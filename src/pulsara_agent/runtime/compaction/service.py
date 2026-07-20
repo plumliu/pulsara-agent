@@ -52,6 +52,10 @@ from pulsara_agent.llm.errors import (
     ModelTargetCapabilityMismatch,
 )
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.user_carrier import (
+    derived_text_runtime_observation_payload,
+    transcript_lifecycle_observation_payload,
+)
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.resolution import ResolvedModelTarget
 from pulsara_agent.primitives.model_call import (
@@ -94,6 +98,7 @@ from pulsara_agent.memory.candidates.projection_outbox import (
     MemoryCandidateProjectionCommitPort,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.governance_evidence import (
     CandidateProjectionOutboxItemFact,
     CandidateProjectionProducerKind,
@@ -179,7 +184,9 @@ class CompactionSummaryReplayTemplate:
 class CompactionTerminalizationOwner:
     started_event: ContextCompactionStartedEvent
     terminal_event_id: str
-    terminal_candidate: ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
+    terminal_candidate: (
+        ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
+    )
     started_committed: bool = True
     pending_started_commit: PendingCompactionEventCommit | None = None
     state: Literal[
@@ -291,7 +298,9 @@ class ContextCompactionService:
         for raw in checkpoint_rows:
             event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             if not isinstance(event, ContextCompactionCompletedEvent):
-                raise ValueError("compaction checkpoint query returned another event type")
+                raise ValueError(
+                    "compaction checkpoint query returned another event type"
+                )
             try:
                 self.archive.get_text(
                     event.summary_artifact_id,
@@ -362,7 +371,10 @@ class ContextCompactionService:
             raise RuntimeError("compaction terminal candidate has no Started owner")
         if candidate.id != owner.terminal_event_id:
             raise RuntimeError("compaction terminal candidate identity mismatch")
-        if owner.terminal_candidate is not None and owner.terminal_candidate != candidate:
+        if (
+            owner.terminal_candidate is not None
+            and owner.terminal_candidate != candidate
+        ):
             stored = self.event_log.get_by_id(owner.terminal_event_id)
             if stored is not None:
                 raise RuntimeError("compaction terminal candidate payload conflict")
@@ -443,9 +455,7 @@ class ContextCompactionService:
                 if remaining <= 0:
                     break
                 try:
-                    started_result = await pending.resolve(
-                        timeout_seconds=remaining
-                    )
+                    started_result = await pending.resolve(timeout_seconds=remaining)
                 except CompactionPendingCommitNotDurable:
                     self._pending_terminalizations.pop(started_event_id, None)
                     continue
@@ -453,9 +463,7 @@ class ContextCompactionService:
                     errors.append(exc)
                     continue
                 committed_started = started_result.committed_event
-                if not isinstance(
-                    committed_started, ContextCompactionStartedEvent
-                ):
+                if not isinstance(committed_started, ContextCompactionStartedEvent):
                     errors.append(
                         RuntimeError(
                             "pending compaction Started returned wrong event type"
@@ -615,12 +623,15 @@ class ContextCompactionService:
         )
         if basis is None:
             return None
-        estimated_before = _estimate_transcript_messages(
-            model_visible_messages_before,
-            current_user_input=current_user_input_if_not_already_represented,
-            target_model_target=target_model_target,
-            previous_summary_text=None,
-        ) + basis.budget.non_transcript_baseline_tokens
+        estimated_before = (
+            _estimate_transcript_messages(
+                model_visible_messages_before,
+                current_user_input=current_user_input_if_not_already_represented,
+                target_model_target=target_model_target,
+                previous_summary_text=None,
+            )
+            + basis.budget.non_transcript_baseline_tokens
+        )
         threshold_tokens = max(
             1,
             math.floor(
@@ -757,6 +768,8 @@ class ContextCompactionService:
         summarizer_call = None
         summarizer_context: LLMContext | None = None
         summarizer_input_estimated_tokens: int | None = None
+        summarizer_provider_input = None
+        summarizer_model_event_context: EventContext | None = None
         call_result: DirectModelCallResult | None = None
         completed_target_estimate = plan.target_estimate
         observed_after_measurement: CompactionObservedAfterMeasurementFact | None = None
@@ -779,6 +792,32 @@ class ContextCompactionService:
                     trigger=trigger,
                     phase=phase,
                 )
+            )
+            if self.runtime_session is None:
+                raise RuntimeError(
+                    "context compaction model execution requires RuntimeSession ownership"
+                )
+            summarizer_model_event_context = EventContext(
+                run_id=context.run_id,
+                turn_id=context.turn_id,
+                reply_id=f"{context.reply_id}:compaction-model",
+            )
+            failure_stage = "summarizer_provider_input_prepare"
+            summarizer_provider_input = await self.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=summarizer_call,
+                context=summarizer_context,
+                event_context=summarizer_model_event_context,
+                operation_kind="window_summarizer",
+                operation_id=summarizer_context.context_id
+                or summarizer_call.fact.resolved_model_call_id,
+            )
+            summarizer_context = summarizer_provider_input.carrier.to_llm_context(
+                summarizer_context
+            )
+            summarizer_input_estimated_tokens = (
+                summarizer_call.target.token_estimator.estimate_context(
+                    summarizer_context
+                ).total_input_tokens
             )
             started = ContextCompactionStartedEvent(
                 id=started_event_id,
@@ -820,9 +859,7 @@ class ContextCompactionService:
                 raise
             except CompactionCommitCancelledAfterCommit as cancelled_commit:
                 committed_started = cancelled_commit.result.committed_event
-                if not isinstance(
-                    committed_started, ContextCompactionStartedEvent
-                ):
+                if not isinstance(committed_started, ContextCompactionStartedEvent):
                     raise RuntimeError(
                         "compaction Started cancellation confirmation type mismatch"
                     )
@@ -833,7 +870,9 @@ class ContextCompactionService:
                 self._pending_terminalizations.pop(started.id, None)
                 raise
             if not isinstance(committed_started, ContextCompactionStartedEvent):
-                raise RuntimeError("compaction Started commit returned wrong event type")
+                raise RuntimeError(
+                    "compaction Started commit returned wrong event type"
+                )
             started_committed = committed_started
             self._acknowledge_started_commit(committed_started)
 
@@ -841,7 +880,8 @@ class ContextCompactionService:
             call_result = await self._summarize(
                 call=summarizer_call,
                 context=summarizer_context,
-                event_context=context,
+                event_context=summarizer_model_event_context,
+                provider_input=summarizer_provider_input,
             )
             if call_result.outcome != "completed":
                 raise RuntimeError(
@@ -989,9 +1029,7 @@ class ContextCompactionService:
                 stored_event = await self._commit_event(completed)
             except CompactionCommitCancelledAfterCommit as cancelled_commit:
                 stored_event = cancelled_commit.result.committed_event
-                if not isinstance(
-                    stored_event, ContextCompactionCompletedEvent
-                ):
+                if not isinstance(stored_event, ContextCompactionCompletedEvent):
                     raise RuntimeError(
                         "compaction Completed cancellation confirmation type mismatch"
                     )
@@ -999,7 +1037,9 @@ class ContextCompactionService:
                 self._acknowledge_terminal_candidate(stored_event)
                 raise
             if not isinstance(stored_event, ContextCompactionCompletedEvent):
-                raise RuntimeError("compaction Completed commit returned wrong event type")
+                raise RuntimeError(
+                    "compaction Completed commit returned wrong event type"
+                )
             stored = stored_event
             terminal_committed = True
             self._acknowledge_terminal_candidate(stored)
@@ -1013,6 +1053,11 @@ class ContextCompactionService:
             self._consecutive_failures = 0
             return stored
         except BaseException as exc:
+            if summarizer_provider_input is not None and self.runtime_session is not None:
+                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    summarizer_provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                    reason="compaction_failed_before_model_start",
+                )
             if isinstance(exc, CompactionCommitPendingAfterCancellation):
                 # The service now owns the still-running Started write.  Close or
                 # the next safe point will resolve it and, if committed, append
@@ -1034,7 +1079,9 @@ class ContextCompactionService:
                 failure_stage = "model_validation"
             estimate = getattr(exc, "estimate", None)
             failed = ContextCompactionFailedEvent(
-                id=(terminal_event_id if started_committed is not None else uuid4().hex),
+                id=(
+                    terminal_event_id if started_committed is not None else uuid4().hex
+                ),
                 **context.event_fields(),
                 compaction_id=compaction_id,
                 trigger=trigger,
@@ -1134,9 +1181,16 @@ class ContextCompactionService:
         def build(input_text: str) -> LLMContext:
             return LLMContext(
                 messages=(
-                    LLMMessage.system(prompt),
-                    LLMMessage.user(input_text),
+                    LLMMessage.runtime_request(
+                        input_text,
+                        request_kind="compaction_request",
+                        business_occurrence_semantic_fingerprint=context_fingerprint(
+                            "compaction-runtime-request:v1",
+                            (plan.window_id, input_text),
+                        ),
+                    ),
                 ),
+                system_prompt=prompt,
                 tools=(),
                 context_id=f"context:compaction:{plan.window_id}",
                 resolved_model_call_id=call.fact.resolved_model_call_id,
@@ -1164,34 +1218,42 @@ class ContextCompactionService:
         call,
         context: LLMContext,
         event_context: EventContext,
+        provider_input,
     ) -> DirectModelCallResult:
-        model_event_context = EventContext(
-            run_id=event_context.run_id,
-            turn_id=event_context.turn_id,
-            reply_id=f"{event_context.reply_id}:compaction-model",
-        )
         if self.runtime_session is None:
             raise RuntimeError(
                 "context compaction model execution requires RuntimeSession ownership"
             )
-        start_bundle = prepare_model_lifecycle_start_bundle(
-            call=call,
-            context=context,
-            event_context=model_event_context,
-            runtime_session=self.runtime_session,
-            lifecycle_kind="direct_internal_call",
-        )
-        handle = self.llm_runtime.start_stream(
-            call=call,
-            context=context,
-            event_context=model_event_context,
-            start_bundle=start_bundle,
-            commit_port=RuntimeSessionModelStreamEventCommitPort(
+        try:
+            if provider_input.carrier.to_llm_context(context) != context:
+                raise RuntimeError("compaction provider input changed after Started")
+            start_bundle = prepare_model_lifecycle_start_bundle(
+                call=call,
+                context=context,
+                event_context=event_context,
                 runtime_session=self.runtime_session,
-                state=None,
-            ),
-            execution_registry=self.runtime_session.model_stream_execution_registry,
-        )
+                lifecycle_kind="direct_internal_call",
+                provider_input_start_bundle=provider_input,
+            )
+            handle = self.llm_runtime.start_stream(
+                call=call,
+                context=context,
+                event_context=event_context,
+                start_bundle=start_bundle,
+                commit_port=RuntimeSessionModelStreamEventCommitPort(
+                    runtime_session=self.runtime_session,
+                    state=None,
+                ),
+                execution_registry=(
+                    self.runtime_session.model_stream_execution_registry
+                ),
+            )
+        except BaseException:
+            await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                reason="one_shot_failed_before_start",
+            )
+            raise
         return await collect_direct_model_call_handle(
             handle,
             expected_call=call,
@@ -1304,9 +1366,7 @@ class ContextCompactionService:
             diagnostics=[
                 _event_diagnostic(diagnostic) for diagnostic in all_diagnostics
             ],
-            summary_content_sha256=hashlib.sha256(
-                summary.encode("utf-8")
-            ).hexdigest(),
+            summary_content_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
             summary_content_bytes=len(summary.encode("utf-8")),
             extractor_contract=compaction_extractor_contract(
                 self.policy.memory_candidates
@@ -1710,7 +1770,24 @@ def estimate_compaction_summary_replay_tokens(
         keep_after_sequence=replay_template.keep_after_sequence,
     )
     return target_model_target.token_estimator.estimate_message(
-        LLMMessage.system(rendered)
+        LLMMessage.runtime_observation(
+            derived_text_runtime_observation_payload(
+                derivation_kind="compaction_replacement_summary",
+                model_visible_content=rendered,
+                source_semantic_fingerprint=context_fingerprint(
+                    "compaction-summary-replay-observation-source:v1",
+                    (
+                        replay_template.compaction_id,
+                        replay_template.summary_artifact_id,
+                        rendered,
+                    ),
+                ),
+            ),
+            observation_kind="compaction_replacement_summary",
+            source_instance_id=f"compaction:{replay_template.compaction_id}",
+            lifecycle_class="causal_append_once",
+            authority_class="runtime_fact",
+        )
     )
 
 
@@ -1729,14 +1806,38 @@ def _estimate_transcript_messages(
     if current_user_input:
         total += estimator.estimate_message(LLMMessage.user(current_user_input))
     if previous_summary_text:
-        total += estimator.estimate_message(LLMMessage.system(previous_summary_text))
+        total += estimator.estimate_message(
+            LLMMessage.runtime_observation(
+                derived_text_runtime_observation_payload(
+                    derivation_kind="compaction_replacement_summary",
+                    model_visible_content=previous_summary_text,
+                    source_semantic_fingerprint=context_fingerprint(
+                        "previous-compaction-summary-observation-source:v1",
+                        previous_summary_text,
+                    ),
+                ),
+                observation_kind="compaction_replacement_summary",
+                source_instance_id="compaction:previous-summary",
+                lifecycle_class="causal_append_once",
+                authority_class="runtime_fact",
+            )
+        )
     return total
 
 
 def _message_for_target_estimate(message: Msg) -> LLMMessage:
     text = _message_text_for_estimate(message)
     if message.role == "system":
-        return LLMMessage.system(text)
+        return LLMMessage.runtime_observation(
+            transcript_lifecycle_observation_payload(
+                lifecycle_segment="canonical_system_lifecycle",
+                model_visible_content=text,
+            ),
+            observation_kind="lifecycle_observation",
+            source_instance_id="transcript:canonical-system-lifecycle",
+            lifecycle_class="causal_append_once",
+            authority_class="runtime_fact",
+        )
     if message.role == "assistant":
         return LLMMessage.assistant(text)
     if message.role == "tool_result":

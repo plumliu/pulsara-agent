@@ -23,6 +23,8 @@ from pulsara_agent.event import (
     AgentEvent,
     ContextWindowOpenedEvent,
     EventContext,
+    ProviderInputGenerationClosedEvent,
+    ProviderInputGenerationStartedEvent,
     RolloutBudgetAccountOpenedEvent,
     RunEndEvent,
     RunStartEvent,
@@ -183,6 +185,15 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(
         assert resumed.runtime_session_id == runtime_session_id
         assert resumed.host_session_id != session.host_session_id
         await resumed.run_turn("second durable user")
+        provider_generation_events = tuple(
+            event
+            for event in resumed.replay_events()
+            if isinstance(
+                event,
+                ProviderInputGenerationStartedEvent
+                | ProviderInputGenerationClosedEvent,
+            )
+        )
         summaries = await second_core.list_resumable_sessions(
             workspace_input=_workspace(tmp_path), limit=5
         )
@@ -190,16 +201,35 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(
             resumed.host_session_id, close_conversation=True
         )
         await second_core.shutdown()
-        return summaries
+        return summaries, provider_generation_events
 
     try:
-        summaries = asyncio.run(run())
+        summaries, provider_generation_events = asyncio.run(run())
         assert runtime_session_id is not None
         assert "first durable user" in _context_text(transport.contexts[1])
         assert "first durable reply" in _context_text(transport.contexts[1])
         assert any(
             summary.runtime_session_id == runtime_session_id for summary in summaries
         )
+        generation_starts = tuple(
+            event
+            for event in provider_generation_events
+            if isinstance(event, ProviderInputGenerationStartedEvent)
+        )
+        generation_closes = tuple(
+            event
+            for event in provider_generation_events
+            if isinstance(event, ProviderInputGenerationClosedEvent)
+        )
+        assert len(generation_starts) == 2
+        assert generation_starts[0].generation.generation_id != (
+            generation_starts[1].generation.generation_id
+        )
+        assert len(generation_closes) == 1
+        assert generation_closes[0].generation_id == (
+            generation_starts[0].generation.generation_id
+        )
+        assert generation_closes[0].close_reason == "session_close"
         row = _session_row(settings.storage.postgres_dsn, runtime_session_id)
         assert row is not None
         assert row[0]["lifecycle"]["closed_at"] is not None

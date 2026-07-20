@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
 
 import pytest
 
@@ -11,17 +12,20 @@ from pulsara_agent.primitives.context import (
     ContextCandidateSourceSelectionFact,
     ContextCandidateLifecycleKeyFact,
     ContextFactSnapshotFact,
-    ContextInlineTextFact,
-    ContextSourceTimingFact,
     PreparedContextCandidateEntryFact,
     PreparedContextCandidateSet,
     ContextSectionCandidate,
     context_fingerprint,
 )
+from pulsara_agent.primitives.context_source import (
+    ArtifactContextSourceContentSemanticFact,
+    ContextSourceAbsoluteTimingFact,
+    InlineContextSourceContentSemanticFact,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.runtime import AgentRuntime, LoopBudget
 from pulsara_agent.runtime.context_input.candidate import (
     InMemoryContextLifecycleCache,
-    ContextCandidateCollectionInput,
     build_context_candidate_source_selections,
     collect_context_candidates,
     prepare_context_candidates,
@@ -35,6 +39,7 @@ from pulsara_agent.runtime.context_input.render import (
 from pulsara_agent.runtime.context_input.compiler import _apply_section_budget
 from pulsara_agent.runtime.context_engine.types import AllocatedContextSection
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
+from pulsara_agent.llm.user_carrier import ROOT_USER_CARRIER_INTERPRETATION
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.conftest import open_test_root_rollout_run
 from tests.test_agent_runtime_loop import (
@@ -106,29 +111,67 @@ class _CandidateCache:
 def _replace_candidate_text(
     candidate: ContextSectionCandidate, text: str
 ) -> ContextSectionCandidate:
-    inline = ContextInlineTextFact(
-        text=text,
-        chars=len(text),
-        content_fingerprint=context_fingerprint("context-inline-text:v1", text),
+    current_content = candidate.model_visible_content
+    encoded = text.encode("utf-8")
+    if isinstance(current_content, InlineContextSourceContentSemanticFact):
+        changed_content = build_frozen_fact(
+            InlineContextSourceContentSemanticFact,
+            schema_version="inline_context_source_content_semantic.v1",
+            text=text,
+            chars=len(text),
+            utf8_bytes=len(encoded),
+            media_type=current_content.media_type,
+        )
+    else:
+        assert isinstance(current_content, ArtifactContextSourceContentSemanticFact)
+        changed_content = build_frozen_fact(
+            ArtifactContextSourceContentSemanticFact,
+            schema_version="artifact_context_source_content_semantic.v1",
+            content_sha256=f"sha256:{sha256(encoded).hexdigest()}",
+            expected_chars=len(text),
+            expected_utf8_bytes=len(encoded),
+            media_type=current_content.media_type,
+            codec_contract_fingerprint=(current_content.codec_contract_fingerprint),
+        )
+    source_payload = candidate.attribution.semantic.payload
+    payload_fields = source_payload.model_dump(
+        mode="python", exclude={"semantic_fingerprint"}
     )
-    payload = candidate.model_dump(
-        mode="python",
-        exclude={"semantic_fingerprint", "candidate_fingerprint"},
+    content_field = "prose_content" if "prose_content" in payload_fields else "content"
+    payload_fields[content_field] = changed_content
+    changed_payload = build_frozen_fact(type(source_payload), **payload_fields)
+    semantic_fields = candidate.attribution.semantic.model_dump(
+        mode="python", exclude={"semantic_fingerprint"}
     )
-    payload["payload"] = inline
-    semantic_payload = {
-        key: value for key, value in payload.items() if key != "candidate_id"
+    semantic_fields["payload"] = changed_payload
+    changed_semantic = build_frozen_fact(
+        type(candidate.attribution.semantic), **semantic_fields
+    )
+    attribution_fields = candidate.attribution.model_dump(
+        mode="python", exclude={"fact_fingerprint"}
+    )
+    attribution_fields["semantic"] = changed_semantic
+    changed_attribution = build_frozen_fact(
+        type(candidate.attribution), **attribution_fields
+    )
+    fact_payload = {
+        "schema_version": "context_section_candidate.v2",
+        "attribution": changed_attribution,
     }
-    semantic = context_fingerprint(
-        "context-section-candidate-semantic:v1", semantic_payload
-    )
-    fact_payload = {**payload, "semantic_fingerprint": semantic}
     return ContextSectionCandidate(
         **fact_payload,
         candidate_fingerprint=context_fingerprint(
-            "context-section-candidate-fact:v1", fact_payload
+            "context-section-candidate-fact:v2", fact_payload
         ),
     )
+
+
+def _candidate_expected_chars(candidate: ContextSectionCandidate) -> int:
+    content = candidate.model_visible_content
+    if isinstance(content, ArtifactContextSourceContentSemanticFact):
+        return content.expected_chars
+    assert isinstance(content, InlineContextSourceContentSemanticFact)
+    return content.chars
 
 
 def test_context_candidates_freeze_cacheable_and_ephemeral_lifecycle(
@@ -141,8 +184,8 @@ def test_context_candidates_freeze_cacheable_and_ephemeral_lifecycle(
     }
     assert by_source["system:prompt"].lifecycle.status == "freshly_collected"
     assert by_source["system:prompt"].lifecycle.cache_key is not None
-    assert by_source["runtime_context"].lifecycle.status == "not_cacheable"
-    assert by_source["runtime_context"].lifecycle.cache_key is None
+    assert by_source["runtime:clock"].lifecycle.status == "freshly_collected"
+    assert by_source["runtime:clock"].lifecycle.cache_key is not None
 
 
 def test_candidate_cache_reuse_requires_snapshot_authorized_payload(
@@ -169,7 +212,7 @@ def test_candidate_cache_reuse_requires_snapshot_authorized_payload(
     assert operational == ()
 
     changed = _replace_candidate_text(system_entry.candidate, "changed projection")
-    with pytest.raises(ValueError, match="payload differs from snapshot authority"):
+    with pytest.raises(ValueError, match="exact snapshot-owned source fact"):
         prepare_context_candidates(
             snapshot=snapshot,
             candidates=(changed,),
@@ -215,7 +258,7 @@ def test_compiler_rejects_forged_candidate_even_with_valid_candidate_fingerprint
         token_estimator=prepared.invocation.resolved_call.target.token_estimator,
     )
 
-    with pytest.raises(ValueError, match="payload differs from snapshot authority"):
+    with pytest.raises(ValueError, match="exact snapshot-owned source fact"):
         compile_context_from_facts(
             facts=prepared.invocation,
             transcript=prepared.normalized_transcript.transcript,
@@ -247,7 +290,7 @@ def test_candidate_lifecycle_cache_is_bounded_lru_and_records_eviction(
     assert cache.get(second_key) == entry.candidate
     assert cache.stats() == {
         "entry_count": 1,
-        "total_chars": entry.candidate.payload.chars,
+        "total_chars": _candidate_expected_chars(entry.candidate),
         "max_entries": 1,
         "max_chars": 100_000,
         "eviction_count": 1,
@@ -270,14 +313,14 @@ def test_candidate_lifecycle_cache_skips_oversize_without_evicting_existing(
     oversize_key = first_key.model_copy(update={"scope_id": "runtime:oversize"})
     cache = InMemoryContextLifecycleCache(
         max_entries=2,
-        max_chars=entry.candidate.payload.chars,
+        max_chars=_candidate_expected_chars(entry.candidate),
     )
     cache.put(first_key, entry.candidate)
     cache.put(
         oversize_key,
         _replace_candidate_text(
             entry.candidate,
-            entry.candidate.payload.text + " oversized",
+            "x" * (_candidate_expected_chars(entry.candidate) + 1),
         ),
     )
 
@@ -335,33 +378,17 @@ def test_candidate_channel_lowering_matrix_is_schema_enforced(
         for entry in prepared.prepared_candidates.entries
         if entry.candidate.source_instance_id == "system:prompt"
     )
-    payload = system.model_dump(
-        mode="python",
-        exclude={"semantic_fingerprint", "candidate_fingerprint"},
-    )
-    payload["lowering_kind"] = "leading_user_context"
-    semantic_payload = {
-        key: value for key, value in payload.items() if key != "candidate_id"
-    }
-    semantic = context_fingerprint(
-        "context-section-candidate-semantic:v1", semantic_payload
-    )
-    fact_payload = {**payload, "semantic_fingerprint": semantic}
-    with pytest.raises(ValueError, match="channel/lowering matrix"):
-        ContextSectionCandidate(
-            **fact_payload,
-            candidate_fingerprint=context_fingerprint(
-                "context-section-candidate-fact:v1", fact_payload
-            ),
-        )
+    assert system.channel.value == "system"
+    assert system.lowering_kind == "system_instruction"
+    assert system.attribution.semantic.lowering_intent.role_constraint == "system"
 
 
-def test_candidate_collector_consumes_snapshot_authority_without_parallel_sources(
+def test_candidate_collector_consumes_snapshot_sources_without_parallel_facade(
     tmp_path, monkeypatch
 ) -> None:
     prepared = asyncio.run(_prepared_snapshot(tmp_path, monkeypatch))
-    for authority in prepared.invocation.fact.candidate_authorities:
-        fields = authority.model_dump(mode="python")
+    for candidate in prepared.invocation.fact.context_source_candidates:
+        fields = candidate.attribution.model_dump(mode="python")
         assert "selected_source_ids" not in fields
         assert "omitted_source_count" not in fields
         assert "collection_reason_code" not in fields
@@ -369,13 +396,15 @@ def test_candidate_collector_consumes_snapshot_authority_without_parallel_source
     assert tuple(
         entry.candidate.source_instance_id for entry in collected.prepared.entries
     ) == tuple(
-        authority.source_instance_id
-        for authority in sorted(
-            prepared.invocation.fact.candidate_authorities,
+        candidate.source_instance_id
+        for candidate in sorted(
+            prepared.invocation.fact.context_source_candidates,
             key=lambda item: (
                 not item.required,
                 item.priority,
+                item.source_id.value,
                 item.source_instance_id,
+                item.attribution.semantic.candidate_key,
             ),
         )
     )
@@ -393,12 +422,53 @@ def test_candidate_collector_consumes_snapshot_authority_without_parallel_source
     assert decision.reason_code == "no_eligible_sources"
 
 
-def test_candidate_collection_input_rejects_process_local_subagent_selection() -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument"):
-        ContextCandidateCollectionInput(
-            system_prompt="system",
-            subagent_selected_result_ids=("result:1",),  # type: ignore[call-arg]
-        )
+def test_required_source_above_legacy_64k_uses_resolved_physical_policy(
+    tmp_path, monkeypatch
+) -> None:
+    import pulsara_agent.runtime.agent as agent_module
+
+    system_prompt = "system source above the removed fixed cap\n" + ("x" * 70_000)
+    transport = ScriptedTransport([{"text": "done"}])
+    captured = []
+    original = agent_module.prepare_live_context_snapshot
+
+    async def capture(**kwargs):
+        prepared = await original(**kwargs)
+        captured.append(prepared)
+        return prepared
+
+    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        system_prompt=system_prompt,
+    )
+
+    result = asyncio.run(run_agent_task(agent, "verify resolved source policy"))
+
+    assert result.status.value == "finished"
+    provider_root = transport.contexts[0].system_prompt
+    assert provider_root is not None
+    assert provider_root.startswith(system_prompt)
+    assert provider_root.count(system_prompt) == 1
+    assert provider_root.endswith(ROOT_USER_CARRIER_INTERPRETATION)
+    system_candidate = next(
+        candidate
+        for candidate in captured[0].snapshot_build_input.context_source_candidates
+        if candidate.source_instance_id == "system:prompt"
+    )
+    assert isinstance(
+        system_candidate.model_visible_content,
+        ArtifactContextSourceContentSemanticFact,
+    )
+    assert system_prompt not in str(system_candidate.model_dump(mode="python"))
+
+
+def test_legacy_candidate_collection_input_is_physically_removed() -> None:
+    import pulsara_agent.runtime.context_input.candidate as candidate_module
+
+    assert not hasattr(candidate_module, "ContextCandidateCollectionInput")
 
 
 def test_snapshot_rejects_subagent_selection_above_frozen_policy(
@@ -415,9 +485,7 @@ def test_snapshot_rejects_subagent_selection_above_frozen_policy(
         "policy_fingerprint": (
             snapshot.compile_policy.candidate_collection.policy_fingerprint
         ),
-        "subagent_graph_semantic_source": (
-            snapshot.subagent_graph_semantic_source
-        ),
+        "subagent_graph_semantic_source": (snapshot.subagent_graph_semantic_source),
     }
     forged_selection = ContextCandidateSourceSelectionFact(
         **selection_payload,
@@ -527,7 +595,7 @@ def test_new_child_completion_between_reads_cannot_drift_selection_high_water(
     assert new_selection.subagent_graph_semantic_source == new_semantic
 
 
-def test_candidate_source_timing_must_match_snapshot_authority(
+def test_candidate_source_attribution_must_match_snapshot_authority(
     tmp_path, monkeypatch
 ) -> None:
     prepared = asyncio.run(_prepared_snapshot(tmp_path, monkeypatch))
@@ -536,40 +604,38 @@ def test_candidate_source_timing_must_match_snapshot_authority(
         for entry in prepared.prepared_candidates.entries
         if entry.candidate.source_instance_id == "system:prompt"
     )
-    timing_payload = {
-        "observed_at_utc": "2000-01-01T00:00:00.000000Z",
-        "source_started_at_utc": None,
-        "source_ended_at_utc": None,
-        "source_sequence_start": None,
-        "source_sequence_end": None,
-        "freshness": "subagent_result",
-        "clock_source": "host_clock",
-    }
-    forged_timing = ContextSourceTimingFact(
-        **timing_payload,
-        timing_fingerprint=context_fingerprint(
-            "context-source-timing:v1", timing_payload
+    forged_timing = build_frozen_fact(
+        ContextSourceAbsoluteTimingFact,
+        schema_version="context_source_absolute_timing.v1",
+        observed_at_utc="2000-01-01T00:00:00.000000Z",
+        source_started_at_utc=None,
+        source_ended_at_utc=None,
+        source_sequence_ranges=(),
+        freshness_kind="historical_replay",
+        clock_source="host_clock",
+        timing_contract_fingerprint=context_fingerprint(
+            "test-context-source-timing-contract:v1", "forged"
         ),
     )
-    candidate_payload = original.model_dump(
-        mode="python", exclude={"semantic_fingerprint", "candidate_fingerprint"}
+    attribution_fields = original.attribution.model_dump(
+        mode="python", exclude={"fact_fingerprint"}
     )
-    candidate_payload["source_timing"] = forged_timing
-    semantic_payload = {
-        key: value for key, value in candidate_payload.items() if key != "candidate_id"
+    attribution_fields["source_absolute_timing"] = forged_timing
+    forged_attribution = build_frozen_fact(
+        type(original.attribution), **attribution_fields
+    )
+    fact_payload = {
+        "schema_version": "context_section_candidate.v2",
+        "attribution": forged_attribution,
     }
-    semantic = context_fingerprint(
-        "context-section-candidate-semantic:v1", semantic_payload
-    )
-    fact_payload = {**candidate_payload, "semantic_fingerprint": semantic}
     forged = ContextSectionCandidate(
         **fact_payload,
         candidate_fingerprint=context_fingerprint(
-            "context-section-candidate-fact:v1", fact_payload
+            "context-section-candidate-fact:v2", fact_payload
         ),
     )
 
-    with pytest.raises(ValueError, match="attribution differs from snapshot authority"):
+    with pytest.raises(ValueError, match="exact snapshot-owned source fact"):
         prepare_context_candidates(
             snapshot=prepared.invocation.fact,
             candidates=(forged,),
@@ -686,7 +752,11 @@ def test_model_followup_reuses_session_owned_candidate_cache(
     )
     assert first_system.lifecycle.status == "freshly_collected"
     assert second_system.lifecycle.status == "reused"
-    assert first_system.candidate == second_system.candidate
+    assert (
+        first_system.candidate.attribution.semantic
+        == second_system.candidate.attribution.semantic
+    )
+    assert first_system.candidate.attribution != second_system.candidate.attribution
     compiled = [
         event
         for event in agent.runtime_session.event_log.iter()

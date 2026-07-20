@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pulsara_agent.llm.input import LLMMessage, ToolSpec
+from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.primitives.context import context_fingerprint
 
 
@@ -23,6 +24,13 @@ class LLMContext:
     tools: tuple[ToolSpec, ...] = field(default_factory=tuple)
     system_prompt: str | None = None
     compiler_estimated_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "system_prompt",
+            compose_provider_root_policy(self.system_prompt),
+        )
 
 
 def llm_context_fingerprint(context: LLMContext) -> str:

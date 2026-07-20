@@ -15,6 +15,10 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY, RawStoredEventEnvelope
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole
 from pulsara_agent.llm.request import LLMContext, llm_context_fingerprint
+from pulsara_agent.llm.user_carrier import (
+    compose_provider_root_policy,
+    encode_one_shot_runtime_clock,
+)
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.llm.validation import validate_model_context_for_call
@@ -146,9 +150,9 @@ def default_governance_batch_input_artifact_contract(
 ) -> GovernanceBatchInputArtifactContractFact:
     return build_frozen_fact(
         GovernanceBatchInputArtifactContractFact,
-        schema_version="governance_batch_input_artifact_contract.v1",
+        schema_version="governance_batch_input_artifact_contract.v2",
         contract_id="pulsara.governance_batch_input",
-        contract_version="1",
+        contract_version="2",
         document_schema_fingerprint=context_fingerprint(
             "governance-batch-input-document-schema:v1",
             GovernanceBatchInputSnapshotFact.model_json_schema(),
@@ -163,17 +167,21 @@ def default_governance_batch_input_artifact_contract(
 
 
 def governance_system_prompt_contract() -> GovernanceSystemPromptContractFact:
+    exact_prompt = compose_provider_root_policy(_GOVERNANCE_SYSTEM_PROMPT)
     return build_frozen_fact(
         GovernanceSystemPromptContractFact,
         schema_version="governance_system_prompt_contract.v1",
         contract_id="pulsara.memory_governance.system_prompt",
-        contract_version="4",
+        contract_version="5",
         template_content_sha256=hashlib.sha256(
-            _GOVERNANCE_SYSTEM_PROMPT.encode("utf-8")
+            exact_prompt.encode("utf-8")
         ).hexdigest(),
         assembly_contract_fingerprint=context_fingerprint(
-            "governance-system-prompt-assembly:v2",
-            "exact-static-template+typed-decision-view+typed-source-evidence",
+            "governance-system-prompt-assembly:v3",
+            (
+                "exact-static-template+typed-decision-view+typed-source-evidence"
+                "+provider-user-carrier-root-protocol"
+            ),
         ),
     )
 
@@ -214,6 +222,7 @@ def build_governance_batch_input(
     max_batch_projection_utf8_bytes: int,
     call: ResolvedModelCall,
     trigger_reason: str,
+    clock_observed_at_utc: str,
 ) -> PreparedGovernanceBatchInput:
     candidate_ids = tuple(
         item.candidate_attribution.entry_id for item in candidate_snapshots
@@ -246,9 +255,27 @@ def build_governance_batch_input(
     if len(user_text.encode("utf-8")) > max_batch_projection_utf8_bytes:
         raise ValueError("governance model-visible input exceeds projection bound")
     context_id = f"memory_governance:{governance_batch_id}"
+    clock_message = LLMMessage.from_provider_user_carrier(
+        role=MessageRole.RUNTIME_OBSERVATION,
+        carrier=encode_one_shot_runtime_clock(
+            operation_kind="governance_model_call",
+            operation_id=governance_batch_id,
+            attempt_index=0,
+            observed_at_utc=clock_observed_at_utc,
+        ),
+    )
     unestimated = LLMContext(
         system_prompt=_GOVERNANCE_SYSTEM_PROMPT,
-        messages=(LLMMessage.user(user_text),),
+        messages=(
+            clock_message,
+            LLMMessage.runtime_request(
+                user_text,
+                request_kind="governance_request",
+                business_occurrence_semantic_fingerprint=context_fingerprint(
+                    "governance-runtime-request:v1", governance_batch_id
+                ),
+            ),
+        ),
         tools=(),
         context_id=context_id,
         resolved_model_call_id=call.fact.resolved_model_call_id,
@@ -272,14 +299,14 @@ def build_governance_batch_input(
     frozen_messages = tuple(_freeze_message(item) for item in llm_context.messages)
     model_input = build_frozen_fact(
         GovernanceModelInputFact,
-        schema_version="governance_model_input.v1",
+        schema_version="governance_model_input.v2",
         governance_batch_id=governance_batch_id,
         resolved_call=call.fact,
         target_fingerprint=call.target.fact.target_fingerprint,
         context_id=context_id,
         model_call_index=None,
         system_prompt_contract=governance_system_prompt_contract(),
-        exact_system_prompt=_GOVERNANCE_SYSTEM_PROMPT,
+        exact_system_prompt=llm_context.system_prompt,
         ordered_messages=frozen_messages,
         tool_spec_count=0,
         compiler_estimated_input_tokens=estimate.total_input_tokens,
@@ -303,7 +330,7 @@ def build_governance_batch_input(
     artifact_contract = default_governance_batch_input_artifact_contract()
     snapshot = build_frozen_fact(
         GovernanceBatchInputSnapshotFact,
-        schema_version="governance_batch_input_snapshot.v1",
+        schema_version="governance_batch_input_snapshot.v2",
         artifact_contract=artifact_contract,
         runtime_session_id=runtime_session_id,
         governance_batch_id=governance_batch_id,
@@ -626,7 +653,7 @@ def _freeze_message(message: LLMMessage) -> GovernanceFrozenLLMMessageFact:
     )
     return build_frozen_fact(
         GovernanceFrozenLLMMessageFact,
-        schema_version="governance_frozen_llm_message.v1",
+        schema_version="governance_frozen_llm_message.v2",
         role=message.role.value,
         content=message.content,
         thinking=message.thinking,
@@ -634,6 +661,8 @@ def _freeze_message(message: LLMMessage) -> GovernanceFrozenLLMMessageFact:
         tool_call_id=message.tool_call_id,
         name=message.name,
         arguments=message.arguments,
+        provider_user_carrier_semantic=message.provider_user_carrier_semantic,
+        provider_user_carrier_binding=message.provider_user_carrier_binding,
     )
 
 
@@ -653,6 +682,8 @@ def _thaw_message(message: GovernanceFrozenLLMMessageFact) -> LLMMessage:
         tool_call_id=message.tool_call_id,
         name=message.name,
         arguments=message.arguments,
+        provider_user_carrier_semantic=message.provider_user_carrier_semantic,
+        provider_user_carrier_binding=message.provider_user_carrier_binding,
     )
 
 

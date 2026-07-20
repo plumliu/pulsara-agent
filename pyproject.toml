@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0.3",
     "cachetools>=7.1.4",
+    "psycopg-pool>=3.3.1",
 ]
 
 [project.scripts]
@@ -31,7 +32,6 @@ packages = ["src/pulsara_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "real_llm: opt-in tests that call a configured real LLM provider",
     "retrieval_live: opt-in tests that call live retrieval-side model APIs",
 ]
 

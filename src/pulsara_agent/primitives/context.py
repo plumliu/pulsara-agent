@@ -31,6 +31,14 @@ from pulsara_agent.primitives._context_base import (
     thaw_json,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
+from pulsara_agent.primitives.context_source import (
+    CapabilityToolCatalogRootFact,
+    ContextSourceCandidateAttributionFact,
+    ContextSourceDispositionFact,
+    ContextSourceId,
+    ResolvedContextSourcePhysicalInputPolicyFact,
+    context_source_payload_content,
+)
 from pulsara_agent.primitives.model_call import ResolvedModelCallFact
 from pulsara_agent.primitives.long_horizon import (
     ContextWindowFact,
@@ -61,6 +69,11 @@ from pulsara_agent.primitives.run_entry import (
 )
 
 if TYPE_CHECKING:
+    from pulsara_agent.primitives.provider_input import (
+        PreparedProviderInputPlanFact,
+        ProviderOrderedTranscriptProjectionFact,
+        ProviderOrderedTranscriptProjectionIdentityFact,
+    )
     from pulsara_agent.primitives.transcript_projection import (
         ContextTranscriptAuthorityFact,
         TranscriptProviderProjectionFact,
@@ -273,8 +286,6 @@ class ContextCandidateCollectionPolicyFact(FrozenContextFact):
     policy_version: str = Field(min_length=1)
     projection_token_budget: int = Field(ge=0)
     max_subagent_results_per_parent_compile: int = Field(ge=0)
-    max_inline_candidate_chars: int = Field(ge=0)
-    max_aggregate_candidate_chars: int = Field(ge=0)
     max_candidate_source_refs: int = Field(ge=0)
     max_candidate_artifact_refs: int = Field(ge=0)
     max_input_manifest_chars: int = Field(ge=1)
@@ -626,63 +637,15 @@ class ContextCandidateSourceSelectionFact(FrozenContextFact):
                 raise ValueError("empty selection reason requires no eligible sources")
         elif self.reason_code == "selected_all":
             if self.eligible_source_count == 0 or self.omitted_source_count != 0:
-                raise ValueError("selected-all reason requires a non-empty full selection")
+                raise ValueError(
+                    "selected-all reason requires a non-empty full selection"
+                )
         elif self.omitted_source_count == 0:
             raise ValueError("policy-limit reason requires omitted sources")
         _validate_fingerprint(
             self,
             "context-candidate-source-selection:v1",
             "selection_fingerprint",
-        )
-        return self
-
-
-class ContextCandidateAuthorityFact(FrozenContextFact):
-    """Snapshot-owned authority for one model-visible candidate."""
-
-    source_instance_id: str = Field(min_length=1)
-    source_kind: ContextCandidateSourceKind
-    source_fact_refs: tuple[ContextEventReferenceFact, ...]
-    source_artifact_ids: tuple[str, ...]
-    channel: ContextChannelFact
-    priority: int
-    required: bool
-    stability: Literal["stable", "run", "step", "ephemeral"]
-    lowering_kind: ContextCandidateLoweringKind
-    lifecycle_dependency_fingerprint: str | None
-    model_visible_text: str
-    model_visible_content_fingerprint: str = Field(min_length=1)
-    model_visible_chars: int = Field(ge=0)
-    source_timing: "ContextSourceTimingFact"
-    authority_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _authority(self) -> "ContextCandidateAuthorityFact":
-        expected_channel, expected_lowering = _CONTEXT_CANDIDATE_CHANNEL_MATRIX[
-            self.source_kind
-        ]
-        if (self.channel, self.lowering_kind) != (
-            expected_channel,
-            expected_lowering,
-        ):
-            raise ValueError("candidate authority channel/lowering matrix mismatch")
-        if self.stability != "ephemeral" and not self.lifecycle_dependency_fingerprint:
-            raise ValueError("cacheable candidate authority requires dependency")
-        if self.model_visible_chars != len(self.model_visible_text):
-            raise ValueError("candidate authority model-visible char count mismatch")
-        if self.model_visible_content_fingerprint != context_fingerprint(
-            "context-inline-text:v1", self.model_visible_text
-        ):
-            raise ValueError("candidate authority model-visible content mismatch")
-        _ordered_unique(
-            tuple(ref.event_id for ref in self.source_fact_refs),
-            "candidate authority event refs",
-        )
-        _ordered_unique(self.source_artifact_ids, "candidate authority artifact IDs")
-        _validate_fingerprint(
-            self,
-            "context-candidate-authority:v1",
-            "authority_fingerprint",
         )
         return self
 
@@ -772,8 +735,13 @@ class LongHorizonContextAttributionFact(FrozenContextFact):
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("projection rewrite refs must be ordered and unique")
         if self.window_generation == 1:
-            if self.summary_artifact_id is not None or self.summary_content_sha256 is not None:
-                raise ValueError("initial context window cannot carry summary attribution")
+            if (
+                self.summary_artifact_id is not None
+                or self.summary_content_sha256 is not None
+            ):
+                raise ValueError(
+                    "initial context window cannot carry summary attribution"
+                )
         elif self.summary_artifact_id is None or self.summary_content_sha256 is None:
             raise ValueError("compacted context window requires summary attribution")
         if self.budget_decision.window_id != self.window_id:
@@ -799,9 +767,9 @@ class ProjectedToolResultCompileRefFact(FrozenContextFact):
 
     @model_validator(mode="after")
     def _projection(self) -> "ProjectedToolResultCompileRefFact":
-        if (
-            self.representation is ToolObservationRepresentation.ROLLUP_MEMBER
-        ) != (self.rollup_id is not None):
+        if (self.representation is ToolObservationRepresentation.ROLLUP_MEMBER) != (
+            self.rollup_id is not None
+        ):
             raise ValueError("projected compile ref rollup identity mismatch")
         return self
 
@@ -828,7 +796,11 @@ class ContextFactSnapshotFact(FrozenContextFact):
     subagent_graph_acceleration: SubagentGraphAccelerationFact
     long_horizon_attribution: LongHorizonContextAttributionFact
     candidate_source_selections: tuple[ContextCandidateSourceSelectionFact, ...]
-    candidate_authorities: tuple[ContextCandidateAuthorityFact, ...]
+    context_source_candidates: tuple["ContextSectionCandidate", ...]
+    context_source_dispositions: tuple[ContextSourceDispositionFact, ...]
+    capability_tool_catalog_root: CapabilityToolCatalogRootFact
+    context_source_physical_input_policy: ResolvedContextSourcePhysicalInputPolicyFact
+    context_source_registry_fingerprint: str = Field(min_length=1)
     timing: ContextCompileTimingFact
     authority_slice_plan: ContextAuthoritySlicePlan
     primary_event_range: ContextEventRangeFact
@@ -956,20 +928,35 @@ class ContextFactSnapshotFact(FrozenContextFact):
         _ordered_unique(
             tuple(item.model_tool_name for item in self.tool_specs), "model tool names"
         )
+        if self.capability_tool_catalog_root.ordered_descriptor_fingerprints != tuple(
+            item.descriptor_fingerprint for item in self.tool_specs
+        ):
+            raise ValueError("capability tool root differs from context tool specs")
+        if self.capability_tool_catalog_root.ordered_tool_spec_fingerprints != tuple(
+            context_fingerprint("context-tool-spec:v1", item)
+            for item in self.tool_specs
+        ):
+            raise ValueError("capability tool root tool-spec identities mismatch")
+        if any(
+            item.attribution.physical_input_policy_fingerprint
+            != self.context_source_physical_input_policy.policy_fingerprint
+            for item in self.context_source_candidates
+        ):
+            raise ValueError("context source physical policy attribution mismatch")
         _ordered_unique(
-            tuple(item.source_instance_id for item in self.candidate_authorities),
-            "candidate authority source IDs",
+            tuple(
+                item.attribution.semantic.source_instance_id
+                for item in self.context_source_candidates
+            ),
+            "context source candidate source IDs",
         )
         _ordered_unique(
             tuple(item.source_instance_id for item in self.candidate_source_selections),
             "candidate source selection IDs",
         )
-        max_subagent_results = (
-            self.compile_policy.candidate_collection.max_subagent_results_per_parent_compile
-        )
+        max_subagent_results = self.compile_policy.candidate_collection.max_subagent_results_per_parent_compile
         selections = {
-            item.source_instance_id: item
-            for item in self.candidate_source_selections
+            item.source_instance_id: item for item in self.candidate_source_selections
         }
         subagent_selection = selections.get("subagent:results")
         if subagent_selection is None:
@@ -1012,22 +999,26 @@ class ContextFactSnapshotFact(FrozenContextFact):
             ),
             None,
         )
-        subagent_authority = next(
-            (
-                item
-                for item in self.candidate_authorities
-                if item.source_instance_id == "subagent:results"
-            ),
-            None,
+        subagent_candidates = tuple(
+            item
+            for item in self.context_source_candidates
+            if item.attribution.semantic.source_id is ContextSourceId.SUBAGENT_RESULT
         )
         if subagent_selection.selected_source_ids:
-            if subagent_projection is None or subagent_authority is None:
-                raise ValueError(
-                    "selected subagent results require projection and authority"
+            if (
+                subagent_projection is None
+                or tuple(
+                    item.attribution.semantic.candidate_key
+                    for item in subagent_candidates
                 )
-        elif subagent_projection is not None or subagent_authority is not None:
+                != subagent_selection.selected_source_ids
+            ):
+                raise ValueError(
+                    "selected subagent results require projection and source candidate"
+                )
+        elif subagent_projection is not None or subagent_candidates:
             raise ValueError(
-                "empty subagent selection cannot create projection or authority"
+                "empty subagent selection cannot create projection or source candidate"
             )
         ranges = (self.primary_event_range, *self.named_event_ranges)
         for projection in self.projections:
@@ -1037,10 +1028,12 @@ class ContextFactSnapshotFact(FrozenContextFact):
                     and not _event_ref_is_within_ranges(ref, ranges)
                 ):
                     raise ValueError("projection event ref exceeds snapshot authority")
-        for authority in self.candidate_authorities:
-            for ref in authority.source_fact_refs:
+        for candidate in self.context_source_candidates:
+            attribution = candidate.attribution
+            for ref in attribution.source_event_refs:
                 if (
-                    authority.source_instance_id != "subagent:results"
+                    attribution.semantic.source_id
+                    is not ContextSourceId.SUBAGENT_RESULT
                     and not _event_ref_is_within_ranges(ref, ranges)
                 ):
                     raise ValueError("candidate event ref exceeds snapshot authority")
@@ -1154,7 +1147,9 @@ TranscriptBlockFact: TypeAlias = (
 
 class TranscriptMessageFact(FrozenContextFact):
     message_id: str = Field(min_length=1)
-    role: Literal["system", "user", "assistant"]
+    role: Literal[
+        "user", "assistant", "runtime_request", "runtime_observation"
+    ]
     name: str | None
     run_id: str | None
     turn_id: str | None
@@ -1225,7 +1220,10 @@ class CompactedWindowReferenceFact(FrozenContextFact):
     @model_validator(mode="after")
     def _compaction_kind(self) -> "CompactedWindowReferenceFact":
         if self.compaction_kind == "prefix":
-            if self.keep_after_sequence is None or self.source_started_event is not None:
+            if (
+                self.keep_after_sequence is None
+                or self.source_started_event is not None
+            ):
                 raise ValueError("prefix compaction reference attribution mismatch")
         elif self.keep_after_sequence is not None or self.source_started_event is None:
             raise ValueError("window compaction reference attribution mismatch")
@@ -1259,7 +1257,9 @@ class TranscriptCompileInput(FrozenContextFact):
         )
         if len(current) != 1 or current[0].message_id != self.current_user_anchor:
             raise ValueError("transcript requires exactly one anchored current user")
-        pair_ids = tuple(pair.tool_call_id for pair in self.tool_pairs)
+        pair_ids = tuple(
+            (pair.call_message_id, pair.tool_call_id) for pair in self.tool_pairs
+        )
         _ordered_unique(pair_ids, "tool interaction IDs")
         messages_by_id = {message.message_id: message for message in self.messages}
         result_ref_ids: list[str] = []
@@ -1297,7 +1297,7 @@ class TranscriptCompileInput(FrozenContextFact):
                 <= result_message.source_sequence_end
             ):
                 raise ValueError("tool pair sequence attribution mismatch")
-            result_ref_ids.append(result_block.tool_call_id)
+            result_ref_ids.append((pair.call_message_id, result_block.tool_call_id))
         if tuple(result_ref_ids) != pair_ids:
             raise ValueError("tool result refs differ from ordered tool pairs")
         _validate_fingerprint(
@@ -1384,7 +1384,9 @@ class WindowCompactionSourceEntryFact(FrozenContextFact):
         if not self.source_event_refs:
             raise ValueError("window compaction source entry requires event facts")
         if tuple(sorted(set(self.source_artifact_refs))) != self.source_artifact_refs:
-            raise ValueError("window compaction artifact refs must be sorted and unique")
+            raise ValueError(
+                "window compaction artifact refs must be sorted and unique"
+            )
         _validate_fingerprint(
             self,
             "window-compaction-source-entry:v1",
@@ -1504,19 +1506,19 @@ class WindowCompactionSourceDocumentFact(FrozenContextFact):
             expected = (
                 "summarized" if group.group_id in summarized_groups else "retained"
             )
-            if any(entry_partition[item] != expected for item in group.source_entry_ids):
+            if any(
+                entry_partition[item] != expected for item in group.source_entry_ids
+            ):
                 raise ValueError("window compaction splits a provider pairing group")
         baseline = thaw_json(self.retained_transcript_baseline)
         if not isinstance(baseline, dict):  # pragma: no cover - typed field guard
             raise ValueError("window compaction transcript baseline is not an object")
         if (
-            baseline.get("schema_version")
-            != "window-compaction-transcript-baseline.v1"
+            baseline.get("schema_version") != "window-compaction-transcript-baseline.v1"
             or baseline.get("compaction_id") != self.compaction_id
             or baseline.get("run_id") != self.run_id
             or baseline.get("source_window_id") != self.source_window_id
-            or baseline.get("source_through_sequence")
-            != self.source_through_sequence
+            or baseline.get("source_through_sequence") != self.source_through_sequence
             or tuple(
                 item.get("message_id")
                 for item in baseline.get("retained_messages", ())
@@ -1558,9 +1560,7 @@ class WindowCompactionSummaryFact(FrozenContextFact):
             )
         ):
             raise ValueError("window compaction summary is empty")
-        if len(set(self.cited_source_entry_ids)) != len(
-            self.cited_source_entry_ids
-        ):
+        if len(set(self.cited_source_entry_ids)) != len(self.cited_source_entry_ids):
             raise ValueError("window compaction summary citations are duplicated")
         if len(set(self.artifact_locators)) != len(self.artifact_locators):
             raise ValueError("window compaction summary artifacts are duplicated")
@@ -1588,9 +1588,6 @@ class ContextInlineTextFact(FrozenContextFact):
         return self
 
 
-ContextCandidateAuthorityFact.model_rebuild()
-
-
 class ContextArtifactTextFact(FrozenContextFact):
     artifact_id: str = Field(min_length=1)
     media_type: Literal["text/plain", "text/markdown", "application/json"]
@@ -1602,58 +1599,111 @@ ContextSectionPayloadFact: TypeAlias = ContextInlineTextFact | ContextArtifactTe
 
 
 class ContextSectionCandidate(FrozenContextFact):
-    schema_version: Literal["context-candidate:v1"] = "context-candidate:v1"
-    candidate_id: str = Field(min_length=1)
-    source_kind: ContextCandidateSourceKind
-    source_instance_id: str = Field(min_length=1)
-    source_fact_refs: tuple[ContextEventReferenceFact, ...]
-    source_artifact_ids: tuple[str, ...]
-    channel: ContextChannelFact
-    priority: int
-    required: bool
-    stability: Literal["stable", "run", "step", "ephemeral"]
-    lifecycle_dependency_fingerprint: str | None
-    lowering_kind: ContextCandidateLoweringKind
-    payload: ContextSectionPayloadFact
-    source_timing: ContextSourceTimingFact
-    semantic_fingerprint: str = Field(min_length=1)
+    schema_version: Literal["context_section_candidate.v2"] = (
+        "context_section_candidate.v2"
+    )
+    attribution: ContextSourceCandidateAttributionFact
     candidate_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _candidate(self) -> "ContextSectionCandidate":
-        expected_channel, expected_lowering = _CONTEXT_CANDIDATE_CHANNEL_MATRIX[
-            self.source_kind
-        ]
-        if (self.channel, self.lowering_kind) != (
-            expected_channel,
-            expected_lowering,
-        ):
-            raise ValueError("candidate channel/lowering matrix mismatch")
-        if self.stability != "ephemeral" and not self.lifecycle_dependency_fingerprint:
-            raise ValueError("cacheable candidate requires dependency fingerprint")
-        if (
-            not self.source_fact_refs
-            and not self.source_artifact_ids
-            and self.source_kind != "runtime_context"
-        ):
-            raise ValueError("candidate requires durable source attribution")
-        expected_semantic = context_fingerprint(
-            "context-section-candidate-semantic:v1",
-            self.model_dump(
-                mode="json",
-                exclude={
-                    "candidate_id",
-                    "candidate_fingerprint",
-                    "semantic_fingerprint",
-                },
-            ),
-        )
-        if self.semantic_fingerprint != expected_semantic:
-            raise ValueError("candidate semantic fingerprint mismatch")
         _validate_fingerprint(
-            self, "context-section-candidate-fact:v1", "candidate_fingerprint"
+            self,
+            "context-section-candidate-fact:v2",
+            "candidate_fingerprint",
         )
         return self
+
+    @property
+    def candidate_id(self) -> str:
+        semantic = self.attribution.semantic
+        return ":".join(
+            (
+                "context-candidate",
+                semantic.source_id.value,
+                semantic.source_instance_id,
+                semantic.candidate_key,
+                semantic.source_revision.source_revision_id,
+            )
+        )
+
+    @property
+    def source_instance_id(self) -> str:
+        return self.attribution.semantic.source_instance_id
+
+    @property
+    def source_id(self) -> ContextSourceId:
+        return self.attribution.semantic.source_id
+
+    @property
+    def source_kind(self) -> str:
+        aliases = {
+            ContextSourceId.ACTIVE_SKILL: "capability_active_skill",
+            ContextSourceId.RUNTIME_ENVIRONMENT: "runtime_context",
+            ContextSourceId.RUNTIME_CLOCK: "runtime_clock",
+            ContextSourceId.SUBAGENT_HANDOFF: "subagent_handoff",
+            ContextSourceId.SUBAGENT_RESULT: "subagent_results",
+        }
+        return aliases.get(self.source_id, self.source_id.value)
+
+    @property
+    def source_fact_refs(self) -> tuple[ContextEventReferenceFact, ...]:
+        return self.attribution.source_event_refs
+
+    @property
+    def source_artifact_ids(self) -> tuple[str, ...]:
+        return tuple(item.artifact_id for item in self.attribution.source_artifact_refs)
+
+    @property
+    def channel(self) -> ContextChannelFact:
+        intent = self.attribution.semantic.lowering_intent.intent_kind
+        if intent == "system_instruction":
+            return ContextChannelFact.SYSTEM
+        if intent in {"trailing_observation", "status_observation"}:
+            return ContextChannelFact.TRAILING_STATUS
+        return ContextChannelFact.LEADING_USER
+
+    @property
+    def priority(self) -> int:
+        return self.attribution.semantic.priority
+
+    @property
+    def required(self) -> bool:
+        return self.attribution.semantic.required
+
+    @property
+    def lowering_kind(self) -> str:
+        return {
+            "system_instruction": "system_instruction",
+            "leading_context": "leading_user_context",
+            "paired_observation": "leading_user_context",
+            "trailing_observation": "trailing_status",
+            "status_observation": "trailing_status",
+        }[self.attribution.semantic.lowering_intent.intent_kind]
+
+    @property
+    def stability(self) -> str:
+        lifecycle_kind = self.attribution.semantic.lifecycle.lifecycle_kind
+        return {
+            "generation_root": "stable",
+            "append_once": "run",
+            "append_revision": "step",
+            "audit_only": "ephemeral",
+        }[lifecycle_kind]
+
+    @property
+    def lifecycle_dependency_fingerprint(self) -> str | None:
+        if self.attribution.semantic.lifecycle.lifecycle_kind == "audit_only":
+            return None
+        return self.attribution.semantic.source_revision.revision_fingerprint
+
+    @property
+    def semantic_fingerprint(self) -> str:
+        return self.attribution.semantic.semantic_fingerprint
+
+    @property
+    def model_visible_content(self):
+        return context_source_payload_content(self.attribution.semantic.payload)
 
 
 class ContextCandidateLifecycleKeyFact(FrozenContextFact):
@@ -1773,9 +1823,7 @@ class ContextInputFailureReasonCode(StrEnum):
     TOOL_RESULT_INVALID = "tool_result_invalid"
     CANDIDATE_INVALID = "candidate_invalid"
     CONTEXT_BUDGET_EXCEEDED = "context_budget_exceeded"
-    LONG_HORIZON_PREPARATION_CYCLE_EXCEEDED = (
-        "long_horizon_preparation_cycle_exceeded"
-    )
+    LONG_HORIZON_PREPARATION_CYCLE_EXCEEDED = "long_horizon_preparation_cycle_exceeded"
     CONTEXT_COMPILE_ATTEMPTS_EXHAUSTED = "context_compile_attempts_exhausted"
     LONG_HORIZON_FOLD_FAILED = "long_horizon_fold_failed"
     TOOL_OBSERVATION_PROJECTION_FAILED = "tool_observation_projection_failed"
@@ -1843,8 +1891,8 @@ class ContextCompileInputAuditFact(FrozenContextFact):
     input_manifest_artifact_id: str
     input_manifest_fingerprint: str
     long_horizon_attribution_fingerprint: str = Field(min_length=1)
-    input_manifest_schema_version: Literal["context-input-manifest:v6"] = (
-        "context-input-manifest:v6"
+    input_manifest_schema_version: Literal["context-input-manifest:v8"] = (
+        "context-input-manifest:v8"
     )
     input_manifest_write_outcome: Literal["stored", "confirmed_existing"]
 
@@ -1913,12 +1961,17 @@ class ContextCompileInputFailureFact(FrozenContextFact):
 
 
 class ContextCompileInputManifestFact(FrozenContextFact):
-    schema_version: Literal["context-input-manifest:v6"] = "context-input-manifest:v6"
+    schema_version: Literal["context-input-manifest:v8"] = "context-input-manifest:v8"
     input_aggregate_fingerprint: str
     snapshot: ContextFactSnapshotFact
     subagent_graph_semantic_source: SubagentGraphSemanticSourceFact
     subagent_graph_acceleration: SubagentGraphAccelerationFact
     prepared_candidate_set: PreparedContextCandidateSet
+    ordered_transcript_projection: "ProviderOrderedTranscriptProjectionFact"
+    ordered_transcript_projection_identity: (
+        "ProviderOrderedTranscriptProjectionIdentityFact"
+    )
+    prepared_provider_input_plan: "PreparedProviderInputPlanFact"
     transcript_fingerprint: str
     transcript_provider_projection: "TranscriptProviderProjectionFact"
     transcript_authority: "ContextTranscriptAuthorityFact"
@@ -1945,9 +1998,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
     ) -> "ContextCompileInputManifestFact":
         """Validate a factory-owned payload without hashing it a second time."""
 
-        fingerprint = context_fingerprint(
-            "context-compile-input-manifest:v6", payload
-        )
+        fingerprint = context_fingerprint("context-compile-input-manifest:v8", payload)
         token = _TRUSTED_MANIFEST_FINGERPRINT.set(fingerprint)
         try:
             return cls(**payload, manifest_fingerprint=fingerprint)
@@ -1968,6 +2019,25 @@ class ContextCompileInputManifestFact(FrozenContextFact):
             raise ValueError("manifest tool-result policy basis mismatch")
         if self.prepared_candidate_set.policy != snapshot_policy.candidate_collection:
             raise ValueError("manifest candidate policy mismatch")
+        if (
+            self.prepared_provider_input_plan.resolved_model_call_id
+            != self.snapshot.resolved_model_call.resolved_model_call_id
+        ):
+            raise ValueError("manifest provider-input resolved call mismatch")
+        ordered = self.ordered_transcript_projection
+        ordered_identity = self.ordered_transcript_projection_identity
+        if (
+            self.prepared_provider_input_plan.ordered_transcript_projection_identity
+            != ordered_identity
+            or ordered.projection_semantic_fingerprint
+            != ordered_identity.projection_semantic_fingerprint
+            or len(ordered.ordered_units) != ordered_identity.unit_count
+            or ordered.ordered_wire_semantic_accumulator
+            != ordered_identity.ordered_wire_semantic_accumulator
+            or ordered.ordered_causal_semantic_accumulator
+            != ordered_identity.ordered_causal_semantic_accumulator
+        ):
+            raise ValueError("manifest ordered provider projection mismatch")
         transcript_projection = self.transcript_provider_projection
         if (
             transcript_projection.context_id != self.snapshot.identity.context_id
@@ -1980,8 +2050,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         ):
             raise ValueError("manifest transcript provider projection mismatch")
         if (
-            self.transcript_authority.provider_projection
-            != transcript_projection
+            self.transcript_authority.provider_projection != transcript_projection
             or self.transcript_authority.final_normalized_transcript_fingerprint
             != self.transcript_fingerprint
         ):
@@ -1989,12 +2058,10 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         for section in transcript_projection.sections:
             timing = section.semantic_identity.timing_semantic
             if (
-                timing.compiled_at_utc != self.snapshot.timing.compiled_at_utc
-                or timing.session_timezone != self.snapshot.timing.session_timezone
-                or timing.compiled_local_date
-                != self.snapshot.timing.compiled_local_date
+                timing.rendered_timing_header is not None
+                or timing.age_seconds is not None
             ):
-                raise ValueError("manifest transcript provider timing mismatch")
+                raise ValueError("manifest cannot render dynamic transcript timing")
         if (
             self.compiler_contract_version
             != self.snapshot.identity.compiler_contract_version
@@ -2025,7 +2092,9 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         projection_ids = tuple(
             item.unit_id for item in self.projection_state.unit_projections
         )
-        ref_ids = tuple(item.tool_result_unit_id for item in self.projected_tool_result_refs)
+        ref_ids = tuple(
+            item.tool_result_unit_id for item in self.projected_tool_result_refs
+        )
         if (
             len(ref_ids) != len(set(ref_ids))
             or len(projection_ids) != len(set(projection_ids))
@@ -2033,7 +2102,9 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         ):
             raise ValueError("manifest projected tool-result refs are incomplete")
         rollup_ids = tuple(item.rollup.rollup_id for item in self.prepared_rollup_units)
-        if rollup_ids != tuple(item.rollup_id for item in self.projection_state.rollups):
+        if rollup_ids != tuple(
+            item.rollup_id for item in self.projection_state.rollups
+        ):
             raise ValueError("manifest prepared rollups differ from projection state")
         if (
             self.projection_pressure_shadow.window_id != attribution.window_id
@@ -2052,7 +2123,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         ):
             raise ValueError("manifest projection-unreachable audit mismatch")
         expected_aggregate = context_fingerprint(
-            "context-compile-input-aggregate:v6",
+            "context-compile-input-aggregate:v8",
             [
                 self.snapshot.snapshot_semantic_fingerprint,
                 self.transcript_fingerprint,
@@ -2060,12 +2131,13 @@ class ContextCompileInputManifestFact(FrozenContextFact):
                 self.transcript_authority.provider_semantic_identity.provider_semantic_fingerprint,
                 self.tool_result_render_input_fingerprint,
                 self.prepared_candidate_set.candidate_set_fingerprint,
+                self.ordered_transcript_projection.fact_fingerprint,
+                self.ordered_transcript_projection_identity.identity_fingerprint,
+                self.prepared_provider_input_plan.plan_fingerprint,
                 self.active_window.window_semantic_fingerprint,
                 self.window_policy.policy_fingerprint,
                 self.projection_state.state_semantic_fingerprint,
-                tuple(
-                    item.prepared_fingerprint for item in self.prepared_rollup_units
-                ),
+                tuple(item.prepared_fingerprint for item in self.prepared_rollup_units),
                 self.rollout_state.state_fingerprint,
                 self.context_budget_decision.decision_fingerprint,
                 (
@@ -2080,7 +2152,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
             raise ValueError("manifest aggregate input fingerprint mismatch")
         if _TRUSTED_MANIFEST_FINGERPRINT.get() != self.manifest_fingerprint:
             _validate_fingerprint(
-                self, "context-compile-input-manifest:v6", "manifest_fingerprint"
+                self, "context-compile-input-manifest:v8", "manifest_fingerprint"
             )
         return self
 
@@ -2132,11 +2204,23 @@ from pulsara_agent.primitives.transcript_projection import (  # noqa: E402
     ContextTranscriptAuthorityFact as _ContextTranscriptAuthorityFact,
     TranscriptProviderProjectionFact as _TranscriptProviderProjectionFact,
 )
+from pulsara_agent.primitives.provider_input import (  # noqa: E402
+    PreparedProviderInputPlanFact as _PreparedProviderInputPlanFact,
+    ProviderOrderedTranscriptProjectionFact as _ProviderOrderedTranscriptProjectionFact,
+    ProviderOrderedTranscriptProjectionIdentityFact as _ProviderOrderedTranscriptProjectionIdentityFact,
+)
 
 ContextCompileInputManifestFact.model_rebuild(
     _types_namespace={
         "TranscriptProviderProjectionFact": _TranscriptProviderProjectionFact,
         "ContextTranscriptAuthorityFact": _ContextTranscriptAuthorityFact,
+        "PreparedProviderInputPlanFact": _PreparedProviderInputPlanFact,
+        "ProviderOrderedTranscriptProjectionFact": (
+            _ProviderOrderedTranscriptProjectionFact
+        ),
+        "ProviderOrderedTranscriptProjectionIdentityFact": (
+            _ProviderOrderedTranscriptProjectionIdentityFact
+        ),
     }
 )
 
@@ -2150,7 +2234,6 @@ __all__ = [
     "ContextAuthoritySlicePlan",
     "ContextCandidateCollectionDecisionFact",
     "ContextCandidateCollectionPolicyFact",
-    "ContextCandidateAuthorityFact",
     "ContextCandidateSourceSelectionFact",
     "ContextCandidateLoweringKind",
     "ContextCandidateSourceKind",

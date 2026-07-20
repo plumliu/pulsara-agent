@@ -1,0 +1,63 @@
+{
+  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "scenario_id": "plan-workflow",
+  "description": "Exercise typed plan question and approval boundaries before implementing and verifying a small rate-limiter repair.",
+  "model_role": "flash",
+  "reasoning_effort": null,
+  "timeout_seconds": 900,
+  "memory_reflection": false,
+  "system_prompt": "You are running Pulsara's frozen plan-workflow dogfood. In plan mode, inspect read-only context, ask exactly one useful plan question, then submit a concrete plan with exit_plan. After approval, implement the plan, run visible tests, and never inspect .env or credentials.",
+  "fixture": {
+    "fixture_kind": "directory_copy",
+    "workdir": "workdir"
+  },
+  "workflow": {
+    "workflow_kind": "plan_workflow",
+    "plan_reason": "frozen core dogfood requires an explicit review boundary",
+    "plan_prompt": "Plan a repair for limiter.py. The limiter must allow exactly limit calls per key, isolate counters by key, reject non-positive limits, and expose reset(key) without changing allow(key)'s signature. First inspect the source and tests. Ask exactly one plan question about reset semantics, then call exit_plan with the implementation and verification steps. Do not edit files while still in plan mode.",
+    "question_answers": [
+      "reset(key) should clear only that key; resetting an unknown key is a no-op."
+    ],
+    "approval_feedback": "Approved. Implement the per-key boundary fix and reset semantics, run the visible tests, and create PLAN_DONE.md with PLAN_WORKFLOW_FIXED_V1.",
+    "implementation_prompt": "Ensure the approved plan is fully implemented now. Run the visible tests and make sure PLAN_DONE.md contains the exact line PLAN_WORKFLOW_FIXED_V1. If the approved continuation already changed files, inspect the current result and only correct remaining issues.",
+    "max_interactions": 6
+  },
+  "verifier": {
+    "path": "verify.py",
+    "timeout_seconds": 30
+  },
+  "evidence_gate": {
+    "min_root_runs": 2,
+    "max_root_runs": 2,
+    "min_all_runs": 2,
+    "max_all_runs": 2,
+    "min_model_calls": 3,
+    "max_model_calls": 16,
+    "min_tool_calls": 5,
+    "max_tool_calls": 32,
+    "max_total_tokens": 260000,
+    "event_count_minimums": [
+      {"event_type": "PLAN_EXIT_REQUESTED", "minimum": 1},
+      {"event_type": "PLAN_EXIT_RESOLVED", "minimum": 1},
+      {"event_type": "PLAN_MODE_ENTERED", "minimum": 1},
+      {"event_type": "PLAN_MODE_EXITED", "minimum": 1},
+      {"event_type": "PLAN_QUESTION_ANSWERED", "minimum": 1},
+      {"event_type": "PLAN_QUESTION_ASKED", "minimum": 1}
+    ],
+    "forbidden_event_types": [
+      "MODEL_CALL_REJECTED",
+      "PROVIDER_MODEL_STREAM_ERROR",
+      "RUN_ERROR"
+    ],
+    "root_run_tool_gate": {
+      "run_selector": "all",
+      "required_exact_counts": [
+        {"tool_name": "ask_plan_question", "exact_count": 1},
+        {"tool_name": "exit_plan", "exact_count": 1}
+      ],
+      "forbidden_tool_names": []
+    },
+    "require_positive_cached_input_tokens": false,
+    "max_provider_input_rollovers": 2
+  }
+}

@@ -180,7 +180,14 @@ class NormalizedContextTranscript:
             matching = tuple(
                 unit
                 for unit in self.tool_result_units
-                if unit.tool_call_id == pair.tool_call_id
+                if (
+                    unit.call_message_id,
+                    unit.tool_call_id,
+                )
+                == (
+                    pair.call_message_id,
+                    pair.tool_call_id,
+                )
             )
             if len(matching) != 1:
                 raise ValueError("tool pair does not resolve to one normalized unit")
@@ -798,7 +805,7 @@ def _lifecycle_note_message(
     )
     return _message_fact(
         message_id=message_id,
-        role="system",
+        role="runtime_observation",
         name="pulsara",
         run_id=event.run_id,
         turn_id=event.turn_id,
@@ -1123,7 +1130,7 @@ def _compaction_summary_message(
     )
     message = _message_fact(
         message_id=summary_message_id,
-        role="system",
+        role="runtime_observation",
         name="pulsara_compaction" if prefix else "pulsara_window_compaction",
         run_id=None,
         turn_id=None,
@@ -1293,10 +1300,12 @@ def _reposition_tool_result_units(
     pairs: tuple[ToolInteractionPairFact, ...],
     positions: dict[tuple[str, int], int],
 ) -> list[ToolResultRenderUnit]:
-    pair_by_call = {pair.tool_call_id: pair for pair in pairs}
+    pair_by_call = {
+        (pair.call_message_id, pair.tool_call_id): pair for pair in pairs
+    }
     repositioned: list[ToolResultRenderUnit] = []
     for unit in units:
-        pair = pair_by_call.get(unit.tool_call_id)
+        pair = pair_by_call.get((unit.call_message_id, unit.tool_call_id))
         if pair is None:
             raise TranscriptNormalizationError(
                 "tool result unit lacks its normalized interaction pair"

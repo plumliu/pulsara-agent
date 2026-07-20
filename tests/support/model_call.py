@@ -16,6 +16,7 @@ from pulsara_agent.llm.adapters.mock import MockTransport
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.provider import ProviderProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
+from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.retry import LLMRetryConfig
@@ -147,6 +148,7 @@ def context_compiled_contract_fields(
     non_transcript_baseline_tokens: int | None = None,
     resolved_call: ResolvedModelCallFact | None = None,
     model_call_index: int = 1,
+    context_id: str = "context:test",
 ) -> dict[str, object]:
     call = resolved_call or test_resolved_call_fact()
     target = call.target
@@ -178,6 +180,21 @@ def context_compiled_contract_fields(
         transcript_estimated_tokens=transcript,
         estimator=target.token_estimator,
     )
+    prepared_candidate = None
+    manifest_reference = None
+    prepared_plan_fingerprint = None
+    prepared_candidate_fingerprint = None
+    if status == "compiled":
+        prepared_candidate, manifest_reference = (
+            _compiled_provider_input_candidate_fixture(
+                call,
+                context_id=context_id,
+                model_call_index=model_call_index,
+            )
+        )
+        assert prepared_candidate.prepared_plan is not None
+        prepared_plan_fingerprint = prepared_candidate.prepared_plan.plan_fingerprint
+        prepared_candidate_fingerprint = prepared_candidate.candidate_fingerprint
     return {
         "status": status,
         "failure_stage": "context_compile" if status == "failed" else None,
@@ -215,7 +232,11 @@ def context_compiled_contract_fields(
             prepared_candidate_set_fingerprint="sha256:" + "9" * 64,
             section_candidate_count=1,
             input_aggregate_fingerprint="sha256:" + "a" * 64,
-            input_manifest_artifact_id="context-input-manifest:test",
+            input_manifest_artifact_id=(
+                manifest_reference.input_manifest_artifact_id
+                if manifest_reference is not None
+                else "context-input-manifest:test"
+            ),
             input_manifest_fingerprint="sha256:" + "b" * 64,
             long_horizon_attribution_fingerprint="sha256:" + "e" * 64,
             input_manifest_write_outcome="stored",
@@ -226,11 +247,145 @@ def context_compiled_contract_fields(
         "canonical_render_decisions_fingerprint": (
             "sha256:" + "d" * 64 if status == "compiled" else None
         ),
+        "prepared_provider_input": prepared_candidate,
+        "manifest_projection_reference": manifest_reference,
+        "prepared_provider_input_plan_fingerprint": prepared_plan_fingerprint,
+        "prepared_provider_input_candidate_fingerprint": (
+            prepared_candidate_fingerprint
+        ),
     }
+
+
+def _compiled_provider_input_candidate_fixture(
+    call: ResolvedModelCallFact,
+    *,
+    context_id: str,
+    model_call_index: int,
+):
+    """Wrap the one-shot physical fixture in the compiled manifest contract."""
+
+    from pulsara_agent.primitives.context import context_fingerprint
+    from pulsara_agent.primitives.provider_input import (
+        ContextInputManifestProjectionReferenceFact,
+        PreparedProviderInputAppendCandidateFact,
+        PreparedProviderInputPlanFact,
+        ProviderInputCausalValidationResult,
+        ProviderOrderedTranscriptProjectionIdentityFact,
+        ProviderTranscriptDeltaCommitProofFact,
+    )
+    from pulsara_agent.runtime.provider_input.causal import (
+        CAUSAL_VALIDATION_CONTRACT_FINGERPRINT,
+        build_default_resolved_causal_physical_policy,
+    )
+
+    bundle = prepared_provider_input_bundle_fixture(
+        call,
+        context_id=context_id,
+        model_call_index=model_call_index,
+    )
+    candidate = bundle.prepared_candidate
+    policy = build_default_resolved_causal_physical_policy()
+    empty_wire = context_fingerprint(
+        "provider-ordered-transcript-wire:v2:empty", ()
+    )
+    empty_causal = context_fingerprint(
+        "provider-ordered-transcript-causal:v2:empty", ()
+    )
+    projection_identity = build_frozen_fact(
+        ProviderOrderedTranscriptProjectionIdentityFact,
+        schema_version="provider_ordered_transcript_projection_identity.v1",
+        projection_semantic_fingerprint=context_fingerprint(
+            "test-provider-ordered-projection:v1", context_id
+        ),
+        unit_count=0,
+        ordered_wire_semantic_accumulator=empty_wire,
+        ordered_causal_semantic_accumulator=empty_causal,
+    )
+    validation = build_frozen_fact(
+        ProviderInputCausalValidationResult,
+        schema_version="provider_input_causal_validation_result.v2",
+        status="valid",
+        projection_identity_fingerprint=projection_identity.identity_fingerprint,
+        checked_visible_edge_count=0,
+        violation_reason=None,
+        violating_projection_indices=(),
+        validation_contract_fingerprint=CAUSAL_VALIDATION_CONTRACT_FINGERPRINT,
+        resolved_causal_physical_policy_fingerprint=policy.policy_fingerprint,
+    )
+    frontier = bundle.resulting_core_state.transcript_frontier
+    proof = build_frozen_fact(
+        ProviderTranscriptDeltaCommitProofFact,
+        schema_version="provider_transcript_delta_commit_proof.v1",
+        projection_identity_fingerprint=projection_identity.identity_fingerprint,
+        predecessor_frontier_fingerprint=(
+            frontier.provider_semantic_frontier_fingerprint
+        ),
+        delta_first_projection_index=None,
+        delta_last_projection_index=None,
+        ordered_delta_wire_accumulator=empty_wire,
+        ordered_delta_causal_accumulator=empty_causal,
+        continuation_joins=(),
+        resulting_frontier=frontier,
+        resolved_causal_physical_policy_fingerprint=policy.policy_fingerprint,
+    )
+    prepared_plan = build_frozen_fact(
+        PreparedProviderInputPlanFact,
+        schema_version="prepared_provider_input_plan.v2",
+        plan_kind="initial_generation",
+        resolved_model_call_id=call.resolved_model_call_id,
+        continuity_scope_fingerprint=(
+            candidate.preparation_ownership.scope_fingerprint
+        ),
+        target_generation_id=candidate.generation_id,
+        predecessor_core_state_fingerprint=None,
+        ordered_transcript_projection_identity=projection_identity,
+        causal_validation=validation,
+        frame_placement=None,
+        transcript_delta_proof=proof,
+        source_dispositions=(),
+        rollover_intent=None,
+        resulting_unit_vector_root_fingerprint=(
+            candidate.provider_input_plan.unit_vector_root.reference_fingerprint
+        ),
+        resolved_causal_physical_policy_fingerprint=policy.policy_fingerprint,
+    )
+    manifest_reference = build_frozen_fact(
+        ContextInputManifestProjectionReferenceFact,
+        schema_version="context_input_manifest_projection_reference.v1",
+        context_id=context_id,
+        input_manifest_artifact_id=f"context-input-manifest:test:{context_id}",
+        input_manifest_content_fingerprint=context_fingerprint(
+            "test-context-input-manifest-content:v1", context_id
+        ),
+        input_manifest_fact_fingerprint=context_fingerprint(
+            "test-context-input-manifest-fact:v1", context_id
+        ),
+        projection_identity=projection_identity,
+    )
+    payload = {
+        name: getattr(candidate, name)
+        for name in candidate.__class__.model_fields
+        if name not in {"schema_version", "candidate_fingerprint"}
+    }
+    payload.update(
+        candidate_kind="compiled_manifest",
+        prepared_plan=prepared_plan,
+        manifest_projection_reference=manifest_reference,
+        rollover_request=None,
+    )
+    return (
+        build_frozen_fact(
+            PreparedProviderInputAppendCandidateFact,
+            schema_version="prepared_provider_input_append_candidate.v2",
+            **payload,
+        ),
+        manifest_reference,
+    )
 
 
 def model_call_start_fields(
     *,
+    event_id: str | None = None,
     context_id: str = "context:test",
     model_call_index: int | None = 1,
     resolved_call: ResolvedModelCallFact | None = None,
@@ -238,7 +393,7 @@ def model_call_start_fields(
     pre_send_estimated_input_tokens: int = 0,
 ) -> dict[str, object]:
     call = resolved_call or test_resolved_call_fact()
-    event_id = f"model_call_start:{uuid4().hex}"
+    event_id = event_id or f"model_call_start:{uuid4().hex}"
     main = lifecycle_kind == "main_assistant_reply"
     activation = make_test_run_execution_activation()
     contract = CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_CONTRACT
@@ -282,7 +437,83 @@ def model_call_start_fields(
         "context_id": context_id,
         "model_call_index": model_call_index,
         "recovery_plan": recovery_plan,
+        "provider_input_reference": committed_provider_input_reference_fixture(
+            call,
+            context_id=context_id,
+            model_call_index=model_call_index,
+        ),
     }
+
+
+def committed_provider_input_reference_fixture(
+    call: ResolvedModelCallFact,
+    *,
+    context_id: str,
+    model_call_index: int | None,
+):
+    """Build the minimum legal one-shot carrier for schema-level tests."""
+
+    return prepared_provider_input_bundle_fixture(
+        call,
+        context_id=context_id,
+        model_call_index=model_call_index,
+    ).committed_reference
+
+
+def prepared_provider_input_bundle_fixture(
+    call: ResolvedModelCallFact,
+    *,
+    context_id: str,
+    model_call_index: int | None,
+    event_context: EventContext | None = None,
+    runtime_session_id: str = "runtime:test",
+):
+    """Build one immutable provider-input lifecycle fixture."""
+
+    from dataclasses import replace as dataclass_replace
+
+    from pulsara_agent.primitives.provider_input import OneShotGenerationScopeFact
+    from pulsara_agent.runtime.provider_input.planner import (
+        plan_one_shot_provider_input,
+    )
+    from pulsara_agent.runtime.provider_input.store import ProviderInputGenerationStore
+
+    runtime_call = dataclass_replace(
+        test_resolved_call(purpose=call.purpose),
+        fact=call,
+    )
+    context = LLMContext(
+        messages=(LLMMessage.user("[test provider input]"),),
+        context_id=context_id,
+        resolved_model_call_id=call.resolved_model_call_id,
+        target_fingerprint=call.target.target_fingerprint,
+        model_call_index=model_call_index,
+        compiler_estimated_input_tokens=(0 if model_call_index is not None else None),
+    )
+    scope = build_frozen_fact(
+        OneShotGenerationScopeFact,
+        schema_version="one_shot_generation_scope.v1",
+        operation_kind="direct_model_call",
+        operation_id=call.resolved_model_call_id,
+        attempt_index=0,
+    )
+    resolved_event_context = event_context or EventContext(
+        run_id="run:test",
+        turn_id="turn:test",
+        reply_id="reply:test",
+    )
+    store = ProviderInputGenerationStore(runtime_session_id=runtime_session_id)
+    return plan_one_shot_provider_input(
+        call=runtime_call,
+        context=context,
+        generation_snapshot=store.snapshot(scope.scope_fingerprint),
+        event_context=resolved_event_context,
+        runtime_session_id=runtime_session_id,
+        operation_kind="direct_model_call",
+        operation_id=call.resolved_model_call_id,
+        attempt_index=0,
+        clock_observed_at_utc="2026-01-01T00:00:00Z",
+    )
 
 
 def make_test_run_execution_activation() -> RunExecutionActivationFact:
@@ -470,9 +701,7 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         run_id=state.run_id,
         run_start_event_id=run_start_event_id,
         primary_target=target.fact,
-        summarizer_target=agent.llm_runtime.resolve_target(
-            role=ModelRole.FLASH
-        ).fact,
+        summarizer_target=agent.llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
         graph_reducer_contract=(
             agent.runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
         ),
@@ -977,7 +1206,30 @@ def bind_test_context(
     return bound
 
 
-def start_test_direct_model_stream(
+def bind_test_provider_input_context(
+    call,
+    provider_input,
+    context: LLMContext,
+) -> LLMContext:
+    """Hydrate a prepared carrier and freeze its final compiled estimate.
+
+    Production compiled calls receive this estimate from the context compiler.
+    Tests that intentionally route a compiled call through the one-shot planner
+    must recompute it after the planner appends its per-invocation clock.
+    """
+
+    bound = provider_input.carrier.to_llm_context(context)
+    if call.fact.context_mode == "compiled":
+        bound = replace(
+            bound,
+            compiler_estimated_input_tokens=(
+                call.target.token_estimator.estimate_context(bound).total_input_tokens
+            ),
+        )
+    return bound
+
+
+async def start_test_direct_model_stream(
     runtime,
     *,
     call,
@@ -987,12 +1239,21 @@ def start_test_direct_model_stream(
 ):
     """Start a direct model call through the production durable lifecycle."""
 
+    provider_input = await runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+        call=call,
+        context=context,
+        event_context=event_context,
+        operation_kind="direct_model_call",
+        operation_id=call.fact.resolved_model_call_id,
+    )
+    context = bind_test_provider_input_context(call, provider_input, context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
         event_context=event_context,
         runtime_session=runtime_session,
         lifecycle_kind="direct_internal_call",
+        provider_input_start_bundle=provider_input,
     )
     return runtime.start_stream(
         call=call,

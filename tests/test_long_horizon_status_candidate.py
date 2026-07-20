@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     CustomEvent,
@@ -12,7 +15,11 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.user_carrier import context_source_observation_payload
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context_source import (
+    ContextSourceId,
+)
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonActionClass,
     RolloutBudgetAccountFact,
@@ -24,9 +31,15 @@ from pulsara_agent.primitives.long_horizon import (
     default_rollout_budget_policy,
     default_rollout_status_hint_policy,
 )
-from pulsara_agent.runtime.context_engine.types import AllocatedContextSection
-from pulsara_agent.runtime.context_input.candidate import _source_spec
-from pulsara_agent.runtime.context_input.compiler import _lower_messages
+from pulsara_agent.runtime.context_input.compiler import (
+    _lower_compiled_provider_messages,
+)
+from pulsara_agent.runtime.context_input.sources.builder import (
+    default_context_source_registry,
+)
+from pulsara_agent.runtime.context_input.sources.input import (
+    CONTEXT_SOURCE_INPUT_TYPES,
+)
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventSlice,
     FrozenStoredEvent,
@@ -126,7 +139,9 @@ def test_non_exploration_candidate_is_required_neutral_and_checkpoint_stable() -
     assert after_checkpoint.source_event_refs == baseline.source_event_refs
 
 
-def test_exact_recurrence_in_exploration_is_optional_and_uses_shadow_algorithm() -> None:
+def test_exact_recurrence_in_exploration_is_optional_and_uses_shadow_algorithm() -> (
+    None
+):
     account = _account()
     events: list = [_account_open(account, sequence=1)]
     for index in range(3):
@@ -152,20 +167,31 @@ def test_trailing_status_lowers_after_current_run_tail_as_runtime_observation() 
         LLMMessage.user("current user"),
         LLMMessage.assistant("current run tail"),
     )
-    sections = (
-        _section("transcript:prior_history", "history"),
-        _section("transcript:current_user", "current_user"),
-        _section("transcript:current_run_tail", "current_run_tail"),
-        _section(
-            "rollout:status",
-            "trailing_status",
-            text="[rollout status]\nphase=restricted",
+    trailing = LLMMessage.runtime_observation(
+        context_source_observation_payload(
+            source_id=ContextSourceId.ROLLOUT_STATUS,
+            transition_kind="status_update",
+            model_visible_content="[rollout status]\nphase=restricted",
+            source_payload_schema_version="rollout_status_test_payload.v1",
+            source_payload_semantic_fingerprint=context_fingerprint(
+                "rollout-status-test-payload:v1", "phase=restricted"
+            ),
+            lifecycle_class="replacement_snapshot",
         ),
+        observation_kind="rollout_status_snapshot",
+        source_instance_id="rollout:status",
+        lifecycle_class="replacement_snapshot",
+        authority_class="runtime_fact",
     )
 
-    messages, scopes = _lower_messages(
+    messages, scopes = _lower_compiled_provider_messages(
         transcript_messages=transcript_messages,
-        sections=sections,
+        source_fragments=(
+            SimpleNamespace(
+                provider_lane="status_observation",
+                message=trailing,
+            ),
+        ),
     )
 
     assert tuple(message.role for message in messages) == (
@@ -174,12 +200,21 @@ def test_trailing_status_lowers_after_current_run_tail_as_runtime_observation() 
         MessageRole.ASSISTANT,
         MessageRole.RUNTIME_OBSERVATION,
     )
-    assert messages[-1].content == ("[rollout status]\nphase=restricted",)
+    envelope = json.loads(messages[-1].content[0])
+    observation = envelope["pulsara_runtime_observation"]
+    assert observation["kind"] == "rollout_status_snapshot"
+    assert observation["payload"]["model_visible_content"] == (
+        "[rollout status]\nphase=restricted"
+    )
     assert scopes == ("transcript", "transcript", "transcript", "non_transcript")
-    spec = _source_spec("rollout:status")
-    assert spec[0] == "rollout_status"
-    assert spec[1].value == "trailing_status"
-    assert spec[5] == "trailing_status"
+    binding = default_context_source_registry().resolve(
+        source_id=ContextSourceId.ROLLOUT_STATUS
+    )
+    assert binding.policy.source_id is ContextSourceId.ROLLOUT_STATUS
+    assert (
+        binding.policy.input_type
+        is CONTEXT_SOURCE_INPUT_TYPES[ContextSourceId.ROLLOUT_STATUS]
+    )
 
 
 def _account() -> RolloutBudgetAccountFact:
@@ -198,9 +233,7 @@ def _account() -> RolloutBudgetAccountFact:
     }
     return RolloutBudgetAccountFact(
         **payload,
-        semantic_fingerprint=context_fingerprint(
-            "rollout-budget-account:v1", payload
-        ),
+        semantic_fingerprint=context_fingerprint("rollout-budget-account:v1", payload),
     )
 
 
@@ -334,22 +367,4 @@ def _slice(events: list) -> ContextEventSlice:
             "context-event-slice-payloads:v1",
             tuple(event.payload_fingerprint for event in frozen),
         ),
-    )
-
-
-def _section(
-    section_id: str,
-    channel: str,
-    *,
-    text: str = "",
-) -> AllocatedContextSection:
-    return AllocatedContextSection(
-        id=section_id,
-        source_id=section_id,
-        channel=channel,
-        priority=90,
-        stability="step",
-        budget_class="important",
-        text=text,
-        metadata={"lowering_kind": channel},
     )

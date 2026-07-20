@@ -18,6 +18,7 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
+    ContextCompiledEvent,
     ContextWindowClosedEvent,
     ContextWindowCompactionCompletedEvent,
     ContextWindowCompactionFailedEvent,
@@ -409,6 +410,18 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    provider_input_generation_store: Any = field(
+        init=False,
+        repr=False,
+    )
+    provider_input_generation_coordinator: Any = field(
+        init=False,
+        repr=False,
+    )
+    provider_input_preparation_recovery_service: Any = field(
+        init=False,
+        repr=False,
+    )
     transcript_projection_checkpoint_service: Any = field(
         init=False,
         repr=False,
@@ -546,17 +559,13 @@ class RuntimeSession:
             )
         self.materialization_account_store = LedgerMaterializationAccountStore(
             state=durable_account,
-            charge_contract=(
-                self.authority_materialization_contracts.charge_contract
-            ),
+            charge_contract=(self.authority_materialization_contracts.charge_contract),
         )
         self.materialization_coordinator = LedgerMaterializationCoordinator(
             runtime_session_id=self.runtime_session_id,
             event_log=self.event_log,
             store=self.materialization_account_store,
-            charge_contract=(
-                self.authority_materialization_contracts.charge_contract
-            ),
+            charge_contract=(self.authority_materialization_contracts.charge_contract),
             limits=self.authority_materialization_contracts.limits,
             prepare_event=self.prepare_event_for_write,
         )
@@ -618,6 +627,59 @@ class RuntimeSession:
             through_sequence=self.transcript_projection_state_store.through_sequence,
             apply_committed=self.transcript_projection_state_store.apply_committed,
             rebuild_committed=self.transcript_projection_state_store.rebuild,
+        )
+        from pulsara_agent.runtime.provider_input import (
+            ProviderInputGenerationCoordinator,
+            ProviderInputGenerationStore,
+            ProviderInputPreparationRecoveryService,
+        )
+
+        provider_input_bootstrap = self.event_log.read_raw_events_by_types(
+            (
+                EventType.CONTEXT_COMPILED.value,
+                EventType.PROVIDER_INPUT_GENERATION_STARTED.value,
+                EventType.PROVIDER_INPUT_APPEND_COMMITTED.value,
+                EventType.PROVIDER_INPUT_EXISTING_PREPARATION_ABANDONED.value,
+                EventType.PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED.value,
+                EventType.PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED.value,
+                EventType.PROVIDER_INPUT_GENERATION_CLOSED.value,
+                EventType.MODEL_CALL_START.value,
+                EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED.value,
+                EventType.MODEL_CALL_END.value,
+                EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED.value,
+                EventType.RUN_END.value,
+            ),
+            # A provider-input generation can be the predecessor of a later
+            # run/window generation.  Restricting this sparse read to active
+            # runs drops the durable rollover basis after restart.
+            active_runs_only=False,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        self.provider_input_generation_store = (
+            ProviderInputGenerationStore.from_sparse_bootstrap(
+                tuple(
+                    event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for event in provider_input_bootstrap.events
+                ),
+                runtime_session_id=self.runtime_session_id,
+                through_sequence=provider_input_bootstrap.through_sequence,
+            )
+        )
+        self.provider_input_generation_coordinator = ProviderInputGenerationCoordinator(
+            runtime_session=self,
+            store=self.provider_input_generation_store,
+        )
+        self.provider_input_preparation_recovery_service = (
+            ProviderInputPreparationRecoveryService(
+                runtime_session=self,
+                store=self.provider_input_generation_store,
+            )
+        )
+        self.register_committed_reducer(
+            reducer_id=f"provider_input_generation:{self.runtime_session_id}",
+            through_sequence=self.provider_input_generation_store.through_sequence,
+            apply_committed=self.provider_input_generation_store.apply_committed,
+            rebuild_committed=self.provider_input_generation_store.rebuild,
         )
         # Startup recovery may commit a stable checkpoint terminal batch. The
         # publisher must own that newly committed suffix before recovery runs.
@@ -695,9 +757,7 @@ class RuntimeSession:
             InMemoryPreparedObservationRollupCache,
         )
 
-        self.observation_rollup_content_cache = (
-            InMemoryObservationRollupContentCache()
-        )
+        self.observation_rollup_content_cache = InMemoryObservationRollupContentCache()
         self.prepared_observation_rollup_cache = (
             InMemoryPreparedObservationRollupCache()
         )
@@ -731,9 +791,7 @@ class RuntimeSession:
             through_sequence=long_horizon_bootstrap.through_sequence,
         )
         self.register_committed_reducer(
-            reducer_id=(
-                f"long_horizon:{self.runtime_session_id}"
-            ),
+            reducer_id=(f"long_horizon:{self.runtime_session_id}"),
             through_sequence=self.long_horizon_state_store.through_sequence,
             apply_committed=self.long_horizon_state_store.apply_committed,
             rebuild_committed=self.long_horizon_state_store.rebuild,
@@ -741,6 +799,7 @@ class RuntimeSession:
         from pulsara_agent.runtime.authority_materialization import (
             AuthorityMaterializationShadowAccount,
         )
+
         usage_reader = getattr(self.event_log, "read_ledger_usage_snapshot", None)
         if usage_reader is None:
             usage_through = self.long_horizon_state_store.through_sequence
@@ -772,13 +831,13 @@ class RuntimeSession:
             ),
         )
         self.register_committed_reducer(
-            reducer_id=(
-                f"authority_materialization_shadow:{self.runtime_session_id}"
-            ),
+            reducer_id=(f"authority_materialization_shadow:{self.runtime_session_id}"),
             through_sequence=self.authority_materialization_shadow.through_sequence,
             apply_committed=self.authority_materialization_shadow.apply_committed,
         )
         self._bind_terminal(self.terminal_binding)
+        self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
+        self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
 
     def _restore_active_physical_reservations(self, durable_account: Any) -> None:
         self._physical_reservation_facts = {}
@@ -810,8 +869,7 @@ class RuntimeSession:
             reservation = event.reservation
             if (
                 reservation.reservation_id != active.reservation_id
-                or reservation.reservation_fingerprint
-                != active.reservation_fingerprint
+                or reservation.reservation_fingerprint != active.reservation_fingerprint
                 or reservation.owner_kind != active.owner_kind
                 or reservation.owner_id != active.owner_id
             ):
@@ -822,11 +880,8 @@ class RuntimeSession:
             self._physical_reservation_facts[key] = reservation
             if reservation.owner_kind is not PhysicalOperationKind.CHECKPOINT_COMMIT:
                 self._physical_operation_admission_tokens[key] = (
-                    self.checkpoint_dispatch_barrier_coordinator
-                    .restore_operation_admission(
-                        operation_owner_id=_physical_operation_admission_owner_id(
-                            key
-                        )
+                    self.checkpoint_dispatch_barrier_coordinator.restore_operation_admission(
+                        operation_owner_id=_physical_operation_admission_owner_id(key)
                     )
                 )
 
@@ -1576,7 +1631,9 @@ class RuntimeSession:
             and self.event_log.next_sequence() == 1
         )
         tool_reservation = self._active_tool_reservation_for_batch(prepared)
-        if transaction_companion is not None and (is_genesis or tool_reservation is not None):
+        if transaction_companion is not None and (
+            is_genesis or tool_reservation is not None
+        ):
             raise ValueError(
                 "transaction companion requires an accounted one-shot event batch"
             )
@@ -1610,9 +1667,7 @@ class RuntimeSession:
                         await_delivery=True,
                     ),
                     deadline_monotonic=deadline,
-                    **self._physical_operation_continuation_admission(
-                        tool_reservation
-                    ),
+                    **self._physical_operation_continuation_admission(tool_reservation),
                 )
             else:
                 attempt = await self.event_write_service.execute(
@@ -1701,18 +1756,18 @@ class RuntimeSession:
                     state=state,
                 ),
                 deadline_monotonic=deadline,
-                **self._physical_operation_continuation_admission(
-                    tool_reservation
-                ),
+                **self._physical_operation_continuation_admission(tool_reservation),
             )
         return self.event_write_service.execute_blocking(
-            lambda: self._commit_reduce_enqueue(
-                prepared,
-                expected_last_sequence=expected_last_sequence,
-                state=state,
-                await_delivery=False,
-                deadline_monotonic=deadline,
-            ).result,
+            lambda: (
+                self._commit_reduce_enqueue(
+                    prepared,
+                    expected_last_sequence=expected_last_sequence,
+                    state=state,
+                    await_delivery=False,
+                    deadline_monotonic=deadline,
+                ).result
+            ),
             deadline_monotonic=deadline,
         )
 
@@ -1754,11 +1809,9 @@ class RuntimeSession:
         self,
         operation_kind: PhysicalOperationKind,
     ) -> int:
-        contract = (
-            self.authority_materialization_contracts.burst_registry
-            .unique_binding_for_operation(operation_kind)
-            .contract
-        )
+        contract = self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+            operation_kind
+        ).contract
         return self.materialization_coordinator.available_dispatch_capacity(
             burst_contract=contract
         )
@@ -1778,7 +1831,9 @@ class RuntimeSession:
         while self.physical_dispatch_capacity(operation_kind) <= 0:
             account = self.materialization_account_store.snapshot()
             if account is None:
-                raise RuntimeError("materialization account disappeared during recovery")
+                raise RuntimeError(
+                    "materialization account disappeared during recovery"
+                )
             minimum = account.generation.reclaimable_through_sequence
             blockers = tuple(
                 item
@@ -1804,8 +1859,10 @@ class RuntimeSession:
                     blocker.consumer_kind
                     is LedgerMaterializationConsumerKind.SUBAGENT_GRAPH
                 ):
-                    await self.subagent_graph_checkpoint_service.checkpoint_for_admission(
-                        requested_through_sequence=account.ledger_through_sequence
+                    await (
+                        self.subagent_graph_checkpoint_service.checkpoint_for_admission(
+                            requested_through_sequence=account.ledger_through_sequence
+                        )
                     )
                 if self.physical_dispatch_capacity(operation_kind) > 0:
                     return
@@ -1862,9 +1919,9 @@ class RuntimeSession:
                     reservation_id=reservation_id,
                     owner_id=owner_id,
                     burst_contract=(
-                        self.authority_materialization_contracts.burst_registry
-                        .unique_binding_for_operation(operation_kind)
-                        .contract
+                        self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                            operation_kind
+                        ).contract
                     ),
                     deadline_monotonic=deadline,
                 )
@@ -1876,9 +1933,7 @@ class RuntimeSession:
                 raise AssertionError("unreachable materialization exception mapping")
             key = (committed.reservation.owner_kind, committed.reservation.owner_id)
             promoted = self.event_write_service.promote_current_producer_admission(
-                operation_owner_ids=(
-                    _physical_operation_admission_owner_id(key),
-                ),
+                operation_owner_ids=(_physical_operation_admission_owner_id(key),),
             )
             if len(promoted) != 1 or key in self._physical_operation_admission_tokens:
                 self._latch_ledger_reconciliation_required()
@@ -1927,18 +1982,15 @@ class RuntimeSession:
             self._validate_run_lifecycle_batch(prepared)
             self.long_horizon_state_store.validate_next_batch(prepared)
             try:
-                committed = (
-                    self.materialization_coordinator
-                    .commit_graph_checkpoint_consumer_advance(
-                        checkpoint_event=checkpoint_event,
-                        ledger_charged_payload_bytes_through_checkpoint=(
-                            ledger_charged_payload_bytes_through_checkpoint
-                        ),
-                        ledger_continuity_accumulator_through_checkpoint=(
-                            ledger_continuity_accumulator_through_checkpoint
-                        ),
-                        deadline_monotonic=deadline,
-                    )
+                committed = self.materialization_coordinator.commit_graph_checkpoint_consumer_advance(
+                    checkpoint_event=checkpoint_event,
+                    ledger_charged_payload_bytes_through_checkpoint=(
+                        ledger_charged_payload_bytes_through_checkpoint
+                    ),
+                    ledger_continuity_accumulator_through_checkpoint=(
+                        ledger_continuity_accumulator_through_checkpoint
+                    ),
+                    deadline_monotonic=deadline,
                 )
             except BaseException as exc:
                 self._raise_materialization_commit_error(
@@ -2045,8 +2097,7 @@ class RuntimeSession:
             first = prepared[0]
             try:
                 committed = (
-                    self.materialization_coordinator
-                    .reserve_and_commit_dispatch_batch(
+                    self.materialization_coordinator.reserve_and_commit_dispatch_batch(
                         context=EventContext(
                             run_id=first.run_id,
                             turn_id=first.turn_id,
@@ -2322,14 +2373,16 @@ class RuntimeSession:
             else self.event_write_service.new_deadline_monotonic()
         )
         return self.event_write_service.execute_blocking(
-            lambda: self._commit_reduce_enqueue(
-                prepared,
-                expected_last_sequence=expected_last_sequence,
-                state=state,
-                await_delivery=False,
-                enqueue_publication=False,
-                deadline_monotonic=deadline,
-            ).result,
+            lambda: (
+                self._commit_reduce_enqueue(
+                    prepared,
+                    expected_last_sequence=expected_last_sequence,
+                    state=state,
+                    await_delivery=False,
+                    enqueue_publication=False,
+                    deadline_monotonic=deadline,
+                ).result
+            ),
             deadline_monotonic=deadline,
         )
 
@@ -2427,9 +2480,7 @@ class RuntimeSession:
                     or attribution.final_model_visible_input_fingerprint
                     != model_input.provider_neutral_context_fingerprint
                 ):
-                    raise ValueError(
-                        "governance model Start/artifact identity drifted"
-                    )
+                    raise ValueError("governance model Start/artifact identity drifted")
             elif isinstance(event, MemoryGovernanceBatchPreparedEvent):
                 snapshot = hydrate_governance_batch_input(
                     reference=event.batch_input_reference,
@@ -2502,9 +2553,7 @@ class RuntimeSession:
                         expected_payload,
                     )
                 ):
-                    raise ValueError(
-                        "governance Prepared event/artifact join drifted"
-                    )
+                    raise ValueError("governance Prepared event/artifact join drifted")
             elif isinstance(event, terminal_types):
                 prepared = self.event_log.get_by_id(event.prepared_event_id)
                 if not isinstance(prepared, MemoryGovernanceBatchPreparedEvent):
@@ -2545,6 +2594,24 @@ class RuntimeSession:
         self._validate_memory_governance_batch(events)
         self._validate_terminal_projection_batch(events)
 
+        if not self.allow_unbootstrapped_test_events:
+            for event in events:
+                if (
+                    isinstance(event, ContextCompiledEvent)
+                    and event.status == "compiled"
+                    and event.prepared_provider_input is None
+                ):
+                    raise ValueError(
+                        "production compiled context requires prepared provider input"
+                    )
+                if (
+                    isinstance(event, ModelCallStartEvent)
+                    and event.provider_input_reference is None
+                ):
+                    raise ValueError(
+                        "production ModelStart requires committed provider input"
+                    )
+
         starts_in_batch = {
             event.run_id: event for event in events if isinstance(event, RunStartEvent)
         }
@@ -2563,11 +2630,14 @@ class RuntimeSession:
                 if isinstance(event, ModelCallControlDispositionResolvedEvent)
                 and event.run_id == terminal.run_id
             }
-            unresolved_call_ids = set(
-                self.transcript_projection_state_store.unresolved_completed_call_ids(
-                    terminal.run_id
+            unresolved_call_ids = (
+                set(
+                    self.transcript_projection_state_store.unresolved_completed_call_ids(
+                        terminal.run_id
+                    )
                 )
-            ) - resolving_call_ids
+                - resolving_call_ids
+            )
             if unresolved_call_ids:
                 raise ValueError(
                     "RunEnd requires FULL model control disposition commit: "
@@ -2732,9 +2802,7 @@ class RuntimeSession:
                     )
                 started = (
                     existing_started
-                    if isinstance(
-                        existing_started, ContextWindowCompactionStartedEvent
-                    )
+                    if isinstance(existing_started, ContextWindowCompactionStartedEvent)
                     else None
                 )
             if (
@@ -2781,9 +2849,7 @@ class RuntimeSession:
                     != started.plan.summarizer_call.resolved_model_call_id
                     or terminal.summarizer_call.target.target_fingerprint
                     != started.plan.summarizer_call.target.target_fingerprint
-                    or not isinstance(
-                        settlement, RolloutBudgetReservationSettledEvent
-                    )
+                    or not isinstance(settlement, RolloutBudgetReservationSettledEvent)
                     or settlement.reservation_id
                     != started.plan.rollout_reservation.reservation_id
                     or settlement.usage_charge is None
@@ -2791,11 +2857,9 @@ class RuntimeSession:
                     or settlement.usage_charge.reservation_quote_fact_fingerprint
                     != reservation_quote.quote_fact_fingerprint
                     or not isinstance(closed, ContextWindowClosedEvent)
-                    or closed.id
-                    != started.plan.stable_source_window_close_event_id
+                    or closed.id != started.plan.stable_source_window_close_event_id
                     or closed.window_id != started.plan.source_window_id
-                    or closed.window_generation
-                    != started.plan.source_window_generation
+                    or closed.window_generation != started.plan.source_window_generation
                     or closed.final_projection_generation
                     != started.plan.source_projection_generation
                     or closed.final_projection_state_fingerprint
@@ -2807,10 +2871,8 @@ class RuntimeSession:
                     or not isinstance(opened, ContextWindowOpenedEvent)
                     or opened.id != started.plan.stable_target_window_open_event_id
                     or opened.window.window_id != started.plan.target_window_id
-                    or opened.window.generation
-                    != started.plan.target_window_generation
-                    or opened.window.source_compaction_id
-                    != terminal.compaction_id
+                    or opened.window.generation != started.plan.target_window_generation
+                    or opened.window.source_compaction_id != terminal.compaction_id
                     or opened.opening_batch_id != terminal.compaction_id
                     or any(position is None for position in expected_order)
                     or expected_order[1] != expected_order[0] + 1
@@ -2884,9 +2946,7 @@ class RuntimeSession:
             boundary = boundary_event.boundary
             start = candidate_by_id.get(boundary.original_run_start_event_id)
             if start is None:
-                start = self.event_log.get_by_id(
-                    boundary.original_run_start_event_id
-                )
+                start = self.event_log.get_by_id(boundary.original_run_start_event_id)
             if (
                 not isinstance(start, RunStartEvent)
                 or start.sequence != boundary.original_run_start_sequence
@@ -2914,8 +2974,7 @@ class RuntimeSession:
                         decoded := item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
                         CapabilityExposureResolvedEvent,
                     )
-                    and decoded.exposure.exposure_id
-                    == boundary.source_exposure_id
+                    and decoded.exposure.exposure_id == boundary.source_exposure_id
                 ),
                 None,
             )
@@ -3102,17 +3161,13 @@ class RuntimeSession:
                 committed.projection_reference
             )
             if isinstance(event, ModelCallEndEvent):
-                if not isinstance(
-                    committed, ModelCallTerminalProjectionCommittedEvent
-                ):
+                if not isinstance(committed, ModelCallTerminalProjectionCommittedEvent):
                     raise ValueError("model End requires a model projection event")
                 start = self.event_log.get_by_id(
                     committed.model_call_start_event_identity.event_id
                 )
                 if not isinstance(start, ModelCallStartEvent):
-                    raise ValueError(
-                        "model terminal projection Start is unavailable"
-                    )
+                    raise ValueError("model terminal projection Start is unavailable")
                 validate_model_terminal_projection_document(
                     runtime_session_id=self.runtime_session_id,
                     start=start,
@@ -3386,16 +3441,17 @@ class RuntimeSession:
                 "external execution requires a retained physical reservation"
             )
         try:
-            burst_contract = (
-                self.authority_materialization_contracts.burst_registry
-                .unique_binding_for_operation(operation_kind)
-                .contract
-            )
+            burst_contract = self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                operation_kind
+            ).contract
             starts = tuple(
                 event for event in events if isinstance(event, RunStartEvent)
             )
             if starts:
-                if len(starts) != 1 or operation_kind is not PhysicalOperationKind.HOST_RUN_BOUNDARY:
+                if (
+                    len(starts) != 1
+                    or operation_kind is not PhysicalOperationKind.HOST_RUN_BOUNDARY
+                ):
                     raise EventReconciliationRequired(
                         "RunStart requires one Host boundary consumer rotation"
                     )
@@ -3744,9 +3800,7 @@ class RuntimeSession:
                 registration.through_sequence = through_sequence
             except Exception as exc:
                 registration.reconciliation_required = True
-                registration.last_error = (
-                    f"{type(exc).__name__}: {_bounded_error(exc)}"
-                )
+                registration.last_error = f"{type(exc).__name__}: {_bounded_error(exc)}"
                 self._reconciliation_required = True
 
     def _catch_up_publisher(
@@ -3893,6 +3947,9 @@ class RuntimeSession:
             raise RuntimeError(
                 "cannot close RuntimeSession with active physical operation admissions"
             )
+        self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
+        self.provider_input_generation_coordinator.close_open_session_generations_sync()
+        self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
         self.context_input_manifest_service.close_if_idle()
         self.context_input_io_service.close_if_idle()
         self.event_write_service.close_if_idle()
@@ -3903,6 +3960,7 @@ class RuntimeSession:
         self.context_static_instruction_cache.clear()
         self.context_candidate_lifecycle_cache.clear()
         self.tool_result_render_cache.clear()
+        self.provider_input_generation_store.clear_resident_cache()
         self.model_call_control_disposition_owner.clear()
         self._context_input_cache_diagnostics.clear()
         subagent_runtime = self.subagent_runtime

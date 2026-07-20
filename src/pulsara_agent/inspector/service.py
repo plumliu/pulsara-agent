@@ -23,10 +23,12 @@ from pulsara_agent.event import (
     ContextWindowCompactionFailedEvent,
     ContextWindowCompactionStartedEvent,
     ContextWindowOpenedEvent,
+    ExistingGenerationPreparationAbandonedEvent,
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     McpCapabilitySnapshotInstalledEvent,
     ModelCallEndEvent,
+    ModelCallControlDispositionResolvedEvent,
     ModelCallRejectedEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
@@ -34,6 +36,10 @@ from pulsara_agent.event import (
     PhysicalOperationReservationSettledEvent,
     PhysicalOperationReservationSuspendedEvent,
     ProjectionReadyEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationClosedEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
+    ProviderInputGenerationStartedEvent,
     ReplyStartEvent,
     RolloutBudgetAccountOpenedEvent,
     RolloutBudgetReservationCreatedEvent,
@@ -41,6 +47,7 @@ from pulsara_agent.event import (
     RolloutPhaseTransitionedEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
+    ScopedGenerationPreparationAbandonedEvent,
     SubagentGraphCheckpointCommittedEvent,
     SubagentRunCompletedEvent,
     ToolResultTerminalProjectionCommittedEvent,
@@ -150,6 +157,8 @@ class InspectorService:
         diagnostics.extend(_compaction_diagnostics(events, self.store))
         model_contracts = _model_contract_projection(events)
         diagnostics.extend(model_contracts["diagnostics"])
+        provider_input_generations = _provider_input_generation_projection(events)
+        diagnostics.extend(provider_input_generations["diagnostics"])
         boundary_projections = [
             _run_boundary_projection(start, events, self.store)
             for start in events
@@ -201,6 +210,7 @@ class InspectorService:
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
+            "provider_input_generations": provider_input_generations["generations"],
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "compaction_windows": _compaction_windows(events, self.store),
@@ -211,18 +221,12 @@ class InspectorService:
                 events,
                 self.store,
             ),
-            "subagent_graph_checkpoints": _subagent_graph_checkpoint_projection(
-                events
-            ),
+            "subagent_graph_checkpoints": _subagent_graph_checkpoint_projection(events),
             "rollout_status_shadows": rollout_status["shadows"],
             "long_horizon_runs": long_horizon["runs"],
             "authority_materialization": authority_materialization,
-            "transcript_projection": authority_materialization[
-                "transcript_projection"
-            ],
-            "terminal_projections": authority_materialization[
-                "terminal_projections"
-            ],
+            "transcript_projection": authority_materialization["transcript_projection"],
+            "terminal_projections": authority_materialization["terminal_projections"],
             "checkpoint_accelerations": authority_materialization[
                 "checkpoint_accelerations"
             ],
@@ -292,6 +296,13 @@ class InspectorService:
         diagnostics.extend(outbox_diagnostics(self.store.outbox_for_run(run_id)))
         model_contracts = _model_contract_projection(run_events)
         diagnostics.extend(model_contracts["diagnostics"])
+        provider_input_generations = _provider_input_generation_projection(
+            session_events,
+            include_generation_ids=_referenced_provider_input_generation_ids(
+                run_events
+            ),
+        )
+        diagnostics.extend(provider_input_generations["diagnostics"])
         mcp_installation = _mcp_run_installation_projection(
             run_start,
             current_session_id=session_id,
@@ -366,9 +377,7 @@ class InspectorService:
                 session_events
             ),
             "rollout_status_shadows": rollout_status["shadows"],
-            "long_horizon": (
-                long_horizon["runs"][0] if long_horizon["runs"] else None
-            ),
+            "long_horizon": (long_horizon["runs"][0] if long_horizon["runs"] else None),
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
             "context_windows": context_windows["windows"],
@@ -386,6 +395,7 @@ class InspectorService:
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
+            "provider_input_generations": provider_input_generations["generations"],
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "subagent_graph": _subagent_graph_projection(
@@ -630,9 +640,7 @@ def _memory_governance_projection(
         "batches": [_json_safe(row) for row in batches],
         "claims": [_json_safe(row) for row in claims],
         "evidence_rejections": [_json_safe(row) for row in rejections],
-        "candidate_projection_outbox": [
-            _json_safe(row) for row in projection_outbox
-        ],
+        "candidate_projection_outbox": [_json_safe(row) for row in projection_outbox],
         "counts": {
             "batches": len(batches),
             "open_claims": sum(
@@ -1084,9 +1092,7 @@ def _run_transcript_seed_projection(
         "prior_source_state_join_outcome": (
             "matched" if source_state_joined else "mismatch"
         ),
-        "root_manifest_contract_fingerprint": (
-            root_manifest_contract_fingerprint
-        ),
+        "root_manifest_contract_fingerprint": (root_manifest_contract_fingerprint),
         "total_entry_count": total_entry_count,
         "restore_outcome": restore_outcome,
         "materialization": {
@@ -1103,9 +1109,7 @@ def _run_transcript_seed_projection(
         "source_ledger": {
             "runtime_session_id": reference.source_runtime_session_id,
             "through_sequence": reference.source_ledger_through_sequence,
-            "continuity_accumulator": (
-                reference.source_ledger_continuity_accumulator
-            ),
+            "continuity_accumulator": (reference.source_ledger_continuity_accumulator),
             "checkpoint_id": reference.source_checkpoint_id,
         },
         "reference_fingerprint": reference.reference_fingerprint,
@@ -1119,9 +1123,7 @@ def _authority_materialization_projection(
     store: PostgresInspectorStore,
 ) -> dict[str, Any]:
     ordered = tuple(sorted(events, key=lambda item: item.sequence or 0))
-    run_starts = tuple(
-        item for item in ordered if isinstance(item, RunStartEvent)
-    )
+    run_starts = tuple(item for item in ordered if isinstance(item, RunStartEvent))
     projection_events = tuple(
         item
         for item in ordered
@@ -1169,12 +1171,8 @@ def _authority_materialization_projection(
             "transcript_semantic_domain_contract_fingerprint": (
                 latest_source.transcript_semantic_domain_contract_fingerprint
             ),
-            "semantic_source_event_count": (
-                latest_source.semantic_source_event_count
-            ),
-            "semantic_source_accumulator": (
-                latest_source.semantic_source_accumulator
-            ),
+            "semantic_source_event_count": (latest_source.semantic_source_event_count),
+            "semantic_source_accumulator": (latest_source.semantic_source_accumulator),
             "state_fingerprint": latest_source.resulting_state_fingerprint,
             "source_kind": "checkpoint" if checkpoint_events else "run_seed",
         }
@@ -1215,9 +1213,7 @@ def _authority_materialization_projection(
                 "ledger_materialization_generation": (
                     candidate.source_ledger_materialization_generation
                 ),
-                "materialization_consumer_id": (
-                    candidate.materialization_consumer_id
-                ),
+                "materialization_consumer_id": (candidate.materialization_consumer_id),
                 "previous_checkpoint_id": candidate.previous_checkpoint_id,
                 "root_manifest_contract_fingerprint": (
                     materialization.root_manifest_ref.root_manifest_contract_fingerprint
@@ -1235,13 +1231,9 @@ def _authority_materialization_projection(
                     candidate.candidate_ledger_continuity_accumulator
                 ),
                 "semantic_source": candidate.semantic_source.model_dump(mode="json"),
-                "stable_state": candidate.stable_semantic_state.model_dump(
-                    mode="json"
-                ),
+                "stable_state": candidate.stable_semantic_state.model_dump(mode="json"),
                 "terminal": (
-                    terminal.model_dump(mode="json")
-                    if terminal is not None
-                    else None
+                    terminal.model_dump(mode="json") if terminal is not None else None
                 ),
             }
         )
@@ -1267,9 +1259,7 @@ def _authority_materialization_projection(
                 generation.ledger_materialization_generation
             ),
             "consumer_horizon_revision": generation.consumer_horizon_revision,
-            "reclaimable_through_sequence": (
-                generation.reclaimable_through_sequence
-            ),
+            "reclaimable_through_sequence": (generation.reclaimable_through_sequence),
             "consumer_horizons": [
                 item.model_dump(mode="json") for item in generation.consumer_horizons
             ],
@@ -1285,9 +1275,7 @@ def _authority_materialization_projection(
             "active_reservations": [
                 item.model_dump(mode="json") for item in account.active_reservations
             ],
-            "latest_transition_event_ids": list(
-                account.latest_transition_event_ids
-            ),
+            "latest_transition_event_ids": list(account.latest_transition_event_ids),
             "reconciliation_required": account.reconciliation_required,
             "reconciliation_reason_code": account.reconciliation_reason_code,
             "account_state_fingerprint": account.account_state_fingerprint,
@@ -1297,15 +1285,11 @@ def _authority_materialization_projection(
             "ledger_materialization_generation": (
                 generation.ledger_materialization_generation
             ),
-            "reclaimable_through_sequence": (
-                generation.reclaimable_through_sequence
-            ),
+            "reclaimable_through_sequence": (generation.reclaimable_through_sequence),
             "consumer_horizons": [
                 item.model_dump(mode="json") for item in generation.consumer_horizons
             ],
-            "events_since_reclaimable_horizon": (
-                account.used_since_reclaimable_events
-            ),
+            "events_since_reclaimable_horizon": (account.used_since_reclaimable_events),
             "charged_payload_bytes_since_reclaimable_horizon": (
                 account.used_since_reclaimable_payload_bytes
             ),
@@ -1381,9 +1365,7 @@ def _terminal_projection_event_projection(
                     for item in document.payload.items
                 )
                 projection["completed_block_count"] = statuses.count("completed")
-                projection["interrupted_block_count"] = statuses.count(
-                    "interrupted"
-                )
+                projection["interrupted_block_count"] = statuses.count("interrupted")
                 if isinstance(document.source_fact, ModelCallSemanticSourceFact):
                     measurement = document.source_fact.stream_settlement_measurement
                     projection["model_stream_settlement_measurement"] = {
@@ -1426,9 +1408,7 @@ def _terminal_projection_event_projection(
             projection["projection_order_verified"] = False
     if isinstance(event, ModelCallTerminalProjectionCommittedEvent):
         projection["resolved_model_call_id"] = event.resolved_model_call_id
-        projection["source_event_id"] = (
-            event.model_call_start_event_identity.event_id
-        )
+        projection["source_event_id"] = event.model_call_start_event_identity.event_id
     else:
         projection["tool_call_id"] = event.tool_call_id
         projection["source_kind"] = event.source_kind
@@ -2090,6 +2070,368 @@ def _apply_outer_usage(
     )
 
 
+def _provider_input_generation_projection(
+    events: Iterable[AgentEvent],
+    *,
+    include_generation_ids: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Project durable generations without inventing process-local cache state."""
+
+    generations: dict[str, dict[str, Any]] = {}
+    call_to_generation: dict[str, str] = {}
+    diagnostics: list[dict[str, Any]] = []
+
+    def entry_for(generation_id: str) -> dict[str, Any]:
+        return generations.setdefault(
+            generation_id,
+            {
+                "generation_id": generation_id,
+                "generation": None,
+                "durable_core": None,
+                "preparations": [],
+                "appends": [],
+                "model_calls": [],
+                "rollover": None,
+                "close": None,
+                "awaiting_control_disposition": None,
+                "pending_continuation": None,
+                "runtime_observation_semantic_noop_count": 0,
+                "runtime_observation_kind_counts": {},
+                "source_semantic_heads": [],
+                "root_privileged_carrier": None,
+                "exact_replay_status": "exact_replay",
+                # Historical Inspector cannot observe process-local memoization.
+                "resident_cache": None,
+            },
+        )
+
+    for event in events:
+        if isinstance(event, ContextCompiledEvent):
+            prepared = event.prepared_provider_input
+            if prepared is None:
+                continue
+            owner = prepared.preparation_ownership
+            entry_for(owner.generation_id)["preparations"].append(
+                {
+                    "status": "prepared",
+                    "sequence": event.sequence,
+                    "context_id": event.context_id,
+                    "resolved_model_call_id": owner.resolved_model_call_id,
+                    "preparation_id": owner.preparation_id,
+                    "ownership_kind": owner.ownership_kind,
+                    "ownership_fingerprint": owner.ownership_fingerprint,
+                    "candidate_fingerprint": prepared.candidate_fingerprint,
+                }
+            )
+            continue
+        if isinstance(event, ProviderInputGenerationStartedEvent):
+            entry = entry_for(event.generation.generation_id)
+            entry["generation"] = event.generation.model_dump(mode="json")
+            entry["durable_core"] = event.genesis_core_state.model_dump(mode="json")
+            entry["root_privileged_carrier"] = {
+                "system_instruction_semantic_fingerprint": (
+                    event.generation.compatibility.system_instruction_semantic_fingerprint
+                ),
+                "root_semantic_fingerprint": (
+                    event.root_reference.root_semantic.root_semantic_fingerprint
+                ),
+                "root_artifact_id": (
+                    event.root_reference.root_artifact_reference.artifact_id
+                ),
+                "root_reference_fingerprint": (
+                    event.root_reference.reference_fingerprint
+                ),
+            }
+            continue
+        if isinstance(event, ProviderInputAppendCommittedEvent):
+            entry = entry_for(event.generation_id)
+            prior = entry.get("durable_core")
+            if prior is not None and prior["revision"] != event.expected_revision:
+                entry["exact_replay_status"] = "contract_mismatch"
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "provider_input_revision_gap",
+                        "Provider-input append revision is not contiguous.",
+                        {
+                            "generation_id": event.generation_id,
+                            "sequence": event.sequence,
+                            "expected_revision": event.expected_revision,
+                            "observed_revision": prior["revision"],
+                        },
+                    )
+                )
+            entry["durable_core"] = event.resulting_core_state.model_dump(mode="json")
+            entry["awaiting_control_disposition"] = None
+            entry["pending_continuation"] = None
+            entry["runtime_observation_semantic_noop_count"] += (
+                event.runtime_observation_semantic_noop_count
+            )
+            for observation in event.runtime_observation_units:
+                kind = observation.wire_semantic.observation_kind
+                entry["runtime_observation_kind_counts"][kind] = (
+                    entry["runtime_observation_kind_counts"].get(kind, 0) + 1
+                )
+            entry["source_semantic_heads"] = [
+                {
+                    "source_id": item.effective_snapshot.source_id.value,
+                    "source_instance_id": (
+                        item.effective_snapshot.source_instance_id
+                    ),
+                    "lifecycle_class": (
+                        item.effective_snapshot.lifecycle_class
+                    ),
+                    "committed_source_revision": (
+                        item.effective_snapshot.committed_revision
+                    ),
+                    "source_payload_semantic_fingerprint": (
+                        item.effective_snapshot.snapshot_semantic_fingerprint
+                    ),
+                    "observation_semantic_id": (
+                        item.effective_snapshot.observation_semantic_id
+                    ),
+                    "provider_unit_document_semantic_fingerprint": (
+                        item.effective_snapshot.unit_document_identity.document_semantic_fingerprint
+                    ),
+                    "effective_status": item.effective_snapshot.effective_status,
+                    "head_fingerprint": item.semantic_head_fingerprint,
+                }
+                for item in event.resulting_core_state.committed_source_heads
+            ]
+            entry["appends"].append(
+                {
+                    "sequence": event.sequence,
+                    "append_index": event.append_batch_reference.append_index,
+                    "expected_revision": event.expected_revision,
+                    "resulting_revision": event.resulting_revision,
+                    "new_unit_count": len(
+                        event.append_batch_reference.append_semantic.ordered_unit_semantic_fingerprints
+                    ),
+                    "predecessor_prefix_fingerprint": (
+                        event.append_batch_reference.predecessor_prefix_fingerprint
+                    ),
+                    "resulting_prefix_fingerprint": (
+                        event.append_batch_reference.resulting_prefix_fingerprint
+                    ),
+                    "consumed_pending_continuation_fingerprint": (
+                        event.consumed_pending_continuation_fingerprint
+                    ),
+                    "resolved_model_call_id": event.resolved_model_call_id,
+                }
+            )
+            call_to_generation[event.resolved_model_call_id] = event.generation_id
+            continue
+        if isinstance(event, ModelCallStartEvent):
+            reference = event.provider_input_reference
+            if reference is None:
+                continue
+            entry = entry_for(reference.generation_id)
+            call_id = event.resolved_call.resolved_model_call_id
+            call_to_generation[call_id] = reference.generation_id
+            entry["model_calls"].append(
+                {
+                    "resolved_model_call_id": call_id,
+                    "start_sequence": event.sequence,
+                    "end_sequence": None,
+                    "generation_revision": reference.committed_generation_revision,
+                    "prefix_fingerprint": reference.resulting_prefix_fingerprint,
+                    "provider_input_plan_fingerprint": (
+                        reference.provider_input_plan_fingerprint
+                    ),
+                    "authority_horizon_count": (
+                        reference.authority_horizon_set.horizon_count
+                    ),
+                    "replay_binding_count": (
+                        reference.replay_binding_set.binding_count
+                    ),
+                    "cached_input_tokens": None,
+                    "cache_ratio": None,
+                }
+            )
+            continue
+        if isinstance(event, ModelCallEndEvent):
+            generation_id = call_to_generation.get(event.resolved_model_call_id)
+            if generation_id is None:
+                continue
+            entry = entry_for(generation_id)
+            call = next(
+                (
+                    item
+                    for item in reversed(entry["model_calls"])
+                    if item["resolved_model_call_id"] == event.resolved_model_call_id
+                ),
+                None,
+            )
+            if call is not None:
+                call["end_sequence"] = event.sequence
+                call["outcome"] = event.outcome
+                if event.usage is not None:
+                    cached = event.usage.cached_input_tokens
+                    call["cached_input_tokens"] = cached
+                    call["cache_ratio"] = (
+                        cached / event.usage.input_tokens
+                        if cached is not None and event.usage.input_tokens
+                        else None
+                    )
+            if event.outcome == "completed":
+                generation = entry.get("generation") or {}
+                scope = generation.get("scope") or {}
+                if scope.get("scope_kind") != "one_shot":
+                    entry["awaiting_control_disposition"] = {
+                        "resolved_model_call_id": event.resolved_model_call_id,
+                        "model_call_end_sequence": event.sequence,
+                    }
+            continue
+        if isinstance(event, ModelCallControlDispositionResolvedEvent):
+            generation_id = call_to_generation.get(event.resolved_model_call_id)
+            if generation_id is None:
+                continue
+            entry = entry_for(generation_id)
+            entry["awaiting_control_disposition"] = None
+            entry["pending_continuation"] = (
+                {
+                    "resolved_model_call_id": event.resolved_model_call_id,
+                    "accepted_disposition_event_id": event.id,
+                    "accepted_disposition_sequence": event.sequence,
+                }
+                if event.disposition.value == "accepted"
+                else None
+            )
+            continue
+        if isinstance(event, ProviderInputGenerationClosedEvent):
+            entry = entry_for(event.generation_id)
+            entry["durable_core"] = event.resulting_closed_core_state.model_dump(
+                mode="json"
+            )
+            entry["close"] = {
+                "sequence": event.sequence,
+                "reason": event.close_reason,
+                "successor_generation_id": event.successor_generation_id,
+                "unconsumed_continuation_fingerprint": (
+                    event.unconsumed_continuation_fingerprint
+                ),
+            }
+            continue
+        if isinstance(event, ProviderInputGenerationRolloverResolvedEvent):
+            entry_for(event.old_generation_id)["rollover"] = {
+                "sequence": event.sequence,
+                "reason": event.rollover_request.intent.reason.value,
+                "successor_generation_id": event.new_generation.generation_id,
+                "authority_kind": (
+                    event.rollover_request.intent.authority.authority_kind
+                ),
+                "authority_fingerprint": (
+                    event.rollover_request.intent.authority_fingerprint
+                ),
+                "runtime_observation_rewrite": (
+                    {
+                        "rewrite_id": event.runtime_observation_rewrite.rewrite_id,
+                        "source_active_count": (
+                            event.runtime_observation_rewrite.source_stable_state.active_observations.member_count
+                        ),
+                        "protected_count": (
+                            event.runtime_observation_rewrite.source_stable_state.protected_observations.member_count
+                        ),
+                        "eligible_count": (
+                            event.runtime_observation_rewrite.source_stable_state.eligible_observations.member_count
+                        ),
+                        "replacement_unit_count": (
+                            event.runtime_observation_rewrite.prepared_replacement_projection.unit_count
+                        ),
+                        "fact_fingerprint": (
+                            event.runtime_observation_rewrite.fact_fingerprint
+                        ),
+                    }
+                    if event.runtime_observation_rewrite is not None
+                    else None
+                ),
+            }
+            entry_for(event.new_generation.generation_id)
+            continue
+        if isinstance(
+            event,
+            (
+                ExistingGenerationPreparationAbandonedEvent,
+                ScopedGenerationPreparationAbandonedEvent,
+            ),
+        ):
+            generation_id = (
+                event.generation_id
+                if isinstance(event, ExistingGenerationPreparationAbandonedEvent)
+                else event.proposed_generation_id
+            )
+            entry_for(generation_id)["preparations"].append(
+                {
+                    "status": "abandoned",
+                    "sequence": event.sequence,
+                    "preparation_id": event.preparation_id,
+                    "resolved_model_call_id": event.resolved_model_call_id,
+                    "reason": event.abandonment_reason,
+                }
+            )
+
+    for generation_id, entry in generations.items():
+        if entry["generation"] is None:
+            entry["exact_replay_status"] = (
+                "contract_mismatch"
+                if entry["durable_core"] is not None
+                else "incomplete"
+            )
+            if entry["durable_core"] is not None:
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "provider_input_generation_start_missing",
+                        "Provider-input core has no durable generation Start.",
+                        {"generation_id": generation_id},
+                    )
+                )
+    selected = (
+        generations.values()
+        if include_generation_ids is None
+        else (
+            entry
+            for generation_id, entry in generations.items()
+            if generation_id in include_generation_ids
+        )
+    )
+    if include_generation_ids is not None:
+        diagnostics = [
+            item
+            for item in diagnostics
+            if item.get("details", {}).get("generation_id") in include_generation_ids
+        ]
+    return {
+        "generations": sorted(selected, key=lambda item: item["generation_id"]),
+        "diagnostics": diagnostics,
+    }
+
+
+def _referenced_provider_input_generation_ids(
+    events: Iterable[AgentEvent],
+) -> frozenset[str]:
+    generation_ids: set[str] = set()
+    for event in events:
+        if isinstance(event, ContextCompiledEvent):
+            if event.prepared_provider_input is not None:
+                generation_ids.add(event.prepared_provider_input.generation_id)
+        elif isinstance(event, ProviderInputGenerationStartedEvent):
+            generation_ids.add(event.generation.generation_id)
+        elif isinstance(event, ProviderInputAppendCommittedEvent):
+            generation_ids.add(event.generation_id)
+        elif isinstance(event, ModelCallStartEvent):
+            generation_ids.add(event.provider_input_reference.generation_id)
+        elif isinstance(event, ProviderInputGenerationClosedEvent):
+            generation_ids.add(event.generation_id)
+        elif isinstance(event, ProviderInputGenerationRolloverResolvedEvent):
+            generation_ids.update(
+                (event.old_generation_id, event.new_generation.generation_id)
+            )
+        elif isinstance(event, ExistingGenerationPreparationAbandonedEvent):
+            generation_ids.add(event.generation_id)
+        elif isinstance(event, ScopedGenerationPreparationAbandonedEvent):
+            generation_ids.add(event.proposed_generation_id)
+    return frozenset(generation_ids)
+
+
 def _model_call_join_status(entry: dict[str, Any]) -> str:
     if entry.get("fact_mismatch"):
         return "fact_mismatch"
@@ -2479,9 +2821,7 @@ def _context_input_replay_projection(
         }
 
     snapshot = replayed.manifest.snapshot
-    transcript_provider_projection = (
-        replayed.manifest.transcript_provider_projection
-    )
+    transcript_provider_projection = replayed.manifest.transcript_provider_projection
     transcript_authority = replayed.manifest.transcript_authority
     units = replayed.normalized_transcript.tool_result_units
     candidates = replayed.prepared_candidates
@@ -2513,8 +2853,7 @@ def _context_input_replay_projection(
         for item in snapshot.candidate_source_selections[:64]
     ]
     collection_decisions = [
-        item.model_dump(mode="json")
-        for item in candidates.collection_decisions[:128]
+        item.model_dump(mode="json") for item in candidates.collection_decisions[:128]
     ]
     window = snapshot.authority_slice_plan.transcript_window
     try:
@@ -2545,9 +2884,7 @@ def _context_input_replay_projection(
         },
         "subagent_graph": {
             "semantic_source": (
-                replayed.manifest.subagent_graph_semantic_source.model_dump(
-                    mode="json"
-                )
+                replayed.manifest.subagent_graph_semantic_source.model_dump(mode="json")
             ),
             "preferred_checkpoint_id": (
                 replayed.manifest.subagent_graph_acceleration.checkpoint_id
@@ -2569,9 +2906,7 @@ def _context_input_replay_projection(
                 replayed.subagent_graph_acceleration.delta_through_sequence
             ),
             "delta_count": replayed.subagent_graph_acceleration.delta_count,
-            "delta_byte_count": (
-                replayed.subagent_graph_acceleration.delta_byte_count
-            ),
+            "delta_byte_count": (replayed.subagent_graph_acceleration.delta_byte_count),
             "ledger_through_sequence": (
                 replayed.subagent_graph_acceleration.ledger_through_sequence
             ),
@@ -2638,9 +2973,7 @@ def _context_input_replay_projection(
         },
         "transcript_authority": {
             "provider_semantic_identity": (
-                transcript_authority.provider_semantic_identity.model_dump(
-                    mode="json"
-                )
+                transcript_authority.provider_semantic_identity.model_dump(mode="json")
             ),
             "semantic_source": transcript_authority.semantic_source.model_dump(
                 mode="json"
@@ -2655,9 +2988,7 @@ def _context_input_replay_projection(
                 transcript_authority.final_normalized_transcript_fingerprint
             ),
             "domain_completeness_proof": (
-                transcript_authority.domain_completeness_proof.model_dump(
-                    mode="json"
-                )
+                transcript_authority.domain_completeness_proof.model_dump(mode="json")
             ),
             "named_fact_selection": (
                 transcript_authority.named_fact_selection.model_dump(mode="json")
@@ -2732,9 +3063,7 @@ def _replayed_rollout_status_hint(
         snapshot.long_horizon_attribution.rollout_account_owner_runtime_session_id
     )
     owner_slices = tuple(
-        item
-        for item in (primary, *named)
-        if item.runtime_session_id == owner_id
+        item for item in (primary, *named) if item.runtime_session_id == owner_id
     )
     if len(owner_slices) != 1:
         raise ContextInputReplayError(
@@ -2762,15 +3091,19 @@ def _replayed_rollout_status_hint(
         account_id=snapshot.long_horizon_attribution.rollout_account_id,
         policy=starts[0].long_horizon.rollout_status_hint_policy,
     )
-    authorities = tuple(
+    source_candidates = tuple(
         item
-        for item in snapshot.candidate_authorities
-        if item.source_instance_id == "rollout:status"
+        for item in snapshot.context_source_candidates
+        if item.source_id.value == "rollout_status"
     )
     if (
         candidate is None
-        or len(authorities) != 1
-        or authorities[0].lifecycle_dependency_fingerprint
+        or len(source_candidates) != 1
+        or getattr(
+            source_candidates[0].attribution.semantic.payload,
+            "rollout_account_semantic_fingerprint",
+            None,
+        )
         != candidate.semantic_fingerprint
     ):
         raise ContextInputReplayError(
@@ -2872,9 +3205,7 @@ def _rollout_status_shadow_projection(
         }
 
     starts = {
-        event.run_id: event
-        for event in ordered
-        if isinstance(event, RunStartEvent)
+        event.run_id: event for event in ordered if isinstance(event, RunStartEvent)
     }
     shadows: list[dict[str, Any]] = []
     for opening in openings:
@@ -2955,9 +3286,7 @@ def _long_horizon_run_projection(
         }
 
     starts = {
-        event.run_id: event
-        for event in ordered
-        if isinstance(event, RunStartEvent)
+        event.run_id: event for event in ordered if isinstance(event, RunStartEvent)
     }
     latest_contexts: dict[str, dict[str, Any]] = {}
     for context in context_compilations:
@@ -3016,18 +3345,14 @@ def _long_horizon_run_projection(
             else None
         )
         replay_status = (
-            input_replay.get("status")
-            if isinstance(input_replay, dict)
-            else None
+            input_replay.get("status") if isinstance(input_replay, dict) else None
         )
         graph = (
             input_replay.get("subagent_graph")
             if isinstance(input_replay, dict)
             else None
         )
-        semantic = (
-            graph.get("semantic_source") if isinstance(graph, dict) else None
-        )
+        semantic = graph.get("semantic_source") if isinstance(graph, dict) else None
 
         active_or_final_window_id = chain.active_window_id or (
             chain.ordered_window_ids[-1] if chain.ordered_window_ids else None
@@ -3067,7 +3392,8 @@ def _long_horizon_run_projection(
             for event in ordered
             if isinstance(event, CapabilityGateDecisionEvent)
             and event.run_id == account.root_run_id
-            and event.reason_code in {
+            and event.reason_code
+            in {
                 "rollout_phase_tool_denied",
                 "rollout_emergency_hard_stop",
             }
@@ -3606,10 +3932,7 @@ def _context_window_projection(
     all_ids = sorted(
         set(starts) | set(terminals),
         key=lambda compaction_id: (
-            (
-                starts.get(compaction_id) or terminals[compaction_id]
-            ).sequence
-            or 2**63,
+            (starts.get(compaction_id) or terminals[compaction_id]).sequence or 2**63,
             compaction_id,
         ),
     )
@@ -3650,9 +3973,7 @@ def _context_window_projection(
                     else None
                 ),
                 "started_event_id": started.id if started is not None else None,
-                "started_sequence": (
-                    started.sequence if started is not None else None
-                ),
+                "started_sequence": (started.sequence if started is not None else None),
                 "terminal_event_id": terminal.id if terminal is not None else None,
                 "terminal_sequence": (
                     terminal.sequence if terminal is not None else None
@@ -3703,9 +4024,7 @@ def _context_window_projection(
                     else None
                 ),
                 "summary_artifact_id": (
-                    completed.summary_artifact_id
-                    if completed is not None
-                    else None
+                    completed.summary_artifact_id if completed is not None else None
                 ),
                 "summary_artifact_present": summary_present,
                 "actual_post_compaction_estimated_tokens": (

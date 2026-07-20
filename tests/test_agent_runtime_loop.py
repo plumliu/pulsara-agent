@@ -36,6 +36,7 @@ from pulsara_agent.event import (
     ContextWindowClosedEvent,
     EventContext,
     EventType,
+    ExistingGenerationPreparationAbandonedEvent,
     McpCapabilitySnapshotInstalledEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
@@ -44,6 +45,9 @@ from pulsara_agent.event import (
     PhysicalOperationReservationCreatedEvent,
     PhysicalOperationReservationSettledEvent,
     PhysicalOperationReservationSuspendedEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
+    ProviderInputGenerationStartedEvent,
     RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -140,6 +144,9 @@ from pulsara_agent.runtime import (
     build_tool_result_error_events,
 )
 from pulsara_agent.runtime.context_input.replay import load_context_input_manifest
+from pulsara_agent.runtime.context_input.sources.render import (
+    render_context_source_candidate,
+)
 from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
 from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
@@ -359,6 +366,16 @@ def test_main_model_start_batch_atomically_commits_reply_reservation_and_model_s
     model_start = next(
         i for i, event in enumerate(events) if isinstance(event, ModelCallStartEvent)
     )
+    generation_start = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, ProviderInputGenerationStartedEvent)
+    )
+    provider_append = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
     model_end = next(
         i for i, event in enumerate(events) if isinstance(event, ModelCallEndEvent)
     )
@@ -372,15 +389,123 @@ def test_main_model_start_batch_atomically_commits_reply_reservation_and_model_s
         i for i, event in enumerate(events) if isinstance(event, ReplyEndEvent)
     )
 
-    assert (reply_start, reservation, model_start) == tuple(
-        range(reply_start, reply_start + 3)
-    )
+    assert (
+        reply_start,
+        reservation,
+        generation_start,
+        provider_append,
+        model_start,
+    ) == tuple(range(reply_start, reply_start + 5))
     assert (model_end, settlement, reply_end) == tuple(range(model_end, model_end + 3))
     account_close = next(
         event for event in events if isinstance(event, RolloutBudgetAccountClosedEvent)
     )
     assert account_close.model_call_count == 1
     assert account_close.charged_milliunits > 0
+
+
+def test_provider_input_session_generation_survives_runtime_session_restart(
+    tmp_path,
+) -> None:
+    first_session = in_memory_runtime_session(tmp_path)
+    first_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=first_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "first"}])),
+    )
+    asyncio.run(run_agent_task(first_agent, "first run"))
+    first_session.provider_input_generation_store.clear_resident_cache()
+
+    reopened_session = in_memory_runtime_session(
+        tmp_path,
+        event_log=first_session.event_log,
+        archive=first_session.archive,
+        tool_result_artifacts=first_session.tool_result_artifacts,
+        runtime_session_id=first_session.runtime_session_id,
+    )
+    reopened_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=reopened_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "second"}])),
+    )
+    asyncio.run(run_agent_task(reopened_agent, "second run"))
+
+    events = tuple(reopened_session.event_log.iter())
+    starts = tuple(
+        event
+        for event in events
+        if isinstance(event, ProviderInputGenerationStartedEvent)
+    )
+    appends = tuple(
+        event for event in events if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
+    assert len(starts) == 1
+    assert len(appends) == 2
+    assert not any(
+        isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+        for event in events
+    )
+    assert all(
+        event.generation_id == starts[0].generation.generation_id
+        for event in appends
+    )
+    assert tuple(event.resulting_revision for event in appends) == (1, 2)
+    assert appends[1].append_batch_reference.predecessor_prefix_fingerprint == (
+        appends[0].append_batch_reference.resulting_prefix_fingerprint
+    )
+    assert appends[0].append_batch_reference.resulting_prefix_fingerprint != (
+        appends[1].append_batch_reference.resulting_prefix_fingerprint
+    )
+    assert reopened_session.reconciliation_required is False
+
+
+def test_provider_input_restart_abandons_compiled_preparation_without_start(
+    tmp_path,
+) -> None:
+    source_session = in_memory_runtime_session(tmp_path)
+    source_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=source_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
+    )
+    asyncio.run(run_agent_task(source_agent, "prepare a model call"))
+    source_events = tuple(source_session.event_log.iter())
+    compiled_index = next(
+        index
+        for index, event in enumerate(source_events)
+        if isinstance(event, ContextCompiledEvent)
+    )
+    compiled = source_events[compiled_index]
+    assert compiled.prepared_provider_input is not None
+
+    interrupted_log = InMemoryEventLog()
+    interrupted_log.bind_runtime_session_id(source_session.runtime_session_id)
+    interrupted_log.extend(
+        tuple(
+            event.model_copy(update={"sequence": None})
+            for event in source_events[: compiled_index + 1]
+        )
+    )
+    reopened = in_memory_runtime_session(
+        tmp_path,
+        event_log=interrupted_log,
+        archive=source_session.archive,
+        runtime_session_id=source_session.runtime_session_id,
+    )
+
+    events = tuple(reopened.event_log.iter())
+    abandonment = next(
+        event
+        for event in events
+        if isinstance(event, ExistingGenerationPreparationAbandonedEvent)
+        or event.type is EventType.PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED
+    )
+    assert abandonment.preparation_id == (
+        compiled.prepared_provider_input.preparation_ownership.preparation_id
+    )
+    assert abandonment.abandonment_reason == "recovery_confirmed_not_started"
+    assert reopened.provider_input_generation_store.active_preparation_snapshots() == ()
+    assert not any(isinstance(event, ModelCallStartEvent) for event in events)
 
 
 def test_agent_runtime_builds_immutable_context_input_before_compile(
@@ -426,22 +551,25 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
         for entry in prepared.prepared_candidates.entries
     )
     assert "system:prompt" in candidate_ids
-    assert "runtime_context" in candidate_ids
-    runtime_authority = next(
-        authority
-        for authority in fact.candidate_authorities
-        if authority.source_instance_id == "runtime_context"
-    )
-    assert runtime_authority.lifecycle_dependency_fingerprint == (
-        fact.runtime_environment.fact_fingerprint
+    assert "runtime:environment" in candidate_ids
+    assert "runtime:clock" in candidate_ids
+    runtime_source = next(
+        candidate
+        for candidate in fact.context_source_candidates
+        if candidate.source_instance_id == "runtime:environment"
     )
     assert (
         f"Workspace root: {fact.runtime_environment.model_visible_workspace_root}"
-        in runtime_authority.model_visible_text
+        in render_context_source_candidate(runtime_source)
+    )
+    clock_source = next(
+        candidate
+        for candidate in fact.context_source_candidates
+        if candidate.source_instance_id == "runtime:clock"
     )
     assert (
         f"Current date: {fact.timing.compiled_local_date}"
-        in runtime_authority.model_visible_text
+        in render_context_source_candidate(clock_source)
     )
     assert prepared.prepared_tool_results.units == (
         prepared.normalized_transcript.tool_result_units
@@ -455,11 +583,17 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
     assert fact.identity.source_through_sequence < compiled.sequence
     assert fact.resolved_model_call == compiled.resolved_call
     sections_by_id = {section["id"]: section for section in compiled.sections}
-    assert all("timing" in section["metadata"] for section in compiled.sections)
-    assert (
-        sections_by_id["runtime_context"]["metadata"]["source_timing"]["freshness"]
-        == "current_turn"
+    transcript_sections = tuple(
+        section
+        for section in compiled.sections
+        if section["id"].startswith("transcript:")
     )
+    assert transcript_sections
+    assert all("timing" in section["metadata"] for section in transcript_sections)
+    assert all(
+        "timing_header_text" not in section["metadata"] for section in compiled.sections
+    )
+    assert "source_timing" not in sections_by_id["runtime:environment"]["metadata"]
     assert (
         sections_by_id["transcript:current_user"]["metadata"]["timing"]["source"][
             "freshness"
@@ -476,7 +610,7 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
             ),
         )
     )
-    assert "[context timing: freshness=current_turn;" in provider_text
+    assert "[context timing:" not in provider_text
 
     from pulsara_agent.runtime.context_input.manifest import (
         ContextInputManifestWriteResult,
@@ -1070,9 +1204,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
                 self,
                 suspension_candidate=suspension_candidate,
                 reservation_id=reservation_id,
-                expected_reservation_fingerprint=(
-                    expected_reservation_fingerprint
-                ),
+                expected_reservation_fingerprint=(expected_reservation_fingerprint),
             )
             committed.set()
             try:
@@ -1208,7 +1340,9 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
         fail_before_commit,
     )
 
-    with pytest.raises(EventCommitError, match="synthetic suspension precommit failure"):
+    with pytest.raises(
+        EventCommitError, match="synthetic suspension precommit failure"
+    ):
         asyncio.run(run_agent_task(agent, "suspend once"))
 
     assert not any(
@@ -1321,7 +1455,9 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
     assert active is not None and len(active.active_reservations) == 1
     suspended_state = active.active_reservations[0]
     assert suspended_state.lifecycle_status == "suspended_tail"
-    assert suspended_state.reservation_id == reservation_event.reservation.reservation_id
+    assert (
+        suspended_state.reservation_id == reservation_event.reservation.reservation_id
+    )
     assert suspended_state.latest_lifecycle_event_id == suspension_event.id
     assert suspended_state.remaining_events == (
         reservation_event.reservation.terminal_tail_reserved_events
@@ -1655,6 +1791,45 @@ def test_run_followups_reuse_target(tmp_path) -> None:
         != starts[1].resolved_call.resolved_model_call_id
     )
     events = agent.runtime_session.event_log.iter()
+    generation_starts = tuple(
+        event
+        for event in events
+        if isinstance(event, ProviderInputGenerationStartedEvent)
+    )
+    appends = tuple(
+        event
+        for event in events
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
+    assert len(generation_starts) == 1
+    assert tuple(event.resulting_revision for event in appends) == (1, 2)
+    assert appends[0].generation_id == appends[1].generation_id
+    assert appends[0].consumed_pending_continuation_fingerprint is None
+    assert appends[1].consumed_pending_continuation_fingerprint is not None
+    assert tuple(
+        start.provider_input_reference.committed_generation_revision
+        for start in starts
+        if start.provider_input_reference is not None
+    ) == (1, 2)
+    first_provider_context, second_provider_context = transport.contexts
+    assert first_provider_context.system_prompt == second_provider_context.system_prompt
+    assert first_provider_context.tools == second_provider_context.tools
+    assert (
+        first_provider_context.messages
+        == second_provider_context.messages[: len(first_provider_context.messages)]
+    )
+    from pulsara_agent.inspector.service import (
+        _provider_input_generation_projection,
+    )
+
+    provider_projection = _provider_input_generation_projection(events)
+    assert provider_projection["diagnostics"] == []
+    assert len(provider_projection["generations"]) == 1
+    inspected_generation = provider_projection["generations"][0]
+    assert inspected_generation["durable_core"]["revision"] == 2
+    assert len(inspected_generation["model_calls"]) == 2
+    assert inspected_generation["exact_replay_status"] == "exact_replay"
+    assert inspected_generation["resident_cache"] is None
     rewrites = tuple(
         event
         for event in events
@@ -1683,6 +1858,51 @@ def test_run_followups_reuse_target(tmp_path) -> None:
 
 def test_tool_followup_uses_new_call_id(tmp_path) -> None:
     test_run_followups_reuse_target(tmp_path)
+
+
+def test_provider_append_does_not_rerender_committed_transcript_units(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from pulsara_agent.runtime.provider_input import planner as provider_planner
+
+    original = provider_planner.freeze_message_unit
+    rendered_transcript_owners: list[str] = []
+
+    def recording_freeze_message_unit(message, **kwargs):
+        if kwargs.get("unit_kind") == "transcript_message":
+            rendered_transcript_owners.append(kwargs["owner_semantic_fingerprint"])
+        return original(message, **kwargs)
+
+    monkeypatch.setattr(
+        provider_planner,
+        "freeze_message_unit",
+        recording_freeze_message_unit,
+    )
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:no-rerender",
+                        "name": "unknown_contract_tool",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    result = asyncio.run(run_agent_task(agent, "verify incremental provider input"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert len(rendered_transcript_owners) == len(set(rendered_transcript_owners))
 
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
@@ -1725,18 +1945,18 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "<runtime-context>" not in system_prompt
-    assert "<runtime-context>" in context_text
-    assert f"Workspace root: {tmp_path.resolve()}" in context_text
-    assert "Workspace kind: project" in context_text
-    assert f"Terminal current cwd: {tmp_path.resolve()}" in context_text
+    assert "<runtime-context>" in system_prompt
+    assert "<runtime-context>" not in context_text
+    assert f"Workspace root: {tmp_path.resolve()}" in system_prompt
+    assert "Workspace kind: project" in system_prompt
+    assert f"Terminal current cwd: {tmp_path.resolve()}" in system_prompt
     assert (
         "Terminal workdir, when provided, must stay inside workspace_root"
-        in context_text
+        in system_prompt
     )
     assert (
         "Read-only filesystem tools may read ordinary text files outside workspace_root"
-        in context_text
+        in system_prompt
     )
     assert runtime_session.terminal_sessions.session_count() == 0
 
@@ -1893,8 +2113,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
         == compiled[1].tool_result_render_operational_facts[0].unit_id
     )
     assert (
-        agent.runtime_session.tool_execution_terminal_registry.active_owner_count()
-        == 0
+        agent.runtime_session.tool_execution_terminal_registry.active_owner_count() == 0
     )
 
 
@@ -2118,7 +2337,8 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(
     assert "NEW" in message_output
     assert "OLD" not in message_output
     assert "NEW" in second_context_text
-    assert "OLD" not in second_context_text
+    assert "OLD" in second_context_text
+    assert second_context_text.index("OLD") < second_context_text.rindex("NEW")
 
 
 def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
@@ -2220,7 +2440,10 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
     assert "Malformed JSON arguments" in message_output
     assert "must be a JSON object" not in message_output
     assert "Malformed JSON arguments" in second_context_text
-    assert "must be a JSON object" not in second_context_text
+    assert "must be a JSON object" in second_context_text
+    assert second_context_text.index("must be a JSON object") < (
+        second_context_text.rindex("Malformed JSON arguments")
+    )
 
 
 def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
@@ -2375,7 +2598,10 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
     assert "SECOND_DENY" in message_output
     assert "FIRST_DENY" not in message_output
     assert "SECOND_DENY" in second_context_text
-    assert "FIRST_DENY" not in second_context_text
+    assert "FIRST_DENY" in second_context_text
+    assert second_context_text.index("FIRST_DENY") < second_context_text.rindex(
+        "SECOND_DENY"
+    )
 
 
 def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) -> None:
@@ -2982,7 +3208,20 @@ class RecordingHooks(NoopMemoryHooks):
 
     async def project(self, state: LoopState, *, token_budget: int):
         self.calls.append("project")
-        return {"summary": "Remember source=fenced.", "included_memory_ids": ["mem:1"]}
+        return {
+            "summary": (
+                '<recalled-memory-projection do_not_write_back="true">\n'
+                "- Remember source=fenced.\n"
+                "</recalled-memory-projection>"
+            ),
+            "included_memory_ids": ["mem:1"],
+            "typed_recalled_entries": [
+                {
+                    "memory_ids": ["mem:1"],
+                    "model_visible_text": "Remember source=fenced.",
+                }
+            ],
+        }
 
     async def after_model_reply(self, state: LoopState, assistant):
         self.calls.append("after_model")
@@ -3083,16 +3322,13 @@ class SlowProjectionHooks(NoopMemoryHooks):
         return {"summary": "too late", "included_memory_ids": ["mem:late"]}
 
 
-class SlowProjectionWithBaselineHooks(SlowProjectionHooks):
+class SlowProjectionWithTypedEmptyBaselineHooks(SlowProjectionHooks):
     def baseline_projection(self, state: LoopState, *, token_budget: int):
         return {
-            "summary": (
-                '<working-context-projection authority="recent_activity">'
-                "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
-                "</working-context-projection>"
-            ),
+            "summary": "",
             "included_memory_ids": [],
-            "projection_kind": "working_context",
+            "typed_recalled_entries": [],
+            "projection_kind": "recalled_memory",
         }
 
 
@@ -3105,8 +3341,18 @@ class ReadyThenFailedProjectionHooks(NoopMemoryHooks):
         self.calls += 1
         if self.calls == 1:
             return {
-                "summary": "STALE_MEMORY_MUST_NOT_RETURN",
+                "summary": (
+                    '<recalled-memory-projection do_not_write_back="true">\n'
+                    "- STALE_MEMORY_MUST_NOT_RETURN\n"
+                    "</recalled-memory-projection>"
+                ),
                 "included_memory_ids": ["memory:stale"],
+                "typed_recalled_entries": [
+                    {
+                        "memory_ids": ["memory:stale"],
+                        "model_visible_text": "STALE_MEMORY_MUST_NOT_RETURN",
+                    }
+                ],
             }
         raise RuntimeError("latest projection failed")
 
@@ -3127,32 +3373,19 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     events = agent.runtime_session.event_log.iter()
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
-    ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "Recalled Memory" in context_text
+    assert '"kind":"recalled_memory_snapshot"' in context_text
     assert "Remember source=fenced." in context_text
-    assert "[context timing: freshness=memory_projection;" in context_text
+    assert "[context timing:" not in context_text
     compiled = next(
         event for event in events if isinstance(event, ContextCompiledEvent)
     )
     memory_section = next(
         section for section in compiled.sections if section["id"] == "memory:projection"
     )
-    assert memory_section["metadata"]["source_timing"]["freshness"] == (
-        "memory_projection"
-    )
-    assert memory_section["metadata"]["source_timing"]["clock_source"] == (
-        "event_created_at"
-    )
-    assert (
-        memory_section["metadata"]["source_timing"]["source_sequence_start"]
-        == ready.sequence
-    )
-    assert memory_section["metadata"]["timing"]["source"]["freshness"] == (
-        "memory_projection"
-    )
+    assert "source_timing" not in memory_section["metadata"]
 
 
 def test_memory_hook_prompt_is_backed_by_versioned_static_fact(
@@ -3190,16 +3423,21 @@ def test_memory_hook_prompt_is_backed_by_versioned_static_fact(
         for item in snapshot.static_instructions
         if item.source_id == "memory_scope_instruction"
     )
-    authority = next(
+    source = next(
         item
-        for item in snapshot.candidate_authorities
-        if item.source_instance_id == "memory:hook_prompt"
+        for item in snapshot.context_source_candidates
+        if item.source_instance_id == "memory:instruction"
     )
-    assert authority.source_artifact_ids == (static.content_artifact_id,)
-    assert authority.lifecycle_dependency_fingerprint == static.fact_fingerprint
-    assert authority.model_visible_text == (
-        "MEMORY_SCOPE_INSTRUCTION_FROM_VERSIONED_FACT"
-    )
+    assert source.source_artifact_ids == (static.content_artifact_id,)
+    with pytest.raises(
+        ValueError,
+        match="artifact source content must be hydrated before compile",
+    ):
+        render_context_source_candidate(source)
+    assert render_context_source_candidate(
+        source,
+        hydrated_contents=dict(captured[0].context_source_hydrated_contents),
+    ) == ("MEMORY_SCOPE_INSTRUCTION_FROM_VERSIONED_FACT")
 
 
 def test_run_end_known_precommit_failure_retries_stable_candidate_once(
@@ -3228,9 +3466,7 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
                     raise RuntimeError("synthetic precommit RunEnd failure")
             return super().extend_with_materialization_state(
                 batch,
-                expected_account_state_fingerprint=(
-                    expected_account_state_fingerprint
-                ),
+                expected_account_state_fingerprint=(expected_account_state_fingerprint),
                 resulting_account_state=resulting_account_state,
                 physical_charge_contract=physical_charge_contract,
                 transaction_companion=transaction_companion,
@@ -3351,8 +3587,9 @@ Use the review checklist.
         text for message in transport.contexts[0].messages for text in message.content
     )
     assert "Available Skills:" in first_context_text
-    assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
-    assert "# Review PR" in (transport.contexts[0].system_prompt or "")
+    assert "Active Skill: review-pr" not in (transport.contexts[0].system_prompt or "")
+    assert "Active Skill: review-pr" in first_context_text
+    assert "# Review PR" in first_context_text
     assert [
         [tool.name for tool in context.tools] for context in transport.contexts
     ] == [["noop"], ["noop"]]
@@ -3385,9 +3622,14 @@ description: Review pull requests.
     )
 
     assert result.status is LoopStatus.FINISHED
-    assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
-    assert "Reason: host_command" in (transport.contexts[0].system_prompt or "")
-    assert "# Review PR" in (transport.contexts[0].system_prompt or "")
+    system_prompt = transport.contexts[0].system_prompt or ""
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
+    assert "Active Skill: review-pr" not in system_prompt
+    assert "Active Skill: review-pr" in context_text
+    assert "Reason: host_command" in context_text
+    assert "# Review PR" in context_text
 
 
 def _write_workspace_skill(root, name: str, content: str) -> None:
@@ -3425,7 +3667,7 @@ def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -
     assert "Recalled Memory" not in (transport.contexts[0].system_prompt or "")
 
 
-def test_latest_failed_memory_projection_does_not_reuse_prior_ready(tmp_path) -> None:
+def test_latest_failed_memory_projection_retains_prior_effective_head(tmp_path) -> None:
     hooks = ReadyThenFailedProjectionHooks()
     transport = ScriptedTransport(
         [
@@ -3459,7 +3701,11 @@ def test_latest_failed_memory_projection_does_not_reuse_prior_ready(tmp_path) ->
         text for message in transport.contexts[1].messages for text in message.content
     )
     assert "STALE_MEMORY_MUST_NOT_RETURN" in first_context
-    assert "STALE_MEMORY_MUST_NOT_RETURN" not in second_context
+    assert "STALE_MEMORY_MUST_NOT_RETURN" in second_context
+    assert not any(
+        isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+        for event in agent.runtime_session.event_log.iter()
+    )
     event_types = [
         event.type
         for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
@@ -3544,7 +3790,7 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
     assert selection.reason_code == "policy_limit"
     assert not any(
         item.source_instance_id == "subagent:results"
-        for item in prepared.invocation.fact.candidate_authorities
+        for item in prepared.invocation.fact.context_source_candidates
     )
     decision = next(
         item
@@ -3568,13 +3814,13 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
     assert decision in manifest.prepared_candidate_set.collection_decisions
 
 
-def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) -> None:
+def test_memory_projection_timeout_uses_typed_empty_memory_baseline(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        memory_hooks=SlowProjectionWithBaselineHooks(),
+        memory_hooks=SlowProjectionWithTypedEmptyBaselineHooks(),
         budget=LoopBudget(recall_hard_timeout_ms=1),
     )
 
@@ -3582,10 +3828,7 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
 
     assert result.status is LoopStatus.FINISHED
     assert result.state.memory_projection is not None
-    assert (
-        "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
-        in result.state.memory_projection["summary"]
-    )
+    assert result.state.memory_projection["typed_recalled_entries"] == []
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
     assert ready.metadata == {
@@ -3597,8 +3840,8 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in context_text
-    assert "empty memory_search result does not invalidate" in context_text
+    assert "working-context-projection" not in context_text
+    assert '"kind":"recalled_memory_snapshot"' not in context_text
 
 
 class FailingHook(NoopMemoryHooks):
@@ -4553,7 +4796,9 @@ def test_tool_result_and_reservation_settlement_commit_atomically(tmp_path) -> N
         task.cancel()
         await asyncio.sleep(0.01)
         assert task.done() is False
-        assert runtime_session.tool_execution_terminal_registry.active_owner_count() == 1
+        assert (
+            runtime_session.tool_execution_terminal_registry.active_owner_count() == 1
+        )
 
         release_worker.set()
         with pytest.raises(asyncio.CancelledError):
@@ -4847,7 +5092,9 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
     admission_batches = [
         batch
         for batch in observed_batches
-        if any(isinstance(event, RolloutBudgetReservationCreatedEvent) for event in batch)
+        if any(
+            isinstance(event, RolloutBudgetReservationCreatedEvent) for event in batch
+        )
         and any(isinstance(event, CapabilityGateDecisionEvent) for event in batch)
     ]
     assert len(admission_batches) == 1
@@ -4926,11 +5173,14 @@ def test_concurrent_tool_admission_failure_leaves_no_partial_reservation(
     original_validate = store_type.validate_next_batch
 
     def reject_concurrent_admission(self, events):
-        if sum(
-            isinstance(event, RolloutBudgetReservationCreatedEvent)
-            and event.reservation.owner_kind == "tool_call"
-            for event in events
-        ) > 1:
+        if (
+            sum(
+                isinstance(event, RolloutBudgetReservationCreatedEvent)
+                and event.reservation.owner_kind == "tool_call"
+                for event in events
+            )
+            > 1
+        ):
             raise RuntimeError("injected tool admission validation failure")
         return original_validate(self, events)
 

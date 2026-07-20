@@ -41,6 +41,7 @@ from pulsara_agent.llm.raw_provider import RawProviderStreamItem
 from pulsara_agent.llm.runtime_observation import (
     resolve_runtime_observation_binding,
 )
+from pulsara_agent.llm.user_carrier import validate_provider_user_carrier_messages
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -256,19 +257,24 @@ def build_chat_completions_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
+    validate_provider_user_carrier_messages(
+        context.messages,
+        system_prompt=context.system_prompt,
+    )
     model = call.target.model_profile
     options = call.target.effective_options
     provider_profile = model.provider_profile
     runtime_observation_role: str | None = None
     if any(
-        message.role is MessageRole.RUNTIME_OBSERVATION
+        message.role
+        in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
         for message in context.messages
     ):
         carrier = call.target.fact.runtime_observation_carrier
         if carrier is None:
             raise ValueError("resolved target does not support runtime observations")
         binding = resolve_runtime_observation_binding(carrier)
-        if binding.wire_role != "system":
+        if binding.wire_role != "user":
             raise ValueError("resolved runtime observation carrier is not chat-compatible")
         runtime_observation_role = binding.wire_role
     messages: list[dict[str, Any]] = []
@@ -519,11 +525,14 @@ def _message_to_chat_message(
                 _tool_call_to_chat_tool_call(call) for call in message.tool_calls
             ]
         return payload
-    if message.role is MessageRole.RUNTIME_OBSERVATION:
-        if runtime_observation_role != "system":
+    if message.role in {
+        MessageRole.RUNTIME_REQUEST,
+        MessageRole.RUNTIME_OBSERVATION,
+    }:
+        if runtime_observation_role != "user":
             raise ValueError("Chat runtime observation carrier is unavailable")
         return {
-            "role": runtime_observation_role,
+            "role": "user",
             "content": "\n".join(message.content),
         }
     return {
@@ -533,7 +542,7 @@ def _message_to_chat_message(
 
 
 def _chat_role(role: MessageRole) -> str:
-    if role in {MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT}:
+    if role in {MessageRole.USER, MessageRole.ASSISTANT}:
         return role.value
     raise ValueError(f"Unsupported chat message role: {role}")
 

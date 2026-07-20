@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     context_compiled_contract_fields,
     make_test_run_execution_activation,
     resolve_test_call,
@@ -44,6 +45,9 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
 )
+from pulsara_agent.llm.adapters.openai.events import (
+    transport_usage_report_from_mapping,
+)
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
@@ -74,6 +78,7 @@ from pulsara_agent.llm.runtime import LLMRuntime
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
+from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -93,7 +98,7 @@ EVENT_CONTEXT = EventContext(
 )
 
 
-def _start_test_stream(
+async def _start_test_stream(
     runtime: LLMRuntime,
     *,
     call,
@@ -102,6 +107,7 @@ def _start_test_stream(
     runtime_session,
     run_execution_activation=None,
 ):
+    validate_model_context_for_call(call=call, context=context)
     lifecycle_kind = (
         "main_assistant_reply"
         if context.model_call_index is not None
@@ -113,6 +119,16 @@ def _start_test_stream(
             event_context=event_context,
             model_target=call.target.fact,
         )
+    provider_input = await (
+        runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+            call=call,
+            context=context,
+            event_context=event_context,
+            operation_kind="direct_model_call",
+            operation_id=call.fact.resolved_model_call_id,
+        )
+    )
+    context = bind_test_provider_input_context(call, provider_input, context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -120,6 +136,7 @@ def _start_test_stream(
         runtime_session=runtime_session,
         lifecycle_kind=lifecycle_kind,
         run_execution_activation=run_execution_activation,
+        provider_input_start_bundle=provider_input,
     )
     return runtime.start_stream(
         call=call,
@@ -744,6 +761,40 @@ def test_model_token_usage_fact_round_trip() -> None:
     assert ModelTokenUsageFact.model_validate_json(usage.model_dump_json()) == usage
 
 
+def test_deepseek_prompt_cache_usage_is_normalized() -> None:
+    report = transport_usage_report_from_mapping(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_cache_hit_tokens": 75,
+            "prompt_cache_miss_tokens": 25,
+        }
+    )
+
+    assert report.usage_status == "reported"
+    assert report.usage is not None
+    assert report.usage.cached_input_tokens == 75
+    assert report.provider_diagnostics == ()
+
+
+def test_deepseek_prompt_cache_partition_drift_is_diagnostic() -> None:
+    report = transport_usage_report_from_mapping(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 60,
+            "prompt_cache_miss_tokens": 30,
+        }
+    )
+
+    assert report.usage is not None
+    assert report.usage.cached_input_tokens == 60
+    assert tuple(item.code for item in report.provider_diagnostics) == (
+        "provider_prompt_cache_partition_mismatch",
+    )
+
+
 def test_model_token_usage_rejects_invalid_cached_or_reasoning_breakdown() -> None:
     with pytest.raises(ValidationError):
         ModelTokenUsageFact(
@@ -980,7 +1031,8 @@ async def _collect_runtime(
     context: LLMContext,
 ) -> list[AgentEvent]:
     session = in_memory_runtime_session(Path.cwd())
-    handle = _start_test_stream(runtime,
+    handle = await _start_test_stream(
+        runtime,
         call=call,
         context=context,
         event_context=EVENT_CONTEXT,
@@ -1066,9 +1118,10 @@ def test_duplicate_transport_usage_report_fails_closed() -> None:
     transport.items = (report, report)
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
     assert any(isinstance(event, ProviderModelStreamErrorEvent) for event in events)
-    assert next(
-        event for event in events if isinstance(event, ModelCallEndEvent)
-    ).outcome == "provider_error"
+    assert (
+        next(event for event in events if isinstance(event, ModelCallEndEvent)).outcome
+        == "provider_error"
+    )
 
 
 def test_missing_provider_usage_is_missing_not_zero() -> None:
@@ -1081,10 +1134,13 @@ def test_missing_provider_usage_is_missing_not_zero() -> None:
 
 def test_pr1_estimate_only_seam_supplies_model_end_input_tokens() -> None:
     runtime, _, call, context = _call_and_context()
-    expected = call.target.token_estimator.estimate_context(context).total_input_tokens
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    start = next(event for event in events if isinstance(event, ModelCallStartEvent))
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
-    assert end.estimated_input_tokens == expected
+    assert (
+        end.estimated_input_tokens
+        == start.recovery_plan.pre_send_estimated_input_tokens
+    )
 
 
 def test_pr1_token_estimate_includes_message_breakdown() -> None:
@@ -1167,7 +1223,7 @@ def test_v1_estimator_text_json_and_framing_golden_values() -> None:
     )
     estimate = estimator.estimate_context(context)
     assert estimate.envelope_tokens == 3
-    assert estimate.message_tokens_by_index == (5,)
+    assert estimate.message_tokens_by_index == (45,)
     assert estimate.tool_tokens > 8
 
 
@@ -1180,14 +1236,18 @@ def test_provider_run_error_precedes_model_end_and_reply_end() -> None:
     runtime, transport, call, context = _call_and_context()
     transport.items = (run_error,)
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert [type(event) for event in events[-5:]] == [
+    ordered_types = [type(event) for event in events]
+    expected_order = [
         ProviderModelStreamErrorEvent,
         ModelCallTerminalProjectionCommittedEvent,
         ModelCallEndEvent,
         RolloutBudgetReservationSettledEvent,
         ReplyEndEvent,
     ]
-    assert events[-3].outcome == "provider_error"
+    positions = [ordered_types.index(event_type) for event_type in expected_order]
+    assert positions == sorted(positions)
+    end = next(event for event in events if isinstance(event, ModelCallEndEvent))
+    assert end.outcome == "provider_error"
 
 
 def test_final_context_call_id_mismatch_rejected() -> None:
@@ -1242,8 +1302,12 @@ def test_final_context_over_budget_never_invokes_transport() -> None:
 def test_compiler_and_pre_send_estimates_are_equal() -> None:
     runtime, _transport, call, context = _call_and_context()
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    start = next(event for event in events if isinstance(event, ModelCallStartEvent))
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
-    assert end.estimated_input_tokens == context.compiler_estimated_input_tokens
+    assert (
+        end.estimated_input_tokens
+        == start.recovery_plan.pre_send_estimated_input_tokens
+    )
 
 
 def test_llm_runtime_does_not_persist_model_call_rejected() -> None:

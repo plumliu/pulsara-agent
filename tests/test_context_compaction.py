@@ -61,6 +61,7 @@ from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
     compaction_started_contract_fields,
@@ -81,7 +82,7 @@ from pulsara_agent.llm.errors import (
     ModelOptionUnsupported,
     ModelTargetBindingMismatch,
 )
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.raw_provider import RawProviderFailure
 from pulsara_agent.llm.result import TransportUsageReport
@@ -193,7 +194,9 @@ class CompactScriptedTransport:
         yield RawProviderTextDelta(
             **event_context.event_fields(), block_id="text:compact", delta=self.text
         )
-        yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:compact")
+        yield RawProviderTextBlockEnd(
+            **event_context.event_fields(), block_id="text:compact"
+        )
         yield TransportUsageReport(
             usage_status="missing",
             usage=None,
@@ -342,6 +345,15 @@ async def _compact(service: ContextCompactionService, **kwargs):
     )
 
 
+def _runtime_request_text(context: LLMContext) -> str:
+    request = next(
+        message
+        for message in context.messages
+        if message.role is MessageRole.RUNTIME_REQUEST
+    )
+    return request.content[0]
+
+
 def _compaction_service(**kwargs: Any) -> ContextCompactionService:
     """Build compaction tests on the same RuntimeSession-owned model path as production."""
 
@@ -398,7 +410,9 @@ def _accepted_reply_events(
             name="assistant",
         ),
         model_start,
-        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_start_event(
+            **ctx.event_fields(), block_id=f"text:{ctx.run_id}"
+        ),
         make_text_block_segment_event(
             **ctx.event_fields(),
             block_id=f"text:{ctx.run_id}",
@@ -514,7 +528,9 @@ def _suppressed_reply_events(
             name="assistant",
         ),
         model_start,
-        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_start_event(
+            **ctx.event_fields(), block_id=f"text:{ctx.run_id}"
+        ),
         make_text_block_segment_event(
             **ctx.event_fields(),
             block_id=f"text:{ctx.run_id}",
@@ -595,9 +611,7 @@ def _append_turn(
                 **run_start_permission_fields(
                     ctx.run_id,
                     user_input=user_input,
-                    mcp_installation_owner_runtime_session_id=(
-                        log.runtime_session_id
-                    ),
+                    mcp_installation_owner_runtime_session_id=(log.runtime_session_id),
                 ),
                 user_input_chars=len(user_input),
                 metadata={"user_input": user_input},
@@ -672,6 +686,16 @@ async def _emit_turn(
         ),
     )
     activation = make_test_run_execution_activation()
+    provider_input = await (
+        runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+            call=call,
+            context=context,
+            event_context=ctx,
+            operation_kind="direct_model_call",
+            operation_id=call.fact.resolved_model_call_id,
+        )
+    )
+    context = bind_test_provider_input_context(call, provider_input, context)
     start_bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -679,6 +703,7 @@ async def _emit_turn(
         runtime_session=runtime_session,
         lifecycle_kind="main_assistant_reply",
         run_execution_activation=activation,
+        provider_input_start_bundle=provider_input,
     )
     result = await llm_runtime.start_stream(
         call=call,
@@ -1317,7 +1342,7 @@ def test_manual_context_compaction_writes_summary_artifact_and_events() -> None:
     )
     assert transport.contexts
     assert transport.contexts[0].tools == ()
-    assert "Do NOT call any tools" in (transport.contexts[0].messages[0].content[0])
+    assert "Do NOT call any tools" in (transport.contexts[0].system_prompt or "")
 
 
 def test_cancelled_compaction_after_started_commits_stable_failed_terminal() -> None:
@@ -1582,7 +1607,9 @@ def test_context_compaction_appends_pending_memory_candidate() -> None:
         event_log=log,
         archive=archive,
     )
-    asyncio.run(_emit_turn(runtime_session, "one", "please remember my workflow", "noted"))
+    asyncio.run(
+        _emit_turn(runtime_session, "one", "please remember my workflow", "noted")
+    )
     raw = """
 <analysis>draft</analysis>
 <summary>Task state: user repeatedly syncs release before pushing.</summary>
@@ -1785,9 +1812,7 @@ def test_context_compaction_zero_proposal_audit_event_for_all_duplicate() -> Non
     assert "same intent fingerprint" in duplicate_audit.diagnostics[0].message
 
 
-def test_context_compaction_projection_failure_keeps_durable_outbox_for_retry() -> (
-    None
-):
+def test_context_compaction_projection_failure_keeps_durable_outbox_for_retry() -> None:
     class FailingSecondAppendPool(InMemoryCandidatePool):
         def __init__(self) -> None:
             super().__init__()
@@ -2054,7 +2079,7 @@ def test_context_compaction_memory_candidate_policy_disabled_omits_prompt_and_au
     )
 
     assert event is not None
-    assert "memory_candidates_json" not in transport.contexts[0].messages[0].content[0]
+    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
     assert candidate_pool.list_pending() == []
     assert not any(
         isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
@@ -2098,7 +2123,7 @@ def test_context_compaction_transient_workspace_does_not_write_candidate_audit_e
     )
 
     assert event is not None
-    assert "memory_candidates_json" not in transport.contexts[0].messages[0].content[0]
+    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
     assert candidate_pool.list_pending() == []
     assert not any(
         isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
@@ -2136,7 +2161,7 @@ def test_repeated_compaction_carries_previous_summary_forward() -> None:
     )
 
     assert second is not None
-    second_input = transport.contexts[-1].messages[1].content[0]
+    second_input = _runtime_request_text(transport.contexts[-1])
     assert "Previous compact summary to carry forward" in second_input
     assert "FIRST_SENTINEL old context." in second_input
     messages = rebuild_prior_messages(log, archive=archive, session_id="runtime:test")
@@ -2302,7 +2327,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     assert completed is not None
     assert completed.sequence is not None
     assert completed.sequence > current_start.sequence
-    compact_input = transport.contexts[-1].messages[1].content[0]
+    compact_input = _runtime_request_text(transport.contexts[-1])
     assert "old request" in compact_input
     assert "current request" not in compact_input
 
@@ -2342,9 +2367,9 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
             turn_id=state.turn_id,
             reply_id=state.reply_id,
         )
-        current_target = _llm_runtime(
-            CompactScriptedTransport("")
-        ).resolve_target(role=ModelRole.PRO)
+        current_target = _llm_runtime(CompactScriptedTransport("")).resolve_target(
+            role=ModelRole.PRO
+        )
         open_test_root_rollout_run(
             runtime_session,
             event_context=current_context,
@@ -2397,7 +2422,7 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
 
         assert result.compacted is True
         assert current_start.sequence is not None
-        compact_input = transport.contexts[-1].messages[1].content[0]
+        compact_input = _runtime_request_text(transport.contexts[-1])
         assert "old-a request" in compact_input
         assert "old-b request" not in compact_input
         assert "current request" not in compact_input
@@ -2451,9 +2476,9 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
         )
         await _emit_turn(runtime_session, "old-b", "old-b request", "old-b reply")
         state = _current_tail_state(runtime_session.runtime_session_id)
-        current_target = _llm_runtime(
-            CompactScriptedTransport("")
-        ).resolve_target(role=ModelRole.PRO)
+        current_target = _llm_runtime(CompactScriptedTransport("")).resolve_target(
+            role=ModelRole.PRO
+        )
         open_test_root_rollout_run(
             runtime_session,
             event_context=EventContext(
@@ -2700,14 +2725,18 @@ def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_e
                 for _ in range(500)
             ],
             make_text_block_end_event(**ctx.event_fields(), block_id="text:streamy"),
-            make_thinking_block_start_event(**ctx.event_fields(), block_id="thinking:streamy"),
+            make_thinking_block_start_event(
+                **ctx.event_fields(), block_id="thinking:streamy"
+            ),
             *[
                 make_thinking_block_segment_event(
                     **ctx.event_fields(), block_id="thinking:streamy", delta="private"
                 )
                 for _ in range(500)
             ],
-            make_thinking_block_end_event(**ctx.event_fields(), block_id="thinking:streamy"),
+            make_thinking_block_end_event(
+                **ctx.event_fields(), block_id="thinking:streamy"
+            ),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         ]
     )
@@ -2801,6 +2830,7 @@ def test_auto_context_compaction_can_use_context_compiled_estimate() -> None:
                     estimated_tokens=1_500,
                     non_transcript_baseline_tokens=100,
                     resolved_call=compiled_call.fact,
+                    context_id="context:compiled-estimate",
                 ),
                 context_id="context:compiled-estimate",
                 model_call_index=1,
@@ -2869,6 +2899,7 @@ def test_auto_context_compaction_uses_recorded_compiled_baseline_without_reestim
                     estimated_tokens=1_500,
                     non_transcript_baseline_tokens=1_200,
                     resolved_call=compiled_call.fact,
+                    context_id="context:compiled-margin",
                 ),
                 context_id="context:compiled-margin",
                 model_call_index=1,
@@ -2926,6 +2957,7 @@ def test_auto_context_compaction_compiled_estimate_includes_post_model_output() 
                     estimated_tokens=500,
                     non_transcript_baseline_tokens=100,
                     resolved_call=compiled_call.fact,
+                    context_id="context:compiled-post-output",
                 ),
                 context_id="context:compiled-post-output",
                 model_call_index=1,
@@ -3106,9 +3138,7 @@ def test_preflight_compaction_treats_empty_ledger_as_empty_source() -> None:
     service = _compaction_service(
         event_log=log,
         archive=InMemoryArchiveStore(),
-        llm_runtime=_llm_runtime(
-            CompactScriptedTransport("<summary>unused</summary>")
-        ),
+        llm_runtime=_llm_runtime(CompactScriptedTransport("<summary>unused</summary>")),
         runtime_session_id=log.runtime_session_id,
     )
 
@@ -3157,7 +3187,7 @@ def test_preflight_current_user_input_affects_threshold_but_not_summary_input() 
         is True
     )
 
-    compact_input = transport.contexts[0].messages[1].content[0]
+    compact_input = _runtime_request_text(transport.contexts[0])
     assert "CURRENT_USER_INPUT_SHOULD_NOT_BE_SUMMARIZED" not in compact_input
     completed = [
         event
@@ -3750,6 +3780,7 @@ def _append_compiled_baseline(
                 tools_estimated_tokens=0,
                 non_transcript_baseline_tokens=baseline_tokens,
                 resolved_call=call.fact,
+                context_id=f"context:{label}",
             ),
             context_id=f"context:{label}",
             model_call_index=1,
@@ -4247,8 +4278,7 @@ def test_manual_compaction_uses_direct_summarizer_call_without_main_call() -> No
     new_starts = [
         event
         for event in model_lifecycle_log.iter()
-        if isinstance(event, ModelCallStartEvent)
-        and event.id not in existing_start_ids
+        if isinstance(event, ModelCallStartEvent) and event.id not in existing_start_ids
     ]
     assert len(new_starts) == 1
     assert new_starts[0].recovery_plan.lifecycle_kind == "direct_internal_call"

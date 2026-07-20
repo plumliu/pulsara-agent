@@ -18,7 +18,10 @@ from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationAccountStateFact,
     PhysicalChargeContractFact,
 )
-from pulsara_agent.primitives.context import canonical_utc_timestamp, context_fingerprint
+from pulsara_agent.primitives.context import (
+    canonical_utc_timestamp,
+    context_fingerprint,
+)
 
 
 DEFAULT_SPARSE_EVENT_READ_MAX_EVENTS = 16_384
@@ -125,7 +128,9 @@ class RawStoredEventEnvelope:
             raise ValueError("unsupported stored event envelope version")
         if self.sequence < 1:
             raise ValueError("stored event sequence must be positive")
-        payload_fingerprint = f"sha256:{sha256(self.canonical_payload_bytes).hexdigest()}"
+        payload_fingerprint = (
+            f"sha256:{sha256(self.canonical_payload_bytes).hexdigest()}"
+        )
         if self.payload_fingerprint != payload_fingerprint:
             raise ValueError("stored event payload fingerprint mismatch")
         try:
@@ -203,9 +208,7 @@ class RawStoredEventEnvelope:
             "event_type": str(event.type),
             "event_schema_version": contract.event_schema_version,
             "event_schema_fingerprint": contract.event_schema_fingerprint,
-            "event_domain_contract_fingerprint": (
-                contract.domain_contract_fingerprint
-            ),
+            "event_domain_contract_fingerprint": (contract.domain_contract_fingerprint),
             "canonical_payload_bytes": payload,
             "payload_fingerprint": payload_fingerprint,
         }
@@ -226,9 +229,7 @@ class RawStoredEventEnvelope:
             event_type=self.event_type,
             event_schema_version=self.event_schema_version,
             event_schema_fingerprint=self.event_schema_fingerprint,
-            event_domain_contract_fingerprint=(
-                self.event_domain_contract_fingerprint
-            ),
+            event_domain_contract_fingerprint=(self.event_domain_contract_fingerprint),
         )
         event = binding.decode_owned_payload(self.canonical_payload_bytes)
         if not hasattr(event, "id") or getattr(event, "id") != self.event_id:
@@ -343,9 +344,7 @@ class RawTranscriptDomainDeltaSnapshot:
                     "semantic_envelopes": tuple(
                         item.envelope_fingerprint for item in semantic_events
                     ),
-                    "registry_contract_fingerprint": (
-                        registry_contract_fingerprint
-                    ),
+                    "registry_contract_fingerprint": (registry_contract_fingerprint),
                 },
             ),
         )
@@ -386,6 +385,7 @@ class RawTranscriptDomainDeltaSnapshot:
         if self.snapshot_fingerprint != expected:
             raise ValueError("transcript semantic delta snapshot fingerprint mismatch")
 
+
 @dataclass(frozen=True, slots=True)
 class RawEventSelectionBounds:
     max_events: int
@@ -405,11 +405,14 @@ class RawLedgerUsageSnapshot:
     candidate_payload_bytes: int
 
     def __post_init__(self) -> None:
-        if min(
-            self.through_sequence,
-            self.event_count,
-            self.candidate_payload_bytes,
-        ) < 0:
+        if (
+            min(
+                self.through_sequence,
+                self.event_count,
+                self.candidate_payload_bytes,
+            )
+            < 0
+        ):
             raise ValueError("ledger usage snapshot values must be non-negative")
         if self.event_count != self.through_sequence:
             raise ValueError("append-only ledger event count must equal high-water")
@@ -460,9 +463,7 @@ class RawContextAuthorityBundleRequest:
                 "session_sparse_event_types": self.session_sparse_event_types,
                 "exact_event_ids": self.exact_event_ids,
                 "primary_bounds": _selection_bounds_payload(self.primary_bounds),
-                "run_sparse_bounds": _selection_bounds_payload(
-                    self.run_sparse_bounds
-                ),
+                "run_sparse_bounds": _selection_bounds_payload(self.run_sparse_bounds),
                 "session_sparse_bounds": _selection_bounds_payload(
                     self.session_sparse_bounds
                 ),
@@ -480,6 +481,7 @@ class RawContextAuthorityBundle:
     run_sparse_events: tuple[RawStoredEventEnvelope, ...]
     session_sparse_events: tuple[RawStoredEventEnvelope, ...]
     exact_events: tuple[RawStoredEventEnvelope, ...]
+    ledger_prefix: RawTranscriptDomainPrefixFact
     snapshot_fingerprint: str
 
     @classmethod
@@ -493,7 +495,10 @@ class RawContextAuthorityBundle:
         run_sparse_events: tuple[RawStoredEventEnvelope, ...],
         session_sparse_events: tuple[RawStoredEventEnvelope, ...],
         exact_events: tuple[RawStoredEventEnvelope, ...],
+        ledger_prefix: RawTranscriptDomainPrefixFact,
     ) -> "RawContextAuthorityBundle":
+        if ledger_prefix.through_sequence != through_sequence:
+            raise ValueError("authority bundle ledger prefix high-water drifted")
         if primary_events:
             if primary_events[0].sequence != request.primary_minimum_sequence:
                 raise ValueError("authority bundle primary start sequence drifted")
@@ -509,6 +514,7 @@ class RawContextAuthorityBundle:
             "run_sparse_events": run_sparse_events,
             "session_sparse_events": session_sparse_events,
             "exact_events": exact_events,
+            "ledger_prefix": ledger_prefix,
         }
         return cls(
             **values,
@@ -516,6 +522,7 @@ class RawContextAuthorityBundle:
                 "raw-context-authority-bundle:v1",
                 {
                     **values,
+                    "ledger_prefix": asdict(ledger_prefix),
                     "primary_events": tuple(
                         item.envelope_fingerprint for item in primary_events
                     ),
@@ -535,6 +542,8 @@ class RawContextAuthorityBundle:
     def __post_init__(self) -> None:
         if not self.runtime_session_id or self.through_sequence < 0:
             raise ValueError("authority bundle identity is invalid")
+        if self.ledger_prefix.through_sequence != self.through_sequence:
+            raise ValueError("authority bundle prefix high-water mismatch")
         for events, label in (
             (self.primary_events, "primary"),
             (self.run_sparse_events, "run sparse"),
@@ -571,6 +580,7 @@ class RawContextAuthorityBundle:
                 "exact_events": tuple(
                     item.envelope_fingerprint for item in self.exact_events
                 ),
+                "ledger_prefix": asdict(self.ledger_prefix),
             },
         )
         if self.snapshot_fingerprint != expected:
@@ -588,7 +598,9 @@ class RawReplyEventGroup:
         if any(item.reply_id != self.reply_id for item in self.events):
             raise ValueError("reply event group contains another reply")
         sequences = tuple(item.sequence for item in self.events)
-        if sequences != tuple(sorted(sequences)) or len(sequences) != len(set(sequences)):
+        if sequences != tuple(sorted(sequences)) or len(sequences) != len(
+            set(sequences)
+        ):
             raise ValueError("reply event group must be ordered and unique")
 
 
@@ -723,7 +735,9 @@ class RawCheckpointLedgerSnapshot:
         if self.requested_through_sequence < 1:
             raise ValueError("checkpoint ledger requested high-water is invalid")
         if self.ledger_high_water_observed < self.requested_through_sequence:
-            raise ValueError("checkpoint ledger snapshot does not cover requested prefix")
+            raise ValueError(
+                "checkpoint ledger snapshot does not cover requested prefix"
+            )
         if self.confirmed_checkpoint_count < len(self.candidates):
             raise ValueError("checkpoint ledger catalog count is inconsistent")
         if self.contract_compatible_checkpoint_count < len(self.candidates):
@@ -908,6 +922,13 @@ class EventLog(Protocol):
         *,
         deadline_monotonic: float | None = None,
     ) -> RawContextAuthorityBundle: ...
+
+    def read_raw_ledger_prefix(
+        self,
+        *,
+        through_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainPrefixFact: ...
 
     def read_raw_reply_events(
         self,

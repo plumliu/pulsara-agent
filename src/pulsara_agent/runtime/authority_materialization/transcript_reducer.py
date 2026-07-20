@@ -737,7 +737,19 @@ class TranscriptProjectionStateStore:
             schema_version="transcript_tool_pair_leaf_entry.v3",
             entry_kind="tool_pair",
             ordinal=_ordinal(len(self._stable_entries)),
-            pair_id=f"tool-pair:{tool_call_id}",
+            pair_id=(
+                "tool-pair:"
+                + context_fingerprint(
+                    "transcript-tool-pair-identity:v1",
+                    {
+                        "assistant_entry_fact_fingerprint": (
+                            assistant_entry.fact_fingerprint
+                        ),
+                        "tool_call_id": tool_call_id,
+                        "result_entry_fact_fingerprint": result_entry.fact_fingerprint,
+                    },
+                )
+            ),
             semantic_identity=pair_semantic,
             source_event_refs=(_event_ref(self.runtime_session_id, record.committed_event),),
         )
@@ -839,9 +851,12 @@ class TranscriptProjectionStateStore:
             provider_semantic_identity=block_semantic,
             attribution=block_attribution,
         )
+        provider_role = (
+            "user" if current.source_kind == "host_user_input" else "runtime_request"
+        )
         provider = _message_provider_semantic(
-            role="user",
-            name="user",
+            role=provider_role,
+            name="user" if provider_role == "user" else "pulsara_runtime",
             segment="current_user",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
         )
@@ -899,7 +914,7 @@ class TranscriptProjectionStateStore:
             ),
         )
         provider = _message_provider_semantic(
-            role="system",
+            role="runtime_observation",
             name="pulsara",
             segment="prior_history",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
@@ -958,7 +973,7 @@ class TranscriptProjectionStateStore:
             ),
         )
         provider = _message_provider_semantic(
-            role="system",
+            role="runtime_observation",
             name="pulsara",
             segment="prior_history",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
@@ -1147,7 +1162,7 @@ def _message_provider_semantic(
     )
     return build_frozen_fact(
         TranscriptMessageProviderSemanticFact,
-        schema_version="transcript_message_provider_semantic.v3",
+        schema_version="transcript_message_provider_semantic.v4",
         role=role,
         name=name,
         placement_semantic=placement,

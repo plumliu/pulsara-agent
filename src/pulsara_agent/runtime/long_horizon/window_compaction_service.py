@@ -24,6 +24,7 @@ from pulsara_agent.llm.direct import (
     collect_direct_model_call_handle,
 )
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.user_carrier import derived_text_runtime_observation_payload
 from pulsara_agent.llm.lifecycle import (
     PreparedModelRolloutReservation,
     prepare_model_lifecycle_start_bundle,
@@ -167,9 +168,7 @@ class ContextWindowCompactionService:
             raise ValueError("window compaction failure limit must be positive")
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
-        self.max_automatic_failures_per_window = (
-            max_automatic_failures_per_window
-        )
+        self.max_automatic_failures_per_window = max_automatic_failures_per_window
         self._lock = asyncio.Lock()
         self._owners: dict[str, _WindowCompactionOwner] = {}
         self._recovery_done = False
@@ -202,10 +201,8 @@ class ContextWindowCompactionService:
                 attempt_index=None,
                 reason_code="window_compaction_failure_circuit_open",
             )
-        attempt_index = (
-            self.runtime_session.long_horizon_state_store.next_window_compaction_attempt_index(
-                request.source_window.window_id
-            )
+        attempt_index = self.runtime_session.long_horizon_state_store.next_window_compaction_attempt_index(
+            request.source_window.window_id
         )
         compaction_id, _digest = window_compaction_identity(
             run_id=request.event_context.run_id,
@@ -295,9 +292,7 @@ class ContextWindowCompactionService:
         recovered: list[ContextWindowCompactionFailedEvent] = []
         for item in started:
             settlement_id = item.plan.rollout_reservation.reservation_id
-            stable_settlement_id = (
-                f"rollout_reservation_settled:{settlement_id}"
-            )
+            stable_settlement_id = f"rollout_reservation_settled:{settlement_id}"
             if stable_settlement_id not in found_ids:
                 self.runtime_session.latch_event_commit_outcome_unknown()
                 raise EventReconciliationRequired(
@@ -479,9 +474,7 @@ class ContextWindowCompactionService:
                         status="blocked",
                         compaction_id=compaction_id,
                         attempt_index=attempt_index,
-                        reason_code=(
-                            "window_compaction_rollout_reservation_pending"
-                        ),
+                        reason_code=("window_compaction_rollout_reservation_pending"),
                     )
                 if admission.action == "terminal":
                     return WindowCompactionOutcome(
@@ -516,9 +509,7 @@ class ContextWindowCompactionService:
                 runtime_session=self.runtime_session,
             )
             reservation = _require_window_reservation(prepared_reservation)
-            source_artifact_id = _artifact_id(
-                "window-compaction-source", compaction_id
-            )
+            source_artifact_id = _artifact_id("window-compaction-source", compaction_id)
             manifest_artifact_id = _artifact_id(
                 "window-compaction-input", compaction_id
             )
@@ -582,41 +573,61 @@ class ContextWindowCompactionService:
                 **model_event_context.event_fields(),
                 plan=plan,
             )
-            bundle = prepare_model_lifecycle_start_bundle(
+            provider_input = await self.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
                 call=call,
                 context=model_context,
                 event_context=model_event_context,
-                runtime_session=self.runtime_session,
-                lifecycle_kind="window_compaction_summary",
-                window_compaction_started_event_id=started.id,
-                extra_companion_candidates=(started,),
-                prepared_rollout_reservation=prepared_reservation,
+                operation_kind="window_summarizer",
+                operation_id=compaction_id,
+                attempt_index=attempt_index,
             )
-            settlement_event_id = bundle.recovery_plan.stable_settlement_event_id
-            if settlement_event_id is None:
-                raise RuntimeError("window compaction lifecycle lacks settlement identity")
-            failure_stage = "model_stream"
-            handle = self.llm_runtime.start_stream(
-                call=call,
-                context=model_context,
-                event_context=model_event_context,
-                start_bundle=bundle,
-                commit_port=RuntimeSessionModelStreamEventCommitPort(
+            try:
+                model_context = provider_input.carrier.to_llm_context(model_context)
+                bundle = prepare_model_lifecycle_start_bundle(
+                    call=call,
+                    context=model_context,
+                    event_context=model_event_context,
                     runtime_session=self.runtime_session,
-                    state=request.state,
-                ),
-                execution_registry=(
-                    self.runtime_session.model_stream_execution_registry
-                ),
-            )
+                    lifecycle_kind="window_compaction_summary",
+                    window_compaction_started_event_id=started.id,
+                    extra_companion_candidates=(started,),
+                    prepared_rollout_reservation=prepared_reservation,
+                    provider_input_start_bundle=provider_input,
+                )
+                settlement_event_id = bundle.recovery_plan.stable_settlement_event_id
+                if settlement_event_id is None:
+                    raise RuntimeError(
+                        "window compaction lifecycle lacks settlement identity"
+                    )
+                failure_stage = "model_stream"
+                handle = self.llm_runtime.start_stream(
+                    call=call,
+                    context=model_context,
+                    event_context=model_event_context,
+                    start_bundle=bundle,
+                    commit_port=RuntimeSessionModelStreamEventCommitPort(
+                        runtime_session=self.runtime_session,
+                        state=request.state,
+                    ),
+                    execution_registry=(
+                        self.runtime_session.model_stream_execution_registry
+                    ),
+                )
+            except BaseException:
+                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                    reason="one_shot_failed_before_start",
+                )
+                raise
             result = await collect_direct_model_call_handle(
                 handle,
                 expected_call=call,
                 runtime_session_id=self.runtime_session.runtime_session_id,
             )
-            started_committed = self.runtime_session.event_log.get_by_id(
-                plan.stable_started_event_id
-            ) is not None
+            started_committed = (
+                self.runtime_session.event_log.get_by_id(plan.stable_started_event_id)
+                is not None
+            )
             if result.outcome != "completed":
                 raise WindowCompactionError(
                     result.error.message
@@ -625,9 +636,9 @@ class ContextWindowCompactionService:
                 )
             failure_stage = "summary_validation"
             summary = parse_window_compaction_summary(result.text, source=source.fact)
-            summary_text = canonical_json_bytes(
-                summary.model_dump(mode="json")
-            ).decode("utf-8")
+            summary_text = canonical_json_bytes(summary.model_dump(mode="json")).decode(
+                "utf-8"
+            )
             observed_summary_tokens = call.target.token_estimator.estimate_text(
                 summary_text
             )
@@ -636,7 +647,20 @@ class ContextWindowCompactionService:
                     "window compaction summary exceeds its resolved output budget"
                 )
             summary_message_tokens = call.target.token_estimator.estimate_message(
-                LLMMessage.system(summary_text)
+                LLMMessage.runtime_observation(
+                    derived_text_runtime_observation_payload(
+                        derivation_kind="compaction_replacement_summary",
+                        model_visible_content=summary_text,
+                        source_semantic_fingerprint=context_fingerprint(
+                            "window-compaction-summary-observation-source:v1",
+                            (compaction_id, summary_text),
+                        ),
+                    ),
+                    observation_kind="compaction_replacement_summary",
+                    source_instance_id=f"window-compaction:{compaction_id}",
+                    lifecycle_class="causal_append_once",
+                    authority_class="runtime_fact",
+                )
             )
             observed_post_tokens = (
                 plan.fixed_new_window_tokens
@@ -683,9 +707,7 @@ class ContextWindowCompactionService:
                 summarizer_usage=result.usage,
                 usage_status=result.usage_status,
                 rollout_settlement_event_id=settlement_event_id,
-                source_window_close_event_id=(
-                    plan.stable_source_window_close_event_id
-                ),
+                source_window_close_event_id=(plan.stable_source_window_close_event_id),
                 target_window_open_event_id=plan.stable_target_window_open_event_id,
             )
             closed = ContextWindowClosedEvent(
@@ -744,7 +766,10 @@ class ContextWindowCompactionService:
             if not started_committed and failure_stage == "model_stream":
                 failure_stage = "model_validation"
             if started_committed and settlement_event_id is not None:
-                if self.runtime_session.event_log.get_by_id(settlement_event_id) is None:
+                if (
+                    self.runtime_session.event_log.get_by_id(settlement_event_id)
+                    is None
+                ):
                     raise EventReconciliationRequired(
                         "window compaction Started lacks model terminal settlement"
                     ) from exc
@@ -801,18 +826,20 @@ class ContextWindowCompactionService:
         await self.runtime_session.context_input_io_service.execute(
             operation_name=kind,
             deadline_monotonic=deadline,
-            operation=lambda: self.runtime_session.archive.put_text_if_absent_or_confirm_identical(
-                artifact_id,
-                text,
-                session_id=self.runtime_session.runtime_session_id,
-                run_id=run_id,
-                media_type="application/json; charset=utf-8",
-                semantic_metadata={
-                    "kind": kind,
-                    "semantic_fingerprint": semantic_fingerprint,
-                    "do_not_write_back": True,
-                },
-                deadline_monotonic=deadline,
+            operation=lambda: (
+                self.runtime_session.archive.put_text_if_absent_or_confirm_identical(
+                    artifact_id,
+                    text,
+                    session_id=self.runtime_session.runtime_session_id,
+                    run_id=run_id,
+                    media_type="application/json; charset=utf-8",
+                    semantic_metadata={
+                        "kind": kind,
+                        "semantic_fingerprint": semantic_fingerprint,
+                        "do_not_write_back": True,
+                    },
+                    deadline_monotonic=deadline,
+                )
             ),
         )
 
@@ -862,6 +889,7 @@ class ContextWindowCompactionService:
                 task = asyncio.current_task()
                 if task is not None:
                     task.uncancel()
+
 
 def _validate_request(request: WindowCompactionRequest) -> None:
     if request.event_context.run_id != request.source_window.run_id:
@@ -926,7 +954,9 @@ async def _validate_source_refs(
                 )
 
 
-def _build_summarizer_context(*, call, source: WindowCompactionSourceDocumentFact) -> LLMContext:
+def _build_summarizer_context(
+    *, call, source: WindowCompactionSourceDocumentFact
+) -> LLMContext:
     summarized_ids = set(source.summarized_entry_ids)
     payload = {
         "schema_version": "window-compaction-summarizer-input.v1",
@@ -964,7 +994,15 @@ def _build_summarizer_context(*, call, source: WindowCompactionSourceDocumentFac
         "retained_tail_entry_ids": source.retained_entry_ids,
     }
     return LLMContext(
-        messages=(LLMMessage.user(canonical_json_bytes(payload).decode("utf-8")),),
+        messages=(
+            LLMMessage.runtime_request(
+                canonical_json_bytes(payload).decode("utf-8"),
+                request_kind="window_compaction_request",
+                business_occurrence_semantic_fingerprint=context_fingerprint(
+                    "window-compaction-runtime-request:v1", source.compaction_id
+                ),
+            ),
+        ),
         system_prompt=WINDOW_COMPACTION_PROMPT,
         context_id=f"context:window-compaction:{source.compaction_id}",
         resolved_model_call_id=call.fact.resolved_model_call_id,
@@ -1009,9 +1047,9 @@ def _require_window_reservation(
 
 
 def _artifact_id(kind: str, compaction_id: str) -> str:
-    digest = context_fingerprint(
-        f"{kind}-artifact-id:v1", compaction_id
-    ).removeprefix("sha256:")
+    digest = context_fingerprint(f"{kind}-artifact-id:v1", compaction_id).removeprefix(
+        "sha256:"
+    )
     return f"artifact:{kind}:{digest}"
 
 

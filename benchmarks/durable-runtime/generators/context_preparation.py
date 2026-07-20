@@ -66,9 +66,6 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalArtifactContentReferenceFact,
     ToolTerminalProjectionPayloadFact,
 )
-from pulsara_agent.runtime.context_input.candidate import (
-    ContextCandidateCollectionInput,
-)
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.context_input.compiler import (
     compile_context_from_facts,
@@ -458,22 +455,16 @@ class DeterministicSubagentTransport(RawLLMTransport):
             **common,
             block_id=block_id,
         )
-        tool_call_id = (
-            f"tool:benchmark-child:{spec.child_id}:{call_ordinal}"
-        )
+        tool_call_id = f"tool:benchmark-child:{spec.child_id}:{call_ordinal}"
         arguments = (
             {
                 "summary": f"{spec.child_id} explicit benchmark result",
-                "output_preview": (
-                    f"{spec.child_id} explicit benchmark evidence"
-                ),
+                "output_preview": (f"{spec.child_id} explicit benchmark evidence"),
             }
             if tool_name == "report_agent_result"
             else {
                 "phase": f"step-{call_ordinal}",
-                "message": (
-                    f"{spec.child_id} benchmark progress {call_ordinal}"
-                ),
+                "message": (f"{spec.child_id} benchmark progress {call_ordinal}"),
             }
         )
         yield RawProviderToolCallStart(
@@ -620,16 +611,13 @@ async def run_context_preparation_sample(
                     event_context=event_context,
                     target=target,
                 )
-                run.working_set.model_call_control_owner = (
-                    RunModelCallControlOwner(
-                        run_id=event_context.run_id,
-                        activation=run.activation,
-                        segment_id=(
-                            run.working_set.process_segment_id
-                            or "benchmark-segment"
-                        ),
-                        segment_generation=run.activation.segment_generation,
-                    )
+                run.working_set.model_call_control_owner = RunModelCallControlOwner(
+                    run_id=event_context.run_id,
+                    activation=run.activation,
+                    segment_id=(
+                        run.working_set.process_segment_id or "benchmark-segment"
+                    ),
+                    segment_generation=run.activation.segment_generation,
                 )
             elif mode == "verified_artifact_cache_warm":
                 await _stabilize_acceleration(runtime_session)
@@ -758,9 +746,7 @@ async def _run_checkpoint_rebase_restart_sample(
                 ),
             )
             generated_semantic_delta_count += semantic_delta_count
-            checkpoint_fixture = checkpoints_by_high_water.get(
-                logical_high_water
-            )
+            checkpoint_fixture = checkpoints_by_high_water.get(logical_high_water)
             if checkpoint_fixture is None:
                 continue
             committed = await _force_transcript_checkpoint(
@@ -783,9 +769,7 @@ async def _run_checkpoint_rebase_restart_sample(
             for checkpoint in scenario.ledger.checkpoints
             if checkpoint.preferred
         )
-        preferred_committed = checkpoint_by_logical_id[
-            preferred_fixture.checkpoint_id
-        ]
+        preferred_committed = checkpoint_by_logical_id[preferred_fixture.checkpoint_id]
         if isinstance(execution_case, MissingCheckpointRebaseCase):
             _delete_checkpoint_artifacts(
                 runtime_session=runtime_session,
@@ -885,8 +869,9 @@ async def _run_checkpoint_rebase_restart_sample(
             generated_tool_result_count=0,
             repeated_final_compile_semantics_equal=repeated_equal,
             generated_checkpoint_ids=tuple(
-                checkpoint_by_logical_id[item.checkpoint_id]
-                .installed.prepared.candidate.checkpoint_id
+                checkpoint_by_logical_id[
+                    item.checkpoint_id
+                ].installed.prepared.candidate.checkpoint_id
                 for item in scenario.ledger.checkpoints
             ),
             deleted_checkpoint_id=deleted_checkpoint_id,
@@ -1025,16 +1010,12 @@ async def _run_single_long_compaction_sample(
                 window=compaction_input.prepared.active_window,
                 current_projection=compaction_input.prepared.projection_state,
                 canonical_slice=compaction_input.prepared.authority_slice,
-                transcript=(
-                    compaction_input.prepared.normalized_transcript.transcript
-                ),
+                transcript=(compaction_input.prepared.normalized_transcript.transcript),
                 tool_result_units=(
                     compaction_input.prepared.normalized_transcript.tool_result_units
                 ),
                 context_budget=target.context_budget,
-                allocation_policy=(
-                    run.working_set.long_horizon_contract.window_policy
-                ),
+                allocation_policy=(run.working_set.long_horizon_contract.window_policy),
                 estimator=target.fact.token_estimator,
                 pending_interaction=False,
                 tool_call_in_flight=False,
@@ -1138,9 +1119,7 @@ async def _run_single_long_compaction_sample(
             scenario.ledger.post_compaction_model_calls + 1,
         ):
             call_ordinal += 1
-            delta_count = (
-                scenario.ledger.post_compaction_semantic_delta_events_per_call
-            )
+            delta_count = scenario.ledger.post_compaction_semantic_delta_events_per_call
             await _append_model_step(
                 runtime_session=runtime_session,
                 run=run,
@@ -1201,16 +1180,12 @@ async def _run_single_long_compaction_sample(
             generated_tool_result_count=generated_tool_result_count,
             repeated_final_compile_semantics_equal=repeated_equal,
             compaction_status=outcome.status,
-            compaction_source_artifact_verified=(
-                compaction_source_artifact_verified
-            ),
+            compaction_source_artifact_verified=(compaction_source_artifact_verified),
         )
     finally:
         drain_deadline = monotonic() + 30.0
         if compaction_service is not None:
-            await compaction_service.drain_pending(
-                deadline_monotonic=drain_deadline
-            )
+            await compaction_service.drain_pending(deadline_monotonic=drain_deadline)
         await runtime_session.context_input_io_service.drain_pending(
             deadline_monotonic=drain_deadline
         )
@@ -1282,9 +1257,7 @@ async def _run_subagent_two_children_sample(
             event_context=event_context,
             task_id=task_id,
             profile_id=(
-                "review_worker"
-                if child.child_id == "review"
-                else "verification_worker"
+                "review_worker" if child.child_id == "review" else "verification_worker"
             ),
             task_key=child.child_id,
             depends_on=dependencies,
@@ -1316,9 +1289,7 @@ async def _run_subagent_two_children_sample(
             scenario.ledger.parent.model_calls + 1,
         ):
             tool_result_characters = (
-                (2_048,)
-                if call_ordinal <= scenario.ledger.parent.tool_calls
-                else ()
+                (2_048,) if call_ordinal <= scenario.ledger.parent.tool_calls else ()
             )
             await _append_model_step(
                 runtime_session=runtime_session,
@@ -1385,9 +1356,7 @@ async def _run_subagent_two_children_sample(
                 child.target_raw_events - child.model_calls * 6
             )
             generated_tool_result_count += child.tool_calls
-            child_runtime_session_ids.append(
-                child_run.child_runtime_session_id
-            )
+            child_runtime_session_ids.append(child_run.child_runtime_session_id)
             child_result_ids.append(result.result_id)
             completed = runtime_session.event_log.get_by_id(
                 next(
@@ -1410,11 +1379,9 @@ async def _run_subagent_two_children_sample(
             started_parent_events[child.child_id] = started
 
             if child.child_id == scenario.ledger.children[-1].child_id:
-                checkpoint = (
-                    await runtime_session.subagent_graph_checkpoint_service.checkpoint_for_admission(
-                        requested_through_sequence=(
-                            runtime_session.event_log.next_sequence() - 1
-                        )
+                checkpoint = await runtime_session.subagent_graph_checkpoint_service.checkpoint_for_admission(
+                    requested_through_sequence=(
+                        runtime_session.event_log.next_sequence() - 1
                     )
                 )
                 checkpoint_id = checkpoint.selected_checkpoint_id
@@ -1482,9 +1449,7 @@ async def _run_subagent_two_children_sample(
             )
         )
         review_completed = completed_parent_events[0]
-        verify_started = started_parent_events[
-            scenario.ledger.children[1].child_id
-        ]
+        verify_started = started_parent_events[scenario.ledger.children[1].child_id]
         child_dependency_order_valid = (
             review_completed.sequence is not None
             and verify_started.sequence is not None
@@ -1590,9 +1555,7 @@ async def _await_subagent_completion(
             if item.subagent_run_id == subagent_run_id
         )
         if run.status in {"failed", "cancelled"}:
-            raise RuntimeError(
-                f"subagent benchmark child terminated as {run.status}"
-            )
+            raise RuntimeError(f"subagent benchmark child terminated as {run.status}")
         await asyncio.sleep(0.01)
     raise TimeoutError("subagent benchmark child completion timed out")
 
@@ -1635,13 +1598,11 @@ async def _force_transcript_checkpoint(
     runtime_session: RuntimeSession,
     run: BenchmarkContextRun,
 ) -> CommittedTranscriptCheckpoint:
-    committed = (
-        await runtime_session.transcript_projection_checkpoint_service.checkpoint_if_needed(
-            context=run.event_context,
-            run_seed_semantic=run.working_set.run_transcript_seed_semantic,
-            run_seed_reference=run.working_set.run_transcript_seed_reference,
-            force_for_admission=True,
-        )
+    committed = await runtime_session.transcript_projection_checkpoint_service.checkpoint_if_needed(
+        context=run.event_context,
+        run_seed_semantic=run.working_set.run_transcript_seed_semantic,
+        run_seed_reference=run.working_set.run_transcript_seed_reference,
+        force_for_admission=True,
     )
     if not isinstance(committed, CommittedTranscriptCheckpoint):
         raise RuntimeError("benchmark forced checkpoint did not commit")
@@ -1709,9 +1670,7 @@ async def _append_model_step(
     call_target = runtime.resolve_target(role=ModelRole.PRO)
     if call_target.fact != run.target.fact:
         raise RuntimeError("benchmark call target drifted from RunStart target")
-    call_id = _resolved_call_id(
-        f"{run.event_context.run_id}:benchmark:{call_ordinal}"
-    )
+    call_id = _resolved_call_id(f"{run.event_context.run_id}:benchmark:{call_ordinal}")
     call = ResolvedModelCall(
         target=call_target,
         fact=ResolvedModelCallFact(
@@ -1759,6 +1718,20 @@ async def _append_model_step(
         event_context=step_context,
         call=call,
     )
+    provider_input = await runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+        call=call,
+        context=context,
+        event_context=step_context,
+        operation_kind="direct_model_call",
+        operation_id=call_id,
+    )
+    context = provider_input.carrier.to_llm_context(context)
+    context = replace(
+        context,
+        compiler_estimated_input_tokens=(
+            call_target.token_estimator.estimate_context(context).total_input_tokens
+        ),
+    )
     start_bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -1766,6 +1739,7 @@ async def _append_model_step(
         runtime_session=runtime_session,
         lifecycle_kind="main_assistant_reply",
         run_execution_activation=run.activation,
+        provider_input_start_bundle=provider_input,
     )
     handle = runtime.start_stream(
         call=call,
@@ -1926,8 +1900,7 @@ async def _advance_rollout_phase_for_call(
             )
             continue
         raise RuntimeError(
-            "benchmark trajectory exceeds its resolved rollout contract: "
-            f"{plan.action}"
+            f"benchmark trajectory exceeds its resolved rollout contract: {plan.action}"
         )
     raise RuntimeError("benchmark rollout phase did not converge")
 
@@ -1987,11 +1960,7 @@ async def _prepare_compile_point(
         terminal_current_cwd=str(runtime_session.workspace_root),
         session_timezone="UTC",
         compiled_local_date="2026-01-01",
-        candidate_sources=ContextCandidateCollectionInput(
-            system_prompt="Pulsara deterministic context benchmark.",
-            capability_catalog=exposure.catalog_prompt,
-            capability_active_skill=exposure.active_skill_prompt,
-        ),
+        memory_scope_instruction=None,
     )
     prepare_seconds = perf_counter() - started
     compile_started = perf_counter()
@@ -2007,6 +1976,9 @@ async def _prepare_compile_point(
         rendered_tool_results=rendered,
         prepared_rollups=(),
         section_candidates=prepared.prepared_candidates,
+        transcript_stable_entries=(
+            prepared.transcript_projection_evidence.stable_entries
+        ),
     )
     compile_seconds = perf_counter() - compile_started
     evidence = prepared.transcript_projection_evidence
@@ -2026,9 +1998,7 @@ async def _prepare_compile_point(
     )
     terminal_projection_source_delta_count = 0
     artifact_backed_terminal_content_count = 0
-    for reference in stable_entry_projection_references(
-        evidence.stable_entries
-    ):
+    for reference in stable_entry_projection_references(evidence.stable_entries):
         document = evidence.document_registry.resolve(reference)
         source_fact = document.source_fact
         terminal_projection_source_delta_count += (
@@ -2079,12 +2049,8 @@ async def _prepare_compile_point(
             compiled.llm_context
         ),
         terminal_document_count=terminal_document_count,
-        terminal_projection_source_delta_count=(
-            terminal_projection_source_delta_count
-        ),
-        artifact_backed_terminal_content_count=(
-            artifact_backed_terminal_content_count
-        ),
+        terminal_projection_source_delta_count=(terminal_projection_source_delta_count),
+        artifact_backed_terminal_content_count=(artifact_backed_terminal_content_count),
         max_stable_entry_bytes=max(
             (
                 len(canonical_json_bytes(item.model_dump(mode="json")))
@@ -2092,9 +2058,7 @@ async def _prepare_compile_point(
             ),
             default=0,
         ),
-        selected_subagent_result_count=len(
-            subagent_selection.selected_source_ids
-        ),
+        selected_subagent_result_count=len(subagent_selection.selected_source_ids),
         subagent_graph_semantic_fingerprint=(
             prepared.invocation.fact.subagent_graph_semantic_source.semantic_source_fingerprint
         ),
@@ -2282,9 +2246,7 @@ def _window_summary_json(
     )
     if len(encoded) > target_characters:
         raise ValueError("configured compaction summary is smaller than its schema")
-    payload["observed_facts"] = [
-        "s" * (1 + target_characters - len(encoded))
-    ]
+    payload["observed_facts"] = ["s" * (1 + target_characters - len(encoded))]
     result = json.dumps(
         payload,
         sort_keys=True,
@@ -2300,8 +2262,7 @@ def _even_partition(total: int, count: int) -> tuple[int, ...]:
         raise ValueError("benchmark partition requires one or more items per bucket")
     quotient, remainder = divmod(total, count)
     return tuple(
-        quotient + (1 if ordinal < remainder else 0)
-        for ordinal in range(count)
+        quotient + (1 if ordinal < remainder else 0) for ordinal in range(count)
     )
 
 

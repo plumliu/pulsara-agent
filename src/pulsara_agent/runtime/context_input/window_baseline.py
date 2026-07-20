@@ -39,8 +39,14 @@ class WindowCompactionTranscriptBaselineFact(FrozenContextFact):
         message_ids = {item.message_id for item in self.retained_messages}
         if self.current_user_anchor not in message_ids:
             raise ValueError("window baseline lacks current user anchor")
-        pair_ids = {item.tool_call_id for item in self.retained_tool_pairs}
-        unit_ids = {item.tool_call_id for item in self.retained_tool_result_units}
+        pair_ids = {
+            (item.call_message_id, item.tool_call_id)
+            for item in self.retained_tool_pairs
+        }
+        unit_ids = {
+            (item.call_message_id, item.tool_call_id)
+            for item in self.retained_tool_result_units
+        }
         if pair_ids != unit_ids:
             raise ValueError("window baseline pair/unit identity mismatch")
         return self
@@ -64,8 +70,12 @@ def build_window_compaction_transcript_baseline(
         for pair in transcript.tool_pairs
         if pair.call_message_id in retained and pair.result_message_id in retained
     )
-    pair_ids = {pair.tool_call_id for pair in pairs}
-    retained_units = tuple(unit for unit in units if unit.tool_call_id in pair_ids)
+    pair_ids = {(pair.call_message_id, pair.tool_call_id) for pair in pairs}
+    retained_units = tuple(
+        unit
+        for unit in units
+        if (unit.call_message_id, unit.tool_call_id) in pair_ids
+    )
     payload = {
         "schema_version": "window-compaction-transcript-baseline.v1",
         "compaction_id": compaction_id,

@@ -97,6 +97,9 @@ from pulsara_agent.llm.segment import (
 )
 
 if TYPE_CHECKING:
+    from pulsara_agent.runtime.provider_input.planner import (
+        PreparedProviderInputStartBundle,
+    )
     from pulsara_agent.runtime.session import RuntimeSession
 
 
@@ -155,11 +158,9 @@ class LLMRuntime:
         """
 
         runtime_session = commit_port.runtime_session
-        model_burst_contract = (
-            runtime_session.authority_materialization_contracts.burst_registry
-            .unique_binding_for_operation(PhysicalOperationKind.MODEL_CALL)
-            .contract
-        )
+        model_burst_contract = runtime_session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+            PhysicalOperationKind.MODEL_CALL
+        ).contract
         call_id = call.fact.resolved_model_call_id
         handle_id = f"model_stream:{call_id}:{uuid4().hex}"
 
@@ -301,8 +302,7 @@ class LLMRuntime:
                                     ModelCallTerminalProjectionCommittedEvent,
                                 )
                             ).projection_reference
-                        )
-                        .source_fact.stream_settlement_measurement.measurement_fingerprint
+                        ).source_fact.stream_settlement_measurement.measurement_fingerprint
                     ),
                 )
                 while True:
@@ -332,6 +332,11 @@ class LLMRuntime:
                         if task is not None:
                             task.uncancel()
 
+            provider_input_start = start_bundle.provider_input_start_bundle
+            if provider_input_start is None:
+                raise RuntimeError(
+                    "model lifecycle Start lacks committed provider-input owner"
+                )
             start_event = ModelCallStartEvent(
                 id=recovery_plan.model_call_start_event_id,
                 **event_context.event_fields(),
@@ -342,6 +347,7 @@ class LLMRuntime:
                 governance_input_attribution=(
                     start_bundle.governance_input_attribution
                 ),
+                provider_input_reference=provider_input_start.committed_reference,
             )
             start_batch = (
                 *start_bundle.companion_candidates,
@@ -368,9 +374,7 @@ class LLMRuntime:
                     start_event=committed_start,
                     contracts=runtime_session.terminal_projection_contracts,
                     model_stream_semantic_domain_contract_fingerprint=(
-                        runtime_session.authority_materialization_contracts
-                        .event_domain.contract
-                        .transcript_semantic_domain_contract_fingerprint
+                        runtime_session.authority_materialization_contracts.event_domain.contract.transcript_semantic_domain_contract_fingerprint
                     ),
                     segment_policy_contract_fingerprint=(
                         MODEL_STREAM_SEGMENT_POLICY.contract_fingerprint
@@ -410,14 +414,15 @@ class LLMRuntime:
                     runtime_session=runtime_session,
                     reservation=rollout_reservation,
                     projection_reducer=terminal_projection_reducer,
-                    semantic_commit_measurements=tuple(
-                        semantic_commit_measurements
-                    ),
+                    semantic_commit_measurements=tuple(semantic_commit_measurements),
                     physical_accounting_mode=(
                         "accounted"
                         if runtime_session.materialization_account_store.snapshot()
                         is not None
                         else "unbootstrapped_test"
+                    ),
+                    provider_input_start_bundle=(
+                        start_bundle.provider_input_start_bundle
                     ),
                 )
                 try:
@@ -428,9 +433,7 @@ class LLMRuntime:
                         error=exc,
                     )
                 if not await materialize_terminal_result():
-                    return reconciliation_blocked(
-                        "model_stream_materialization_failed"
-                    )
+                    return reconciliation_blocked("model_stream_materialization_failed")
                 return ModelStreamCompletion(
                     resolved_model_call_id=call_id,
                     terminal_outcome="runtime_error",
@@ -480,9 +483,7 @@ class LLMRuntime:
                     first_transport_sequence_index=(
                         first_attribution.source_span.first_transport_sequence_index
                     ),
-                    source_item_count=sum(
-                        item.source_item_count for item in batch
-                    ),
+                    source_item_count=sum(item.source_item_count for item in batch),
                     source_accumulator_before=(
                         first_attribution.source_span.source_accumulator_before
                     ),
@@ -517,16 +518,16 @@ class LLMRuntime:
                 )
                 if commit_measurement is not None:
                     semantic_commit_measurements.append(commit_measurement)
-                elif runtime_session.materialization_account_store.snapshot() is not None:
+                elif (
+                    runtime_session.materialization_account_store.snapshot() is not None
+                ):
                     raise RuntimeError(
                         "accounted model semantic commit lost its measurement"
                     )
                 semantic_commit_batch_count += 1
                 source_item_count = live_semantic_cursor.confirmed_source_item_count
                 source_accumulator = live_semantic_cursor.confirmed_source_accumulator
-                durable_event_count = (
-                    live_semantic_cursor.confirmed_durable_event_count
-                )
+                durable_event_count = live_semantic_cursor.confirmed_durable_event_count
                 last_semantic_event_id = live_semantic_cursor.last_semantic_event_id
                 coordinator.confirm_current_batch_full()
 
@@ -605,9 +606,7 @@ class LLMRuntime:
                 read_task: asyncio.Task[object] | None,
                 operation_id: str | None,
             ) -> ModelStreamCompletion:
-                await seal_and_flush(
-                    ModelStreamSegmentSealReason.CANCELLATION_BOUNDARY
-                )
+                await seal_and_flush(ModelStreamSegmentSealReason.CANCELLATION_BOUNDARY)
                 physical = await drain_transport_after_fault(
                     reason=reason,
                     outstanding=outstanding,
@@ -635,21 +634,20 @@ class LLMRuntime:
                     runtime_session=runtime_session,
                     reservation=rollout_reservation,
                     projection_reducer=terminal_projection_reducer,
-                    semantic_commit_measurements=tuple(
-                        semantic_commit_measurements
-                    ),
+                    semantic_commit_measurements=tuple(semantic_commit_measurements),
                     physical_accounting_mode=(
                         "accounted"
                         if runtime_session.materialization_account_store.snapshot()
                         is not None
                         else "unbootstrapped_test"
                     ),
+                    provider_input_start_bundle=(
+                        start_bundle.provider_input_start_bundle
+                    ),
                 )
                 await commit_stable_terminal(terminal_events)
                 if not await materialize_terminal_result():
-                    return reconciliation_blocked(
-                        "model_stream_materialization_failed"
-                    )
+                    return reconciliation_blocked("model_stream_materialization_failed")
                 return ModelStreamCompletion(
                     resolved_model_call_id=call_id,
                     terminal_outcome=terminal_outcome,
@@ -665,20 +663,15 @@ class LLMRuntime:
             try:
                 read_task = asyncio.create_task(read_with_stamp())
                 read_operation_id = handle.register_physical_operation(read_task)
-                cancel_task = asyncio.create_task(
-                    cancellation_with_stamp()
-                )
+                cancel_task = asyncio.create_task(cancellation_with_stamp())
                 while terminal_draft is None:
-                    deadline_ns = (
-                        coordinator.oldest_unconfirmed_deadline_monotonic_ns
-                    )
+                    deadline_ns = coordinator.oldest_unconfirmed_deadline_monotonic_ns
                     deadline_task = None
                     waiters = [read_task, cancel_task]
                     if deadline_ns is not None:
                         delay = max(
                             0.0,
-                            (deadline_ns - monotonic_ns())
-                            / 1_000_000_000,
+                            (deadline_ns - monotonic_ns()) / 1_000_000_000,
                         )
                         deadline_task = asyncio.create_task(asyncio.sleep(delay))
                         waiters.append(deadline_task)
@@ -829,21 +822,20 @@ class LLMRuntime:
                     runtime_session=runtime_session,
                     reservation=rollout_reservation,
                     projection_reducer=terminal_projection_reducer,
-                    semantic_commit_measurements=tuple(
-                        semantic_commit_measurements
-                    ),
+                    semantic_commit_measurements=tuple(semantic_commit_measurements),
                     physical_accounting_mode=(
                         "accounted"
                         if runtime_session.materialization_account_store.snapshot()
                         is not None
                         else "unbootstrapped_test"
                     ),
+                    provider_input_start_bundle=(
+                        start_bundle.provider_input_start_bundle
+                    ),
                 )
                 await commit_stable_terminal(terminal_events)
                 if not await materialize_terminal_result():
-                    return reconciliation_blocked(
-                        "model_stream_materialization_failed"
-                    )
+                    return reconciliation_blocked("model_stream_materialization_failed")
                 if terminal_draft.outcome == "provider_error":
                     diagnostic_code = "provider_error"
             except BaseException as exc:
@@ -923,11 +915,9 @@ class LLMRuntime:
 
         shadow_owner_id: str | None = handle_id
         try:
-            model_burst = (
-                runtime_session.authority_materialization_contracts.burst_registry
-                .unique_binding_for_operation(PhysicalOperationKind.MODEL_CALL)
-                .contract
-            )
+            model_burst = runtime_session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.MODEL_CALL
+            ).contract
             runtime_session.authority_materialization_shadow.observe_candidate(
                 owner_id=handle_id,
                 contract=model_burst,
@@ -943,6 +933,18 @@ class LLMRuntime:
             try:
                 return await worker(handle)
             finally:
+                provider_bundle = start_bundle.provider_input_start_bundle
+                if provider_bundle is not None:
+                    try:
+                        await runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                            provider_bundle.prepared_candidate.preparation_ownership.preparation_id,
+                            reason="run_terminated_before_start",
+                        )
+                    except BaseException:
+                        # A committed Start consumes the preparation and this is
+                        # a no-op. Any unresolved/unknown pre-Start owner must
+                        # remain durable and block teardown for exact recovery.
+                        runtime_session.latch_event_commit_outcome_unknown()
                 if shadow_owner_id is not None:
                     runtime_session.authority_materialization_shadow.release_candidate(
                         shadow_owner_id
@@ -959,6 +961,10 @@ class LLMRuntime:
                 worker=observed_worker,
             )
         except BaseException:
+            if start_bundle.provider_input_start_bundle is not None:
+                runtime_session.provider_input_generation_coordinator.reject_before_worker_start(
+                    start_bundle.provider_input_start_bundle
+                )
             if shadow_owner_id is not None:
                 runtime_session.authority_materialization_shadow.release_candidate(
                     shadow_owner_id
@@ -984,6 +990,7 @@ class LLMRuntime:
         physical_accounting_mode: Literal[
             "accounted", "unbootstrapped_test"
         ] = "unbootstrapped_test",
+        provider_input_start_bundle: PreparedProviderInputStartBundle | None,
     ) -> tuple[AgentEvent, ...]:
         normalized_usage = usage_report or TransportUsageReport(
             usage_status="missing", usage=None
@@ -1046,6 +1053,7 @@ class LLMRuntime:
             runtime_session=runtime_session,
             reservation=reservation,
             terminal_projection=projection,
+            provider_input_start_bundle=provider_input_start_bundle,
         )
 
     def _terminal_batch(
@@ -1061,6 +1069,7 @@ class LLMRuntime:
         runtime_session: "RuntimeSession",
         reservation: RolloutReservationFact | None,
         terminal_projection: PreparedModelTerminalProjection,
+        provider_input_start_bundle: PreparedProviderInputStartBundle | None,
     ) -> tuple[AgentEvent, ...]:
         usage_report = usage_report or TransportUsageReport(
             usage_status="missing", usage=None
@@ -1083,6 +1092,20 @@ class LLMRuntime:
             terminal_projection.committed_event,
             model_end,
         ]
+        if (
+            provider_input_start_bundle is not None
+            and provider_input_start_bundle.is_one_shot
+        ):
+            from pulsara_agent.runtime.provider_input.planner import (
+                build_one_shot_generation_close_event,
+            )
+
+            events.append(
+                build_one_shot_generation_close_event(
+                    bundle=provider_input_start_bundle,
+                    event_context=event_context,
+                )
+            )
         if reservation is not None:
             settlement = self._build_model_settlement_event(
                 event_context=event_context,

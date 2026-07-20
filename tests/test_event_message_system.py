@@ -1,3 +1,5 @@
+from hashlib import sha256
+
 import pytest
 
 from tests.support.model_stream import (
@@ -20,6 +22,7 @@ from pulsara_agent.event import (
     ExternalExecutionResultEvent,
     ModelCallEndEvent,
     ProjectionReadyEvent,
+    RecalledMemoryProjectionEntryFact,
     RequireExternalExecutionEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -48,6 +51,7 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.model_call import sha256_fingerprint
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -410,6 +414,19 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
 
 def test_projection_events_are_not_written_as_canonical_memory() -> None:
     event_log = InMemoryEventLog()
+    text = "Projection summary."
+    entry_payload = {
+        "entry_index": 0,
+        "memory_ids": ("claim:1",),
+        "model_visible_text": text,
+        "text_utf8_sha256": f"sha256:{sha256(text.encode('utf-8')).hexdigest()}",
+    }
+    entry = RecalledMemoryProjectionEntryFact(
+        **entry_payload,
+        entry_semantic_fingerprint=sha256_fingerprint(
+            "recalled-memory-projection-entry:v1", entry_payload
+        ),
+    )
     event = event_log.append(
         ProjectionReadyEvent(
             **CTX.event_fields(),
@@ -420,7 +437,12 @@ def test_projection_events_are_not_written_as_canonical_memory() -> None:
             projection_kind="memory",
             included_memory_ids=["claim:1"],
             filtered_memory_ids=["claim:stale"],
-            summary="Projection summary.",
+            recalled_memory_entries=(entry,),
+            summary=(
+                '<recalled-memory-projection do_not_write_back="true">\n'
+                f"- {text}\n"
+                "</recalled-memory-projection>"
+            ),
         )
     )
 

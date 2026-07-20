@@ -754,6 +754,7 @@ def open_test_root_rollout_run(
         empty_projection_state_fingerprint,
         prepare_root_long_horizon_run,
     )
+
     if any(
         isinstance(event, RunStartEvent)
         for event in runtime_session.event_log.iter(run_id=event_context.run_id)
@@ -780,9 +781,7 @@ def open_test_root_rollout_run(
         user_input=user_input,
         turn_id=event_context.turn_id,
         reply_id=event_context.reply_id,
-        mcp_installation_owner_runtime_session_id=(
-            runtime_session.runtime_session_id
-        ),
+        mcp_installation_owner_runtime_session_id=(runtime_session.runtime_session_id),
         model_target=model_target,
     )
     fields.update(
@@ -813,13 +812,9 @@ def open_test_root_rollout_run(
     result = runtime_session.write_events_from_thread(
         (run_start, window_open, account_open)
     )
-    result.require_reduced(
-        f"long_horizon:{runtime_session.runtime_session_id}"
-    )
+    result.require_reduced(f"long_horizon:{runtime_session.runtime_session_id}")
     stored_run_start = next(
-        event
-        for event in result.committed_events
-        if isinstance(event, RunStartEvent)
+        event for event in result.committed_events if isinstance(event, RunStartEvent)
     )
     runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
         stored_run_start
@@ -850,6 +845,7 @@ async def emit_test_accepted_model_reply(
     from pulsara_agent.primitives.model_call import ModelCallPurpose
     from pulsara_agent.runtime.state import LoopState
     from tests.support import (
+        bind_test_provider_input_context,
         bind_test_context,
         make_test_run_execution_activation,
         test_llm_config,
@@ -940,6 +936,16 @@ async def emit_test_accepted_model_reply(
             model_call_index=1,
         ),
     )
+    provider_input = await (
+        runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+            call=call,
+            context=context,
+            event_context=event_context,
+            operation_kind="direct_model_call",
+            operation_id=call.fact.resolved_model_call_id,
+        )
+    )
+    context = bind_test_provider_input_context(call, provider_input, context)
     activation = make_test_run_execution_activation()
     start_bundle = prepare_model_lifecycle_start_bundle(
         call=call,
@@ -948,6 +954,7 @@ async def emit_test_accepted_model_reply(
         runtime_session=runtime_session,
         lifecycle_kind="main_assistant_reply",
         run_execution_activation=activation,
+        provider_input_start_bundle=provider_input,
     )
     state = LoopState(
         session_id=runtime_session.runtime_session_id,

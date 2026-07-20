@@ -125,7 +125,9 @@ class PostgresEventLog:
                 deadline_monotonic=deadline,
             ) as connection:
                 with connection.cursor() as cursor:
-                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._apply_transaction_deadline(
+                        cursor, deadline, include_lock=True
+                    )
                     self._lock_session(cursor)
                     existing = self._get_by_id(cursor, event.id)
                     if existing is not None:
@@ -175,7 +177,9 @@ class PostgresEventLog:
                 deadline_monotonic=deadline,
             ) as connection:
                 with connection.cursor() as cursor:
-                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._apply_transaction_deadline(
+                        cursor, deadline, include_lock=True
+                    )
                     self._lock_session(cursor)
                     stored_events: list[AgentEvent] = []
                     next_sequence = self._next_sequence(cursor)
@@ -219,9 +223,7 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
-                self._apply_transaction_deadline(
-                    cursor, deadline, include_lock=False
-                )
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     """
                     select state_payload
@@ -260,7 +262,9 @@ class PostgresEventLog:
                 deadline_monotonic=deadline,
             ) as connection:
                 with connection.cursor(row_factory=dict_row) as cursor:
-                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._apply_transaction_deadline(
+                        cursor, deadline, include_lock=True
+                    )
                     self._lock_session(cursor)
                     cursor.execute(
                         """
@@ -277,10 +281,7 @@ class PostgresEventLog:
                         if account_row is not None
                         else None
                     )
-                    if (
-                        actual_account_fingerprint
-                        != expected_account_state_fingerprint
-                    ):
+                    if actual_account_fingerprint != expected_account_state_fingerprint:
                         raise MaterializationAccountStateConflict(
                             expected_state_fingerprint=(
                                 expected_account_state_fingerprint
@@ -394,8 +395,7 @@ class PostgresEventLog:
             )
             if (
                 str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
-                and actual
-                > stored.charge.charge_applied_event_charge_payload_bytes
+                and actual > stored.charge.charge_applied_event_charge_payload_bytes
             ):
                 raise ValueError(
                     "stored charge-applied envelope exceeds its dynamic charge bound"
@@ -515,9 +515,7 @@ class PostgresEventLog:
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(query, params)
                 return [
-                    self._raw_from_row(row).decode_owned(
-                        DEFAULT_EVENT_SCHEMA_REGISTRY
-                    )
+                    self._raw_from_row(row).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
                     for row in cursor.fetchall()
                 ]
 
@@ -570,9 +568,7 @@ class PostgresEventLog:
                         or not same_event_raw_payload(candidate, raw)
                     ):
                         raise EventIdConflict(candidate.id)
-                    committed.append(
-                        raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
-                    )
+                    committed.append(raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
                 return EventBatchConfirmation(
                     committed_events=tuple(committed),
                     missing_event_ids=tuple(missing),
@@ -664,9 +660,11 @@ class PostgresEventLog:
                 events = tuple(self._raw_from_row(row) for row in cursor.fetchall())
                 if max_events is not None and len(events) > max_events:
                     raise ValueError("event range exceeds its event bound")
-                if max_payload_bytes is not None and sum(
-                    len(event.canonical_payload_bytes) for event in events
-                ) > max_payload_bytes:
+                if (
+                    max_payload_bytes is not None
+                    and sum(len(event.canonical_payload_bytes) for event in events)
+                    > max_payload_bytes
+                ):
                     raise ValueError("event range exceeds its payload-byte bound")
         return RawEventLogReadSnapshot(
             through_sequence=effective_through,
@@ -675,9 +673,7 @@ class PostgresEventLog:
                 "raw-event-log-read-snapshot:v1",
                 {
                     "through_sequence": effective_through,
-                    "envelopes": tuple(
-                        event.envelope_fingerprint for event in events
-                    ),
+                    "envelopes": tuple(event.envelope_fingerprint for event in events),
                 },
             ),
         )
@@ -755,8 +751,7 @@ class PostgresEventLog:
                         (self.runtime_session_id, list(event_ids)),
                     )
                     by_id = {
-                        row["id"]: self._raw_from_row(row)
-                        for row in cursor.fetchall()
+                        row["id"]: self._raw_from_row(row) for row in cursor.fetchall()
                     }
         return RawEventIdSelectionSnapshot(
             through_sequence=through_sequence,
@@ -846,18 +841,14 @@ class PostgresEventLog:
                         max_events + 1,
                     ),
                 )
-                selected = tuple(
-                    self._raw_from_row(row) for row in cursor.fetchall()
-                )
+                selected = tuple(self._raw_from_row(row) for row in cursor.fetchall())
                 if len(selected) > max_events:
                     raise ValueError("model-call event count exceeds its read bound")
                 if (
                     sum(len(event.canonical_payload_bytes) for event in selected)
                     > max_payload_bytes
                 ):
-                    raise ValueError(
-                        "model-call payload bytes exceed their read bound"
-                    )
+                    raise ValueError("model-call payload bytes exceed their read bound")
                 return selected
 
     def read_raw_events_by_types(
@@ -874,9 +865,7 @@ class PostgresEventLog:
     ) -> RawEventTypeSelectionSnapshot:
         if not event_types or len(event_types) != len(set(event_types)):
             raise ValueError("raw event types must be non-empty and unique")
-        if run_ids is not None and (
-            not run_ids or len(run_ids) != len(set(run_ids))
-        ):
+        if run_ids is not None and (not run_ids or len(run_ids) != len(set(run_ids))):
             raise ValueError("run id selection must be non-empty and unique")
         if minimum_sequence < 1 or max_events < 1 or max_payload_bytes < 1:
             raise ValueError("sparse event read bounds are invalid")
@@ -896,9 +885,7 @@ class PostgresEventLog:
                 )
                 current_high_water = int(cursor.fetchone()["high_water"])
                 high_water = (
-                    current_high_water
-                    if through_sequence is None
-                    else through_sequence
+                    current_high_water if through_sequence is None else through_sequence
                 )
                 if high_water < 0 or high_water > current_high_water:
                     raise ValueError(
@@ -944,17 +931,14 @@ class PostgresEventLog:
                     """,
                     tuple(parameters),
                 )
-                events = tuple(
-                    self._raw_from_row(row) for row in cursor.fetchall()
-                )
+                events = tuple(self._raw_from_row(row) for row in cursor.fetchall())
                 if len(events) > max_events:
-                    raise ValueError(
-                        "sparse event selection exceeds its event bound"
-                    )
-                if sum(len(item.canonical_payload_bytes) for item in events) > max_payload_bytes:
-                    raise ValueError(
-                        "sparse event selection exceeds its byte bound"
-                    )
+                    raise ValueError("sparse event selection exceeds its event bound")
+                if (
+                    sum(len(item.canonical_payload_bytes) for item in events)
+                    > max_payload_bytes
+                ):
+                    raise ValueError("sparse event selection exceeds its byte bound")
                 return RawEventTypeSelectionSnapshot(
                     through_sequence=high_water,
                     events=events,
@@ -996,10 +980,7 @@ class PostgresEventLog:
                 effective_through = (
                     high_water if through_sequence is None else through_sequence
                 )
-                if (
-                    effective_through > high_water
-                    or effective_through < after_sequence
-                ):
+                if effective_through > high_water or effective_through < after_sequence:
                     raise ValueError("transcript domain delta range is invalid")
                 before = self._read_transcript_prefix(
                     control,
@@ -1099,6 +1080,7 @@ class PostgresEventLog:
             "exact": [],
         }
         high_water: int | None = None
+        ledger_prefix: RawTranscriptDomainPrefixFact | None = None
         with postgres_event_connection(
             self.dsn,
             lane=PostgresConnectionLane.BOUNDED_READ,
@@ -1227,10 +1209,24 @@ class PostgresEventLog:
                         if channel == "meta":
                             continue
                         if channel not in channels:
-                            raise ValueError("authority bundle returned unknown channel")
+                            raise ValueError(
+                                "authority bundle returned unknown channel"
+                            )
                         channels[channel].append(self._raw_from_row(row))
+            if high_water is None:
+                raise ValueError("authority bundle did not return a high-water")
+            with connection.cursor(row_factory=dict_row) as prefix_cursor:
+                self._apply_transaction_deadline(
+                    prefix_cursor, deadline, include_lock=False
+                )
+                ledger_prefix = self._read_transcript_prefix(
+                    prefix_cursor,
+                    sequence=high_water,
+                )
         if high_water is None:
             raise ValueError("authority bundle did not return a high-water")
+        if ledger_prefix is None:
+            raise ValueError("authority bundle did not return a ledger prefix")
         primary = tuple(channels["primary"])
         run_sparse = tuple(channels["run_sparse"])
         session_sparse = tuple(channels["session_sparse"])
@@ -1251,7 +1247,27 @@ class PostgresEventLog:
             run_sparse_events=run_sparse,
             session_sparse_events=session_sparse,
             exact_events=exact,
+            ledger_prefix=ledger_prefix,
         )
+
+    def read_raw_ledger_prefix(
+        self,
+        *,
+        through_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainPrefixFact:
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                return self._read_transcript_prefix(
+                    cursor,
+                    sequence=through_sequence,
+                )
 
     def read_raw_reply_events(
         self,
@@ -1285,12 +1301,13 @@ class PostgresEventLog:
                     """,
                     (self.runtime_session_id, reply_id, max_events + 1),
                 )
-                selected = tuple(
-                    self._raw_from_row(row) for row in cursor.fetchall()
-                )
+                selected = tuple(self._raw_from_row(row) for row in cursor.fetchall())
         if len(selected) > max_events:
             raise ValueError("reply event count exceeds its read bound")
-        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+        if (
+            sum(len(item.canonical_payload_bytes) for item in selected)
+            > max_payload_bytes
+        ):
             raise ValueError("reply payload bytes exceed their read bound")
         return selected
 
@@ -1400,12 +1417,13 @@ class PostgresEventLog:
                     """,
                     (self.runtime_session_id, run_id, max_events + 1),
                 )
-                selected = tuple(
-                    self._raw_from_row(row) for row in cursor.fetchall()
-                )
+                selected = tuple(self._raw_from_row(row) for row in cursor.fetchall())
         if len(selected) > max_events:
             raise ValueError("run event count exceeds its read bound")
-        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+        if (
+            sum(len(item.canonical_payload_bytes) for item in selected)
+            > max_payload_bytes
+        ):
             raise ValueError("run payload bytes exceed their read bound")
         return selected
 
@@ -1425,11 +1443,7 @@ class PostgresEventLog:
     ) -> RawCheckpointLedgerSnapshot:
         if requested_through_sequence < 1:
             raise ValueError("checkpoint requested high-water must be positive")
-        if (
-            max_delta_events < 0
-            or max_delta_bytes < 0
-            or max_checkpoint_candidates < 1
-        ):
+        if max_delta_events < 0 or max_delta_bytes < 0 or max_checkpoint_candidates < 1:
             raise ValueError("checkpoint read bounds are invalid")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
@@ -1503,9 +1517,7 @@ class PostgresEventLog:
                     ),
                 )
                 catalog_rows = tuple(cursor.fetchall())
-                catalog: list[
-                    tuple[RawStoredEventEnvelope, str, int]
-                ] = []
+                catalog: list[tuple[RawStoredEventEnvelope, str, int]] = []
                 for row in catalog_rows:
                     raw = self._raw_from_row(row)
                     (
@@ -1552,9 +1564,7 @@ class PostgresEventLog:
                             requested_through_sequence,
                         ),
                     )
-                    delta = tuple(
-                        self._raw_from_row(row) for row in cursor.fetchall()
-                    )
+                    delta = tuple(self._raw_from_row(row) for row in cursor.fetchall())
                     delta_bytes = sum(
                         len(event.canonical_payload_bytes) for event in delta
                     )
@@ -1711,9 +1721,7 @@ class PostgresEventLog:
             if prior_turn.run_id != event.run_id:
                 raise ValueError("event batch reuses a turn across runs")
         ensured_runs = tuple(
-            run_id
-            for run_id in runs
-            if run_id not in self._confirmed_parent_run_ids
+            run_id for run_id in runs if run_id not in self._confirmed_parent_run_ids
         )
         ensured_turns = tuple(
             (turn_id, event)
@@ -1918,8 +1926,7 @@ class PostgresEventLog:
             previous = RawTranscriptDomainPrefixFact(
                 through_sequence=raw.sequence,
                 ledger_payload_bytes=(
-                    previous.ledger_payload_bytes
-                    + len(raw.canonical_payload_bytes)
+                    previous.ledger_payload_bytes + len(raw.canonical_payload_bytes)
                 ),
                 semantic_event_count=semantic_count,
                 semantic_accumulator=semantic_accumulator,
@@ -2011,9 +2018,7 @@ class PostgresEventLog:
             return None
         return raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
 
-    def _get_raw_by_id(
-        self, cursor, event_id: str
-    ) -> RawStoredEventEnvelope | None:
+    def _get_raw_by_id(self, cursor, event_id: str) -> RawStoredEventEnvelope | None:
         cursor.execute(
             """
             select id, session_id, run_id, turn_id, reply_id, sequence,
@@ -2066,9 +2071,7 @@ class PostgresEventLog:
             "turn_id": str(row["turn_id"]),
             "reply_id": str(row["reply_id"]),
             "sequence": int(row["sequence"]),
-            "created_at_utc": canonical_utc_timestamp(
-                row["created_at"].isoformat()
-            ),
+            "created_at_utc": canonical_utc_timestamp(row["created_at"].isoformat()),
             "event_type": str(row["event_type"]),
             "event_schema_version": str(row["event_schema_version"]),
             "event_schema_fingerprint": str(row["event_schema_fingerprint"]),

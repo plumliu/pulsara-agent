@@ -13,6 +13,10 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationClosedEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
+    ProviderInputGenerationStartedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
@@ -30,6 +34,9 @@ from pulsara_agent.primitives.model_call import (
     DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT,
 )
 from pulsara_agent.primitives.terminal_projection import ModelCallSemanticSourceFact
+from pulsara_agent.primitives.provider_input import (
+    ProviderInputGenerationCommitGuardFact,
+)
 from pulsara_agent.llm.terminal_projection import (
     MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
 )
@@ -83,6 +90,9 @@ class ModelStreamStartCommitGuard:
     expected_rollout_account_state_fingerprint: str | None
     reservation_id: str | None
     reservation_quote_fingerprint: str | None
+    provider_input_generation_guard: ProviderInputGenerationCommitGuardFact | None
+    prepared_provider_input_candidate_fingerprint: str | None
+    committed_provider_input_reference_fingerprint: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,21 +124,22 @@ class ModelStreamTerminalCommitGuard:
     rollout_accounting_mode: RolloutAccountingMode
     reservation_id: str | None
     reservation_quote_fingerprint: str | None
+    one_shot_generation_id: str | None
+    stable_one_shot_close_event_id: str | None
 
 
 def build_model_stream_start_commit_guard(
     bundle: ModelLifecycleStartCommitBundle,
 ) -> ModelStreamStartCommitGuard:
     reservation = bundle.reservation
+    provider = bundle.provider_input_start_bundle
     return ModelStreamStartCommitGuard(
         resolved_model_call_id=bundle.resolved_model_call_id,
         stable_model_call_start_event_id=(
             bundle.recovery_plan.model_call_start_event_id
         ),
         lifecycle_kind=bundle.lifecycle_kind,
-        recovery_plan_fingerprint=(
-            bundle.recovery_plan.recovery_plan_fingerprint
-        ),
+        recovery_plan_fingerprint=(bundle.recovery_plan.recovery_plan_fingerprint),
         rollout_accounting_mode=bundle.rollout_accounting_mode,
         expected_rollout_account_state_fingerprint=(
             bundle.expected_rollout_account_state_fingerprint
@@ -137,6 +148,21 @@ def build_model_stream_start_commit_guard(
         reservation_quote_fingerprint=(
             bundle.reservation_quote.quote_fact_fingerprint
             if bundle.reservation_quote is not None
+            else None
+        ),
+        provider_input_generation_guard=(
+            provider.prepared_candidate.generation_commit_guard
+            if provider is not None
+            else None
+        ),
+        prepared_provider_input_candidate_fingerprint=(
+            provider.prepared_candidate.candidate_fingerprint
+            if provider is not None
+            else None
+        ),
+        committed_provider_input_reference_fingerprint=(
+            provider.committed_reference.reference_fingerprint
+            if provider is not None
             else None
         ),
     )
@@ -152,6 +178,12 @@ def build_model_stream_terminal_commit_guard(
     model_stream_measurement_fingerprint: str,
 ) -> ModelStreamTerminalCommitGuard:
     reservation = bundle.reservation
+    provider = bundle.provider_input_start_bundle
+    one_shot_generation_id = (
+        provider.prepared_candidate.generation_id
+        if provider is not None and provider.is_one_shot
+        else None
+    )
     return ModelStreamTerminalCommitGuard(
         resolved_model_call_id=bundle.resolved_model_call_id,
         model_call_start_event_id=bundle.recovery_plan.model_call_start_event_id,
@@ -160,21 +192,23 @@ def build_model_stream_terminal_commit_guard(
         ),
         lifecycle_kind=bundle.lifecycle_kind,
         stable_reply_end_event_id=bundle.stable_reply_end_event_id,
-        stable_settlement_event_id=(
-            bundle.recovery_plan.stable_settlement_event_id
-        ),
+        stable_settlement_event_id=(bundle.recovery_plan.stable_settlement_event_id),
         expected_last_semantic_event_id=expected_last_semantic_event_id,
         source_item_count=source_item_count,
         source_accumulator=source_accumulator,
         durable_event_count=durable_event_count,
-        model_stream_measurement_fingerprint=(
-            model_stream_measurement_fingerprint
-        ),
+        model_stream_measurement_fingerprint=(model_stream_measurement_fingerprint),
         rollout_accounting_mode=bundle.rollout_accounting_mode,
         reservation_id=reservation.reservation_id if reservation else None,
         reservation_quote_fingerprint=(
             bundle.reservation_quote.quote_fact_fingerprint
             if bundle.reservation_quote is not None
+            else None
+        ),
+        one_shot_generation_id=one_shot_generation_id,
+        stable_one_shot_close_event_id=(
+            f"provider_input_generation_closed:{one_shot_generation_id}"
+            if one_shot_generation_id is not None
             else None
         ),
     )
@@ -217,7 +251,9 @@ class RuntimeSessionModelStreamEventCommitPort:
         guard: ModelStreamStartCommitGuard,
     ) -> ConfirmedCommittedBatch:
         events = self._decode_candidates(candidates)
-        starts = tuple(event for event in events if isinstance(event, ModelCallStartEvent))
+        starts = tuple(
+            event for event in events if isinstance(event, ModelCallStartEvent)
+        )
         if len(starts) != 1 or events[-1] is not starts[0]:
             raise ModelStreamCommitContractError(
                 "model start batch requires exactly one final ModelCallStartEvent"
@@ -227,6 +263,10 @@ class RuntimeSessionModelStreamEventCommitPort:
             ModelCallStartEvent,
             ReplyStartEvent,
             RolloutBudgetReservationCreatedEvent,
+            ProviderInputGenerationStartedEvent,
+            ProviderInputAppendCommittedEvent,
+            ProviderInputGenerationClosedEvent,
+            ProviderInputGenerationRolloverResolvedEvent,
         )
         if any(not isinstance(event, allowed) for event in events):
             raise ModelStreamCommitContractError(
@@ -243,6 +283,40 @@ class RuntimeSessionModelStreamEventCommitPort:
         ):
             raise ModelStreamCommitContractError(
                 "model start batch does not match its frozen commit guard"
+            )
+        provider_guard = guard.provider_input_generation_guard
+        if (provider_guard is None) != (start.provider_input_reference is None):
+            raise ModelStreamCommitContractError(
+                "model start provider-input guard/reference matrix mismatch"
+            )
+        if provider_guard is not None:
+            reference = start.provider_input_reference
+            assert reference is not None
+            appends = tuple(
+                event
+                for event in events
+                if isinstance(event, ProviderInputAppendCommittedEvent)
+            )
+            if (
+                len(appends) != 1
+                or events.index(appends[0]) >= events.index(start)
+                or appends[0].id != reference.append_committed_event_identity.event_id
+                or appends[0].expected_model_start_event_id != start.id
+                or reference.reference_fingerprint
+                != guard.committed_provider_input_reference_fingerprint
+            ):
+                raise ModelStreamCommitContractError(
+                    "model start provider append/reference join failed"
+                )
+        elif any(
+            value is not None
+            for value in (
+                guard.prepared_provider_input_candidate_fingerprint,
+                guard.committed_provider_input_reference_fingerprint,
+            )
+        ):
+            raise ModelStreamCommitContractError(
+                "model start has provider-input fingerprints without a guard"
             )
         reservations = tuple(
             event.reservation
@@ -262,8 +336,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 guard.expected_rollout_account_state_fingerprint is None
                 or guard.reservation_id != reservation.reservation_id
                 or quote is None
-                or guard.reservation_quote_fingerprint
-                != quote.quote_fact_fingerprint
+                or guard.reservation_quote_fingerprint != quote.quote_fact_fingerprint
                 or reservation.owner_id != guard.resolved_model_call_id
             ):
                 raise ModelStreamCommitContractError(
@@ -287,6 +360,10 @@ class RuntimeSessionModelStreamEventCommitPort:
             # The same reentrant session lock covers state comparison and the
             # append, so an unrelated settlement cannot slip between them.
             with self._runtime_session.write_coordinator.lock:
+                if provider_guard is not None:
+                    self._runtime_session.provider_input_generation_store.validate_start_guard(
+                        provider_guard
+                    )
                 if reservation is not None:
                     self._require_expected_rollout_state(
                         run_id=start.run_id,
@@ -458,10 +535,13 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model terminal batch must begin with projection then ModelCallEnd"
             )
-        if sum(
-            isinstance(event, ModelCallTerminalProjectionCommittedEvent)
-            for event in events
-        ) != 1:
+        if (
+            sum(
+                isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+                for event in events
+            )
+            != 1
+        ):
             raise ModelStreamCommitContractError(
                 "model terminal batch requires exactly one projection event"
             )
@@ -474,6 +554,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             ModelCallEndEvent,
             RolloutBudgetReservationSettledEvent,
             ReplyEndEvent,
+            ProviderInputGenerationClosedEvent,
         )
         if any(not isinstance(event, allowed) for event in events):
             raise ModelStreamCommitContractError(
@@ -509,6 +590,28 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model terminal projection/End reference join drifted"
             )
+        closes = tuple(
+            event
+            for event in events
+            if isinstance(event, ProviderInputGenerationClosedEvent)
+        )
+        one_shot = guard.one_shot_generation_id is not None
+        if one_shot:
+            if (
+                len(closes) != 1
+                or len(events) < 3
+                or events[2] is not closes[0]
+                or closes[0].id != guard.stable_one_shot_close_event_id
+                or closes[0].generation_id != guard.one_shot_generation_id
+                or closes[0].close_reason != "one_shot_terminal"
+            ):
+                raise ModelStreamCommitContractError(
+                    "one-shot model terminal lacks its atomic generation close"
+                )
+        elif closes or guard.stable_one_shot_close_event_id is not None:
+            raise ModelStreamCommitContractError(
+                "session-window model terminal cannot close a one-shot generation"
+            )
         document = (
             self._runtime_session.transcript_projection_document_registry.resolve(
                 projection.projection_reference
@@ -529,9 +632,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             != DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
             or source.model_stream_semantic_domain_contract_fingerprint
             != (
-                self._runtime_session.authority_materialization_contracts
-                .event_domain.contract
-                .transcript_semantic_domain_contract_fingerprint
+                self._runtime_session.authority_materialization_contracts.event_domain.contract.transcript_semantic_domain_contract_fingerprint
             )
             or source.reducer_contract_fingerprint
             != MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
@@ -617,9 +718,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                                 state=self._state,
                             )
                         )
-                        result = self._confirmed_batch(
-                            candidates, result=write_result
-                        )
+                        result = self._confirmed_batch(candidates, result=write_result)
                     committed_end = next(
                         event
                         for event in result.decode_owned()
@@ -674,8 +773,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             if isinstance(error, ModelStreamCommitNotCommitted):
                 raise error
             if isinstance(error, PendingRuntimeEventWriteError) or (
-                isinstance(error, EventCommitError)
-                and error.commit_outcome == "none"
+                isinstance(error, EventCommitError) and error.commit_outcome == "none"
             ):
                 raise ModelStreamCommitNotCommitted(
                     "stable model-stream batch was not physically committed"
@@ -801,9 +899,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 != stored.event_schema_fingerprint
                 or expected_candidate.event_domain_contract_fingerprint
                 != stored.event_domain_contract_fingerprint
-                or not _stored_payload_matches_candidate(
-                    stored, expected_candidate
-                )
+                or not _stored_payload_matches_candidate(stored, expected_candidate)
             ):
                 raise ModelStreamCommitContractError(
                     "model stream committed event drifted from its frozen candidate"
@@ -819,9 +915,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             )
         payload = {
             "committed_through_sequence": sequences[-1],
-            "envelope_fingerprints": tuple(
-                event.envelope_fingerprint for event in raw
-            ),
+            "envelope_fingerprints": tuple(event.envelope_fingerprint for event in raw),
         }
         return ConfirmedCommittedBatch(
             committed_events=raw,
@@ -847,11 +941,9 @@ class RuntimeSessionModelStreamEventCommitPort:
             )
         try:
             if accounting_mode == "root_account":
-                state = (
-                    self._runtime_session.long_horizon_state_store.rollout_state_at(
-                        account_id,
-                        through_sequence=source_sequence,
-                    )
+                state = self._runtime_session.long_horizon_state_store.rollout_state_at(
+                    account_id,
+                    through_sequence=source_sequence,
                 )
                 if state is None:
                     raise ModelStreamCommitContractError(
@@ -892,9 +984,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 model_call_start_event_id=guard.model_call_start_event_id,
                 expected_source_item_count=guard.first_transport_sequence_index,
                 expected_source_accumulator=guard.source_accumulator_before,
-                expected_durable_event_count=(
-                    guard.first_durable_semantic_event_index
-                ),
+                expected_durable_event_count=(guard.first_durable_semantic_event_index),
                 expected_previous_semantic_event_id=(
                     guard.expected_previous_semantic_event_id
                 ),
@@ -970,12 +1060,12 @@ class RuntimeSessionModelStreamEventCommitPort:
         if (
             matching[0].owner_id != guard.resolved_model_call_id
             or quote is None
-            or quote.quote_fact_fingerprint
-            != guard.reservation_quote_fingerprint
+            or quote.quote_fact_fingerprint != guard.reservation_quote_fingerprint
         ):
             raise ModelStreamCommitContractError(
                 "model terminal reservation quote identity drifted"
             )
+
 
 def _stored_payload_matches_candidate(
     stored: RawStoredEventEnvelope,

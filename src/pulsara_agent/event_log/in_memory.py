@@ -73,9 +73,7 @@ class InMemoryEventLog:
         ]
     )
     _next_sequence: int = 1
-    _materialization_account_state: LedgerMaterializationAccountStateFact | None = (
-        None
-    )
+    _materialization_account_state: LedgerMaterializationAccountStateFact | None = None
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def ensure_runtime_session_owner(self) -> None:
@@ -226,9 +224,7 @@ class InMemoryEventLog:
             )
             if actual_fingerprint != expected_account_state_fingerprint:
                 raise MaterializationAccountStateConflict(
-                    expected_state_fingerprint=(
-                        expected_account_state_fingerprint
-                    ),
+                    expected_state_fingerprint=(expected_account_state_fingerprint),
                     actual_state_fingerprint=actual_fingerprint,
                 )
             actual_last_sequence = self._next_sequence - 1
@@ -242,8 +238,7 @@ class InMemoryEventLog:
                 )
             expected_result_sequence = actual_last_sequence + len(event_list)
             if (
-                resulting_account_state.runtime_session_id
-                != self.runtime_session_id
+                resulting_account_state.runtime_session_id != self.runtime_session_id
                 or resulting_account_state.ledger_through_sequence
                 != expected_result_sequence
                 or resulting_account_state.ledger_event_count_through
@@ -254,7 +249,9 @@ class InMemoryEventLog:
                 )
             existing_ids = {event.event_id for event in self._raw_events}
             if any(event.id in existing_ids for event in event_list):
-                raise ValueError("materialization state batch cannot contain existing IDs")
+                raise ValueError(
+                    "materialization state batch cannot contain existing IDs"
+                )
             stored_events = [
                 _owned_event(
                     event.model_copy(update={"sequence": self._next_sequence + index})
@@ -299,8 +296,7 @@ class InMemoryEventLog:
             )
             if (
                 str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
-                and actual
-                > stored.charge.charge_applied_event_charge_payload_bytes
+                and actual > stored.charge.charge_applied_event_charge_payload_bytes
             ):
                 raise ValueError(
                     "stored charge-applied envelope exceeds its dynamic charge bound"
@@ -453,9 +449,11 @@ class InMemoryEventLog:
             )
         if max_events is not None and len(events) > max_events:
             raise ValueError("event range exceeds its event bound")
-        if max_payload_bytes is not None and sum(
-            len(event.canonical_payload_bytes) for event in events
-        ) > max_payload_bytes:
+        if (
+            max_payload_bytes is not None
+            and sum(len(event.canonical_payload_bytes) for event in events)
+            > max_payload_bytes
+        ):
             raise ValueError("event range exceeds its payload-byte bound")
         return RawEventLogReadSnapshot(
             through_sequence=effective_through,
@@ -464,9 +462,7 @@ class InMemoryEventLog:
                 "raw-event-log-read-snapshot:v1",
                 {
                     "through_sequence": effective_through,
-                    "envelopes": tuple(
-                        event.envelope_fingerprint for event in events
-                    ),
+                    "envelopes": tuple(event.envelope_fingerprint for event in events),
                 },
             ),
         )
@@ -526,10 +522,7 @@ class InMemoryEventLog:
                 event
                 for event in self._raw_events
                 if event.event_type == event_type
-                and (
-                    through_sequence is None
-                    or event.sequence <= through_sequence
-                )
+                and (through_sequence is None or event.sequence <= through_sequence)
             ]
             return tuple(_owned_raw(event) for event in reversed(matches[-limit:]))
 
@@ -554,7 +547,10 @@ class InMemoryEventLog:
             )
         if len(selected) > max_events:
             raise ValueError("model-call event count exceeds its read bound")
-        if sum(len(event.canonical_payload_bytes) for event in selected) > max_payload_bytes:
+        if (
+            sum(len(event.canonical_payload_bytes) for event in selected)
+            > max_payload_bytes
+        ):
             raise ValueError("model-call payload bytes exceed their read bound")
         return selected
 
@@ -573,9 +569,7 @@ class InMemoryEventLog:
         del deadline_monotonic
         if not event_types or len(event_types) != len(set(event_types)):
             raise ValueError("raw event types must be non-empty and unique")
-        if run_ids is not None and (
-            not run_ids or len(run_ids) != len(set(run_ids))
-        ):
+        if run_ids is not None and (not run_ids or len(run_ids) != len(set(run_ids))):
             raise ValueError("run id selection must be non-empty and unique")
         if minimum_sequence < 1 or max_events < 1 or max_payload_bytes < 1:
             raise ValueError("sparse event read bounds are invalid")
@@ -583,9 +577,7 @@ class InMemoryEventLog:
         with self._lock:
             current_high_water = self._next_sequence - 1
             effective_through = (
-                current_high_water
-                if through_sequence is None
-                else through_sequence
+                current_high_water if through_sequence is None else through_sequence
             )
             if effective_through < 0 or effective_through > current_high_water:
                 raise ValueError("requested sparse high-water has not been committed")
@@ -613,7 +605,10 @@ class InMemoryEventLog:
             )
             if len(events) > max_events:
                 raise ValueError("sparse event selection exceeds its event bound")
-            if sum(len(item.canonical_payload_bytes) for item in events) > max_payload_bytes:
+            if (
+                sum(len(item.canonical_payload_bytes) for item in events)
+                > max_payload_bytes
+            ):
                 raise ValueError("sparse event selection exceeds its byte bound")
             return RawEventTypeSelectionSnapshot(
                 through_sequence=effective_through,
@@ -637,7 +632,9 @@ class InMemoryEventLog:
             raise ValueError("transcript registry contract fingerprint is required")
         with self._lock:
             high_water = self._next_sequence - 1
-            effective_through = high_water if through_sequence is None else through_sequence
+            effective_through = (
+                high_water if through_sequence is None else through_sequence
+            )
             if effective_through > high_water or effective_through < after_sequence:
                 raise ValueError("transcript domain delta range is invalid")
             before = self._transcript_prefixes[after_sequence]
@@ -650,9 +647,10 @@ class InMemoryEventLog:
             )
         if len(semantic_events) > max_events:
             raise ValueError("transcript semantic delta exceeds its event bound")
-        if sum(
-            len(item.canonical_payload_bytes) for item in semantic_events
-        ) > max_payload_bytes:
+        if (
+            sum(len(item.canonical_payload_bytes) for item in semantic_events)
+            > max_payload_bytes
+        ):
             raise ValueError("transcript semantic delta exceeds its byte bound")
         return RawTranscriptDomainDeltaSnapshot.build(
             runtime_session_id=self.runtime_session_id,
@@ -682,8 +680,7 @@ class InMemoryEventLog:
             RawTranscriptDomainPrefixFact(
                 through_sequence=raw.sequence,
                 ledger_payload_bytes=(
-                    previous.ledger_payload_bytes
-                    + len(raw.canonical_payload_bytes)
+                    previous.ledger_payload_bytes + len(raw.canonical_payload_bytes)
                 ),
                 semantic_event_count=semantic_count,
                 semantic_accumulator=semantic_accumulator,
@@ -703,6 +700,7 @@ class InMemoryEventLog:
         del deadline_monotonic
         with self._lock:
             high_water = self._next_sequence - 1
+            ledger_prefix = self._transcript_prefixes[high_water]
             primary = tuple(
                 _owned_raw(item)
                 for item in self._raw_events
@@ -742,7 +740,25 @@ class InMemoryEventLog:
             run_sparse_events=run_sparse,
             session_sparse_events=session_sparse,
             exact_events=exact,
+            ledger_prefix=ledger_prefix,
         )
+
+    def read_raw_ledger_prefix(
+        self,
+        *,
+        through_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainPrefixFact:
+        del deadline_monotonic
+        with self._lock:
+            sequence = (
+                self._next_sequence - 1
+                if through_sequence is None
+                else through_sequence
+            )
+            if sequence < 0 or sequence >= len(self._transcript_prefixes):
+                raise ValueError("ledger prefix sequence is not committed")
+            return self._transcript_prefixes[sequence]
 
     def read_raw_reply_events(
         self,
@@ -763,7 +779,10 @@ class InMemoryEventLog:
             )
         if len(selected) > max_events:
             raise ValueError("reply event count exceeds its read bound")
-        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+        if (
+            sum(len(item.canonical_payload_bytes) for item in selected)
+            > max_payload_bytes
+        ):
             raise ValueError("reply payload bytes exceed their read bound")
         return selected
 
@@ -788,8 +807,7 @@ class InMemoryEventLog:
             selected = tuple(
                 _owned_raw(item)
                 for item in self._raw_events
-                if item.reply_id in selected_ids
-                and item.sequence <= through_sequence
+                if item.reply_id in selected_ids and item.sequence <= through_sequence
             )
         _require_reply_snapshot_bounds(
             selected,
@@ -824,7 +842,10 @@ class InMemoryEventLog:
             )
         if len(selected) > max_events:
             raise ValueError("run event count exceeds its read bound")
-        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+        if (
+            sum(len(item.canonical_payload_bytes) for item in selected)
+            > max_payload_bytes
+        ):
             raise ValueError("run payload bytes exceed their read bound")
         return selected
 
@@ -845,11 +866,7 @@ class InMemoryEventLog:
         del deadline_monotonic
         if requested_through_sequence < 1:
             raise ValueError("checkpoint requested high-water must be positive")
-        if (
-            max_delta_events < 0
-            or max_delta_bytes < 0
-            or max_checkpoint_candidates < 1
-        ):
+        if max_delta_events < 0 or max_delta_bytes < 0 or max_checkpoint_candidates < 1:
             raise ValueError("checkpoint read bounds are invalid")
         expected_contract = (
             graph_reducer_id,
@@ -912,13 +929,9 @@ class InMemoryEventLog:
                 delta = tuple(
                     _owned_raw(event)
                     for event in self._raw_events
-                    if checkpoint_through
-                    < event.sequence
-                    <= requested_through_sequence
+                    if checkpoint_through < event.sequence <= requested_through_sequence
                 )
-                delta_bytes = sum(
-                    len(event.canonical_payload_bytes) for event in delta
-                )
+                delta_bytes = sum(len(event.canonical_payload_bytes) for event in delta)
                 candidates.append(
                     RawCheckpointLedgerCandidate(
                         checkpoint_id=checkpoint_id,
@@ -1048,5 +1061,8 @@ def _require_reply_snapshot_bounds(
 ) -> None:
     if len(events) > max_total_events:
         raise ValueError("reply snapshot event count exceeds its aggregate bound")
-    if sum(len(item.canonical_payload_bytes) for item in events) > max_total_payload_bytes:
+    if (
+        sum(len(item.canonical_payload_bytes) for item in events)
+        > max_total_payload_bytes
+    ):
         raise ValueError("reply snapshot payload exceeds its aggregate byte bound")

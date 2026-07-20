@@ -1,0 +1,58 @@
+{
+  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "scenario_id": "manual-compaction-trail",
+  "description": "Follow a long linked-document trail, compact through the public Host API, and recover both endpoint facts without rereading files.",
+  "model_role": "flash",
+  "reasoning_effort": null,
+  "timeout_seconds": 1200,
+  "memory_reflection": false,
+  "system_prompt": "You are running Pulsara's frozen long-horizon compaction dogfood. Follow linked files one at a time and retain only facts established by the trail. Never inspect .env or credentials. When a later turn forbids file reads, rely exclusively on the durable conversation and compaction summary.",
+  "fixture": {
+    "fixture_kind": "linked_chapter_trail",
+    "chapter_count": 6,
+    "trail_order": [1, 4, 2, 6, 3, 5],
+    "filler_paragraph_count": 72,
+    "first_marker": "Asterford",
+    "final_marker": "Veylan"
+  },
+  "workflow": {
+    "workflow_kind": "manual_compaction",
+    "discovery_prompt": "Begin with story/chapter-1.md. Each chapter ends with NEXT or TRAIL_END. Read exactly that linked trail one chapter at a time; do not guess ahead. Remember the river village explicitly named in the first trail chapter and the noble House explicitly named at TRAIL_END. Do not write answer.txt yet. When done, briefly state that both endpoint facts are retained.",
+    "post_compaction_prompt": "The Host has now completed a durable manual compaction. Do not read or search any workspace file. From the retained conversation, write answer.txt whose entire contents are FIRST_VILLAGE-FINAL_HOUSE with the exact two names learned from the trail. Use write_file exactly once."
+  },
+  "verifier": {
+    "path": "verify.py",
+    "timeout_seconds": 20
+  },
+  "evidence_gate": {
+    "min_root_runs": 2,
+    "max_root_runs": 2,
+    "min_all_runs": 2,
+    "max_all_runs": 4,
+    "min_model_calls": 3,
+    "max_model_calls": 16,
+    "min_tool_calls": 7,
+    "max_tool_calls": 24,
+    "max_total_tokens": 350000,
+    "event_count_minimums": [
+      {"event_type": "CONTEXT_COMPACTION_COMPLETED", "minimum": 1},
+      {"event_type": "MODEL_CALL_END", "minimum": 3},
+      {"event_type": "RUN_END", "minimum": 2}
+    ],
+    "forbidden_event_types": [
+      "CONTEXT_COMPACTION_FAILED",
+      "MODEL_CALL_REJECTED",
+      "PROVIDER_MODEL_STREAM_ERROR",
+      "RUN_ERROR"
+    ],
+    "root_run_tool_gate": {
+      "run_selector": "last",
+      "required_exact_counts": [
+        {"tool_name": "write_file", "exact_count": 1}
+      ],
+      "forbidden_tool_names": ["read_file", "search_files", "terminal"]
+    },
+    "require_positive_cached_input_tokens": false,
+    "max_provider_input_rollovers": 3
+  }
+}

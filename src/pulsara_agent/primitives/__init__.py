@@ -31,7 +31,6 @@ from pulsara_agent.primitives.authority_materialization import (
 )
 from pulsara_agent.primitives.context import (
     ContextAuthoritySlicePlan,
-    ContextCandidateAuthorityFact,
     ContextCandidateSourceSelectionFact,
     ContextCandidateCollectionPolicyFact,
     ContextCompilePolicyFact,
@@ -55,6 +54,12 @@ from pulsara_agent.primitives.context import (
     context_fingerprint,
     freeze_json,
     thaw_json,
+)
+from pulsara_agent.primitives.context_source import (
+    ContextSourceCandidateAttributionFact,
+    ContextSourceCandidateSemanticFact,
+    ContextSourceContractFact,
+    ContextSourceId,
 )
 from pulsara_agent.primitives.model_call import (
     CompactionTargetEstimateFact,
@@ -168,7 +173,6 @@ __all__ = [
     "CheckpointDispatchBarrierFact",
     "ContextBudgetReportEvent",
     "ContextAuthoritySlicePlan",
-    "ContextCandidateAuthorityFact",
     "ContextCandidateSourceSelectionFact",
     "ContextCandidateCollectionPolicyFact",
     "ContextCompilePolicyFact",
@@ -179,6 +183,10 @@ __all__ = [
     "ContextInputIdentityFact",
     "LongHorizonContextAttributionFact",
     "ContextSectionCandidate",
+    "ContextSourceCandidateAttributionFact",
+    "ContextSourceCandidateSemanticFact",
+    "ContextSourceContractFact",
+    "ContextSourceId",
     "CurrentUserMessageFact",
     "DataMediaTypeNormalizationContractFact",
     "DataMediaTypeNormalizationRuleFact",

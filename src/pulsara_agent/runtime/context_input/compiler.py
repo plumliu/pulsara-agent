@@ -7,14 +7,19 @@ This module is the production C3 boundary.  It does not accept or import
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 
 from pulsara_agent.llm.estimator import TokenEstimator
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
 from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.llm.user_carrier import (
+    context_source_observation_payload,
+    derived_text_runtime_observation_payload,
+    runtime_clock_observation_payload,
+    transcript_lifecycle_observation_payload,
+)
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.context import (
-    ContextArtifactTextFact,
-    ContextInlineTextFact,
+    ContextSectionCandidate,
     ContextSourceTimingFact,
     PreparedContextCandidateSet,
     TranscriptCompileInput,
@@ -28,10 +33,15 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.long_horizon import PreparedObservationRollupUnit
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.context_source import (
+    ContextSourceDispositionFact,
+    RuntimeClockProposalPayloadFact,
+)
 from pulsara_agent.primitives.tool_result import ToolResultRenderDecisionFact
 from pulsara_agent.runtime.context_engine.types import (
     CompiledContext,
     CompiledContextSection,
+    CompiledProviderSourceFragment,
     CompiledToolSpecUnit,
     ContextBudgetExceeded,
     ContextBudgetReport,
@@ -46,6 +56,15 @@ from pulsara_agent.runtime.context_input.render import (
 from pulsara_agent.runtime.context_input.candidate import (
     validate_candidate_against_snapshot,
 )
+from pulsara_agent.runtime.context_input.sources.render import (
+    render_context_source_candidate,
+)
+from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    context_source_lifecycle_entry,
+    context_source_observation_kind,
+    context_source_transition_kind,
+    runtime_observation_kind_contract,
+)
 from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshot
 from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshotDraft
 from pulsara_agent.runtime.context_input.provider_projection import (
@@ -56,15 +75,34 @@ from pulsara_agent.primitives.transcript_projection import (
     ModelVisibleNamedFactSemanticIdentityFact,
     ModelVisibleNamedFactSemanticSelectionFact,
     TranscriptProviderProjectionFact,
+    TranscriptProjectionLeafEntryFact,
+)
+from pulsara_agent.runtime.provider_input.causal import (
+    LoweredProviderTranscriptMessage,
+    PreparedOrderedProviderTranscriptProjection,
+    build_default_resolved_causal_physical_policy,
+    build_ordered_provider_transcript_projection,
+)
+from pulsara_agent.primitives.provider_input import (
+    CommittedRuntimeObservationSemanticHeadFact,
+    ProviderOrderedTranscriptProjectionFact,
+    ResolvedProviderInputCausalAndPhysicalPolicyFact,
 )
 
 
 @dataclass(frozen=True, slots=True)
 class LoweredTranscriptMessages:
     full_messages: tuple[LLMMessage, ...]
+    full_source_event_refs: tuple[tuple[ContextEventReferenceFact, ...], ...]
+    full_sources: tuple[LoweredProviderTranscriptMessage, ...]
     prior_history_messages: tuple[LLMMessage, ...]
+    prior_history_source_event_refs: tuple[tuple[ContextEventReferenceFact, ...], ...]
     current_user_messages: tuple[LLMMessage, ...]
+    current_user_source_event_refs: tuple[tuple[ContextEventReferenceFact, ...], ...]
     current_run_tail_messages: tuple[LLMMessage, ...]
+    current_run_tail_source_event_refs: tuple[
+        tuple[ContextEventReferenceFact, ...], ...
+    ]
 
 
 def compile_context_from_facts(
@@ -75,6 +113,16 @@ def compile_context_from_facts(
     prepared_rollups: tuple[PreparedObservationRollupUnit, ...],
     section_candidates: PreparedContextCandidateSet,
     transcript_provider_projection: TranscriptProviderProjectionFact | None = None,
+    ordered_transcript_projection: ProviderOrderedTranscriptProjectionFact
+    | None = None,
+    transcript_stable_entries: tuple[TranscriptProjectionLeafEntryFact, ...] = (),
+    provider_causal_physical_policy: (
+        ResolvedProviderInputCausalAndPhysicalPolicyFact | None
+    ) = None,
+    context_source_hydrated_contents: tuple[tuple[str, str], ...] = (),
+    historical_provider_source_heads: tuple[
+        CommittedRuntimeObservationSemanticHeadFact, ...
+    ] = (),
 ) -> CompiledContext:
     """Lower one already-prepared immutable aggregate into ``LLMContext``."""
 
@@ -93,8 +141,7 @@ def compile_context_from_facts(
             "prepared observation rollups require a resolved runtime carrier"
         )
     if carrier is not None and any(
-        item.compile_unit.carrier_contract_fingerprint
-        != carrier.contract_fingerprint
+        item.compile_unit.carrier_contract_fingerprint != carrier.contract_fingerprint
         for item in prepared_rollups
     ):
         raise ValueError("prepared rollup carrier differs from resolved model target")
@@ -102,15 +149,22 @@ def compile_context_from_facts(
         raise ValueError("compiler transcript fingerprint is required")
     if section_candidates.policy != snapshot.compile_policy.candidate_collection:
         raise ValueError("compiler candidate policy differs from snapshot")
+    hydrated_source_contents = dict(context_source_hydrated_contents)
     for entry in section_candidates.entries:
         validate_candidate_against_snapshot(
             snapshot=snapshot,
             candidate=entry.candidate,
+            hydrated_contents=hydrated_source_contents,
         )
 
     candidate_sections = sorted(
         (
-            _candidate_section(entry.candidate, entry.lifecycle.status, estimator)
+            _candidate_section(
+                entry.candidate,
+                entry.lifecycle.status,
+                estimator,
+                hydrated_contents=hydrated_source_contents,
+            )
             for entry in section_candidates.entries
         ),
         key=lambda section: (section.priority, section.id),
@@ -128,6 +182,7 @@ def compile_context_from_facts(
             prior_history_messages=lowered_transcript.prior_history_messages,
             current_user_messages=lowered_transcript.current_user_messages,
             current_run_tail_messages=lowered_transcript.current_run_tail_messages,
+            chronological_messages=lowered_transcript.full_messages,
             sections=transcript_sections,
             estimator=estimator,
         )
@@ -139,17 +194,41 @@ def compile_context_from_facts(
             prior_history_messages=lowered_transcript.prior_history_messages,
             current_user_messages=lowered_transcript.current_user_messages,
             current_run_tail_messages=lowered_transcript.current_run_tail_messages,
+            chronological_messages=lowered_transcript.full_messages,
             sections=transcript_sections,
             estimator=estimator,
         )
     )
-    sections = list(
-        _apply_non_transcript_timing_overlay(
-            snapshot=snapshot,
-            sections=tuple(candidate_sections),
-            estimator=estimator,
-        )
+    causal_policy = (
+        provider_causal_physical_policy
+        or build_default_resolved_causal_physical_policy()
     )
+    prepared_ordered_projection: PreparedOrderedProviderTranscriptProjection | None = (
+        None
+    )
+    if transcript_stable_entries:
+        prepared_ordered_projection = build_ordered_provider_transcript_projection(
+            runtime_session_id=transcript.runtime_session_id,
+            context_id=snapshot.identity.context_id,
+            transcript=transcript,
+            lowered_messages=lowered_transcript.full_sources,
+            stable_entries=transcript_stable_entries,
+            rendering_contract_fingerprint=(
+                prepared_provider_projection.projection_fact.rendering_contract.contract_fingerprint
+            ),
+            policy=causal_policy,
+        )
+        if (
+            ordered_transcript_projection is not None
+            and ordered_transcript_projection
+            != prepared_ordered_projection.projection
+        ):
+            raise ValueError("frozen ordered provider transcript projection drifted")
+    elif ordered_transcript_projection is not None:
+        raise ValueError(
+            "ordered provider projection replay requires stable transcript entries"
+        )
+    sections = list(candidate_sections)
     sections.extend(prepared_provider_projection.rendered_transcript_sections)
     tools, tool_units = _compile_tools(facts)
     target = call.target
@@ -170,12 +249,31 @@ def compile_context_from_facts(
         tools_estimated_tokens=sum(item.estimated_tokens for item in tool_units),
         estimator=estimator,
     )
-    system_prompt = _system_prompt(sections)
-    messages, scopes = _lower_messages(
-        transcript_messages=(
-            prepared_provider_projection.lowered_provider_messages
-        ),
+    provider_source_fragments = _compiled_provider_source_fragments(
         sections=sections,
+        candidates=section_candidates,
+        estimator=estimator,
+    )
+    provider_source_dispositions = _compiled_provider_source_dispositions(
+        fragments=provider_source_fragments,
+        candidates=section_candidates,
+        all_source_candidates=snapshot.context_source_candidates,
+        source_dispositions=snapshot.context_source_dispositions,
+        historical_source_heads=historical_provider_source_heads,
+    )
+    system_prompt = "\n\n".join(
+        fragment.message.content[0]
+        for fragment in provider_source_fragments
+        if fragment.provider_lane == "system_prompt"
+    )
+    chronological_transcript_messages = (
+        prepared_ordered_projection.lowered_messages
+        if prepared_ordered_projection is not None
+        else prepared_provider_projection.lowered_provider_messages
+    )
+    messages, scopes = _lower_compiled_provider_messages(
+        transcript_messages=chronological_transcript_messages,
+        source_fragments=provider_source_fragments,
     )
     llm_context = LLMContext(
         messages=messages,
@@ -317,15 +415,20 @@ def compile_context_from_facts(
         final_token_estimate=estimate,
         message_budget_scopes=scopes,
         prepared_transcript_provider_projection=prepared_provider_projection,
-        model_visible_named_fact_semantic_selection=(
-            named_fact_semantic_selection
-        ),
+        prepared_ordered_transcript_projection=prepared_ordered_projection,
+        provider_causal_physical_policy=causal_policy,
+        model_visible_named_fact_semantic_selection=(named_fact_semantic_selection),
         tool_result_render_decisions=(
             rendered_tool_results.tool_result_render_decisions
         ),
         tool_result_budget_report=dict(rendered_tool_results.tool_result_budget_report),
         tool_result_render_decision_facts=(rendered_tool_results.canonical_decisions),
         tool_result_render_operational_facts=(rendered_tool_results.operational_facts),
+        provider_source_fragments=provider_source_fragments,
+        provider_source_dispositions=provider_source_dispositions,
+        transcript_source_event_refs_by_message=(
+            lowered_transcript.full_source_event_refs
+        ),
     )
 
 
@@ -474,7 +577,10 @@ def lower_transcript_for_context(
     )
     if tuple(fragments) != expected_refs:
         raise ValueError("rendered fragments do not match transcript result refs")
-    pairs_by_call = {pair.tool_call_id: pair for pair in transcript.tool_pairs}
+    pairs_by_call = {
+        (pair.result_message_id, pair.tool_call_id): pair
+        for pair in transcript.tool_pairs
+    }
     messages_by_id = {message.message_id: message for message in transcript.messages}
     anchored_rollups: dict[str, list[PreparedObservationRollupUnit]] = {}
     seen_rollup_ids: set[str] = set()
@@ -497,21 +603,36 @@ def lower_transcript_for_context(
         anchored_rollups.setdefault(message.message_id, []).append(prepared)
 
     full: list[LLMMessage] = []
+    full_refs: list[tuple[ContextEventReferenceFact, ...]] = []
+    full_sources: list[LoweredProviderTranscriptMessage] = []
     prior: list[LLMMessage] = []
+    prior_refs: list[tuple[ContextEventReferenceFact, ...]] = []
     current: list[LLMMessage] = []
+    current_refs: list[tuple[ContextEventReferenceFact, ...]] = []
     tail: list[LLMMessage] = []
+    tail_refs: list[tuple[ContextEventReferenceFact, ...]] = []
+    source_refs_by_event_id = {
+        ref.event_id: ref
+        for source_message in transcript.messages
+        for block in source_message.blocks
+        for ref in getattr(block, "source_events", ())
+    }
     for message_index, message in enumerate(transcript.messages):
         segment = _normalized_segment(message.segment)
-        lowered = _lower_transcript_message(
+        lowered_message_parts = _lower_transcript_message(
             message=message,
             message_index=message_index,
             segment=segment,
             fragments=fragments,
             pairs_by_call=pairs_by_call,
         )
-        rollup_messages = tuple(
-            LLMMessage.runtime_observation(item.compile_unit.inline_text)
-            for item in sorted(
+        message_refs = _ordered_transcript_source_refs(
+            ref
+            for block in message.blocks
+            for ref in getattr(block, "source_events", ())
+        )
+        ordered_rollups = tuple(
+            sorted(
                 anchored_rollups.get(message.message_id, ()),
                 key=lambda item: (
                     item.rollup.member_facts[-1].result_sequence,
@@ -519,20 +640,98 @@ def lower_transcript_for_context(
                 ),
             )
         )
-        lowered = (*lowered, *rollup_messages)
+        rollup_messages = tuple(
+            LLMMessage.runtime_observation(
+                derived_text_runtime_observation_payload(
+                    derivation_kind="long_horizon_rollup_observation",
+                    model_visible_content=item.compile_unit.inline_text,
+                    source_semantic_fingerprint=item.rollup.semantic_fingerprint,
+                ),
+                observation_kind="long_horizon_rollup_observation",
+                source_instance_id=f"rollup:{item.rollup.rollup_id}",
+                lifecycle_class="causal_append_once",
+                authority_class="runtime_fact",
+                causal_occurrence_semantic_fingerprint=(
+                    item.rollup.semantic_fingerprint
+                ),
+            )
+            for item in ordered_rollups
+        )
+        rollup_refs = tuple(
+            _ordered_transcript_source_refs(
+                _rollup_member_source_ref(
+                    event_id=member.result_event_id,
+                    source_refs_by_event_id=source_refs_by_event_id,
+                )
+                for member in item.rollup.member_facts
+            )
+            for item in ordered_rollups
+        )
+        lowered = (*lowered_message_parts, *rollup_messages)
+        lowered_refs = (
+            *(message_refs for _ in lowered_message_parts),
+            *rollup_refs,
+        )
+        if len(lowered) != len(lowered_refs):
+            raise ValueError("lowered transcript source attribution drifted")
         full.extend(lowered)
+        full_refs.extend(lowered_refs)
+        full_sources.extend(
+            LoweredProviderTranscriptMessage(
+                message=provider_message,
+                source_message=message,
+                source_event_refs=source_refs,
+                lowered_part_index=index,
+                source_kind=(
+                    "canonical_message"
+                    if index < len(lowered_message_parts)
+                    else "rollup_observation"
+                ),
+            )
+            for index, (provider_message, source_refs) in enumerate(
+                zip(lowered, lowered_refs, strict=True)
+            )
+        )
         if segment == "current_user":
             current.extend(lowered)
+            current_refs.extend(lowered_refs)
         elif segment == "current_run_tail":
             tail.extend(lowered)
+            tail_refs.extend(lowered_refs)
         else:
             prior.extend(lowered)
+            prior_refs.extend(lowered_refs)
     return LoweredTranscriptMessages(
         full_messages=tuple(full),
+        full_source_event_refs=tuple(full_refs),
+        full_sources=tuple(full_sources),
         prior_history_messages=tuple(prior),
+        prior_history_source_event_refs=tuple(prior_refs),
         current_user_messages=tuple(current),
+        current_user_source_event_refs=tuple(current_refs),
         current_run_tail_messages=tuple(tail),
+        current_run_tail_source_event_refs=tuple(tail_refs),
     )
+
+
+def _ordered_transcript_source_refs(
+    refs,
+) -> tuple[ContextEventReferenceFact, ...]:
+    by_identity = {
+        (ref.runtime_session_id, ref.sequence, ref.event_id): ref for ref in refs
+    }
+    return tuple(by_identity[key] for key in sorted(by_identity))
+
+
+def _rollup_member_source_ref(
+    *,
+    event_id: str,
+    source_refs_by_event_id: dict[str, ContextEventReferenceFact],
+) -> ContextEventReferenceFact:
+    try:
+        return source_refs_by_event_id[event_id]
+    except KeyError as exc:
+        raise ValueError("rollup member lacks exact transcript source ref") from exc
 
 
 def _lower_transcript_message(
@@ -559,10 +758,71 @@ def _lower_transcript_message(
                     tool_calls=tuple(tool_calls),
                 )
             )
-        elif message.role == "system":
-            lowered.append(LLMMessage.system("\n".join(text_parts)))
+        elif message.role == "user":
+            lowered.append(
+                LLMMessage.user(
+                    "\n".join(text_parts),
+                    causal_occurrence_semantic_fingerprint=context_fingerprint(
+                        "canonical-human-message-occurrence:v1", message.message_id
+                    ),
+                )
+            )
+        elif message.role == "runtime_request":
+            lowered.append(
+                LLMMessage.runtime_request(
+                    "\n".join(text_parts),
+                    request_kind="subagent_task",
+                    business_occurrence_semantic_fingerprint=context_fingerprint(
+                        "canonical-runtime-request-occurrence:v1",
+                        (message.run_id, message.message_id),
+                    ),
+                    lifecycle_class="child_run_entry",
+                )
+            )
+        elif message.role == "runtime_observation":
+            observation_kind = (
+                "compaction_replacement_summary"
+                if message.segment == "compaction_summary"
+                else "lifecycle_observation"
+            )
+            content = "\n".join(text_parts)
+            payload = (
+                derived_text_runtime_observation_payload(
+                    derivation_kind="compaction_replacement_summary",
+                    model_visible_content=content,
+                    source_semantic_fingerprint=context_fingerprint(
+                        "compaction-summary-runtime-observation-source:v1",
+                        (message.message_id, content),
+                    ),
+                )
+                if observation_kind == "compaction_replacement_summary"
+                else transcript_lifecycle_observation_payload(
+                    lifecycle_segment=message.segment,
+                    model_visible_content=content,
+                )
+            )
+            lowered.append(
+                LLMMessage.runtime_observation(
+                    payload,
+                    observation_kind=observation_kind,
+                    source_instance_id=(
+                        f"transcript:{message.run_id or 'session'}:{message.segment}"
+                    ),
+                    lifecycle_class="causal_append_once",
+                    authority_class="runtime_fact",
+                    causal_occurrence_semantic_fingerprint=context_fingerprint(
+                        "canonical-lifecycle-occurrence:v1",
+                        (
+                            message.run_id,
+                            message.segment,
+                            message.created_at_utc,
+                            tuple(text_parts),
+                        ),
+                    ),
+                )
+            )
         else:
-            lowered.append(LLMMessage.user("\n".join(text_parts)))
+            raise ValueError(f"unsupported canonical transcript role: {message.role}")
         text_parts.clear()
         thinking_parts.clear()
         tool_calls.clear()
@@ -589,7 +849,7 @@ def _lower_transcript_message(
         elif isinstance(block, TranscriptToolResultRefFact):
             flush()
             fragment = fragments[block.tool_result_unit_id]
-            pair = pairs_by_call.get(block.tool_call_id)
+            pair = pairs_by_call.get((message.message_id, block.tool_call_id))
             if pair is None:
                 raise ValueError("tool-result ref lacks normalized interaction pair")
             if (
@@ -619,17 +879,16 @@ def _normalized_segment(segment: str) -> str:
 
 
 def _candidate_section(
-    candidate, lifecycle_status: str, estimator
+    candidate,
+    lifecycle_status: str,
+    estimator,
+    *,
+    hydrated_contents: dict[str, str],
 ) -> AllocatedContextSection:
-    payload = candidate.payload
-    if isinstance(payload, ContextInlineTextFact):
-        text = payload.text
-    elif isinstance(payload, ContextArtifactTextFact):
-        raise ValueError(
-            "artifact-backed candidate must be materialized before pure compile"
-        )
-    else:  # pragma: no cover - closed Pydantic union
-        raise TypeError("unsupported candidate payload")
+    text = render_context_source_candidate(
+        candidate,
+        hydrated_contents=hydrated_contents,
+    )
     stability = {
         "stable": "stable",
         "run": "turn",
@@ -654,64 +913,23 @@ def _candidate_section(
         },
         metadata={
             "chars": len(text),
-            "source_timing": candidate.source_timing.model_dump(mode="json"),
+            "source_absolute_timing": (
+                candidate.attribution.source_absolute_timing.model_dump(mode="json")
+                if candidate.attribution.source_absolute_timing is not None
+                else None
+            ),
             "lowering_kind": candidate.lowering_kind,
+            "source_revision_fingerprint": (
+                candidate.attribution.semantic.source_revision.revision_fingerprint
+            ),
+            "source_contract_fingerprint": (
+                candidate.attribution.source_contract_fingerprint
+            ),
         },
         lifecycle_status=lifecycle_status,
         lifecycle_reason="prepared_candidate_set",
         dependency_fingerprint=candidate.lifecycle_dependency_fingerprint,
     )
-
-
-def _apply_non_transcript_timing_overlay(
-    *,
-    snapshot,
-    sections: tuple[AllocatedContextSection, ...],
-    estimator: TokenEstimator,
-) -> tuple[AllocatedContextSection, ...]:
-    overlaid: list[AllocatedContextSection] = []
-    for section in sections:
-        if section.metadata.get("lowering_kind") == "transcript":
-            raise ValueError(
-                "transcript invocation timing belongs to the provider projection"
-            )
-        source = ContextSourceTimingFact.model_validate(
-            section.metadata.get("source_timing")
-        )
-        age_seconds = _age_seconds(
-            compiled_at_utc=snapshot.timing.compiled_at_utc,
-            source=source,
-        )
-        timing = {
-            "compiled_at_utc": snapshot.timing.compiled_at_utc,
-            "session_timezone": snapshot.timing.session_timezone,
-            "compiled_local_date": snapshot.timing.compiled_local_date,
-            "age_seconds": age_seconds,
-            "source": source.model_dump(mode="json"),
-        }
-        metadata = {
-            **section.metadata,
-            "source_timing": source.model_dump(mode="json"),
-            "timing": timing,
-        }
-        if _section_renders_timing_header(section):
-            header = _timing_header_text(timing)
-            metadata["timing_header_text"] = header
-            metadata["rendered_timing_header_tokens"] = estimator.estimate_text(header)
-            metadata["rendered_timing_header_chars"] = len(header)
-        overlaid.append(
-            replace(
-                section,
-                metadata=metadata,
-                estimated_tokens=_estimate_section_tokens(
-                    section,
-                    text=section.text,
-                    estimator=estimator,
-                    metadata=metadata,
-                ),
-            )
-        )
-    return tuple(overlaid)
 
 
 def _transcript_source_timing(
@@ -763,72 +981,6 @@ def _transcript_source_timing(
         **payload,
         timing_fingerprint=context_fingerprint("context-source-timing:v1", payload),
     )
-
-
-def _section_renders_timing_header(section: AllocatedContextSection) -> bool:
-    return section.id != "system:prompt" and section.metadata.get("lowering_kind") in {
-        "system_instruction",
-        "leading_user_context",
-        "handoff_hint",
-        "trailing_status",
-    }
-
-
-def _age_seconds(
-    *,
-    compiled_at_utc: str,
-    source: ContextSourceTimingFact,
-) -> float | None:
-    source_time = (
-        source.source_ended_at_utc
-        or source.observed_at_utc
-        or source.source_started_at_utc
-    )
-    if source_time is None:
-        return None
-    compiled = datetime.fromisoformat(compiled_at_utc.replace("Z", "+00:00"))
-    observed = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
-    return max(0.0, round((compiled - observed).total_seconds(), 3))
-
-
-def _timing_header_text(timing: dict[str, object]) -> str:
-    source = timing["source"]
-    assert isinstance(source, dict)
-    parts = [
-        f"freshness={source['freshness']}",
-        f"compiled_at_utc={timing['compiled_at_utc']}",
-    ]
-    if timing.get("session_timezone"):
-        parts.append(f"session_timezone={timing['session_timezone']}")
-    if timing.get("compiled_local_date"):
-        parts.append(f"local_date={timing['compiled_local_date']}")
-    started = source.get("source_started_at_utc")
-    ended = source.get("source_ended_at_utc")
-    observed = source.get("observed_at_utc")
-    if started and ended:
-        parts.append(f"source={started}..{ended}")
-    elif observed:
-        parts.append(f"source={observed}")
-    else:
-        parts.append("source=unknown")
-    age = timing.get("age_seconds")
-    if isinstance(age, int | float):
-        parts.append(f"age={_format_duration(float(age))}")
-    return "[context timing: " + "; ".join(parts) + "]"
-
-
-def _format_duration(seconds: float) -> str:
-    whole = max(0, int(seconds))
-    if whole < 60:
-        return f"{whole}s"
-    minutes, second = divmod(whole, 60)
-    if minutes < 60:
-        return f"{minutes}m{second:02d}s"
-    hours, minute = divmod(minutes, 60)
-    if hours < 24:
-        return f"{hours}h{minute:02d}m"
-    days, hour = divmod(hours, 24)
-    return f"{days}d{hour:02d}h"
 
 
 def _component_label(component_id: str) -> str:
@@ -1165,73 +1317,321 @@ def _compile_tools(
     return tuple(tools), tuple(units)
 
 
-def _system_prompt(sections: tuple[AllocatedContextSection, ...]) -> str:
-    return "\n\n".join(
-        _render_section_text_with_timing(section)
-        for section in sorted(sections, key=lambda item: (item.priority, item.id))
-        if section.metadata.get("lowering_kind") == "system_instruction"
-        and section.included
-        and section.text
+def _compiled_provider_source_fragments(
+    *,
+    sections: tuple[AllocatedContextSection, ...],
+    candidates: PreparedContextCandidateSet,
+    estimator: TokenEstimator,
+) -> tuple[CompiledProviderSourceFragment, ...]:
+    candidates_by_id = {
+        entry.candidate.source_instance_id: entry.candidate
+        for entry in candidates.entries
+    }
+    fragments = []
+    for section in sorted(sections, key=lambda item: (item.priority, item.id)):
+        if (
+            section.metadata.get("lowering_kind") == "transcript"
+            or not section.included
+        ):
+            continue
+        candidate = candidates_by_id.get(section.id)
+        if candidate is None:
+            raise ValueError("compiled provider section lacks ContextSource owner")
+        if not section.text and context_source_lifecycle_entry(
+            candidate.source_id
+        ).lifecycle_class != "replacement_snapshot":
+            continue
+        # Source timing is durable attribution.  Except for the explicit clock
+        # source, it must not turn an unchanged snapshot into new wire bytes.
+        rendered = section.text
+        provider_lane, message = _lower_context_source_provider_message(
+            candidate,
+            rendered,
+        )
+        fragments.append(
+            CompiledProviderSourceFragment(
+                candidate=candidate,
+                render_mode=section.render_mode,
+                provider_lane=provider_lane,
+                message=message,
+                estimated_tokens=estimator.estimate_message(message),
+            )
+        )
+    selected = {item.candidate.semantic_fingerprint for item in fragments}
+    for entry in candidates.entries:
+        candidate = entry.candidate
+        if candidate.semantic_fingerprint in selected:
+            continue
+        lifecycle = context_source_lifecycle_entry(candidate.source_id)
+        if lifecycle.lifecycle_class != "replacement_snapshot":
+            continue
+        if context_source_transition_kind(
+            candidate.source_id,
+            candidate.attribution.semantic.payload,
+        ) != "explicit_empty":
+            continue
+        provider_lane, message = _lower_context_source_provider_message(
+            candidate,
+            "",
+        )
+        fragments.append(
+            CompiledProviderSourceFragment(
+                candidate=candidate,
+                render_mode="full",
+                provider_lane=provider_lane,
+                message=message,
+                estimated_tokens=estimator.estimate_message(message),
+            )
+        )
+    return tuple(fragments)
+
+
+def _compiled_provider_source_dispositions(
+    *,
+    fragments: tuple[CompiledProviderSourceFragment, ...],
+    candidates: PreparedContextCandidateSet,
+    all_source_candidates: tuple[ContextSectionCandidate, ...],
+    source_dispositions: tuple[ContextSourceDispositionFact, ...],
+    historical_source_heads: tuple[
+        CommittedRuntimeObservationSemanticHeadFact, ...
+    ],
+) -> tuple[ContextSourceDispositionFact, ...]:
+    """Bind compiler allocation to every replacement source already in authority."""
+
+    selected = {
+        item.candidate.semantic_fingerprint for item in fragments
+    }
+    prepared_entries = {
+        item.candidate.semantic_fingerprint: item.candidate
+        for item in candidates.entries
+    }
+    prepared = {
+        item.semantic_fingerprint: item for item in all_source_candidates
+    }
+    if any(
+        prepared.get(fingerprint) != candidate
+        for fingerprint, candidate in prepared_entries.items()
+    ):
+        raise ValueError("prepared candidate set differs from snapshot source authority")
+    historical = {
+        (
+            item.effective_snapshot.source_id,
+            item.effective_snapshot.source_instance_id,
+        ): item
+        for item in historical_source_heads
+    }
+    result: list[ContextSourceDispositionFact] = []
+    for disposition in source_dispositions:
+        key = (disposition.source_id, disposition.source_instance_id)
+        prior = historical.get(key)
+        candidate_fingerprint = disposition.candidate_semantic_fingerprint
+        if candidate_fingerprint is None:
+            if prior is not None:
+                result.append(disposition)
+            continue
+        candidate = prepared.get(candidate_fingerprint)
+        if candidate is None:
+            raise ValueError(
+                "source disposition lacks its prepared candidate "
+                f"(source={disposition.source_id.value!r}, "
+                f"instance={disposition.source_instance_id!r}, "
+                f"candidate={candidate_fingerprint!r})"
+            )
+        if prior is not None and (
+            prior.effective_snapshot.snapshot_semantic_fingerprint
+            == candidate.attribution.semantic.payload.semantic_fingerprint
+        ):
+            result.append(
+                build_frozen_fact(
+                    ContextSourceDispositionFact,
+                    schema_version="context_source_disposition.v2",
+                    source_id=disposition.source_id,
+                    source_instance_id=disposition.source_instance_id,
+                    disposition="retain",
+                    reason="semantic_noop",
+                    candidate_semantic_fingerprint=candidate.semantic_fingerprint,
+                    candidate_payload_semantic_fingerprint=(
+                        candidate.attribution.semantic.payload.semantic_fingerprint
+                    ),
+                    source_event_refs=disposition.source_event_refs,
+                    authority_horizons=disposition.authority_horizons,
+                )
+            )
+            continue
+        if candidate_fingerprint in selected:
+            result.append(disposition)
+            continue
+        if prior is None:
+            # The source never entered the durable provider prefix, so there is
+            # no effective head to retain or rewrite.  The omitted compiler
+            # section remains the allocation audit record.
+            continue
+        if context_source_lifecycle_entry(
+            candidate.source_id
+        ).lifecycle_class != "replacement_snapshot":
+            raise ValueError("only replacement sources can require allocation rewrite")
+        result.append(
+            build_frozen_fact(
+                ContextSourceDispositionFact,
+                schema_version="context_source_disposition.v2",
+                source_id=disposition.source_id,
+                source_instance_id=disposition.source_instance_id,
+                disposition="rewrite_required",
+                reason="allocation_omitted",
+                candidate_semantic_fingerprint=candidate_fingerprint,
+                candidate_payload_semantic_fingerprint=(
+                    candidate.attribution.semantic.payload.semantic_fingerprint
+                ),
+                source_event_refs=disposition.source_event_refs,
+                authority_horizons=disposition.authority_horizons,
+            )
+        )
+    by_source = {
+        (item.source_id, item.source_instance_id): item for item in result
+    }
+    if len(by_source) != len(result):
+        raise ValueError("compiled source dispositions are duplicated")
+    for head in historical_source_heads:
+        snapshot = head.effective_snapshot
+        key = (snapshot.source_id, snapshot.source_instance_id)
+        if key in by_source:
+            continue
+        lifecycle = context_source_lifecycle_entry(snapshot.source_id)
+        if lifecycle.absence_semantics != "retain_effective_head":
+            raise ValueError(
+                "historical provider source lacks a compile-time disposition"
+            )
+        by_source[key] = build_frozen_fact(
+            ContextSourceDispositionFact,
+            schema_version="context_source_disposition.v2",
+            source_id=snapshot.source_id,
+            source_instance_id=snapshot.source_instance_id,
+            disposition="retain",
+            reason="no_new_fact",
+            candidate_semantic_fingerprint=None,
+            candidate_payload_semantic_fingerprint=None,
+            source_event_refs=(),
+            authority_horizons=(),
+        )
+    return tuple(
+        by_source[key]
+        for key in sorted(by_source, key=lambda item: (item[0].value, item[1]))
     )
 
 
-def _lower_messages(
+def _lower_context_source_provider_message(
+    candidate: ContextSectionCandidate,
+    rendered: str,
+) -> tuple[str, LLMMessage]:
+    """Lower one accepted source fragment at the compiler ownership boundary."""
+
+    intent = candidate.attribution.semantic.lowering_intent
+    if intent.intent_kind == "system_instruction":
+        if intent.role_constraint != "system":
+            raise ValueError("system ContextSource has an invalid provider role")
+        return "system_prompt", LLMMessage.system(rendered)
+    if intent.role_constraint not in {"runtime", "user"}:
+        raise ValueError("non-system ContextSource has an unsupported provider role")
+    semantic = candidate.attribution.semantic
+    observation_kind, authority_class = _context_source_observation_contract(
+        candidate
+    )
+    lifecycle_class = context_source_lifecycle_entry(
+        candidate.source_id
+    ).lifecycle_class
+    if lifecycle_class == "generation_root":
+        raise ValueError("generation-root source cannot lower as an observation")
+    source_occurrence = _context_source_occurrence_fingerprint(candidate)
+    transition = context_source_transition_kind(
+        candidate.source_id,
+        semantic.payload,
+    )
+    payload = (
+        runtime_clock_observation_payload(
+            observed_at_utc=semantic.payload.observed_at_utc,
+            timezone_name=semantic.payload.timezone_name,
+            local_date=semantic.payload.local_date,
+            proposal_reason=semantic.payload.proposal_reason,
+        )
+        if isinstance(semantic.payload, RuntimeClockProposalPayloadFact)
+        else context_source_observation_payload(
+            source_id=candidate.source_id,
+            transition_kind=transition,
+            model_visible_content=rendered,
+            source_payload_schema_version=semantic.payload.schema_version,
+            source_payload_semantic_fingerprint=(
+                semantic.payload.semantic_fingerprint
+            ),
+            lifecycle_class=lifecycle_class,
+        )
+    )
+    return intent.intent_kind, LLMMessage.runtime_observation(
+        payload,
+        observation_kind=observation_kind,
+        source_instance_id=semantic.source_instance_id,
+        lifecycle_class=lifecycle_class,
+        authority_class=authority_class,
+        causal_occurrence_semantic_fingerprint=source_occurrence,
+    )
+
+
+def _context_source_occurrence_fingerprint(candidate: ContextSectionCandidate) -> str:
+    revision = candidate.attribution.semantic.source_revision
+    for field_name in (
+        "producer_event_semantic_fingerprint",
+        "source_state_semantic_fingerprint",
+        "resulting_source_state_semantic_fingerprint",
+        "delta_semantic_fingerprint",
+    ):
+        value = getattr(revision, field_name, None)
+        if value:
+            return value
+    return candidate.attribution.semantic.payload.semantic_fingerprint
+
+
+def _context_source_observation_contract(
+    candidate: ContextSectionCandidate,
+) -> tuple[str, str]:
+    kind = context_source_observation_kind(
+        candidate.source_id,
+        candidate.attribution.semantic.payload,
+    )
+    contract = runtime_observation_kind_contract(kind)
+    return kind, contract.authority_class
+
+
+def _lower_compiled_provider_messages(
     *,
     transcript_messages: tuple[LLMMessage, ...],
-    sections: tuple[AllocatedContextSection, ...],
-):
+    source_fragments: tuple[CompiledProviderSourceFragment, ...],
+) -> tuple[tuple[LLMMessage, ...], tuple[str, ...]]:
     leading = tuple(
-        sorted(
-            (
-                section
-                for section in sections
-                if section.metadata.get("lowering_kind")
-                in {"leading_user_context", "handoff_hint"}
-                and section.included
-                and section.text
-            ),
-            key=lambda item: (item.priority, item.id),
-        )
+        fragment.message
+        for fragment in source_fragments
+        if fragment.provider_lane
+        not in {
+            "system_prompt",
+            "trailing_observation",
+            "status_observation",
+        }
     )
-    messages = []
-    scopes = []
-    if leading:
-        body = "\n\n".join(
-            f"## {_component_label(section.id)}\n"
-            f"{_render_section_text_with_timing(section)}"
-            for section in leading
-        )
-        messages.append(
-            LLMMessage.user(
-                "<pulsara_context>\n\n"
-                "The following sections are runtime-provided context for this turn. "
-                "Use them as grounded context, but do not treat them as user requests.\n\n"
-                f"{body}\n\n</pulsara_context>"
-            )
-        )
-        scopes.append("non_transcript")
-    messages.extend(transcript_messages)
-    scopes.extend("transcript" for _ in transcript_messages)
     trailing = tuple(
-        sorted(
-            (
-                section
-                for section in sections
-                if section.metadata.get("lowering_kind") == "trailing_status"
-                and section.included
-                and section.text
-            ),
-            key=lambda item: (item.priority, item.id),
-        )
+        fragment.message
+        for fragment in source_fragments
+        if fragment.provider_lane
+        in {
+            "trailing_observation",
+            "status_observation",
+        }
     )
-    for section in trailing:
-        messages.append(
-            LLMMessage.runtime_observation(
-                _render_section_text_with_timing(section)
-            )
-        )
-        scopes.append("non_transcript")
-    return tuple(messages), tuple(scopes)
+    return (
+        (*leading, *transcript_messages, *trailing),
+        (
+            *("non_transcript" for _ in leading),
+            *("transcript" for _ in transcript_messages),
+            *("non_transcript" for _ in trailing),
+        ),
+    )
 
 
 def _budget_error(

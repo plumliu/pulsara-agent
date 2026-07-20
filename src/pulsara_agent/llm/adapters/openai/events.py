@@ -60,13 +60,9 @@ class RawProviderItemBuilder:
         if self.text_block_id is None:
             self.text_block_id = f"text:{uuid4()}"
             events.append(
-                RawProviderBlockStart(
-                    block_kind="text", block_id=self.text_block_id
-                )
+                RawProviderBlockStart(block_kind="text", block_id=self.text_block_id)
             )
-        events.append(
-            RawProviderTextDelta(block_id=self.text_block_id, delta=delta)
-        )
+        events.append(RawProviderTextDelta(block_id=self.text_block_id, delta=delta))
         self.text_parts.append(delta)
         return events
 
@@ -94,7 +90,10 @@ class RawProviderItemBuilder:
         if final_text is not None:
             if self.text_block_id is None and final_text:
                 events.extend(self.text_delta(final_text))
-            elif self.text_block_id is not None and "".join(self.text_parts) != final_text:
+            elif (
+                self.text_block_id is not None
+                and "".join(self.text_parts) != final_text
+            ):
                 raise LLMTransportContractError(
                     "provider text done payload differs from its delta prefix",
                     reason_code="transport_text_done_content_mismatch",
@@ -199,9 +198,7 @@ class RawProviderItemBuilder:
                 reason_code="transport_tool_call_start_missing",
             )
         self.tool_call_argument_parts.setdefault(tool_call_id, []).append(delta)
-        events.append(
-            RawProviderToolCallDelta(tool_call_id=tool_call_id, delta=delta)
-        )
+        events.append(RawProviderToolCallDelta(tool_call_id=tool_call_id, delta=delta))
         return events
 
     def reconcile_tool_call_arguments(
@@ -234,9 +231,7 @@ class RawProviderItemBuilder:
             return []
         self.has_semantic_output = True
         self.active_tool_call_ids.pop(tool_call_id)
-        return [
-            RawProviderBlockEnd(block_kind="tool_call", block_id=tool_call_id)
-        ]
+        return [RawProviderBlockEnd(block_kind="tool_call", block_id=tool_call_id)]
 
     def tool_call(
         self, *, tool_call_id: str, tool_call_name: str, arguments: str
@@ -303,9 +298,7 @@ class RawProviderItemBuilder:
         events.extend(self.thinking_end())
         for tool_call_id in tuple(self.active_tool_call_ids):
             events.append(
-                RawProviderBlockEnd(
-                    block_kind="tool_call", block_id=tool_call_id
-                )
+                RawProviderBlockEnd(block_kind="tool_call", block_id=tool_call_id)
             )
             self.active_tool_call_ids.pop(tool_call_id)
         return events
@@ -412,12 +405,44 @@ def transport_usage_report_from_mapping(raw_usage: Any) -> TransportUsageReport:
     output_details = usage.get(
         "output_tokens_details", usage.get("completion_tokens_details")
     )
-    cached = (
+    standard_cached = (
         input_details.get("cached_tokens")
         if isinstance(input_details, dict)
         and input_details.get("cached_tokens") is not None
         else None
     )
+    deepseek_cached = usage.get("prompt_cache_hit_tokens")
+    deepseek_miss = usage.get("prompt_cache_miss_tokens")
+    if (
+        standard_cached is not None
+        and deepseek_cached is not None
+        and int(standard_cached) != int(deepseek_cached)
+    ):
+        diagnostics.append(
+            ModelCallDiagnosticFact(
+                code="provider_cached_input_tokens_mismatch",
+                attributes=(
+                    ("input_details_cached_tokens", int(standard_cached)),
+                    ("prompt_cache_hit_tokens", int(deepseek_cached)),
+                ),
+            )
+        )
+    cached = standard_cached if standard_cached is not None else deepseek_cached
+    if (
+        deepseek_cached is not None
+        and deepseek_miss is not None
+        and (int(deepseek_cached) + int(deepseek_miss) != input_tokens)
+    ):
+        diagnostics.append(
+            ModelCallDiagnosticFact(
+                code="provider_prompt_cache_partition_mismatch",
+                attributes=(
+                    ("input_tokens", input_tokens),
+                    ("prompt_cache_hit_tokens", int(deepseek_cached)),
+                    ("prompt_cache_miss_tokens", int(deepseek_miss)),
+                ),
+            )
+        )
     reasoning = (
         output_details.get("reasoning_tokens")
         if isinstance(output_details, dict)

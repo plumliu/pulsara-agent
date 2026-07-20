@@ -152,11 +152,14 @@ def prepare_tool_result_render_input(
             for block_index, _block in enumerate(message.blocks)
         )
     }
-    pairs = {pair.tool_call_id: pair for pair in transcript.tool_pairs}
+    pairs = {
+        (pair.result_message_id, pair.tool_call_id): pair
+        for pair in transcript.tool_pairs
+    }
     for unit, (_message_index, block_index, message, ref) in zip(
         units, refs, strict=True
     ):
-        pair = pairs.get(ref.tool_call_id)
+        pair = pairs.get((message.message_id, ref.tool_call_id))
         if pair is None:
             raise ValueError("tool-result unit lacks normalized interaction pair")
         if (

@@ -72,6 +72,7 @@ from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.control import RunModelCallControlOwner
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     make_test_run_execution_activation,
     run_agent_task,
     test_llm_config,
@@ -1118,11 +1119,15 @@ class _ScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockStart(
+                **event_context.event_fields(), block_id="text:1"
+            )
             yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(
+                **event_context.event_fields(), block_id="text:1"
+            )
         for call in reply.get("tool_calls", []):
             yield RawProviderToolCallStart(
                 **event_context.event_fields(),
@@ -1427,9 +1432,13 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
 
     assert result.status is LoopStatus.FINISHED
     system_prompt = transport.contexts[0].system_prompt or ""
-    assert "Active Skill: huggingface-local-models" in system_prompt
-    assert "Required binaries: hf" in system_prompt
-    assert "Skill CLI hints are guidance only" in system_prompt
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
+    assert "Active Skill: huggingface-local-models" not in system_prompt
+    assert "Active Skill: huggingface-local-models" in context_text
+    assert "Required binaries: hf" in context_text
+    assert "Skill CLI hints are guidance only" in context_text
     exposure_event = next(
         event.exposure
         for event in agent.runtime_session.event_log.iter()
@@ -1638,6 +1647,14 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                 model_call_index=1,
             ),
         )
+        provider_input = await agent.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+            call=call,
+            context=context,
+            event_context=event_context,
+            operation_kind="direct_model_call",
+            operation_id=call.fact.resolved_model_call_id,
+        )
+        context = bind_test_provider_input_context(call, provider_input, context)
         start_bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -1645,6 +1662,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             runtime_session=agent.runtime_session,
             lifecycle_kind="main_assistant_reply",
             run_execution_activation=activation,
+            provider_input_start_bundle=provider_input,
         )
         model_result = await agent.llm_runtime.start_stream(
             call=call,
@@ -1655,9 +1673,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                 runtime_session=agent.runtime_session,
                 state=state,
             ),
-            execution_registry=(
-                agent.runtime_session.model_stream_execution_registry
-            ),
+            execution_registry=(agent.runtime_session.model_stream_execution_registry),
         ).wait_result()
         disposition_fields = {
             "id": (
@@ -1699,12 +1715,8 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             run_start_sequence=stored_start.sequence,
             run_model_target=state.run_model_target,
             long_horizon_contract=stored_start.long_horizon,
-            run_transcript_seed_semantic=(
-                stored_start.run_transcript_seed_semantic
-            ),
-            run_transcript_seed_reference=(
-                stored_start.run_transcript_seed_reference
-            ),
+            run_transcript_seed_semantic=(stored_start.run_transcript_seed_semantic),
+            run_transcript_seed_reference=(stored_start.run_transcript_seed_reference),
             permission_snapshot=state.permission_snapshot,
             plan_snapshot=PlanWorkflowStateFact(
                 workflow_id=None,
@@ -1791,9 +1803,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                 ApprovalResolution(
                     approval_id="approval:test",
                     decisions=(
-                        ToolApprovalDecision(
-                            tool_call_id="call:write", confirmed=True
-                        ),
+                        ToolApprovalDecision(tool_call_id="call:write", confirmed=True),
                     ),
                 ),
             )

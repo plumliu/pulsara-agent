@@ -1,0 +1,40 @@
+{
+  "schema_version": "pulsara.core-dogfood-suite.v1",
+  "suite_id": "pulsara-core-dogfood-v1",
+  "execution_policy": "serial-real-provider",
+  "external_network_access": "required",
+  "workspace_isolation": "fresh-copy-hidden-verifier",
+  "durable_evidence_source": "postgres-inspector",
+  "scenarios": [
+    {
+      "scenario_id": "cache-continuity",
+      "path": "scenarios/cache-continuity",
+      "scenario_contract_fingerprint": "b521df709aa29b0976c598ae9d01fe5f9af86379dcb994cc187657c839cc9da8"
+    },
+    {
+      "scenario_id": "durable-resume",
+      "path": "scenarios/durable-resume",
+      "scenario_contract_fingerprint": "30481338b5afd211a915bbded36d0d399ae99dc80988dc4ca97cbcb84faac49e"
+    },
+    {
+      "scenario_id": "manual-compaction-trail",
+      "path": "scenarios/manual-compaction-trail",
+      "scenario_contract_fingerprint": "830ee160f1f56f3e3e0751a19de0c1cd625c4a924338b08622d3075460afceb4"
+    },
+    {
+      "scenario_id": "plan-workflow",
+      "path": "scenarios/plan-workflow",
+      "scenario_contract_fingerprint": "10ff5c3f1f8ed8471cea9093cc5402ed5c6084d62c93054130401a47d2cee056"
+    },
+    {
+      "scenario_id": "subagent-delegation",
+      "path": "scenarios/subagent-delegation",
+      "scenario_contract_fingerprint": "f1f635a1c70f82a98159e498308df2dad15443dc75909c392dba03bf3c1f817e"
+    },
+    {
+      "scenario_id": "workspace-patch",
+      "path": "scenarios/workspace-patch",
+      "scenario_contract_fingerprint": "0f56db5931356ce1177be6bdfeb298b7b3b4f39ab87559e74575ab971ef2b968"
+    }
+  ]
+}

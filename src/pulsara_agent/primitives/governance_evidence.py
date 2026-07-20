@@ -26,10 +26,19 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelCallFact,
     canonical_json_bytes,
 )
+from pulsara_agent.primitives.provider_input import ProviderUserCarrierBindingFact
+from pulsara_agent.primitives.runtime_observation import (
+    HumanInputWireSemanticFact,
+    RuntimeObservationWireSemanticFact,
+    RuntimeRequestWireSemanticFact,
+)
 from pulsara_agent.primitives.terminal_projection import (
     ModelToolCallBlockSemanticFact,
     TerminalProjectionReferenceFact,
     ToolTerminalProjectionSemanticFact,
+)
+from pulsara_agent.primitives.transcript_projection import (
+    TranscriptProjectionLeafEntryReferenceFact,
 )
 
 
@@ -77,35 +86,8 @@ class GovernanceEvidenceArtifactReferenceFact(GovernanceEvidenceFrozenFact):
     reference_fingerprint: Fingerprint
 
 
-class TranscriptProjectionLeafEntryReferenceFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["transcript_projection_leaf_entry_reference.v1"]
-    runtime_session_id: str = Field(min_length=1, max_length=256)
-    entry_kind: Literal["message", "tool_pair", "tool_result"]
-    ordinal: int = Field(ge=0)
-    entry_semantic_fingerprint: Fingerprint
-    entry_fact_fingerprint: Fingerprint
-    source_event_references: tuple[GovernanceStoredEventReferenceFact, ...] = Field(
-        min_length=1,
-        max_length=16,
-    )
-    reference_fingerprint: Fingerprint
-
-    @model_validator(mode="after")
-    def _same_session_and_ordered(self) -> "TranscriptProjectionLeafEntryReferenceFact":
-        refs = self.source_event_references
-        if any(
-            ref.stable_identity.runtime_session_id != self.runtime_session_id
-            for ref in refs
-        ):
-            raise ValueError("leaf source references must belong to one session")
-        sequences = tuple(ref.sequence for ref in refs)
-        if sequences != tuple(sorted(sequences)) or len(sequences) != len(set(sequences)):
-            raise ValueError("leaf source references must be ordered and unique")
-        return self
-
-
 class GovernanceBatchInputArtifactContractFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["governance_batch_input_artifact_contract.v1"]
+    schema_version: Literal["governance_batch_input_artifact_contract.v2"]
     contract_id: str = Field(min_length=1, max_length=128)
     contract_version: str = Field(min_length=1, max_length=64)
     document_schema_fingerprint: Fingerprint
@@ -771,19 +753,56 @@ class GovernanceFrozenLLMToolCallFact(GovernanceEvidenceFrozenFact):
 
 
 class GovernanceFrozenLLMMessageFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["governance_frozen_llm_message.v1"]
-    role: Literal["system", "user", "assistant", "tool_call", "tool_result", "runtime_observation"]
+    schema_version: Literal["governance_frozen_llm_message.v2"]
+    role: Literal[
+        "system",
+        "user",
+        "assistant",
+        "tool_call",
+        "tool_result",
+        "runtime_request",
+        "runtime_observation",
+    ]
     content: tuple[str, ...] = Field(max_length=16)
     thinking: tuple[str, ...] = Field(max_length=16)
     tool_calls: tuple[GovernanceFrozenLLMToolCallFact, ...] = Field(max_length=32)
     tool_call_id: str | None = Field(default=None, max_length=256)
     name: str | None = Field(default=None, max_length=128)
     arguments: str | None = Field(default=None, max_length=64 * 1024)
+    provider_user_carrier_semantic: (
+        HumanInputWireSemanticFact
+        | RuntimeRequestWireSemanticFact
+        | RuntimeObservationWireSemanticFact
+        | None
+    ) = None
+    provider_user_carrier_binding: ProviderUserCarrierBindingFact | None = None
     message_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _provider_user_carrier(self) -> "GovernanceFrozenLLMMessageFact":
+        expected = {
+            "user": HumanInputWireSemanticFact,
+            "runtime_request": RuntimeRequestWireSemanticFact,
+            "runtime_observation": RuntimeObservationWireSemanticFact,
+        }.get(self.role)
+        semantic = self.provider_user_carrier_semantic
+        binding = self.provider_user_carrier_binding
+        if expected is None:
+            if semantic is not None or binding is not None:
+                raise ValueError("non-user governance message carries user authority")
+            return self
+        if not isinstance(semantic, expected) or binding is None:
+            raise ValueError("governance message lacks typed provider-user authority")
+        if binding.carrier_semantic_fingerprint not in {
+            getattr(semantic, "semantic_fingerprint", None),
+            getattr(semantic, "wire_semantic_fingerprint", None),
+        }:
+            raise ValueError("governance message carrier semantic join mismatch")
+        return self
 
 
 class GovernanceModelInputFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["governance_model_input.v1"]
+    schema_version: Literal["governance_model_input.v2"]
     governance_batch_id: str = Field(min_length=1, max_length=256)
     resolved_call: ResolvedModelCallFact
     target_fingerprint: Fingerprint
@@ -845,7 +864,7 @@ class GovernanceModelInputFact(GovernanceEvidenceFrozenFact):
 
 
 class GovernanceBatchInputSnapshotFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["governance_batch_input_snapshot.v1"]
+    schema_version: Literal["governance_batch_input_snapshot.v2"]
     artifact_contract: GovernanceBatchInputArtifactContractFact
     runtime_session_id: str = Field(min_length=1, max_length=256)
     governance_batch_id: str = Field(min_length=1, max_length=256)
@@ -914,8 +933,7 @@ class GovernanceDerivedWriteAttributionFact(GovernanceEvidenceFrozenFact):
 _SCHEMAS: tuple[tuple[str, str, str], ...] = (
     ("governance_stored_event_reference.v1", "reference_fingerprint", "governance-stored-event-reference:v1"),
     ("governance_evidence_artifact_reference.v1", "reference_fingerprint", "governance-evidence-artifact-reference:v1"),
-    ("transcript_projection_leaf_entry_reference.v1", "reference_fingerprint", "transcript-projection-leaf-entry-reference:v1"),
-    ("governance_batch_input_artifact_contract.v1", "contract_fingerprint", "governance-batch-input-artifact-contract:v1"),
+    ("governance_batch_input_artifact_contract.v2", "contract_fingerprint", "governance-batch-input-artifact-contract:v2"),
     ("candidate_quoted_evidence_locator.v1", "locator_fingerprint", "candidate-quoted-evidence-locator:v1"),
     ("governance_candidate_payload_semantic.v1", "payload_semantic_fingerprint", "governance-candidate-payload-semantic:v1"),
     ("governance_candidate_attribution.v1", "attribution_fingerprint", "governance-candidate-attribution:v1"),
@@ -944,9 +962,9 @@ _SCHEMAS: tuple[tuple[str, str, str], ...] = (
     ("memory_governance_candidate_claim.v1", "claim_fingerprint", "memory-governance-candidate-claim:v1"),
     ("governance_system_prompt_contract.v1", "contract_fingerprint", "governance-system-prompt-contract:v1"),
     ("governance_frozen_llm_tool_call.v1", "semantic_fingerprint", "governance-frozen-llm-tool-call:v1"),
-    ("governance_frozen_llm_message.v1", "message_fingerprint", "governance-frozen-llm-message:v1"),
-    ("governance_model_input.v1", "model_input_fingerprint", "governance-model-input:v1"),
-    ("governance_batch_input_snapshot.v1", "batch_input_fingerprint", "governance-batch-input-snapshot:v1"),
+    ("governance_frozen_llm_message.v2", "message_fingerprint", "governance-frozen-llm-message:v2"),
+    ("governance_model_input.v2", "model_input_fingerprint", "governance-model-input:v2"),
+    ("governance_batch_input_snapshot.v2", "batch_input_fingerprint", "governance-batch-input-snapshot:v2"),
     ("governance_batch_input_reference.v1", "reference_fingerprint", "governance-batch-input-reference:v1"),
     ("governance_model_input_attribution.v1", "attribution_fingerprint", "governance-model-input-attribution:v1"),
     ("governance_derived_write_attribution.v1", "attribution_fingerprint", "governance-derived-write-attribution:v1"),

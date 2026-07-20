@@ -46,6 +46,7 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallRejectedEvent,
     ProjectionReadyEvent,
+    RecalledMemoryProjectionEntryFact,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetAccountOpenedEvent,
@@ -80,6 +81,7 @@ from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStor
 from pulsara_agent.primitives.model_call import (
     CompactionTargetEstimateFact,
     ModelCallPurpose,
+    sha256_fingerprint,
 )
 from pulsara_agent.primitives.capability import (
     build_capability_resolve_basis,
@@ -215,6 +217,7 @@ def _compiled_call_events(*, reported_usage: bool = True):
                         resolved_call=call,
                         estimated_tokens=12,
                         tools_estimated_tokens=0,
+                        context_id="context:model-contract",
                     ),
                     context_id="context:model-contract",
                     model_call_index=1,
@@ -579,6 +582,35 @@ def _ctx(label: str) -> EventContext:
         turn_id=f"turn:{label}:{unique}",
         reply_id=f"reply:{label}:{unique}",
     )
+
+
+def _typed_memory_projection_fields(
+    *,
+    memory_id: str,
+    text: str,
+) -> dict[str, object]:
+    text_sha = f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+    entry_payload = {
+        "entry_index": 0,
+        "memory_ids": (memory_id,),
+        "model_visible_text": text,
+        "text_utf8_sha256": text_sha,
+    }
+    entry = RecalledMemoryProjectionEntryFact(
+        **entry_payload,
+        entry_semantic_fingerprint=sha256_fingerprint(
+            "recalled-memory-projection-entry:v1", entry_payload
+        ),
+    )
+    return {
+        "included_memory_ids": [memory_id],
+        "recalled_memory_entries": (entry,),
+        "summary": (
+            '<recalled-memory-projection do_not_write_back="true">\n'
+            f"- {text}\n"
+            "</recalled-memory-projection>"
+        ),
+    }
 
 
 def _cleanup_session(dsn: str, runtime_session_id: str) -> None:
@@ -1229,6 +1261,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
         compiled_fields = context_compiled_contract_fields(
             estimated_tokens=321,
             tools_estimated_tokens=42,
+            context_id=context_id,
         )
         log.extend(
             [
@@ -1671,11 +1704,14 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 ProjectionReadyEvent(
                     **target.event_fields(),
                     projection_id="projection:target",
-                    role="pro",
-                    scope="session",
-                    token_budget=100,
-                    projection_kind="memory",
-                    summary="TARGET_PROJECTION_AS_SEEN",
+                        role="pro",
+                        scope="session",
+                        token_budget=100,
+                        projection_kind="memory",
+                        **_typed_memory_projection_fields(
+                            memory_id="memory:target",
+                            text="TARGET_PROJECTION_AS_SEEN",
+                        ),
                 ),
                 ReplyStartEvent(**target.event_fields(), name="assistant"),
                 make_text_block_start_event(**target.event_fields(), block_id="text:target"),
@@ -1703,11 +1739,14 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 ProjectionReadyEvent(
                     **future.event_fields(),
                     projection_id="projection:future",
-                    role="pro",
-                    scope="session",
-                    token_budget=100,
-                    projection_kind="memory",
-                    summary="FUTURE_PROJECTION_NOT_SEEN",
+                        role="pro",
+                        scope="session",
+                        token_budget=100,
+                        projection_kind="memory",
+                        **_typed_memory_projection_fields(
+                            memory_id="memory:future",
+                            text="FUTURE_PROJECTION_NOT_SEEN",
+                        ),
                 ),
                 RunEndEvent(
                     **run_end_contract_fields(future.run_id, status="finished"),

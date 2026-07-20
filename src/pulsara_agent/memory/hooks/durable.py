@@ -70,27 +70,21 @@ class DurableMemoryHooks(NoopMemoryHooks):
         return self.sink
 
     def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict | None:
-        cache_key = "durable_working_context_projection_baseline"
-        if cache_key not in state.scratchpad:
-            state.scratchpad[cache_key] = self._working_context_projection(token_budget=token_budget)
-        cached = state.scratchpad[cache_key]
-        return cached if isinstance(cached, dict) else None
+        # Recent working context remains operational state.  It is deliberately
+        # not projected into provider input until it has its own typed authority.
+        return None
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
-        working_context = self.baseline_projection(state, token_budget=token_budget)
         if self.recall is None:
-            return working_context
+            return None
         latest_user_text = _latest_user_quote(state)
         if latest_user_text is None or _should_skip_recall(latest_user_text):
-            return working_context
+            return None
         cache_key = "durable_memory_recall_projection_cache"
         cached = state.scratchpad.get(cache_key)
         if isinstance(cached, dict) and cached.get("query_text") == latest_user_text:
             cached_projection = cached.get("projection")
-            return _merge_projections(
-                working_context,
-                cached_projection if isinstance(cached_projection, dict) else None,
-            )
+            return cached_projection if isinstance(cached_projection, dict) else None
         query = RecallQuery(
             text=latest_user_text,
             scopes=_recall_scopes(self.read_scopes),
@@ -104,11 +98,11 @@ class DurableMemoryHooks(NoopMemoryHooks):
         result = await self.recall.recall(query, graph_id=self.graph_id)
         if result.status is not RecallStatus.OK or not result.items:
             state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": None}
-            return working_context
+            return None
         self.projection_ledger.record(state, result.items)
         recalled = self.projector.build(result, token_budget=token_budget)
         state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": recalled}
-        return _merge_projections(working_context, recalled)
+        return recalled
 
     async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
         self._drain_to_pool(state)
