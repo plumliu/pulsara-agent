@@ -14,7 +14,7 @@
     {
       "scenario_id": "durable-resume",
       "path": "scenarios/durable-resume",
-      "scenario_contract_fingerprint": "30481338b5afd211a915bbded36d0d399ae99dc80988dc4ca97cbcb84faac49e"
+      "scenario_contract_fingerprint": "aa00e0b7a3d8d6747b16d4645edcd0dca6a8063022aec67301b08baef4843464"
     },
     {
       "scenario_id": "manual-compaction-trail",
@@ -29,12 +29,12 @@
     {
       "scenario_id": "subagent-delegation",
       "path": "scenarios/subagent-delegation",
-      "scenario_contract_fingerprint": "f1f635a1c70f82a98159e498308df2dad15443dc75909c392dba03bf3c1f817e"
+      "scenario_contract_fingerprint": "533f2895e091ea192ab89fb6a80904b42577dc5f08aaf3da79be38fc97a5d1f1"
     },
     {
       "scenario_id": "workspace-patch",
       "path": "scenarios/workspace-patch",
-      "scenario_contract_fingerprint": "0f56db5931356ce1177be6bdfeb298b7b3b4f39ab87559e74575ab971ef2b968"
+      "scenario_contract_fingerprint": "eb8c8d55a764249406e88eb728cd3fd78f0f19c8fc3e3355ac036c0612df2386"
     }
   ]
 }

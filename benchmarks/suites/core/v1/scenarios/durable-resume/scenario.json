@@ -6,15 +6,15 @@
   "reasoning_effort": null,
   "timeout_seconds": 600,
   "memory_reflection": false,
-  "system_prompt": "You are running Pulsara's frozen durable-resume dogfood. Use the workspace tools exactly as requested. Facts from the prior durable conversation must survive process replacement. Never inspect .env or credentials, and never reread a file when the user explicitly forbids it.",
+  "system_prompt": "You are running Pulsara's frozen durable-resume dogfood. Use the workspace tools exactly as requested. This scenario tests durable transcript continuity, not long-term memory: never call memory tools. Facts from the prior durable conversation must survive process replacement. Never inspect .env or credentials, and never reread a file when the user explicitly forbids it.",
   "fixture": {
     "fixture_kind": "directory_copy",
     "workdir": "workdir"
   },
   "workflow": {
     "workflow_kind": "durable_resume",
-    "first_prompt": "Read resume_source.txt exactly once, remember its RESUME_TOKEN, and write before_resume.txt whose entire contents are that token followed by |before. Do not change the source file.",
-    "resumed_prompt": "This is a new HostCore after durable reopen. Do not read or search any file. Using only the restored prior conversation, write after_resume.txt whose entire contents are the remembered RESUME_TOKEN followed by |after. Use write_file exactly once."
+    "first_prompt": "Read resume_source.txt exactly once, retain its RESUME_TOKEN only in this conversation without calling any memory tool, and write before_resume.txt whose entire contents are that token followed by |before. Do not change the source file.",
+    "resumed_prompt": "This is a new HostCore after durable reopen. Do not read, search, or call any memory tool. Using only the restored prior conversation, write after_resume.txt whose entire contents are the retained RESUME_TOKEN followed by |after. Use write_file exactly once."
   },
   "verifier": {
     "path": "verify.py",
@@ -28,7 +28,7 @@
     "min_model_calls": 2,
     "max_model_calls": 8,
     "min_tool_calls": 3,
-    "max_tool_calls": 12,
+    "max_tool_calls": 8,
     "max_total_tokens": 140000,
     "event_count_minimums": [
       {"event_type": "MODEL_CALL_END", "minimum": 2},
@@ -40,11 +40,18 @@
       "RUN_ERROR"
     ],
     "root_run_tool_gate": {
-      "run_selector": "last",
+      "run_selector": "all",
       "required_exact_counts": [
-        {"tool_name": "write_file", "exact_count": 1}
+        {"tool_name": "read_file", "exact_count": 1},
+        {"tool_name": "write_file", "exact_count": 2}
       ],
-      "forbidden_tool_names": ["read_file", "search_files", "terminal"]
+      "forbidden_tool_names": [
+        "memory_search",
+        "remember_claim",
+        "remember_preference",
+        "search_files",
+        "terminal"
+      ]
     },
     "require_positive_cached_input_tokens": false,
     "max_provider_input_rollovers": 2
