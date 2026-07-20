@@ -8,6 +8,7 @@ from typing import Mapping
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.provider_input import ProviderInputPendingContinuationFact
 from pulsara_agent.primitives.terminal_projection import (
     ModelDataBlockSemanticFact,
@@ -25,6 +26,7 @@ from pulsara_agent.primitives.transcript_projection import (
     TerminalProjectionMessageContentRefFact,
     TranscriptMessageLeafEntryFact,
     TranscriptProjectionLeafEntryFact,
+    TranscriptProjectionLeafEntryReferenceFact,
 )
 from pulsara_agent.runtime.provider_input.materialization import (
     message_semantic_fingerprint,
@@ -40,6 +42,7 @@ class PreparedProviderInputContinuationMaterialization:
     provider_message_semantic_fingerprint: str
     owner_semantic_fingerprint: str
     reply_id: str
+    matched_stable_entry_reference: TranscriptProjectionLeafEntryReferenceFact
     matched_stable_entry_fact_fingerprint: str
     matched_stable_entry_semantic_fingerprint: str
 
@@ -140,6 +143,16 @@ def prepare_provider_input_continuation(
             "pending continuation does not join one exact stable assistant leaf"
         )
     matched = matches[0]
+    matched_reference = build_frozen_fact(
+        TranscriptProjectionLeafEntryReferenceFact,
+        schema_version="transcript_projection_leaf_entry_reference.v2",
+        runtime_session_id=pending.accepted_disposition_event_ref.runtime_session_id,
+        entry_kind=matched.entry_kind,
+        ordinal=matched.ordinal.value,
+        entry_semantic_fingerprint=matched.semantic_identity.semantic_fingerprint,
+        entry_fact_fingerprint=matched.fact_fingerprint,
+        source_event_references=matched.source_event_refs,
+    )
     owner_fingerprint = context_fingerprint(
         "provider-input-continuation-unit-owner:v1",
         {
@@ -156,6 +169,7 @@ def prepare_provider_input_continuation(
         provider_message_semantic_fingerprint=message_fingerprint,
         owner_semantic_fingerprint=owner_fingerprint,
         reply_id=matched.attribution.reply_id,
+        matched_stable_entry_reference=matched_reference,
         matched_stable_entry_fact_fingerprint=matched.fact_fingerprint,
         matched_stable_entry_semantic_fingerprint=(
             matched.semantic_identity.semantic_fingerprint

@@ -66,9 +66,7 @@ def _fact(schema_version: str, own_field: str, domain_separator: str):
 class ProviderInputRolloverReason(StrEnum):
     SYSTEM_ROOT_SEMANTIC_CHANGED = "system_root_semantic_changed"
     TOOL_CATALOG_SEMANTIC_CHANGED = "tool_catalog_semantic_changed"
-    PROVIDER_VISIBLE_COMPATIBILITY_CHANGED = (
-        "provider_visible_compatibility_changed"
-    )
+    PROVIDER_VISIBLE_COMPATIBILITY_CHANGED = "provider_visible_compatibility_changed"
     EXPLICIT_LONG_HORIZON_REWRITE = "explicit_long_horizon_rewrite"
     SOURCE_DISPOSITION_REWRITE_REQUIRED = "source_disposition_rewrite_required"
     CONFIRMED_OFFLINE_AUTHORITY_REPAIR = "confirmed_offline_authority_repair"
@@ -396,9 +394,7 @@ class ProviderUserCarrierBindingFact(FrozenFactBase):
     schema_version: Literal["provider_user_carrier_binding.v1"] = (
         "provider_user_carrier_binding.v1"
     )
-    carrier_kind: Literal[
-        "human_input", "runtime_request", "runtime_observation"
-    ]
+    carrier_kind: Literal["human_input", "runtime_request", "runtime_observation"]
     semantic_fact_schema_version: Literal[
         "human_input_wire_semantic.v1",
         "runtime_request_wire_semantic.v1",
@@ -433,7 +429,13 @@ class ProviderMessageFragmentFact(FrozenFactBase):
     )
     fragment_kind: Literal["message"] = "message"
     role: Literal[
-        "system", "user", "assistant", "tool_call", "tool_result", "runtime_request", "runtime_observation"
+        "system",
+        "user",
+        "assistant",
+        "tool_call",
+        "tool_result",
+        "runtime_request",
+        "runtime_observation",
     ]
     name: str | None
     tool_call_id: str | None
@@ -528,9 +530,7 @@ class DerivedToolResultMessageSemanticSourceFact(FrozenFactBase):
     schema_version: Literal["derived_tool_result_message_semantic_source.v1"] = (
         "derived_tool_result_message_semantic_source.v1"
     )
-    source_kind: Literal["derived_tool_result_message"] = (
-        "derived_tool_result_message"
-    )
+    source_kind: Literal["derived_tool_result_message"] = "derived_tool_result_message"
     tool_result_leaf_semantic_fingerprint: Fingerprint
     tool_pair_semantic_fingerprint: Fingerprint
     terminal_projection_semantic_fingerprint: Fingerprint
@@ -543,9 +543,9 @@ class DerivedToolResultMessageSemanticSourceFact(FrozenFactBase):
     "provider-compaction-rewrite-authority-reference:v1",
 )
 class ProviderCompactionRewriteAuthorityReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_compaction_rewrite_authority_reference.v1"] = (
         "provider_compaction_rewrite_authority_reference.v1"
-    ] = "provider_compaction_rewrite_authority_reference.v1"
+    )
     compaction_completed_event_reference: ContextEventReferenceFact
     source_document_fingerprint: Fingerprint
     summary_semantic_fingerprint: Fingerprint
@@ -562,9 +562,7 @@ class ProviderCompactionRewriteAuthorityReferenceFact(FrozenFactBase):
         if self.replaced_first_stable_ordinal > self.replaced_last_stable_ordinal:
             raise ValueError("compaction rewrite stable range is reversed")
         if (
-            self.replaced_last_stable_ordinal
-            - self.replaced_first_stable_ordinal
-            + 1
+            self.replaced_last_stable_ordinal - self.replaced_first_stable_ordinal + 1
             != self.replaced_member_count
         ):
             raise ValueError("compaction rewrite range/member count mismatch")
@@ -577,9 +575,9 @@ class ProviderCompactionRewriteAuthorityReferenceFact(FrozenFactBase):
     "compaction-replacement-summary-semantic-source:v1",
 )
 class CompactionReplacementSummarySemanticSourceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["compaction_replacement_summary_semantic_source.v1"] = (
         "compaction_replacement_summary_semantic_source.v1"
-    ] = "compaction_replacement_summary_semantic_source.v1"
+    )
     source_kind: Literal["compaction_replacement_summary"] = (
         "compaction_replacement_summary"
     )
@@ -636,12 +634,10 @@ class DirectStableMessageSourceAttributionFact(FrozenFactBase):
     "derived-tool-result-message-source-attribution:v1",
 )
 class DerivedToolResultMessageSourceAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["derived_tool_result_message_source_attribution.v1"] = (
         "derived_tool_result_message_source_attribution.v1"
-    ] = "derived_tool_result_message_source_attribution.v1"
-    source_kind: Literal["derived_tool_result_message"] = (
-        "derived_tool_result_message"
     )
+    source_kind: Literal["derived_tool_result_message"] = "derived_tool_result_message"
     tool_result_leaf_reference: TranscriptProjectionLeafEntryReferenceFact
     tool_pair_leaf_reference: TranscriptProjectionLeafEntryReferenceFact
     terminal_projection_reference: TerminalProjectionReferenceFact
@@ -663,9 +659,9 @@ class DerivedToolResultMessageSourceAttributionFact(FrozenFactBase):
     "compaction-replacement-summary-source-attribution:v1",
 )
 class CompactionReplacementSummarySourceAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["compaction_replacement_summary_source_attribution.v1"] = (
         "compaction_replacement_summary_source_attribution.v1"
-    ] = "compaction_replacement_summary_source_attribution.v1"
+    )
     source_kind: Literal["compaction_replacement_summary"] = (
         "compaction_replacement_summary"
     )
@@ -707,12 +703,10 @@ ProviderTranscriptUnitSourceAttributionFact: TypeAlias = Annotated[
     "provider-transcript-source-selection-rule:v1",
 )
 class ProviderTranscriptSourceSelectionRuleFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_transcript_source_selection_rule.v1"] = (
         "provider_transcript_source_selection_rule.v1"
-    ] = "provider_transcript_source_selection_rule.v1"
-    canonical_entry_kind: Literal[
-        "message", "tool_pair", "tool_result_projection_ref"
-    ]
+    )
+    canonical_entry_kind: Literal["message", "tool_pair", "tool_result_projection_ref"]
     eligible_message_segments: tuple[
         Literal[
             "compaction_summary",
@@ -725,12 +719,15 @@ class ProviderTranscriptSourceSelectionRuleFact(FrozenFactBase):
         ...,
     ]
     selection_outcome: Literal["emit_provider_unit", "companion_only"]
-    selected_source_kind: Literal[
-        "direct_stable_message",
-        "derived_tool_result_message",
-        "compaction_replacement_summary",
-        "lifecycle_note",
-    ] | None
+    selected_source_kind: (
+        Literal[
+            "direct_stable_message",
+            "derived_tool_result_message",
+            "compaction_replacement_summary",
+            "lifecycle_note",
+        ]
+        | None
+    )
     required_companion_entry_kinds: tuple[
         Literal["message", "tool_pair", "tool_result_projection_ref"], ...
     ]
@@ -753,9 +750,9 @@ class ProviderTranscriptSourceSelectionRuleFact(FrozenFactBase):
     "provider-transcript-source-selection-contract:v1",
 )
 class ProviderTranscriptSourceSelectionContractFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_transcript_source_selection_contract.v1"] = (
         "provider_transcript_source_selection_contract.v1"
-    ] = "provider_transcript_source_selection_contract.v1"
+    )
     contract_id: Literal["pulsara.provider-transcript-source-selection"] = (
         "pulsara.provider-transcript-source-selection"
     )
@@ -816,9 +813,7 @@ class ProviderCausalPlacementSemanticFact(FrozenFactBase):
     source: ProviderTranscriptUnitSemanticSourceFact
     node_identity: ProviderTranscriptNodeIdentityFact
     position: ProviderProjectionPositionFact
-    visible_causal_predecessor_node_identity_fingerprints: tuple[
-        Fingerprint, ...
-    ]
+    visible_causal_predecessor_node_identity_fingerprints: tuple[Fingerprint, ...]
     causal_semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -841,9 +836,9 @@ class ProviderCausalPlacementSemanticFact(FrozenFactBase):
     "provider-invocation-classification-attribution:v1",
 )
 class ProviderInvocationClassificationAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_invocation_classification_attribution.v1"] = (
         "provider_invocation_classification_attribution.v1"
-    ] = "provider_invocation_classification_attribution.v1"
+    )
     invocation_classification: Literal[
         "prior_history",
         "current_user",
@@ -939,8 +934,7 @@ class ProviderOrderedTranscriptProjectionFact(FrozenFactBase):
                 raise ValueError("provider causal predecessor does not precede unit")
             seen.add(identities[index])
         wire_values = tuple(
-            item.wire_semantic.wire_semantic_fingerprint
-            for item in self.ordered_units
+            item.wire_semantic.wire_semantic_fingerprint for item in self.ordered_units
         )
         causal_values = tuple(
             item.unit_causal_semantic_fingerprint for item in self.ordered_units
@@ -1000,9 +994,9 @@ class ProviderOrderedTranscriptProjectionFact(FrozenFactBase):
     "provider-ordered-transcript-projection-identity:v1",
 )
 class ProviderOrderedTranscriptProjectionIdentityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_ordered_transcript_projection_identity.v1"] = (
         "provider_ordered_transcript_projection_identity.v1"
-    ] = "provider_ordered_transcript_projection_identity.v1"
+    )
     projection_semantic_fingerprint: Fingerprint
     unit_count: int = Field(ge=0)
     ordered_wire_semantic_accumulator: Fingerprint
@@ -1016,9 +1010,9 @@ class ProviderOrderedTranscriptProjectionIdentityFact(FrozenFactBase):
     "context-input-manifest-projection-reference:v1",
 )
 class ContextInputManifestProjectionReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["context_input_manifest_projection_reference.v1"] = (
         "context_input_manifest_projection_reference.v1"
-    ] = "context_input_manifest_projection_reference.v1"
+    )
     context_id: str = Field(min_length=1)
     input_manifest_artifact_id: str = Field(min_length=1)
     input_manifest_content_fingerprint: Fingerprint
@@ -1271,7 +1265,9 @@ class ProviderInputAppendBatchReferenceFact(FrozenFactBase):
             item.identity_fingerprint for item in self.new_replay_bindings
         )
         if binding_fingerprints != tuple(sorted(set(binding_fingerprints))):
-            raise ValueError("provider append replay bindings must be sorted and unique")
+            raise ValueError(
+                "provider append replay bindings must be sorted and unique"
+            )
         return self
 
 
@@ -1348,12 +1344,10 @@ class ProviderTranscriptFrontierFact(FrozenFactBase):
     "provider-invocation-context-frame-semantic:v1",
 )
 class ProviderInvocationContextFrameSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_invocation_context_frame_semantic.v1"] = (
         "provider_invocation_context_frame_semantic.v1"
-    ] = "provider_invocation_context_frame_semantic.v1"
-    ordered_source_unit_wire_fingerprints: tuple[Fingerprint, ...] = Field(
-        min_length=1
     )
+    ordered_source_unit_wire_fingerprints: tuple[Fingerprint, ...] = Field(min_length=1)
     source_head_set_fingerprint: Fingerprint
     frame_semantic_fingerprint: Fingerprint
 
@@ -1364,13 +1358,11 @@ class ProviderInvocationContextFrameSemanticFact(FrozenFactBase):
     "provider-invocation-context-frame-placement:v1",
 )
 class ProviderInvocationContextFramePlacementFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_invocation_context_frame_placement.v1"] = (
         "provider_invocation_context_frame_placement.v1"
-    ] = "provider_invocation_context_frame_placement.v1"
+    )
     semantic: ProviderInvocationContextFrameSemanticFact
-    insertion_kind: Literal[
-        "before_new_current_user", "after_new_transcript_tail"
-    ]
+    insertion_kind: Literal["before_new_current_user", "after_new_transcript_tail"]
     preceding_transcript_node_identity_fingerprint: Fingerprint | None
     following_transcript_node_identity_fingerprint: Fingerprint | None
     insertion_policy_id: str = Field(min_length=1)
@@ -1389,9 +1381,8 @@ class ProviderInvocationContextFramePlacementFact(FrozenFactBase):
     def _range(self) -> "ProviderInvocationContextFramePlacementFact":
         if self.first_vector_ordinal > self.last_vector_ordinal:
             raise ValueError("provider context-frame vector range is reversed")
-        if (
-            self.last_vector_ordinal - self.first_vector_ordinal + 1
-            != len(self.semantic.ordered_source_unit_wire_fingerprints)
+        if self.last_vector_ordinal - self.first_vector_ordinal + 1 != len(
+            self.semantic.ordered_source_unit_wire_fingerprints
         ):
             raise ValueError("provider context-frame range/count mismatch")
         expected = _ordered_accumulator(
@@ -1409,9 +1400,9 @@ class ProviderInvocationContextFramePlacementFact(FrozenFactBase):
     "provider-accepted-continuation-projection-join:v1",
 )
 class ProviderAcceptedContinuationProjectionJoinFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_accepted_continuation_projection_join.v1"] = (
         "provider_accepted_continuation_projection_join.v1"
-    ] = "provider_accepted_continuation_projection_join.v1"
+    )
     resolved_model_call_id: str = Field(min_length=1)
     reply_id: str = Field(min_length=1)
     terminal_projection_reference: TerminalProjectionReferenceFact
@@ -1504,9 +1495,9 @@ class ProviderTranscriptDeltaCommitProofFact(FrozenFactBase):
     "resolved-provider-input-causal-physical-policy:v1",
 )
 class ResolvedProviderInputCausalAndPhysicalPolicyFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["resolved_provider_input_causal_physical_policy.v1"] = (
         "resolved_provider_input_causal_physical_policy.v1"
-    ] = "resolved_provider_input_causal_physical_policy.v1"
+    )
     max_parallel_tool_calls_per_model_call: PositiveInt
     max_non_tool_transcript_units_per_operation: PositiveInt
     max_visible_causal_predecessors_per_unit: PositiveInt
@@ -1640,9 +1631,9 @@ class ProviderCompatibilityChangeAuthorityFact(FrozenFactBase):
     "provider-long-horizon-rewrite-rollover-authority:v1",
 )
 class ProviderLongHorizonRewriteRolloverAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_long_horizon_rewrite_rollover_authority.v1"] = (
         "provider_long_horizon_rewrite_rollover_authority.v1"
-    ] = "provider_long_horizon_rewrite_rollover_authority.v1"
+    )
     authority_kind: Literal["long_horizon_rewrite"] = "long_horizon_rewrite"
     predecessor_generation_id: str = Field(min_length=1)
     predecessor_core_state_fingerprint: Fingerprint
@@ -1658,12 +1649,10 @@ class ProviderLongHorizonRewriteRolloverAuthorityFact(FrozenFactBase):
     "provider-source-disposition-rewrite-authority:v1",
 )
 class ProviderSourceDispositionRewriteAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_source_disposition_rewrite_authority.v1"] = (
         "provider_source_disposition_rewrite_authority.v1"
-    ] = "provider_source_disposition_rewrite_authority.v1"
-    authority_kind: Literal["source_disposition_rewrite"] = (
-        "source_disposition_rewrite"
     )
+    authority_kind: Literal["source_disposition_rewrite"] = "source_disposition_rewrite"
     predecessor_generation_id: str = Field(min_length=1)
     predecessor_core_state_fingerprint: Fingerprint
     ordered_projection_identity_fingerprint: Fingerprint
@@ -1680,8 +1669,7 @@ class ProviderSourceDispositionRewriteAuthorityFact(FrozenFactBase):
         if not keys or keys != tuple(sorted(set(keys))):
             raise ValueError("source-disposition rewrite set is not ordered/unique")
         if any(
-            item.disposition != "rewrite_required"
-            for item in self.rewrite_dispositions
+            item.disposition != "rewrite_required" for item in self.rewrite_dispositions
         ):
             raise ValueError("source-disposition rewrite has a non-rewrite member")
         if len(self.rewritten_predecessor_source_head_fingerprints) != len(keys):
@@ -1695,9 +1683,9 @@ class ProviderSourceDispositionRewriteAuthorityFact(FrozenFactBase):
     "provider-offline-repair-rollover-authority:v1",
 )
 class ProviderOfflineRepairRolloverAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_offline_repair_rollover_authority.v1"] = (
         "provider_offline_repair_rollover_authority.v1"
-    ] = "provider_offline_repair_rollover_authority.v1"
+    )
     authority_kind: Literal["offline_repair"] = "offline_repair"
     predecessor_generation_id: str = Field(min_length=1)
     predecessor_core_state_fingerprint: Fingerprint
@@ -1752,16 +1740,12 @@ _ROLLOVER_AUTHORITY_KIND = {
     ProviderInputRolloverReason.PROVIDER_VISIBLE_COMPATIBILITY_CHANGED: (
         "provider_compatibility_change"
     ),
-    ProviderInputRolloverReason.EXPLICIT_LONG_HORIZON_REWRITE: (
-        "long_horizon_rewrite"
-    ),
+    ProviderInputRolloverReason.EXPLICIT_LONG_HORIZON_REWRITE: ("long_horizon_rewrite"),
     ProviderInputRolloverReason.SOURCE_DISPOSITION_REWRITE_REQUIRED: (
         "source_disposition_rewrite"
     ),
     ProviderInputRolloverReason.CONFIRMED_OFFLINE_AUTHORITY_REPAIR: "offline_repair",
-    ProviderInputRolloverReason.EXPLICIT_ADMINISTRATIVE_RESET: (
-        "administrative_reset"
-    ),
+    ProviderInputRolloverReason.EXPLICIT_ADMINISTRATIVE_RESET: ("administrative_reset"),
 }
 
 
@@ -1856,9 +1840,9 @@ class ProviderInputUnitSemanticMaterializationFact(FrozenFactBase):
     "provider-input-unit-semantic-document-identity:v1",
 )
 class ProviderInputUnitSemanticDocumentIdentityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["provider_input_unit_semantic_document_identity.v1"] = (
         "provider_input_unit_semantic_document_identity.v1"
-    ] = "provider_input_unit_semantic_document_identity.v1"
+    )
     document_schema_version: Literal[
         "provider_input_unit_semantic_materialization.v1"
     ] = "provider_input_unit_semantic_materialization.v1"
@@ -1913,9 +1897,9 @@ class EffectiveProviderSourceSemanticSnapshotFact(FrozenFactBase):
     "committed-runtime-observation-semantic-head:v1",
 )
 class CommittedRuntimeObservationSemanticHeadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["committed_runtime_observation_semantic_head.v1"] = (
         "committed_runtime_observation_semantic_head.v1"
-    ] = "committed_runtime_observation_semantic_head.v1"
+    )
     effective_snapshot: EffectiveProviderSourceSemanticSnapshotFact
     semantic_head_fingerprint: Fingerprint
 
@@ -1926,9 +1910,9 @@ class CommittedRuntimeObservationSemanticHeadFact(FrozenFactBase):
     "inline-provider-input-unit-hydration-attribution:v1",
 )
 class InlineProviderInputUnitHydrationAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["inline_provider_input_unit_hydration_attribution.v1"] = (
         "inline_provider_input_unit_hydration_attribution.v1"
-    ] = "inline_provider_input_unit_hydration_attribution.v1"
+    )
     hydration_kind: Literal["inline"] = "inline"
     semantic_document_identity_fingerprint: Fingerprint
     semantic_materialization: ProviderInputUnitSemanticMaterializationFact
@@ -1941,9 +1925,9 @@ class InlineProviderInputUnitHydrationAttributionFact(FrozenFactBase):
     "artifact-provider-input-unit-hydration-attribution:v1",
 )
 class ArtifactProviderInputUnitHydrationAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["artifact_provider_input_unit_hydration_attribution.v1"] = (
         "artifact_provider_input_unit_hydration_attribution.v1"
-    ] = "artifact_provider_input_unit_hydration_attribution.v1"
+    )
     hydration_kind: Literal["artifact"] = "artifact"
     semantic_document_identity_fingerprint: Fingerprint
     artifact_reference: ContextArtifactReferenceFact
@@ -2000,9 +1984,9 @@ class ProviderInputUnitPlacementAttributionFact(FrozenFactBase):
     "committed-runtime-observation-source-head:v1",
 )
 class CommittedRuntimeObservationSourceHeadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["committed_runtime_observation_source_head.v1"] = (
         "committed_runtime_observation_source_head.v1"
-    ] = "committed_runtime_observation_source_head.v1"
+    )
     semantic_head: CommittedRuntimeObservationSemanticHeadFact
     placement_attribution: ProviderInputUnitPlacementAttributionFact
     fact_fingerprint: Fingerprint
@@ -2036,12 +2020,13 @@ class CommittedRuntimeObservationSourceHeadFact(FrozenFactBase):
         elif (
             hydration.artifact_document_contract_fingerprint
             != document.document_contract_fingerprint
-            or hydration.observed_document_sha256
-            != document.canonical_document_sha256
+            or hydration.observed_document_sha256 != document.canonical_document_sha256
             or hydration.observed_document_bytes != document.canonical_document_bytes
         ):
             raise ValueError("artifact provider source-head document drifted")
-        closed = self.semantic_head.effective_snapshot.effective_status == "source_closed"
+        closed = (
+            self.semantic_head.effective_snapshot.effective_status == "source_closed"
+        )
         if closed != (self.placement_attribution.closure_event_reference is not None):
             raise ValueError("runtime observation source-head closure matrix mismatch")
         return self
@@ -2087,6 +2072,7 @@ class ProviderInputContinuationMaterializationProofFact(FrozenFactBase):
     schema_version: Literal["provider_input_continuation_materialization_proof.v1"] = (
         "provider_input_continuation_materialization_proof.v1"
     )
+    proof_kind: Literal["exact_materialization"] = "exact_materialization"
     pending_continuation_fingerprint: Fingerprint
     terminal_projection_reference: TerminalProjectionReferenceFact
     predecessor_transcript_frontier_fingerprint: Fingerprint
@@ -2133,6 +2119,89 @@ class ProviderInputContinuationMaterializationProofFact(FrozenFactBase):
 
 
 @_fact(
+    "provider_input_continuation_rewrite_coverage_proof.v1",
+    "proof_fingerprint",
+    "provider-input-continuation-rewrite-coverage-proof:v1",
+)
+class ProviderInputContinuationRewriteCoverageProofFact(FrozenFactBase):
+    schema_version: Literal["provider_input_continuation_rewrite_coverage_proof.v1"] = (
+        "provider_input_continuation_rewrite_coverage_proof.v1"
+    )
+    proof_kind: Literal["long_horizon_rewrite_coverage"] = (
+        "long_horizon_rewrite_coverage"
+    )
+    pending_continuation_fingerprint: Fingerprint
+    terminal_projection_reference: TerminalProjectionReferenceFact
+    terminal_projection_committed_event_reference: ContextEventReferenceFact
+    accepted_disposition_event_reference: ContextEventReferenceFact
+    predecessor_transcript_frontier_fingerprint: Fingerprint
+    resulting_transcript_frontier_fingerprint: Fingerprint
+    rewritten_stable_leaf_reference: TranscriptProjectionLeafEntryReferenceFact
+    rewrite_authority_reference: ProviderCompactionRewriteAuthorityReferenceFact
+    replacement_summary_source_attribution: (
+        CompactionReplacementSummarySourceAttributionFact
+    )
+    ordered_projection_identity_fingerprint: Fingerprint
+    replacement_summary_unit_ordinal: int = Field(ge=0)
+    replacement_summary_unit_semantic_fingerprint: Fingerprint
+    replacement_summary_unit_materialization_fingerprint: Fingerprint
+    replacement_summary_unit_owner_semantic_fingerprint: Fingerprint
+    proof_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _coverage(self) -> "ProviderInputContinuationRewriteCoverageProofFact":
+        leaf = self.rewritten_stable_leaf_reference
+        authority = self.rewrite_authority_reference
+        source = self.replacement_summary_source_attribution
+        source_refs = leaf.source_event_references
+        if leaf.entry_kind != "message":
+            raise ValueError("continuation rewrite must cover one message leaf")
+        if not (
+            authority.replaced_first_stable_ordinal
+            <= leaf.ordinal
+            <= authority.replaced_last_stable_ordinal
+        ):
+            raise ValueError(
+                "continuation leaf is outside the compaction rewrite range"
+            )
+        if (
+            self.terminal_projection_committed_event_reference not in source_refs
+            or self.accepted_disposition_event_reference not in source_refs
+            or self.terminal_projection_committed_event_reference.event_type
+            != "MODEL_CALL_TERMINAL_PROJECTION_COMMITTED"
+            or self.accepted_disposition_event_reference.event_type
+            != "MODEL_CALL_CONTROL_DISPOSITION_RESOLVED"
+        ):
+            raise ValueError(
+                "continuation rewrite leaf lacks terminal/disposition authority"
+            )
+        if (
+            source.rewrite_authority_reference != authority
+            or authority.compaction_completed_event_reference
+            not in source.summary_leaf_reference.source_event_references
+            or any(
+                ref.runtime_session_id != leaf.runtime_session_id
+                for ref in (
+                    self.terminal_projection_committed_event_reference,
+                    self.accepted_disposition_event_reference,
+                    authority.compaction_completed_event_reference,
+                )
+            )
+            or max(ref.sequence for ref in source_refs)
+            >= authority.compaction_completed_event_reference.sequence
+        ):
+            raise ValueError("continuation rewrite authority/source join failed")
+        return self
+
+
+ProviderInputContinuationConsumptionProofFact: TypeAlias = Annotated[
+    ProviderInputContinuationMaterializationProofFact
+    | ProviderInputContinuationRewriteCoverageProofFact,
+    Field(discriminator="proof_kind"),
+]
+
+
+@_fact(
     "provider_input_awaiting_control_disposition.v1",
     "awaiting_fingerprint",
     "provider-input-awaiting-control-disposition:v1",
@@ -2169,9 +2238,7 @@ class CommittedProviderInputGenerationCoreStateFact(FrozenFactBase):
     committed_authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
     replay_binding_set: ProviderInputReplayBindingSetReferenceFact
     transcript_frontier: ProviderTranscriptFrontierFact
-    committed_source_heads: tuple[
-        CommittedRuntimeObservationSemanticHeadFact, ...
-    ]
+    committed_source_heads: tuple[CommittedRuntimeObservationSemanticHeadFact, ...]
     clock_head: ProviderInputClockHeadFact | None
     awaiting_control_disposition: ProviderInputAwaitingControlDispositionFact | None
     accepted_but_not_appended_continuation: ProviderInputPendingContinuationFact | None
@@ -2456,7 +2523,9 @@ class PreparedProviderInputPlanFact(FrozenFactBase):
             for item in self.source_dispositions
         )
         if disposition_keys != tuple(sorted(set(disposition_keys))):
-            raise ValueError("prepared provider source dispositions are not ordered/unique")
+            raise ValueError(
+                "prepared provider source dispositions are not ordered/unique"
+            )
         if (
             self.ordered_transcript_projection_identity.identity_fingerprint
             != self.causal_validation.projection_identity_fingerprint
@@ -2535,7 +2604,8 @@ class PreparedProviderInputAppendCandidateFact(FrozenFactBase):
             prepared = self.prepared_plan
             manifest = self.manifest_projection_reference
             if (
-                prepared.resolved_model_call_id != plan.resolved_model_call_fact.resolved_model_call_id
+                prepared.resolved_model_call_id
+                != plan.resolved_model_call_fact.resolved_model_call_id
                 or prepared.target_generation_id != self.generation_id
                 or prepared.resulting_unit_vector_root_fingerprint
                 != plan.unit_vector_root.reference_fingerprint
@@ -2565,7 +2635,9 @@ class PreparedProviderInputAppendCandidateFact(FrozenFactBase):
                 self.rollover_request,
             )
         ):
-            raise ValueError("one-shot provider candidate cannot carry context manifest")
+            raise ValueError(
+                "one-shot provider candidate cannot carry context manifest"
+            )
         return self
 
 

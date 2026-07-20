@@ -239,18 +239,14 @@ def advance_runtime_observation_lifecycle_state(
         previous.closed_protection_scope_semantic_ids if previous is not None else ()
     )
     latest_clock = (
-        previous.latest_clock_observation_semantic_id
-        if previous is not None
-        else None
+        previous.latest_clock_observation_semantic_id if previous is not None else None
     )
     for observation in appended_observations:
         if observation.wire_semantic.observation_kind == "runtime_clock":
             latest_clock = observation.wire_semantic.observation_semantic_id
         transition = observation.source_attribution.transition_kind
         if transition in {"terminal", "delivery"}:
-            closed.add(
-                observation.source_attribution.protection_scope_semantic_id
-            )
+            closed.add(observation.source_attribution.protection_scope_semantic_id)
     effective_ids = frozenset(
         item.effective_snapshot.observation_semantic_id for item in effective_heads
     )
@@ -307,30 +303,25 @@ def classify_runtime_observation_lifecycle(
                 != current_run_protection_scope_semantic_id
             )
         )
-        is_effective = (
-            semantic_id in state.effective_head_observation_semantic_ids
-        )
-        is_latest_clock = (
-            semantic_id == state.latest_clock_observation_semantic_id
-        )
-        is_pending = (
-            semantic_id in state.pending_dependency_observation_semantic_ids
-        )
+        is_effective = semantic_id in state.effective_head_observation_semantic_ids
+        is_latest_clock = semantic_id == state.latest_clock_observation_semantic_id
+        is_pending = semantic_id in state.pending_dependency_observation_semantic_ids
         is_open = (
-            contract.rewrite_eligibility == "after_causal_close"
-            and not causally_closed
+            contract.rewrite_eligibility == "after_causal_close" and not causally_closed
         )
         if is_open:
             open_lifecycle.append(observation)
         if is_pending:
             pending.append(observation)
         rewriteable = (
-            contract.rewrite_eligibility == "superseded_only" and not is_effective
-        ) or (
-            contract.rewrite_eligibility == "after_causal_close" and causally_closed
-        ) or (
-            contract.rewrite_eligibility == "long_horizon_rewrite"
-            and not belongs_to_current_run
+            (contract.rewrite_eligibility == "superseded_only" and not is_effective)
+            or (
+                contract.rewrite_eligibility == "after_causal_close" and causally_closed
+            )
+            or (
+                contract.rewrite_eligibility == "long_horizon_rewrite"
+                and not belongs_to_current_run
+            )
         )
         must_protect = (
             contract.rewrite_eligibility == "never"
@@ -380,6 +371,7 @@ def validate_runtime_observation_source_head_transition(
     appended_observations: tuple[PreparedRuntimeObservationProviderUnitFact, ...],
     resulting_heads,
     allow_rewrite_drop: bool = False,
+    allow_placement_rebind: bool = False,
 ) -> None:
     """Prove that replacement observations are the sole source-head writers."""
 
@@ -395,11 +387,29 @@ def validate_runtime_observation_source_head_transition(
             raise ValueError("runtime observation source heads are duplicated")
         return result
 
+    def placement_only_rebind(prior_head, resulting_head) -> bool:
+        prior = prior_head.effective_snapshot
+        resulting = resulting_head.effective_snapshot
+        return (
+            prior.source_id == resulting.source_id
+            and prior.source_instance_id == resulting.source_instance_id
+            and prior.committed_revision == resulting.committed_revision
+            and prior.observation_semantic_id == resulting.observation_semantic_id
+            and prior.predecessor_observation_semantic_id
+            == resulting.predecessor_observation_semantic_id
+            and prior.snapshot_semantic_fingerprint
+            == resulting.snapshot_semantic_fingerprint
+            and prior.canonical_wire_semantic_fingerprint
+            == resulting.canonical_wire_semantic_fingerprint
+            and prior.lifecycle_class == resulting.lifecycle_class
+            and prior.effective_status == resulting.effective_status
+            and prior.unit_document_identity == resulting.unit_document_identity
+        )
+
     previous = head_map(predecessor_heads)
     resulting = head_map(resulting_heads)
     dispositions = {
-        (item.source_id, item.source_instance_id): item
-        for item in source_dispositions
+        (item.source_id, item.source_instance_id): item for item in source_dispositions
     }
     if len(dispositions) != len(source_dispositions):
         raise ValueError("runtime observation source dispositions are duplicated")
@@ -409,6 +419,31 @@ def validate_runtime_observation_source_head_transition(
     expected = dict(previous)
     transitioned: set[tuple[ContextSourceId, str]] = set()
     carried: set[tuple[ContextSourceId, str]] = set()
+    changing_keys = {
+        (
+            observation.source_id,
+            observation.wire_semantic.source_instance_id,
+        )
+        for observation in appended_observations
+        if observation.source_id not in {None, ContextSourceId.RUNTIME_CLOCK}
+        and runtime_observation_kind_contract(
+            observation.wire_semantic.observation_kind
+        ).lifecycle_class
+        == "replacement_snapshot"
+        and (
+            (
+                prior := previous.get(
+                    (
+                        observation.source_id,
+                        observation.wire_semantic.source_instance_id,
+                    )
+                )
+            )
+            is None
+            or prior.effective_snapshot.observation_semantic_id
+            != observation.wire_semantic.observation_semantic_id
+        )
+    }
     for observation in appended_observations:
         source_id = observation.source_id
         if source_id in {None, ContextSourceId.RUNTIME_CLOCK}:
@@ -427,12 +462,16 @@ def validate_runtime_observation_source_head_transition(
         ):
             if key in carried:
                 raise ValueError("runtime observation source head was carried twice")
-            if dispositions[key].disposition != "retain":
+            if dispositions[key].disposition != "retain" and not (
+                allow_rewrite_drop and key in changing_keys
+            ):
                 raise ValueError("carried runtime observation lacks retain disposition")
             carried.add(key)
             continue
         if key in transitioned:
-            raise ValueError("runtime observation source head changed twice in one append")
+            raise ValueError(
+                "runtime observation source head changed twice in one append"
+            )
         disposition = dispositions.get(key)
         if disposition is None or disposition.disposition not in {
             "replace",
@@ -446,7 +485,9 @@ def validate_runtime_observation_source_head_transition(
             or disposition.candidate_payload_semantic_fingerprint
             != observation.source_payload_semantic_fingerprint
         ):
-            raise ValueError("replacement observation/disposition semantic join drifted")
+            raise ValueError(
+                "replacement observation/disposition semantic join drifted"
+            )
         payload = observation.wire_semantic.payload
         if not isinstance(payload, ContextSourceReplacementObservationPayloadFact):
             raise ValueError("replacement observation lacks typed lineage payload")
@@ -456,9 +497,7 @@ def validate_runtime_observation_source_head_transition(
             else "genesis"
         )
         expected_revision = (
-            prior.effective_snapshot.committed_revision + 1
-            if prior is not None
-            else 1
+            prior.effective_snapshot.committed_revision + 1 if prior is not None else 1
         )
         transition = observation.source_attribution.transition_kind
         lifecycle = context_source_lifecycle_entry(source_id)
@@ -468,13 +507,15 @@ def validate_runtime_observation_source_head_transition(
             for item in lifecycle.observation_kind_bindings
         }
         disposition_transition_valid = (
-            disposition.disposition == "replace"
-            and transition not in {"explicit_empty", "terminal"}
-        ) or (
-            disposition.disposition == "explicit_empty"
-            and transition == "explicit_empty"
-        ) or (
-            disposition.disposition == "terminal" and transition == "terminal"
+            (
+                disposition.disposition == "replace"
+                and transition not in {"explicit_empty", "terminal"}
+            )
+            or (
+                disposition.disposition == "explicit_empty"
+                and transition == "explicit_empty"
+            )
+            or (disposition.disposition == "terminal" and transition == "terminal")
         )
         if (
             payload.predecessor_observation_semantic_id != expected_predecessor_id
@@ -500,7 +541,11 @@ def validate_runtime_observation_source_head_transition(
             or snapshot.observation_semantic_id
             != observation.wire_semantic.observation_semantic_id
             or snapshot.predecessor_observation_semantic_id
-            != (None if expected_predecessor_id == "genesis" else expected_predecessor_id)
+            != (
+                None
+                if expected_predecessor_id == "genesis"
+                else expected_predecessor_id
+            )
             or snapshot.snapshot_semantic_fingerprint
             != observation.source_payload_semantic_fingerprint
             or snapshot.canonical_wire_semantic_fingerprint
@@ -518,13 +563,24 @@ def validate_runtime_observation_source_head_transition(
     for key, disposition in dispositions.items():
         prior = previous.get(key)
         if disposition.disposition == "retain":
-            if prior is None or resulting.get(key) != prior or key in transitioned:
+            retained = resulting.get(key)
+            if prior is None or retained is None or key in transitioned:
                 raise ValueError("retain disposition changed its source head")
+            if retained != prior:
+                if not (
+                    allow_placement_rebind
+                    and key in carried
+                    and placement_only_rebind(prior, retained)
+                ):
+                    raise ValueError("retain disposition changed its source head")
+                expected[key] = retained
             if disposition.reason == "semantic_noop" and (
                 disposition.candidate_payload_semantic_fingerprint
                 != prior.effective_snapshot.snapshot_semantic_fingerprint
             ):
-                raise ValueError("semantic-noop disposition differs from effective head")
+                raise ValueError(
+                    "semantic-noop disposition differs from effective head"
+                )
             continue
         if disposition.disposition == "rewrite_required":
             if not allow_rewrite_drop or prior is None or key in resulting:
@@ -557,12 +613,16 @@ def prepare_runtime_observation_rewrite(
     core = generation_snapshot.core_state
     resident = generation_snapshot.resident
     if core is None or resident is None or core.status != "open":
-        raise ValueError("runtime observation rewrite lacks an open resident generation")
+        raise ValueError(
+            "runtime observation rewrite lacks an open resident generation"
+        )
     active = tuple(generation_snapshot.runtime_observation_units)
     if len({item.wire_semantic.observation_semantic_id for item in active}) != len(
         active
     ):
-        raise ValueError("runtime observation stable state contains duplicate identities")
+        raise ValueError(
+            "runtime observation stable state contains duplicate identities"
+        )
     unit_by_semantic = {
         item.attribution.semantic.semantic_fingerprint: item for item in resident.units
     }
@@ -750,16 +810,10 @@ def prepare_runtime_observation_rewrite(
             ),
             artifact_namespace=artifact_namespace,
             policy=policy,
-            contract_fingerprint=(
-                OBSERVATION_REWRITE_PROJECTION_CONTRACT_FINGERPRINT
-            ),
+            contract_fingerprint=(OBSERVATION_REWRITE_PROJECTION_CONTRACT_FINGERPRINT),
             leaf_metadata_kind="runtime_observation_rewrite_projection_leaf",
-            internal_metadata_kind=(
-                "runtime_observation_rewrite_projection_internal"
-            ),
-            leaf_schema_version=(
-                "runtime_observation_rewrite_projection_leaf.v1"
-            ),
+            internal_metadata_kind=("runtime_observation_rewrite_projection_internal"),
+            leaf_schema_version=("runtime_observation_rewrite_projection_leaf.v1"),
             internal_schema_version=(
                 "runtime_observation_rewrite_projection_internal.v1"
             ),
@@ -792,17 +846,13 @@ def prepare_runtime_observation_rewrite(
                 "root_node_reference": projection_root.model_dump(mode="json"),
             },
             artifact_namespace=artifact_namespace,
-            contract_fingerprint=(
-                OBSERVATION_REWRITE_PROJECTION_CONTRACT_FINGERPRINT
-            ),
+            contract_fingerprint=(OBSERVATION_REWRITE_PROJECTION_CONTRACT_FINGERPRINT),
             metadata_kind="runtime_observation_rewrite_projection",
         )
         artifacts.append(projection_artifact)
     prepared_projection = build_frozen_fact(
         PreparedRuntimeObservationRewriteProjectionReferenceFact,
-        schema_version=(
-            "prepared_runtime_observation_rewrite_projection_reference.v1"
-        ),
+        schema_version=("prepared_runtime_observation_rewrite_projection_reference.v1"),
         unit_count=len(rewrite_units),
         ordered_unit_semantic_accumulator=context_fingerprint(
             "runtime-observation-rewrite-unit-semantics:v1",
@@ -840,8 +890,7 @@ def prepare_runtime_observation_rewrite(
     if len(unique) > policy.maximum_artifact_batches_per_rewrite:
         raise ValueError("runtime observation rewrite exceeds artifact operation bound")
     if any(
-        artifact.artifact_reference.content_bytes
-        > policy.leaf_max_canonical_bytes
+        artifact.artifact_reference.content_bytes > policy.leaf_max_canonical_bytes
         for artifact in unique
     ):
         raise ValueError("runtime observation rewrite artifact exceeds byte bound")
@@ -929,7 +978,10 @@ def _project_active_observations(
         cursor = index + 1
         while cursor < len(active):
             next_observation = active[cursor]
-            if next_observation.wire_semantic.observation_semantic_id not in eligible_ids:
+            if (
+                next_observation.wire_semantic.observation_semantic_id
+                not in eligible_ids
+            ):
                 break
             if (
                 _resolved_group_key(
@@ -1140,16 +1192,12 @@ def _rewrite_group(
         source_instance_id=source_instance_id,
         lifecycle_class="immutable_append_once",
         authority_class="runtime_fact",
-        causal_occurrence_semantic_fingerprint=(
-            coverage.coverage_semantic_fingerprint
-        ),
+        causal_occurrence_semantic_fingerprint=(coverage.coverage_semantic_fingerprint),
     )
     fragment_text = message.content[0]
     wire = decode_runtime_observation_wire_semantic(
         fragment_text,
-        causal_occurrence_semantic_fingerprint=(
-            coverage.coverage_semantic_fingerprint
-        ),
+        causal_occurrence_semantic_fingerprint=(coverage.coverage_semantic_fingerprint),
     )
     (
         predecessor,
@@ -1166,9 +1214,7 @@ def _rewrite_group(
         causal_scope_semantic_id=scope_id,
         placement_phase=phase,
         stable_predecessor_transcript_node=predecessor,
-        source_occurrence_semantic_fingerprint=(
-            coverage.coverage_semantic_fingerprint
-        ),
+        source_occurrence_semantic_fingerprint=(coverage.coverage_semantic_fingerprint),
         intra_boundary_order=min(
             item.causal_placement.intra_boundary_order for item in group
         ),
@@ -1280,9 +1326,7 @@ def _coverage_segment(observation, unit) -> _CoverageSegment:
             transitive_coverage_root_fingerprint=(
                 payload.transitive_coverage_root_fingerprint
             ),
-            coverage_contract_fingerprint=(
-                OBSERVATION_COVERAGE_CONTRACT_FINGERPRINT
-            ),
+            coverage_contract_fingerprint=(OBSERVATION_COVERAGE_CONTRACT_FINGERPRINT),
         )
         if (
             coverage.coverage_semantic_fingerprint
@@ -1422,7 +1466,10 @@ def validate_runtime_observation_rewrite_transition(
         ),
     )
     active = _prepare_observation_set(
-        "active", source_observations, artifact_namespace=artifact_namespace, policy=policy
+        "active",
+        source_observations,
+        artifact_namespace=artifact_namespace,
+        policy=policy,
     )
     protected = _prepare_observation_set(
         "protected",
@@ -1468,9 +1515,7 @@ def validate_runtime_observation_rewrite_transition(
         state_revision=source_core.revision,
         source_generation_id=source_core.generation.generation_id,
         source_generation_core_fingerprint=source_core.core_state_fingerprint,
-        authority_horizon_set_reference=(
-            source_core.committed_authority_horizon_set
-        ),
+        authority_horizon_set_reference=(source_core.committed_authority_horizon_set),
         active_observations=active.reference,
         protected_observations=protected.reference,
         eligible_observations=eligible.reference,
@@ -1523,8 +1568,7 @@ def validate_runtime_observation_rewrite_transition(
     _validate_rewrite_projection_coverage(
         source_observations=source_observations,
         protected_observation_ids={
-            item.wire_semantic.observation_semantic_id
-            for item in lifecycle.protected
+            item.wire_semantic.observation_semantic_id for item in lifecycle.protected
         },
         eligible_observation_ids={
             item.wire_semantic.observation_semantic_id for item in lifecycle.eligible
@@ -1550,7 +1594,9 @@ def _validate_rewrite_projection_coverage(
                 raise ValueError("runtime observation rewrite dropped a protected unit")
             resulting = resulting_observations[resulting_index]
             if resulting.wire_semantic != source.wire_semantic:
-                raise ValueError("runtime observation rewrite changed protected wire semantic")
+                raise ValueError(
+                    "runtime observation rewrite changed protected wire semantic"
+                )
             source_index += 1
             resulting_index += 1
             continue
@@ -1565,23 +1611,24 @@ def _validate_rewrite_projection_coverage(
             raise ValueError("eligible observations lack a typed rewrite projection")
         payload = resulting.wire_semantic.payload
         if not isinstance(payload, RuntimeObservationRewriteProjectionPayloadFact):
-            raise ValueError("runtime observation rewrite projection payload is untyped")
+            raise ValueError(
+                "runtime observation rewrite projection payload is untyped"
+            )
         direct_count = payload.covered_direct_member_count
         group = source_observations[source_index : source_index + direct_count]
         if len(group) != direct_count or any(
-            item.wire_semantic.observation_semantic_id
-            not in eligible_observation_ids
+            item.wire_semantic.observation_semantic_id not in eligible_observation_ids
             for item in group
         ):
-            raise ValueError("runtime observation rewrite coverage crosses a protected unit")
+            raise ValueError(
+                "runtime observation rewrite coverage crosses a protected unit"
+            )
         segments = tuple(_coverage_segment(item, None) for item in group)
         expected = build_frozen_fact(
             RuntimeObservationRewriteCoverageSemanticFact,
             schema_version="runtime_observation_rewrite_coverage_semantic.v1",
             direct_member_count=direct_count,
-            transitive_original_observation_count=sum(
-                item.count for item in segments
-            ),
+            transitive_original_observation_count=sum(item.count for item in segments),
             ordered_original_semantic_accumulator=context_fingerprint(
                 "runtime-observation-coverage-ordered-semantic:v1",
                 tuple((item.count, item.semantic_accumulator) for item in segments),
@@ -1668,9 +1715,7 @@ def _prepare_merkle_tree(
         leaves.append(
             build_frozen_fact(
                 RuntimeObservationProjectionSetNodeReferenceFact,
-                schema_version=(
-                    "runtime_observation_projection_set_node_reference.v1"
-                ),
+                schema_version=("runtime_observation_projection_set_node_reference.v1"),
                 node_kind="leaf",
                 height=1,
                 member_count=count,
@@ -1694,9 +1739,7 @@ def _prepare_merkle_tree(
             raise ValueError("runtime observation set exceeds tree height bound")
         next_level = []
         for group_index in range(0, len(level), policy.internal_max_fanout):
-            children = level[
-                group_index : group_index + policy.internal_max_fanout
-            ]
+            children = level[group_index : group_index + policy.internal_max_fanout]
             artifact = prepared_json_artifact(
                 f"{namespace}-internal",
                 {
@@ -1807,9 +1850,7 @@ def _validate_observation_partition(
     effective_ids,
 ) -> None:
     def identities(values):
-        result = tuple(
-            item.wire_semantic.observation_semantic_id for item in values
-        )
+        result = tuple(item.wire_semantic.observation_semantic_id for item in values)
         if len(result) != len(set(result)):
             raise ValueError("runtime observation partition contains duplicates")
         return result
@@ -1822,7 +1863,9 @@ def _validate_observation_partition(
     open_ids = identities(open_lifecycle)
     pending_ids = identities(pending_dependency)
     partitions = (set(protected_ids), set(retained_ids), set(rewritten_ids))
-    if any(partitions[left] & partitions[right] for left, right in ((0, 1), (0, 2), (1, 2))):
+    if any(
+        partitions[left] & partitions[right] for left, right in ((0, 1), (0, 2), (1, 2))
+    ):
         raise ValueError("runtime observation partition sets overlap")
     if set(active_ids) != set().union(*partitions):
         raise ValueError("runtime observation partition does not cover active state")
