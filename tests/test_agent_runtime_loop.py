@@ -1945,18 +1945,18 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "<runtime-context>" not in system_prompt
-    assert "<runtime-context>" in context_text
-    assert f"Workspace root: {tmp_path.resolve()}" in context_text
-    assert "Workspace kind: project" in context_text
-    assert f"Terminal current cwd: {tmp_path.resolve()}" in context_text
+    assert "<runtime-context>" in system_prompt
+    assert "<runtime-context>" not in context_text
+    assert f"Workspace root: {tmp_path.resolve()}" in system_prompt
+    assert "Workspace kind: project" in system_prompt
+    assert f"Terminal current cwd: {tmp_path.resolve()}" in system_prompt
     assert (
         "Terminal workdir, when provided, must stay inside workspace_root"
-        in context_text
+        in system_prompt
     )
     assert (
         "Read-only filesystem tools may read ordinary text files outside workspace_root"
-        in context_text
+        in system_prompt
     )
     assert runtime_session.terminal_sessions.session_count() == 0
 
@@ -3208,7 +3208,20 @@ class RecordingHooks(NoopMemoryHooks):
 
     async def project(self, state: LoopState, *, token_budget: int):
         self.calls.append("project")
-        return {"summary": "Remember source=fenced.", "included_memory_ids": ["mem:1"]}
+        return {
+            "summary": (
+                '<recalled-memory-projection do_not_write_back="true">\n'
+                "- Remember source=fenced.\n"
+                "</recalled-memory-projection>"
+            ),
+            "included_memory_ids": ["mem:1"],
+            "typed_recalled_entries": [
+                {
+                    "memory_ids": ["mem:1"],
+                    "model_visible_text": "Remember source=fenced.",
+                }
+            ],
+        }
 
     async def after_model_reply(self, state: LoopState, assistant):
         self.calls.append("after_model")
@@ -3309,16 +3322,13 @@ class SlowProjectionHooks(NoopMemoryHooks):
         return {"summary": "too late", "included_memory_ids": ["mem:late"]}
 
 
-class SlowProjectionWithBaselineHooks(SlowProjectionHooks):
+class SlowProjectionWithTypedEmptyBaselineHooks(SlowProjectionHooks):
     def baseline_projection(self, state: LoopState, *, token_budget: int):
         return {
-            "summary": (
-                '<working-context-projection authority="recent_activity">'
-                "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
-                "</working-context-projection>"
-            ),
+            "summary": "",
             "included_memory_ids": [],
-            "projection_kind": "working_context",
+            "typed_recalled_entries": [],
+            "projection_kind": "recalled_memory",
         }
 
 
@@ -3331,8 +3341,18 @@ class ReadyThenFailedProjectionHooks(NoopMemoryHooks):
         self.calls += 1
         if self.calls == 1:
             return {
-                "summary": "STALE_MEMORY_MUST_NOT_RETURN",
+                "summary": (
+                    '<recalled-memory-projection do_not_write_back="true">\n'
+                    "- STALE_MEMORY_MUST_NOT_RETURN\n"
+                    "</recalled-memory-projection>"
+                ),
                 "included_memory_ids": ["memory:stale"],
+                "typed_recalled_entries": [
+                    {
+                        "memory_ids": ["memory:stale"],
+                        "model_visible_text": "STALE_MEMORY_MUST_NOT_RETURN",
+                    }
+                ],
             }
         raise RuntimeError("latest projection failed")
 
@@ -3356,7 +3376,7 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "Recalled Memory" in context_text
+    assert '"kind":"recalled_memory_snapshot"' in context_text
     assert "Remember source=fenced." in context_text
     assert "[context timing:" not in context_text
     compiled = next(
@@ -3647,7 +3667,7 @@ def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -
     assert "Recalled Memory" not in (transport.contexts[0].system_prompt or "")
 
 
-def test_latest_failed_memory_projection_does_not_reuse_prior_ready(tmp_path) -> None:
+def test_latest_failed_memory_projection_retains_prior_effective_head(tmp_path) -> None:
     hooks = ReadyThenFailedProjectionHooks()
     transport = ScriptedTransport(
         [
@@ -3681,36 +3701,11 @@ def test_latest_failed_memory_projection_does_not_reuse_prior_ready(tmp_path) ->
         text for message in transport.contexts[1].messages for text in message.content
     )
     assert "STALE_MEMORY_MUST_NOT_RETURN" in first_context
-    assert "STALE_MEMORY_MUST_NOT_RETURN" not in second_context
-    rollover = next(
-        event
+    assert "STALE_MEMORY_MUST_NOT_RETURN" in second_context
+    assert not any(
+        isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
         for event in agent.runtime_session.event_log.iter()
-        if isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
     )
-    assert rollover.rollover_request.intent.reason.value == "auxiliary_frame_rebase"
-    assert (
-        rollover.rollover_request.intent.authority.authority_kind
-        == "auxiliary_frame_rebase"
-    )
-    from pulsara_agent.inspector.service import _provider_input_generation_projection
-
-    provider_projection = _provider_input_generation_projection(
-        tuple(agent.runtime_session.event_log.iter())
-    )
-    old_generation = next(
-        item
-        for item in provider_projection["generations"]
-        if item["generation_id"] == rollover.old_generation_id
-    )
-    assert old_generation["rollover"] == {
-        "sequence": rollover.sequence,
-        "reason": "auxiliary_frame_rebase",
-        "successor_generation_id": rollover.new_generation.generation_id,
-        "authority_kind": "auxiliary_frame_rebase",
-        "authority_fingerprint": (
-            rollover.rollover_request.intent.authority_fingerprint
-        ),
-    }
     event_types = [
         event.type
         for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
@@ -3819,13 +3814,13 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
     assert decision in manifest.prepared_candidate_set.collection_decisions
 
 
-def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) -> None:
+def test_memory_projection_timeout_uses_typed_empty_memory_baseline(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        memory_hooks=SlowProjectionWithBaselineHooks(),
+        memory_hooks=SlowProjectionWithTypedEmptyBaselineHooks(),
         budget=LoopBudget(recall_hard_timeout_ms=1),
     )
 
@@ -3833,10 +3828,7 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
 
     assert result.status is LoopStatus.FINISHED
     assert result.state.memory_projection is not None
-    assert (
-        "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
-        in result.state.memory_projection["summary"]
-    )
+    assert result.state.memory_projection["typed_recalled_entries"] == []
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
     assert ready.metadata == {
@@ -3848,8 +3840,8 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
     context_text = "\n".join(
         text for message in transport.contexts[0].messages for text in message.content
     )
-    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in context_text
-    assert "empty memory_search result does not invalidate" in context_text
+    assert "working-context-projection" not in context_text
+    assert '"kind":"recalled_memory_snapshot"' not in context_text
 
 
 class FailingHook(NoopMemoryHooks):

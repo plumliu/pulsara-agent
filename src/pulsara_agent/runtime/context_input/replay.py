@@ -1287,6 +1287,12 @@ def _validate_replayed_candidates(
             "context_input_candidate_authority_mismatch",
             "replayed ContextSource candidates differ from manifest",
         )
+    if source_build.source_dispositions != snapshot.context_source_dispositions:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_source_disposition_mismatch",
+            "replayed ContextSource dispositions differ from manifest",
+        )
     if (
         source_build.tool_catalog_root != snapshot.capability_tool_catalog_root
         or source_build.physical_input_policy

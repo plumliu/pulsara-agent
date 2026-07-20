@@ -213,9 +213,11 @@ TimingOverlayKind = Literal[
 
 
 class TranscriptMessageProviderPlacementRuleFact(FrozenFactBase):
-    schema_version: Literal["transcript_message_provider_placement_rule.v1"]
+    schema_version: Literal["transcript_message_provider_placement_rule.v2"]
     source_segment: Segment
-    message_role: Literal["system", "user", "assistant"]
+    message_role: Literal[
+        "user", "assistant", "runtime_request", "runtime_observation"
+    ]
     normalized_lane: ProviderLane
     lowering_scope: LoweringScope
     timing_overlay_kind: TimingOverlayKind
@@ -250,8 +252,10 @@ class TranscriptMessageProviderPlacementSemanticFact(FrozenFactBase):
 
 
 class TranscriptMessageProviderSemanticFact(FrozenFactBase):
-    schema_version: Literal["transcript_message_provider_semantic.v3"]
-    role: Literal["system", "user", "assistant"]
+    schema_version: Literal["transcript_message_provider_semantic.v4"]
+    role: Literal[
+        "user", "assistant", "runtime_request", "runtime_observation"
+    ]
     name: str | None = Field(default=None, max_length=256)
     placement_semantic: TranscriptMessageProviderPlacementSemanticFact
     ordered_block_semantic_fingerprints: tuple[Fingerprint, ...]
@@ -1101,10 +1105,10 @@ _OWN: tuple[tuple[str, str | None, str], ...] = (
     ("transcript_provider_tool_result_ref_semantic.v1", "semantic_fingerprint", "transcript-provider-tool-result-ref-semantic:v1"),
     ("transcript_inline_block_attribution.v1", "attribution_fingerprint", "transcript-inline-block-attribution:v1"),
     ("transcript_inline_block.v1", "fact_fingerprint", "transcript-inline-block:v1"),
-    ("transcript_message_provider_placement_rule.v1", "rule_fingerprint", "transcript-message-provider-placement-rule:v1"),
+    ("transcript_message_provider_placement_rule.v2", "rule_fingerprint", "transcript-message-provider-placement-rule:v2"),
     ("transcript_message_provider_placement_contract.v2", "contract_fingerprint", "transcript-message-provider-placement-contract:v2"),
     ("transcript_message_provider_placement_semantic.v2", "semantic_fingerprint", "transcript-message-provider-placement-semantic:v2"),
-    ("transcript_message_provider_semantic.v3", "semantic_fingerprint", "transcript-message-provider-semantic:v3"),
+    ("transcript_message_provider_semantic.v4", "semantic_fingerprint", "transcript-message-provider-semantic:v4"),
     ("transcript_message_attribution.v2", "attribution_fingerprint", "transcript-message-attribution:v2"),
     ("transcript_provider_lowering_order_rule.v1", "rule_fingerprint", "transcript-provider-lowering-order-rule:v1"),
     ("transcript_provider_lowering_order_contract.v1", "contract_fingerprint", "transcript-provider-lowering-order-contract:v1"),

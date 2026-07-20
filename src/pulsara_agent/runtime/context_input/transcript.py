@@ -805,7 +805,7 @@ def _lifecycle_note_message(
     )
     return _message_fact(
         message_id=message_id,
-        role="system",
+        role="runtime_observation",
         name="pulsara",
         run_id=event.run_id,
         turn_id=event.turn_id,
@@ -1130,7 +1130,7 @@ def _compaction_summary_message(
     )
     message = _message_fact(
         message_id=summary_message_id,
-        role="system",
+        role="runtime_observation",
         name="pulsara_compaction" if prefix else "pulsara_window_compaction",
         run_id=None,
         turn_id=None,

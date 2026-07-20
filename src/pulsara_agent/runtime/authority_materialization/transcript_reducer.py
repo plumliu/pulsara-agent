@@ -851,9 +851,12 @@ class TranscriptProjectionStateStore:
             provider_semantic_identity=block_semantic,
             attribution=block_attribution,
         )
+        provider_role = (
+            "user" if current.source_kind == "host_user_input" else "runtime_request"
+        )
         provider = _message_provider_semantic(
-            role="user",
-            name="user",
+            role=provider_role,
+            name="user" if provider_role == "user" else "pulsara_runtime",
             segment="current_user",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
         )
@@ -911,7 +914,7 @@ class TranscriptProjectionStateStore:
             ),
         )
         provider = _message_provider_semantic(
-            role="system",
+            role="runtime_observation",
             name="pulsara",
             segment="prior_history",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
@@ -970,7 +973,7 @@ class TranscriptProjectionStateStore:
             ),
         )
         provider = _message_provider_semantic(
-            role="system",
+            role="runtime_observation",
             name="pulsara",
             segment="prior_history",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
@@ -1159,7 +1162,7 @@ def _message_provider_semantic(
     )
     return build_frozen_fact(
         TranscriptMessageProviderSemanticFact,
-        schema_version="transcript_message_provider_semantic.v3",
+        schema_version="transcript_message_provider_semantic.v4",
         role=role,
         name=name,
         placement_semantic=placement,

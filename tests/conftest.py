@@ -845,6 +845,7 @@ async def emit_test_accepted_model_reply(
     from pulsara_agent.primitives.model_call import ModelCallPurpose
     from pulsara_agent.runtime.state import LoopState
     from tests.support import (
+        bind_test_provider_input_context,
         bind_test_context,
         make_test_run_execution_activation,
         test_llm_config,
@@ -944,7 +945,7 @@ async def emit_test_accepted_model_reply(
             operation_id=call.fact.resolved_model_call_id,
         )
     )
-    context = provider_input.carrier.to_llm_context(context)
+    context = bind_test_provider_input_context(call, provider_input, context)
     activation = make_test_run_execution_activation()
     start_bundle = prepare_model_lifecycle_start_bundle(
         call=call,

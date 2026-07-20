@@ -55,7 +55,8 @@ class ContextSourceId(StrEnum):
     MEMORY_PROJECTION = "memory_projection"
     CAPABILITY_CATALOG = "capability_catalog"
     ACTIVE_SKILL = "active_skill"
-    PLAN = "plan"
+    PLAN_STATUS = "plan_status"
+    PLAN_GUIDANCE = "plan_guidance"
     RECOVERY = "recovery"
     ROLLOUT_STATUS = "rollout_status"
     SUBAGENT_HANDOFF = "subagent_handoff"
@@ -479,28 +480,6 @@ class RuntimeClockProposalPayloadFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_runtime_clock_observation_semantic.v1",
-    "semantic_fingerprint",
-    "provider-runtime-clock-observation-semantic:v1",
-)
-class ProviderRuntimeClockObservationSemanticFact(FrozenFactBase):
-    schema_version: Literal["provider_runtime_clock_observation_semantic.v1"] = (
-        "provider_runtime_clock_observation_semantic.v1"
-    )
-    proposal: RuntimeClockProposalPayloadFact
-    append_reason: Literal[
-        "generation_start",
-        "user_turn",
-        "staleness_threshold",
-        "long_operation_completed",
-        "local_date_changed",
-        "explicit_temporal_requirement",
-    ]
-    supersedes_clock_unit_semantic_fingerprint: Fingerprint | None
-    semantic_fingerprint: Fingerprint
-
-
-@_fact(
     "generation_root_lifecycle.v1",
     "lifecycle_fingerprint",
     "generation-root-lifecycle:v1",
@@ -756,10 +735,23 @@ class PlanRevisionPayloadFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _active(self) -> "PlanRevisionPayloadFact":
-        if self.active != (self.workflow_id is not None and self.content is not None):
-            raise ValueError("plan payload active fields are inconsistent")
-        if not self.active and self.plan_decision != "inactive":
-            raise ValueError("inactive plan payload requires inactive decision")
+        has_terminal_identity = self.workflow_id is not None and self.content is not None
+        if self.active:
+            if not has_terminal_identity or self.plan_decision not in {
+                "enter",
+                "continue",
+                "revise",
+            }:
+                raise ValueError("active plan payload fields are inconsistent")
+        elif self.plan_decision == "exit":
+            if not has_terminal_identity:
+                raise ValueError("terminal plan payload requires workflow identity")
+        elif (
+            self.plan_decision != "inactive"
+            or self.workflow_id is not None
+            or self.content is not None
+        ):
+            raise ValueError("inactive plan payload fields are inconsistent")
         return self
 
 
@@ -972,6 +964,85 @@ class ContextSourceCandidateAttributionFact(FrozenFactBase):
         return self
 
 
+@_fact(
+    "context_source_disposition.v2",
+    "disposition_fingerprint",
+    "context-source-disposition:v2",
+)
+class ContextSourceDispositionFact(FrozenFactBase):
+    """Frozen treatment of one source relative to an existing provider prefix."""
+
+    schema_version: Literal["context_source_disposition.v2"] = (
+        "context_source_disposition.v2"
+    )
+    source_id: ContextSourceId
+    source_instance_id: str = Field(min_length=1)
+    disposition: Literal[
+        "retain", "replace", "explicit_empty", "terminal", "rewrite_required"
+    ]
+    reason: Literal[
+        "candidate_available",
+        "projection_failed",
+        "allocation_omitted",
+        "source_terminal",
+        "source_explicit_empty",
+        "no_new_fact",
+        "semantic_noop",
+    ]
+    candidate_semantic_fingerprint: Fingerprint | None
+    candidate_payload_semantic_fingerprint: Fingerprint | None
+    source_event_refs: tuple[ContextEventReferenceFact, ...]
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
+    disposition_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _matrix(self) -> "ContextSourceDispositionFact":
+        candidate_owned = self.disposition in {
+            "replace",
+            "explicit_empty",
+            "terminal",
+            "rewrite_required",
+        } or (self.disposition == "retain" and self.reason == "semantic_noop")
+        if candidate_owned != (self.candidate_semantic_fingerprint is not None) or (
+            candidate_owned
+            != (self.candidate_payload_semantic_fingerprint is not None)
+        ):
+            raise ValueError("ContextSource disposition candidate matrix mismatch")
+        if self.disposition == "retain" and self.reason not in {
+            "projection_failed",
+            "no_new_fact",
+            "semantic_noop",
+        }:
+            raise ValueError("ContextSource retain disposition has invalid reason")
+        if self.disposition == "rewrite_required" and self.reason != "allocation_omitted":
+            raise ValueError("ContextSource rewrite disposition has invalid reason")
+        expected_reason = {
+            "replace": "candidate_available",
+            "explicit_empty": "source_explicit_empty",
+            "terminal": "source_terminal",
+            "rewrite_required": "allocation_omitted",
+        }.get(self.disposition)
+        if expected_reason is not None and self.reason != expected_reason:
+            raise ValueError("ContextSource changing disposition has invalid reason")
+        event_keys = tuple(
+            (item.runtime_session_id, item.sequence, item.event_id)
+            for item in self.source_event_refs
+        )
+        if event_keys != tuple(sorted(set(event_keys))):
+            raise ValueError("ContextSource disposition refs are not ordered/unique")
+        horizon_ids = tuple(item.runtime_session_id for item in self.authority_horizons)
+        if horizon_ids != tuple(sorted(set(horizon_ids))):
+            raise ValueError("ContextSource disposition horizons are not ordered/unique")
+        horizon_by_owner = {
+            item.runtime_session_id: item for item in self.authority_horizons
+        }
+        for ref in self.source_event_refs:
+            horizon = horizon_by_owner.get(ref.runtime_session_id)
+            if horizon is None or ref.sequence > horizon.through_sequence:
+                raise ValueError("ContextSource disposition ref exceeds authority")
+        return self
+
+
 def context_source_payload_content(
     payload: ContextSourcePayloadSemanticFact,
 ) -> ContextSourceContentSemanticFact | None:
@@ -999,6 +1070,7 @@ __all__ = [
     "ContextArtifactReferenceFact",
     "ContextCandidateLoweringIntentFact",
     "ContextSourceAbsoluteTimingFact",
+    "ContextSourceDispositionFact",
     "ContextSourceCandidateAttributionFact",
     "ContextSourceCandidateSemanticFact",
     "ContextSourceContentSemanticFact",
@@ -1022,7 +1094,6 @@ __all__ = [
     "MemoryInstructionPayloadFact",
     "MemoryProjectionPayloadFact",
     "PlanRevisionPayloadFact",
-    "ProviderRuntimeClockObservationSemanticFact",
     "RecoveryObservationPayloadFact",
     "ResolvedContextSourcePhysicalInputPolicyFact",
     "RolloutStatusPayloadFact",

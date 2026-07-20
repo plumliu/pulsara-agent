@@ -4676,10 +4676,11 @@ class _BackgroundSubagentResultTransport:
         del call
         self.contexts.append(context)
         text = _context_text(context)
-        assert "## Subagent Results" in text
+        assert '"kind":"subagent_result_delivery"' in text
         assert "background child summary" in text
         assert "[context timing:" not in text
-        assert "<runtime-clock>" in text
+        assert '"kind":"runtime_clock"' in text
+        assert '"pulsara_runtime_observation"' in text
         async for event in _text_reply(
             event_context, "parent used background child result"
         ):

@@ -28,6 +28,7 @@ from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.user_carrier import RUNTIME_REQUEST_ENVELOPE_KEY
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     _parse_governance_output,
@@ -962,13 +963,31 @@ def _candidate_ids(context: LLMContext) -> tuple[str, ...]:
 
 
 def _governance_input(context: LLMContext) -> dict[str, object]:
-    content = context.messages[0].content[0]
+    request_messages = tuple(
+        message
+        for message in context.messages
+        if message.role.value == "runtime_request"
+    )
+    if len(request_messages) != 1:
+        raise TypeError("governance test expected one runtime request")
+    content = request_messages[0].content[0]
     if not isinstance(content, str):
         raise TypeError("governance test expected one text message")
     parsed = json.loads(content)
     if not isinstance(parsed, dict):
         raise TypeError("governance test input must be an object")
-    return parsed
+    carrier = parsed.get(RUNTIME_REQUEST_ENVELOPE_KEY)
+    if not isinstance(carrier, dict) or carrier.get("request_kind") != (
+        "governance_request"
+    ):
+        raise TypeError("governance test expected a typed runtime request")
+    payload = carrier.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("input"), str):
+        raise TypeError("governance runtime request payload is malformed")
+    model_input = json.loads(payload["input"])
+    if not isinstance(model_input, dict):
+        raise TypeError("governance model input must be an object")
+    return model_input
 
 
 def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:

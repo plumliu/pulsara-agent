@@ -21,19 +21,19 @@ from pulsara_agent.event import (
     ScopedGenerationPreparationAbandonedEvent,
 )
 from pulsara_agent.event_log.serialization import freeze_event_write_candidate
-from pulsara_agent.primitives._context_base import (
-    ContextEventReferenceFact,
-    context_fingerprint,
-)
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.context_source import LedgerAuthorityHorizonFact
 from pulsara_agent.primitives.frozen import StableEventIdentityFact, build_frozen_fact
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.primitives.provider_input import (
     CommittedProviderInputGenerationCoreStateFact,
+    CommittedRuntimeObservationSourceHeadFact,
+    InlineProviderInputUnitHydrationAttributionFact,
     OneShotGenerationScopeFact,
     ProviderInputAwaitingControlDispositionFact,
-    ProviderAuxiliaryFrameRebaseAuthorityFact,
     ProviderInputContinuationMaterializationProofFact,
+    ProviderInputUnitPlacementAttributionFact,
     ProviderInputGenerationAttributionStateFact,
     ProviderInputGenerationScopeBindingFact,
     ProviderInvocationContextFramePlacementFact,
@@ -46,9 +46,21 @@ from pulsara_agent.primitives.provider_input import (
     ExistingAppendCommitGuardFact,
     RolloverGenerationCommitGuardFact,
     SessionProviderInputContinuityScopeFact,
+    ProviderSourceDispositionRewriteAuthorityFact,
+)
+from pulsara_agent.primitives.runtime_observation import (
+    PreparedRuntimeObservationProviderUnitFact,
+    RuntimeObservationProjectionRewriteFact,
 )
 from pulsara_agent.runtime.provider_input.materialization import (
     RecursivelyImmutableProviderInputCarrier,
+    build_provider_unit_semantic_document,
+)
+from pulsara_agent.runtime.provider_input.observation_rewrite import (
+    RuntimeObservationLifecycleReducerState,
+    advance_runtime_observation_lifecycle_state,
+    validate_runtime_observation_rewrite_transition,
+    validate_runtime_observation_source_head_transition,
 )
 from pulsara_agent.runtime.provider_input.resident import (
     DEFAULT_PROVIDER_INPUT_RESIDENT_MANAGER,
@@ -58,6 +70,7 @@ from pulsara_agent.runtime.provider_input.resident import (
 from pulsara_agent.runtime.provider_input.vector import (
     PersistentProviderInputUnitSequence,
     ProviderInputVectorState,
+    provider_input_artifact_namespace,
 )
 
 
@@ -181,6 +194,15 @@ class ProviderInputGenerationSnapshot:
     preparation_attribution: ProviderInputPreparationOwnershipAttributionFact | None
     resident: ProviderInputResidentGeneration | None
     frame_placements: tuple[ProviderInvocationContextFramePlacementFact, ...]
+    runtime_observation_units: tuple[
+        PreparedRuntimeObservationProviderUnitFact, ...
+    ]
+    runtime_observation_rewrites: tuple[
+        RuntimeObservationProjectionRewriteFact, ...
+    ]
+    runtime_observation_lifecycle_state: (
+        RuntimeObservationLifecycleReducerState | None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +237,18 @@ class ProviderInputGenerationStore:
         self._append_identities_by_call: dict[str, StableEventIdentityFact] = {}
         self._frame_placements: dict[
             str, tuple[ProviderInvocationContextFramePlacementFact, ...]
+        ] = {}
+        self._runtime_observation_units: dict[
+            str, tuple[PreparedRuntimeObservationProviderUnitFact, ...]
+        ] = {}
+        self._runtime_observation_rewrites: dict[
+            str, tuple[RuntimeObservationProjectionRewriteFact, ...]
+        ] = {}
+        self._runtime_observation_lifecycle_states: dict[
+            str, RuntimeObservationLifecycleReducerState
+        ] = {}
+        self._append_events: dict[
+            str, tuple[ProviderInputAppendCommittedEvent, ...]
         ] = {}
         self._resident_manager = (
             resident_manager or DEFAULT_PROVIDER_INPUT_RESIDENT_MANAGER
@@ -305,6 +339,17 @@ class ProviderInputGenerationStore:
                     else None
                 ),
                 frame_placements=self._frame_placements.get(generation_id, ()),
+                runtime_observation_units=(
+                    self._runtime_observation_units.get(generation_id, ())
+                ),
+                runtime_observation_rewrites=(
+                    self._runtime_observation_rewrites.get(generation_id, ())
+                ),
+                runtime_observation_lifecycle_state=(
+                    self._runtime_observation_lifecycle_states.get(generation_id)
+                    if generation_id
+                    else None
+                ),
             )
 
     def active_preparation_snapshots(
@@ -398,6 +443,19 @@ class ProviderInputGenerationStore:
                 frame_placements=self._frame_placements.get(
                     core.generation.generation_id, ()
                 ),
+                runtime_observation_units=self._runtime_observation_units.get(
+                    core.generation.generation_id, ()
+                ),
+                runtime_observation_rewrites=(
+                    self._runtime_observation_rewrites.get(
+                        core.generation.generation_id, ()
+                    )
+                ),
+                runtime_observation_lifecycle_state=(
+                    self._runtime_observation_lifecycle_states.get(
+                        core.generation.generation_id
+                    )
+                ),
             )
 
     def open_session_continuity_snapshots(
@@ -448,6 +506,21 @@ class ProviderInputGenerationStore:
                         ),
                         frame_placements=self._frame_placements.get(
                             core.generation.generation_id, ()
+                        ),
+                        runtime_observation_units=(
+                            self._runtime_observation_units.get(
+                                core.generation.generation_id, ()
+                            )
+                        ),
+                        runtime_observation_rewrites=(
+                            self._runtime_observation_rewrites.get(
+                                core.generation.generation_id, ()
+                            )
+                        ),
+                        runtime_observation_lifecycle_state=(
+                            self._runtime_observation_lifecycle_states.get(
+                                core.generation.generation_id
+                            )
                         ),
                     )
                 )
@@ -539,6 +612,30 @@ class ProviderInputGenerationStore:
                     "provider resident restore conflicts with live state"
                 )
             self._resident_manager.admit(key, resident)
+            attribution = self._attributions.get(generation_id)
+            if attribution is not None:
+                source_attributions = _source_head_attributions_from_resident(
+                    core=core,
+                    append_events=self._append_events.get(generation_id, ()),
+                    resident=resident,
+                    runtime_session_id=self._runtime_session_id,
+                )
+                self._attributions[generation_id] = build_frozen_fact(
+                    ProviderInputGenerationAttributionStateFact,
+                    schema_version="provider_input_generation_attribution_state.v3",
+                    core_state=core,
+                    source_head_attribution_status="complete",
+                    source_head_attributions=source_attributions,
+                    latest_model_start_event_ref=(
+                        attribution.latest_model_start_event_ref
+                    ),
+                    latest_model_start_committed_core_fingerprint=(
+                        attribution.latest_model_start_committed_core_fingerprint
+                    ),
+                    close_or_rollover_event_ref=(
+                        attribution.close_or_rollover_event_ref
+                    ),
+                )
 
     def discard_staged_resident(self, preparation_id: str) -> None:
         with self._lock:
@@ -721,6 +818,14 @@ class ProviderInputGenerationStore:
             call_to_generation = dict(self._call_to_generation)
             append_identities_by_call = dict(self._append_identities_by_call)
             frame_placements = dict(self._frame_placements)
+            runtime_observation_units = dict(self._runtime_observation_units)
+            runtime_observation_rewrites = dict(
+                self._runtime_observation_rewrites
+            )
+            runtime_observation_lifecycle_states = dict(
+                self._runtime_observation_lifecycle_states
+            )
+            append_events = dict(self._append_events)
             staged_ownerships = dict(self._staged_ownerships)
             resident_actions: list[
                 tuple[
@@ -735,6 +840,9 @@ class ProviderInputGenerationStore:
             ] = {}
             rollover_frontier_by_successor: dict[
                 str, ProviderTranscriptFrontierFact
+            ] = {}
+            rollover_source_core_by_successor: dict[
+                str, CommittedProviderInputGenerationCoreStateFact
             ] = {}
 
             for index, event in enumerate(events):
@@ -908,6 +1016,27 @@ class ProviderInputGenerationStore:
                         resident=resident,
                         require_staged_resident=require_staged_resident,
                     )
+                    source_predecessor = rollover_source_core_by_successor.get(
+                        generation_id, predecessor
+                    )
+                    try:
+                        validate_runtime_observation_source_head_transition(
+                            predecessor_heads=(
+                                source_predecessor.committed_source_heads
+                            ),
+                            source_dispositions=event.source_dispositions,
+                            appended_observations=event.runtime_observation_units,
+                            resulting_heads=(
+                                event.resulting_core_state.committed_source_heads
+                            ),
+                            allow_rewrite_drop=(
+                                generation_id in rollover_source_core_by_successor
+                            ),
+                        )
+                    except ValueError as exc:
+                        raise ProviderInputGenerationReducerError(
+                            "provider append source-head transition is invalid"
+                        ) from exc
                     if event.frame_placement is not None:
                         prior_frames = frame_placements.get(generation_id, ())
                         if any(
@@ -923,7 +1052,79 @@ class ProviderInputGenerationStore:
                                 *prior_frames,
                                 event.frame_placement,
                             )
+                    prior_observations = runtime_observation_units.get(
+                        generation_id, ()
+                    )
+                    known_observation_ids = {
+                        item.wire_semantic.observation_semantic_id
+                        for item in prior_observations
+                    }
+                    if any(
+                        item.wire_semantic.observation_semantic_id
+                        in known_observation_ids
+                        for item in event.runtime_observation_units
+                    ):
+                        raise ProviderInputGenerationReducerError(
+                            "runtime observation semantic identity was committed twice"
+                        )
+                    runtime_observation_units[generation_id] = (
+                        *prior_observations,
+                        *event.runtime_observation_units,
+                    )
+                    runtime_observation_lifecycle_states[generation_id] = (
+                        advance_runtime_observation_lifecycle_state(
+                            runtime_observation_lifecycle_states.get(generation_id),
+                            appended_observations=event.runtime_observation_units,
+                            effective_heads=(
+                                event.resulting_core_state.committed_source_heads
+                            ),
+                        )
+                    )
+                    append_events[generation_id] = (
+                        *append_events.get(generation_id, ()),
+                        event,
+                    )
                     cores[generation_id] = event.resulting_core_state
+                    prior_attribution = attributions.get(generation_id)
+                    if resident is None:
+                        source_head_status = (
+                            "pending_hydration"
+                            if event.resulting_core_state.committed_source_heads
+                            else "complete"
+                        )
+                        source_head_attributions = ()
+                    else:
+                        source_head_status = "complete"
+                        source_head_attributions = (
+                            _source_head_attributions_from_resident(
+                                core=event.resulting_core_state,
+                                append_events=append_events[generation_id],
+                                resident=resident,
+                                runtime_session_id=self._runtime_session_id,
+                            )
+                        )
+                    attributions[generation_id] = build_frozen_fact(
+                        ProviderInputGenerationAttributionStateFact,
+                        schema_version="provider_input_generation_attribution_state.v3",
+                        core_state=event.resulting_core_state,
+                        source_head_attribution_status=source_head_status,
+                        source_head_attributions=source_head_attributions,
+                        latest_model_start_event_ref=(
+                            prior_attribution.latest_model_start_event_ref
+                            if prior_attribution is not None
+                            else None
+                        ),
+                        latest_model_start_committed_core_fingerprint=(
+                            prior_attribution.latest_model_start_committed_core_fingerprint
+                            if prior_attribution is not None
+                            else None
+                        ),
+                        close_or_rollover_event_ref=(
+                            prior_attribution.close_or_rollover_event_ref
+                            if prior_attribution is not None
+                            else None
+                        ),
+                    )
                     resident_actions.append(
                         (
                             "move",
@@ -1055,8 +1256,16 @@ class ProviderInputGenerationStore:
                     prior = attributions.get(generation_id)
                     attributions[generation_id] = build_frozen_fact(
                         ProviderInputGenerationAttributionStateFact,
-                        schema_version="provider_input_generation_attribution_state.v1",
+                        schema_version="provider_input_generation_attribution_state.v3",
                         core_state=core,
+                        source_head_attribution_status=(
+                            prior.source_head_attribution_status
+                            if prior is not None
+                            else "complete"
+                        ),
+                        source_head_attributions=(
+                            prior.source_head_attributions if prior is not None else ()
+                        ),
                         latest_model_start_event_ref=_event_ref(
                             event, runtime_session_id=self._runtime_session_id
                         ),
@@ -1189,6 +1398,9 @@ class ProviderInputGenerationStore:
                         event.close_reason == "rollover"
                         and event.successor_generation_id is not None
                     ):
+                        rollover_source_core_by_successor[
+                            event.successor_generation_id
+                        ] = predecessor
                         rollover_pending_by_successor[event.successor_generation_id] = (
                             predecessor.accepted_but_not_appended_continuation
                         )
@@ -1201,9 +1413,13 @@ class ProviderInputGenerationStore:
                         attributions[event.generation_id] = build_frozen_fact(
                             ProviderInputGenerationAttributionStateFact,
                             schema_version=(
-                                "provider_input_generation_attribution_state.v1"
+                                "provider_input_generation_attribution_state.v3"
                             ),
                             core_state=event.resulting_closed_core_state,
+                            source_head_attribution_status=(
+                                prior.source_head_attribution_status
+                            ),
+                            source_head_attributions=prior.source_head_attributions,
                             latest_model_start_event_ref=(
                                 prior.latest_model_start_event_ref
                             ),
@@ -1282,77 +1498,6 @@ class ProviderInputGenerationStore:
                         raise ProviderInputGenerationReducerError(
                             "provider rollover semantic join failed"
                         )
-                    authority = request.intent.authority
-                    if isinstance(
-                        authority, ProviderAuxiliaryFrameRebaseAuthorityFact
-                    ):
-                        old_frames = frame_placements.get(event.old_generation_id, ())
-                        expected_frame_fingerprints = tuple(
-                            sorted(
-                                {
-                                    item.frame_fact_fingerprint
-                                    for item in old_frames
-                                }
-                            )
-                        )
-                        expected_ranges = tuple(
-                            sorted(
-                                {
-                                    context_fingerprint(
-                                        "provider-auxiliary-frame-range:v1",
-                                        (
-                                            item.frame_id,
-                                            item.first_vector_ordinal,
-                                            item.last_vector_ordinal,
-                                            item.ordered_source_unit_range_accumulator,
-                                        ),
-                                    )
-                                    for item in old_frames
-                                }
-                            )
-                        )
-                        previous_source_set = context_fingerprint(
-                            "provider-committed-source-head-set:v1",
-                            tuple(
-                                item.head_fingerprint
-                                for item in old.committed_source_heads
-                            ),
-                        )
-                        resulting_heads = (
-                            initial_append.resulting_core_state.committed_source_heads
-                        )
-                        resulting_source_set = context_fingerprint(
-                            "provider-selected-source-head-set:v1",
-                            tuple(
-                                sorted(
-                                    (
-                                        item.source_id.value,
-                                        item.source_instance_id,
-                                        item.candidate_key,
-                                        item.canonical_source_revision.revision_fingerprint,
-                                        item.candidate_semantic_fingerprint,
-                                    )
-                                    for item in resulting_heads
-                                )
-                            ),
-                        )
-                        if (
-                            authority.dropped_frame_fact_fingerprints
-                            != expected_frame_fingerprints
-                            or authority.dropped_unit_range_fingerprints
-                            != expected_ranges
-                            or authority.previous_source_head_set_fingerprint
-                            != previous_source_set
-                            or authority.resulting_source_head_set_fingerprint
-                            != resulting_source_set
-                            or authority.retained_transcript_unit_count
-                            != old.transcript_frontier.committed_transcript_unit_count
-                            or authority.predecessor_transcript_frontier_fingerprint
-                            != old.transcript_frontier.provider_semantic_frontier_fingerprint
-                        ):
-                            raise ProviderInputGenerationReducerError(
-                                "provider auxiliary-frame rebase proof drifted"
-                            )
                     required_ids = {
                         event.expected_old_close_event_id,
                         event.expected_new_start_event_id,
@@ -1364,14 +1509,135 @@ class ProviderInputGenerationStore:
                         raise ProviderInputGenerationReducerError(
                             "provider rollover atomic event set is incomplete"
                         )
+                    source_rewrite_authority = request.intent.authority
+                    if isinstance(
+                        source_rewrite_authority,
+                        ProviderSourceDispositionRewriteAuthorityFact,
+                    ):
+                        source_core = rollover_source_core_by_successor.get(
+                            event.new_generation.generation_id
+                        )
+                        if source_core is None:
+                            raise ProviderInputGenerationReducerError(
+                                "source-disposition rollover lacks predecessor core"
+                            )
+                        head_by_key = {
+                            (
+                                item.effective_snapshot.source_id,
+                                item.effective_snapshot.source_instance_id,
+                            ): item
+                            for item in source_core.committed_source_heads
+                        }
+                        expected_head_fingerprints = tuple(
+                            head_by_key[
+                                (item.source_id, item.source_instance_id)
+                            ].semantic_head_fingerprint
+                            for item in source_rewrite_authority.rewrite_dispositions
+                            if (item.source_id, item.source_instance_id) in head_by_key
+                        )
+                        if (
+                            source_rewrite_authority.predecessor_core_state_fingerprint
+                            != source_core.core_state_fingerprint
+                            or source_rewrite_authority.ordered_projection_identity_fingerprint
+                            != request.manifest_projection_reference.projection_identity.identity_fingerprint
+                            or source_rewrite_authority.rewrite_dispositions
+                            != tuple(
+                                item
+                                for item in initial_append.source_dispositions
+                                if item.disposition == "rewrite_required"
+                            )
+                            or len(expected_head_fingerprints)
+                            != len(source_rewrite_authority.rewrite_dispositions)
+                            or expected_head_fingerprints
+                            != source_rewrite_authority.rewritten_predecessor_source_head_fingerprints
+                        ):
+                            raise ProviderInputGenerationReducerError(
+                                "source-disposition rollover authority drifted"
+                            )
+                    rewrite = event.runtime_observation_rewrite
+                    if rewrite is not None:
+                        close_event = next(
+                            (
+                                candidate
+                                for candidate in events
+                                if isinstance(
+                                    candidate, ProviderInputGenerationClosedEvent
+                                )
+                                and candidate.id
+                                == event.expected_old_close_event_id
+                            ),
+                            None,
+                        )
+                        lifecycle_state = runtime_observation_lifecycle_states.get(
+                            event.old_generation_id
+                        )
+                        if close_event is None or lifecycle_state is None:
+                            raise ProviderInputGenerationReducerError(
+                                "runtime observation rewrite lacks source reducer state"
+                            )
+                        source_core = rollover_source_core_by_successor.get(
+                            event.new_generation.generation_id
+                        )
+                        if (
+                            source_core is None
+                            or source_core.core_state_fingerprint
+                            != close_event.predecessor_core_state_fingerprint
+                        ):
+                            raise ProviderInputGenerationReducerError(
+                                "runtime observation rewrite source core drifted"
+                            )
+                        try:
+                            validate_runtime_observation_rewrite_transition(
+                                source_core=source_core,
+                                source_observations=runtime_observation_units.get(
+                                    event.old_generation_id, ()
+                                ),
+                                source_lifecycle_state=lifecycle_state,
+                                resulting_core=initial_append.resulting_core_state,
+                                resulting_observations=(
+                                    initial_append.runtime_observation_units
+                                ),
+                                rewrite=rewrite,
+                                current_run_protection_scope_semantic_id=(
+                                    context_fingerprint(
+                                        "runtime-observation-run-protection-scope:v1",
+                                        (self._runtime_session_id, event.run_id),
+                                    )
+                                ),
+                                artifact_namespace=provider_input_artifact_namespace(
+                                    self._runtime_session_id
+                                ),
+                            )
+                        except ValueError as exc:
+                            raise ProviderInputGenerationReducerError(
+                                "runtime observation rewrite transition is invalid"
+                            ) from exc
+                        prior_rewrites = runtime_observation_rewrites.get(
+                            event.new_generation.generation_id, ()
+                        )
+                        if any(
+                            item.rewrite_id == rewrite.rewrite_id and item != rewrite
+                            for item in prior_rewrites
+                        ):
+                            raise ProviderInputGenerationReducerError(
+                                "runtime observation rewrite identity conflict"
+                            )
+                        if rewrite not in prior_rewrites:
+                            runtime_observation_rewrites[
+                                event.new_generation.generation_id
+                            ] = (*prior_rewrites, rewrite)
                     prior = attributions.get(event.old_generation_id)
                     if prior is not None:
                         attributions[event.old_generation_id] = build_frozen_fact(
                             ProviderInputGenerationAttributionStateFact,
                             schema_version=(
-                                "provider_input_generation_attribution_state.v1"
+                                "provider_input_generation_attribution_state.v3"
                             ),
                             core_state=old,
+                            source_head_attribution_status=(
+                                prior.source_head_attribution_status
+                            ),
+                            source_head_attributions=prior.source_head_attributions,
                             latest_model_start_event_ref=(
                                 prior.latest_model_start_event_ref
                             ),
@@ -1511,6 +1777,12 @@ class ProviderInputGenerationStore:
             self._call_to_generation = call_to_generation
             self._append_identities_by_call = append_identities_by_call
             self._frame_placements = frame_placements
+            self._runtime_observation_units = runtime_observation_units
+            self._runtime_observation_rewrites = runtime_observation_rewrites
+            self._runtime_observation_lifecycle_states = (
+                runtime_observation_lifecycle_states
+            )
+            self._append_events = append_events
             self._staged_ownerships = staged_ownerships
             self._through_sequence = events[-1].sequence or self._through_sequence
 
@@ -1535,10 +1807,126 @@ class ProviderInputGenerationStore:
             self._preparations = {}
             self._call_to_generation = {}
             self._append_identities_by_call = {}
+            self._frame_placements = {}
+            self._runtime_observation_units = {}
+            self._runtime_observation_rewrites = {}
+            self._runtime_observation_lifecycle_states = {}
+            self._append_events = {}
             self._staged_ownerships = staged_ownerships
             self._resident_manager.discard_runtime_session(self._runtime_session_id)
         if events:
             self._apply_committed(events, require_staged_resident=False)
+
+
+def _source_head_attributions_from_resident(
+    *,
+    core: CommittedProviderInputGenerationCoreStateFact,
+    append_events: tuple[ProviderInputAppendCommittedEvent, ...],
+    resident: ProviderInputResidentGeneration,
+    runtime_session_id: str,
+) -> tuple[ProviderInputUnitPlacementAttributionFact, ...]:
+    result = []
+    for head in core.committed_source_heads:
+        snapshot = head.effective_snapshot
+        matched_event = None
+        matched_observation = None
+        for event in reversed(append_events):
+            matched_observation = next(
+                (
+                    item
+                    for item in event.runtime_observation_units
+                    if item.source_id == snapshot.source_id
+                    and item.wire_semantic.source_instance_id
+                    == snapshot.source_instance_id
+                    and item.wire_semantic.observation_semantic_id
+                    == snapshot.observation_semantic_id
+                    and item.source_payload_semantic_fingerprint
+                    == snapshot.snapshot_semantic_fingerprint
+                    and item.wire_semantic.wire_semantic_fingerprint
+                    == snapshot.canonical_wire_semantic_fingerprint
+                    and item.causal_placement.placement_semantic_fingerprint
+                    == snapshot.causal_placement_semantic_fingerprint
+                    and item.unit_causal_semantic_fingerprint
+                    == snapshot.unit_causal_semantic_fingerprint
+                ),
+                None,
+            )
+            if matched_observation is not None:
+                matched_event = event
+                break
+        if matched_event is None or matched_observation is None:
+            raise ProviderInputGenerationReducerError(
+                "provider source head lacks its committed observation"
+            )
+        unit_matches = tuple(
+            (ordinal, unit)
+            for ordinal, unit in enumerate(resident.units)
+            if unit.attribution.semantic.semantic_fingerprint
+            == matched_observation.provider_unit_semantic_fingerprint
+        )
+        if len(unit_matches) != 1:
+            raise ProviderInputGenerationReducerError(
+                "provider source head does not uniquely locate its vector unit"
+            )
+        ordinal, unit = unit_matches[0]
+        semantic_materialization, document_identity = (
+            build_provider_unit_semantic_document(unit)
+        )
+        if document_identity != snapshot.unit_document_identity:
+            raise ProviderInputGenerationReducerError(
+                "provider source-head semantic document drifted"
+            )
+        closure_ref = (
+            unit.attribution.source_event_refs[-1]
+            if snapshot.effective_status == "source_closed"
+            and unit.attribution.source_event_refs
+            else None
+        )
+        if (snapshot.effective_status == "source_closed") != (
+            closure_ref is not None
+        ):
+            raise ProviderInputGenerationReducerError(
+                "provider source-head closure attribution is incomplete"
+            )
+        hydration = build_frozen_fact(
+            InlineProviderInputUnitHydrationAttributionFact,
+            schema_version=(
+                "inline_provider_input_unit_hydration_attribution.v1"
+            ),
+            semantic_document_identity_fingerprint=(
+                document_identity.document_semantic_fingerprint
+            ),
+            semantic_materialization=semantic_materialization,
+        )
+        placement = build_frozen_fact(
+            ProviderInputUnitPlacementAttributionFact,
+            schema_version="provider_input_unit_placement_attribution.v1",
+            semantic_head_fingerprint=head.semantic_head_fingerprint,
+            hydration_attribution=hydration,
+            origin_generation_id=core.generation.generation_id,
+            committed_append_event_reference=_event_ref(
+                matched_event,
+                runtime_session_id=runtime_session_id,
+            ),
+            committed_append_index=matched_event.resulting_revision,
+            committed_vector_root_reference=(
+                matched_event.resulting_core_state.unit_vector_root
+            ),
+            vector_ordinal=ordinal,
+            source_event_references=unit.attribution.source_event_refs,
+            source_artifact_references=unit.attribution.source_artifact_refs,
+            authority_horizons=unit.attribution.authority_horizons,
+            required_replay_bindings=unit.attribution.required_replay_bindings,
+            closure_event_reference=closure_ref,
+        )
+        build_frozen_fact(
+            CommittedRuntimeObservationSourceHeadFact,
+            schema_version="committed_runtime_observation_source_head.v1",
+            semantic_head=head,
+            placement_attribution=placement,
+        )
+        result.append(placement)
+    return tuple(sorted(result, key=lambda item: item.semantic_head_fingerprint))
 
 
 def _copy_core(
@@ -1553,7 +1941,7 @@ def _copy_core(
     payload.update(updates)
     return build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         **payload,
     )
 

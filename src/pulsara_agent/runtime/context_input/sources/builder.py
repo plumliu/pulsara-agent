@@ -14,6 +14,9 @@ from typing import Mapping
 from pulsara_agent.event import (
     EventType,
     PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    ProjectionFailedEvent,
     ProjectionReadyEvent,
     SubagentRunCompletedEvent,
 )
@@ -40,6 +43,7 @@ from pulsara_agent.primitives.context_source import (
     ContextCandidateLoweringIntentFact,
     ContextSourceAbsoluteTimingFact,
     ContextSourceContractFact,
+    ContextSourceDispositionFact,
     ContextSourceId,
     ContextSourceInputAuthorityFact,
     EventSourceRevisionFact,
@@ -129,6 +133,7 @@ class HydratedContextSourceArtifact:
 @dataclass(frozen=True, slots=True)
 class ContextSourceBuildResult:
     candidates: tuple[ContextSectionCandidate, ...]
+    source_dispositions: tuple[ContextSourceDispositionFact, ...]
     tool_catalog_root: CapabilityToolCatalogRootFact
     physical_input_policy: ResolvedContextSourcePhysicalInputPolicyFact
     registry_fingerprint: str
@@ -361,7 +366,7 @@ def build_context_sources(
             lifecycle=_generation_root_lifecycle(),
             priority=20,
             required=False,
-            intent=_intent("leading_context", "user"),
+            intent=_intent("system_instruction", "system"),
             refs=(),
             artifacts=(),
             timing=_absolute_host_timing(runtime_environment),
@@ -392,7 +397,7 @@ def build_context_sources(
                 f"runtime-clock:{clock_payload.observed_at_utc}",
                 clock_payload.semantic_fingerprint,
             ),
-            lifecycle=_append_revision_lifecycle("complete_snapshot"),
+            lifecycle=_append_once_lifecycle(),
             priority=89,
             required=False,
             intent=_intent("status_observation", "runtime"),
@@ -494,6 +499,11 @@ def build_context_sources(
         )
 
     candidates = registry.collect(tuple(inputs))
+    source_dispositions = _context_source_dispositions(
+        candidates=candidates,
+        event_slice=event_slice,
+        horizons=horizons,
+    )
     tool_root = build_frozen_fact(
         CapabilityToolCatalogRootFact,
         schema_version="capability_tool_catalog_root.v1",
@@ -513,10 +523,108 @@ def build_context_sources(
     )
     return ContextSourceBuildResult(
         candidates=candidates,
+        source_dispositions=source_dispositions,
         tool_catalog_root=tool_root,
         physical_input_policy=physical_policy,
         registry_fingerprint=registry.registry_fingerprint,
     )
+
+
+def _context_source_dispositions(
+    *,
+    candidates: tuple[ContextSectionCandidate, ...],
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
+    horizons: tuple[LedgerAuthorityHorizonFact, ...],
+) -> tuple[ContextSourceDispositionFact, ...]:
+    """Freeze every replacement-source transition before compiler allocation."""
+
+    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+        context_source_lifecycle_entry,
+        context_source_transition_kind,
+    )
+
+    dispositions: list[ContextSourceDispositionFact] = []
+    for candidate in candidates:
+        lifecycle = context_source_lifecycle_entry(candidate.source_id)
+        if lifecycle.lifecycle_class != "replacement_snapshot":
+            continue
+        transition = context_source_transition_kind(
+            candidate.source_id,
+            candidate.attribution.semantic.payload,
+        )
+        disposition = (
+            "explicit_empty"
+            if transition == "explicit_empty"
+            else "terminal"
+            if transition == "terminal"
+            else "replace"
+        )
+        reason = (
+            "source_explicit_empty"
+            if disposition == "explicit_empty"
+            else "source_terminal"
+            if disposition == "terminal"
+            else "candidate_available"
+        )
+        dispositions.append(
+            build_frozen_fact(
+                ContextSourceDispositionFact,
+                schema_version="context_source_disposition.v2",
+                source_id=candidate.source_id,
+                source_instance_id=candidate.source_instance_id,
+                disposition=disposition,
+                reason=reason,
+                candidate_semantic_fingerprint=candidate.semantic_fingerprint,
+                candidate_payload_semantic_fingerprint=(
+                    candidate.attribution.semantic.payload.semantic_fingerprint
+                ),
+                source_event_refs=candidate.attribution.source_event_refs,
+                authority_horizons=candidate.attribution.authority_horizons,
+            )
+        )
+    if not any(
+        item.source_id is ContextSourceId.MEMORY_PROJECTION
+        for item in dispositions
+    ):
+        latest_failure = next(
+            (
+                stored
+                for stored in reversed(event_slice.events)
+                if stored.event_type == EventType.PROJECTION_FAILED
+                and isinstance(
+                    stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                    ProjectionFailedEvent,
+                )
+            ),
+            None,
+        )
+        if latest_failure is not None:
+            dispositions.append(
+                build_frozen_fact(
+                    ContextSourceDispositionFact,
+                    schema_version="context_source_disposition.v2",
+                    source_id=ContextSourceId.MEMORY_PROJECTION,
+                    source_instance_id="memory:projection",
+                    disposition="retain",
+                    reason="projection_failed",
+                    candidate_semantic_fingerprint=None,
+                    candidate_payload_semantic_fingerprint=None,
+                    source_event_refs=(
+                        latest_failure.to_reference(event_slice.runtime_session_id),
+                    ),
+                    authority_horizons=horizons,
+                )
+            )
+    ordered = tuple(
+        sorted(
+            dispositions,
+            key=lambda item: (item.source_id.value, item.source_instance_id),
+        )
+    )
+    keys = tuple((item.source_id, item.source_instance_id) for item in ordered)
+    if len(keys) != len(set(keys)):
+        raise ValueError("ContextSource dispositions are not unique")
+    return ordered
 
 
 def _append_capability_inputs(
@@ -552,10 +660,16 @@ def _append_capability_inputs(
             else capability_snapshot.semantic.active_skill_projection
         )
         artifact_id = projection.rendered_prompt_artifact_id
-        if projection_ref is None or artifact_id is None:
-            continue
-        artifact = _require_artifact(artifact_metadata, artifact_id)
-        content = _artifact_content(artifact)
+        if artifact_id is None:
+            if projection.visible_source_entries or projection.rendered_prompt_chars:
+                raise ValueError("non-empty capability projection lacks artifact")
+            artifact = None
+            content = _inline_content("")
+        else:
+            if projection_ref is None:
+                raise ValueError("capability projection artifact lacks source reference")
+            artifact = _require_artifact(artifact_metadata, artifact_id)
+            content = _artifact_content(artifact)
         ordered = tuple(
             item.content_fingerprint for item in projection.visible_source_entries
         )
@@ -588,9 +702,8 @@ def _append_capability_inputs(
                 content=content,
             )
             priority = 31
-            # A changing source cannot be inserted into the immutable system
-            # prefix without invalidating provider continuation. Lower the
-            # typed, revision-wrapped skill snapshot as runtime-owned context.
+            # Active skill is one aggregate replacement snapshot. An empty
+            # aggregate is its explicit close transition, never source absence.
             intent = _intent("leading_context", "user")
         inputs.append(
             _source_input(
@@ -608,12 +721,12 @@ def _append_capability_inputs(
                 priority=priority,
                 required=False,
                 intent=intent,
-                refs=projection_ref.source_event_refs,
-                artifacts=(artifact.reference,),
+                refs=(projection_ref.source_event_refs if projection_ref else ()),
+                artifacts=((artifact.reference,) if artifact is not None else ()),
                 timing=_absolute_event_timing(
                     event_slice=None,
                     external_authority_events={},
-                    refs=projection_ref.source_event_refs,
+                    refs=(projection_ref.source_event_refs if projection_ref else ()),
                     allow_unknown=True,
                 ),
                 horizons=horizons,
@@ -639,23 +752,22 @@ def _append_memory_projection_input(
     event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(event, ProjectionReadyEvent):
         raise ValueError("memory projection source is not ProjectionReadyEvent")
-    if event.projection_kind in {"working_context", "mixed"}:
-        heading = (
-            "Recalled Memory and Recent Working Context "
-            "(source=fenced_memory_context; do not write it back as new memory):\n"
-            "Recent Working Context is independent from canonical memory search. "
-            "An empty memory_search result does not invalidate recent activity shown here."
-        )
-    else:
-        heading = "Recalled Memory (source=fenced_recalled_memory; do not write it back as new memory):"
-    content = _inline_content("\n\n".join((heading, event.summary)))
+    if event.projection_kind != "memory":
+        raise ValueError("legacy working_context/mixed projection is not model-visible")
+    ordered_entry_fingerprints = tuple(
+        item.entry_semantic_fingerprint for item in event.recalled_memory_entries
+    )
+    content = _inline_content(event.summary)
     payload = build_frozen_fact(
         MemoryProjectionPayloadFact,
         schema_version="memory_projection_payload.v1",
-        projection_semantic_fingerprint=projection.semantic_fingerprint,
-        ordered_memory_semantic_fingerprints=(stored.payload_fingerprint,),
+        projection_semantic_fingerprint=context_fingerprint(
+            "typed-recalled-memory-projection:v2",
+            ordered_entry_fingerprints,
+        ),
+        ordered_memory_semantic_fingerprints=ordered_entry_fingerprints,
         selection_contract_fingerprint=context_fingerprint(
-            "memory-context-selection-contract:v1", event.projection_kind
+            "memory-context-selection-contract:v2", "typed-recalled-memory-only"
         ),
         content=content,
     )
@@ -665,7 +777,7 @@ def _append_memory_projection_input(
             input_type=MemoryProjectionSourceInput,
             source_id=ContextSourceId.MEMORY_PROJECTION,
             source_instance_id="memory:projection",
-            candidate_key=event.projection_kind,
+            candidate_key="recalled_memory",
             payload=payload,
             revision=_event_revision(event.id, stored.payload_fingerprint),
             lifecycle=_append_revision_lifecycle("complete_snapshot"),
@@ -691,9 +803,57 @@ def _append_plan_inputs(
     physical_policy: ResolvedContextSourcePhysicalInputPolicyFact,
 ) -> None:
     if not plan_snapshot.active:
+        terminal = _latest_plan_terminal(event_slice)
+        if terminal is not None:
+            entered_stored, exited_stored = terminal
+            workflow_id = f"plan_workflow:{entered_stored.event_id}"
+            terminal_text = (
+                f"Plan workflow {workflow_id} has ended. Its prior active-plan "
+                "guidance is no longer in effect."
+            )
+            terminal_payload = build_frozen_fact(
+                PlanRevisionPayloadFact,
+                schema_version="plan_revision_payload.v1",
+                workflow_id=workflow_id,
+                active=False,
+                canonical_plan_revision=plan_snapshot.revision,
+                plan_decision="exit",
+                plan_semantic_fingerprint=exited_stored.payload_fingerprint,
+                content=_inline_content(terminal_text),
+            )
+            refs = (
+                entered_stored.to_reference(event_slice.runtime_session_id),
+                exited_stored.to_reference(event_slice.runtime_session_id),
+            )
+            inputs.append(
+                _source_input(
+                    registry=registry,
+                    input_type=PlanSourceInput,
+                    source_id=ContextSourceId.PLAN_STATUS,
+                    source_instance_id="plan:status",
+                    candidate_key=workflow_id,
+                    payload=terminal_payload,
+                    revision=_event_revision(
+                        f"plan-terminal:{exited_stored.event_id}",
+                        exited_stored.payload_fingerprint,
+                    ),
+                    lifecycle=_append_revision_lifecycle("complete_snapshot"),
+                    priority=10,
+                    required=True,
+                    intent=_intent("leading_context", "user"),
+                    refs=refs,
+                    artifacts=(),
+                    timing=_absolute_from_stored((entered_stored, exited_stored)),
+                    horizons=horizons,
+                    physical_policy=physical_policy,
+                )
+            )
         return
-    content = _inline_content(PLAN_ACTIVE_INSTRUCTION)
-    payload = build_frozen_fact(
+    status_content = _inline_content(
+        f"Plan workflow {plan_snapshot.workflow_id} is active at canonical revision "
+        f"{plan_snapshot.revision}."
+    )
+    status_payload = build_frozen_fact(
         PlanRevisionPayloadFact,
         schema_version="plan_revision_payload.v1",
         workflow_id=plan_snapshot.workflow_id,
@@ -701,23 +861,67 @@ def _append_plan_inputs(
         canonical_plan_revision=plan_snapshot.revision,
         plan_decision="continue" if plan_snapshot.revision else "enter",
         plan_semantic_fingerprint=plan_snapshot.fact_fingerprint,
-        content=content,
+        content=status_content,
     )
     refs = (plan_snapshot.entered_event,) if plan_snapshot.entered_event else ()
     inputs.append(
         _source_input(
             registry=registry,
             input_type=PlanSourceInput,
-            source_id=ContextSourceId.PLAN,
-            source_instance_id="plan:workflow",
+            source_id=ContextSourceId.PLAN_STATUS,
+            source_instance_id="plan:status",
             candidate_key=str(plan_snapshot.workflow_id),
-            payload=payload,
+            payload=status_payload,
             revision=_event_revision(
                 f"plan:{plan_snapshot.workflow_id}:{plan_snapshot.revision}",
                 plan_snapshot.fact_fingerprint,
             ),
             lifecycle=_append_revision_lifecycle("complete_snapshot"),
             priority=10,
+            required=True,
+            intent=_intent("leading_context", "user"),
+            refs=refs,
+            artifacts=(),
+            timing=_absolute_event_timing(
+                event_slice=event_slice,
+                external_authority_events={},
+                refs=refs,
+                allow_unknown=True,
+            ),
+            horizons=horizons,
+            physical_policy=physical_policy,
+        )
+    )
+    guidance_content = _inline_content(PLAN_ACTIVE_INSTRUCTION)
+    guidance_payload = build_frozen_fact(
+        PlanRevisionPayloadFact,
+        schema_version="plan_revision_payload.v1",
+        workflow_id=plan_snapshot.workflow_id,
+        active=True,
+        canonical_plan_revision=plan_snapshot.revision,
+        plan_decision="continue" if plan_snapshot.revision else "enter",
+        plan_semantic_fingerprint=context_fingerprint(
+            "plan-active-guidance:v1",
+            (plan_snapshot.workflow_id, PLAN_ACTIVE_INSTRUCTION),
+        ),
+        content=guidance_content,
+    )
+    inputs.append(
+        _source_input(
+            registry=registry,
+            input_type=PlanSourceInput,
+            source_id=ContextSourceId.PLAN_GUIDANCE,
+            source_instance_id=(
+                f"plan:guidance:{plan_snapshot.workflow_id}:active"
+            ),
+            candidate_key="active-plan-guidance",
+            payload=guidance_payload,
+            revision=_event_revision(
+                f"plan-guidance:{plan_snapshot.workflow_id}",
+                guidance_payload.semantic_fingerprint,
+            ),
+            lifecycle=_append_once_lifecycle(),
+            priority=11,
             required=True,
             intent=_intent("leading_context", "user"),
             refs=refs,
@@ -771,13 +975,15 @@ def _append_plan_inputs(
         _source_input(
             registry=registry,
             input_type=PlanSourceInput,
-            source_id=ContextSourceId.PLAN,
-            source_instance_id="plan:revision",
+            source_id=ContextSourceId.PLAN_GUIDANCE,
+            source_instance_id=(
+                f"plan:guidance:{plan_snapshot.workflow_id}:revision:{event.id}"
+            ),
             candidate_key=event.id,
             payload=revision_payload,
             revision=_event_revision(event.id, stored.payload_fingerprint),
             lifecycle=_append_once_lifecycle(),
-            priority=11,
+            priority=12,
             required=True,
             intent=_intent("leading_context", "user"),
             refs=(ref,),
@@ -787,6 +993,30 @@ def _append_plan_inputs(
             physical_policy=physical_policy,
         )
     )
+
+
+def _latest_plan_terminal(
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
+) -> tuple[FrozenStoredEvent, FrozenStoredEvent] | None:
+    """Return the latest closed workflow with its durable entry/exit carriers."""
+
+    active_entry: FrozenStoredEvent | None = None
+    latest: tuple[FrozenStoredEvent, FrozenStoredEvent] | None = None
+    for stored in event_slice.events:
+        if stored.event_type not in {
+            EventType.PLAN_MODE_ENTERED,
+            EventType.PLAN_MODE_EXITED,
+        }:
+            continue
+        event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        if isinstance(event, PlanModeEnteredEvent):
+            active_entry = stored
+        elif isinstance(event, PlanModeExitedEvent):
+            if active_entry is None:
+                raise ValueError("plan exit has no preceding durable entry")
+            latest = (active_entry, stored)
+            active_entry = None
+    return latest
 
 
 def _append_subagent_inputs(

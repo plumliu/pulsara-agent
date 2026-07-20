@@ -174,7 +174,12 @@ from pulsara_agent.primitives.provider_input import (
     ProviderTranscriptDeltaCommitProofFact,
     ProviderInputUnitVectorRootReferenceFact,
 )
+from pulsara_agent.primitives.runtime_observation import (
+    PreparedRuntimeObservationProviderUnitFact,
+    RuntimeObservationProjectionRewriteFact,
+)
 from pulsara_agent.primitives.context_source import (
+    ContextSourceDispositionFact,
     LedgerAuthorityHorizonFact,
     LedgerAuthorityHorizonSetReferenceFact,
 )
@@ -1298,8 +1303,8 @@ class ProviderInputGenerationStartedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_GENERATION_STARTED] = (
         EventType.PROVIDER_INPUT_GENERATION_STARTED
     )
-    schema_version: Literal["provider_input_generation_started_event.v1"] = (
-        "provider_input_generation_started_event.v1"
+    schema_version: Literal["provider_input_generation_started_event.v2"] = (
+        "provider_input_generation_started_event.v2"
     )
     generation: ProviderInputGenerationFact
     root_reference: ProviderInputGenerationRootReferenceFact
@@ -1330,8 +1335,8 @@ class ProviderInputAppendCommittedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_APPEND_COMMITTED] = (
         EventType.PROVIDER_INPUT_APPEND_COMMITTED
     )
-    schema_version: Literal["provider_input_append_committed_event.v3"] = (
-        "provider_input_append_committed_event.v3"
+    schema_version: Literal["provider_input_append_committed_event.v7"] = (
+        "provider_input_append_committed_event.v7"
     )
     append_kind: Literal["compiled_manifest", "one_shot"]
     generation_id: str = Field(min_length=1)
@@ -1351,6 +1356,11 @@ class ProviderInputAppendCommittedEvent(EventBase):
     causal_validation: ProviderInputCausalValidationResult | None
     frame_placement: ProviderInvocationContextFramePlacementFact | None
     transcript_delta_proof: ProviderTranscriptDeltaCommitProofFact | None
+    runtime_observation_units: tuple[
+        PreparedRuntimeObservationProviderUnitFact, ...
+    ]
+    runtime_observation_semantic_noop_count: int = Field(ge=0)
+    source_dispositions: tuple[ContextSourceDispositionFact, ...]
     prepared_provider_input_candidate_fingerprint: str | None
     predecessor_core_state_fingerprint: str
     resulting_core_state: CommittedProviderInputGenerationCoreStateFact
@@ -1378,6 +1388,12 @@ class ProviderInputAppendCommittedEvent(EventBase):
             or self.authority_horizons != batch.authority_horizons
         ):
             raise ValueError("provider input append transition drifted")
+        disposition_keys = tuple(
+            (item.source_id.value, item.source_instance_id)
+            for item in self.source_dispositions
+        )
+        if disposition_keys != tuple(sorted(set(disposition_keys))):
+            raise ValueError("provider append source dispositions are not ordered/unique")
         proof = self.continuation_materialization_proof
         if (self.consumed_pending_continuation_fingerprint is None) != (proof is None):
             raise ValueError("provider append continuation proof matrix mismatch")
@@ -1403,6 +1419,23 @@ class ProviderInputAppendCommittedEvent(EventBase):
                 proof.ordered_appended_unit_semantic_fingerprints
             ):
                 raise ValueError("provider continuation proof semantic range drifted")
+        remaining_semantics = list(
+            batch.append_semantic.ordered_unit_semantic_fingerprints
+        )
+        observation_ids: set[str] = set()
+        for observation in self.runtime_observation_units:
+            try:
+                remaining_semantics.remove(
+                    observation.provider_unit_semantic_fingerprint
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "runtime observation is not carried by the committed append"
+                ) from exc
+            semantic_id = observation.wire_semantic.observation_semantic_id
+            if semantic_id in observation_ids:
+                raise ValueError("runtime observation semantic identity is duplicated")
+            observation_ids.add(semantic_id)
         if self.append_kind == "compiled_manifest":
             if (
                 self.manifest_projection_reference is None
@@ -1505,8 +1538,8 @@ class ProviderInputGenerationRolloverResolvedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED] = (
         EventType.PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED
     )
-    schema_version: Literal["provider_input_generation_rollover_resolved_event.v2"] = (
-        "provider_input_generation_rollover_resolved_event.v2"
+    schema_version: Literal["provider_input_generation_rollover_resolved_event.v3"] = (
+        "provider_input_generation_rollover_resolved_event.v3"
     )
     old_generation_id: str = Field(min_length=1)
     old_generation_fingerprint: str = Field(min_length=1)
@@ -1514,6 +1547,7 @@ class ProviderInputGenerationRolloverResolvedEvent(EventBase):
     new_generation: ProviderInputGenerationFact
     new_root_reference: ProviderInputGenerationRootReferenceFact
     rollover_request: ProviderInputRolloverRequestFact
+    runtime_observation_rewrite: RuntimeObservationProjectionRewriteFact | None
     authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
     expected_old_close_event_id: str = Field(min_length=1)
     expected_new_start_event_id: str = Field(min_length=1)
@@ -1535,6 +1569,20 @@ class ProviderInputGenerationRolloverResolvedEvent(EventBase):
             != self.authority_horizon_set
         ):
             raise ValueError("provider input rollover identity drifted")
+        long_horizon = self.rollover_request.intent.reason.value == (
+            "explicit_long_horizon_rewrite"
+        )
+        if long_horizon != (self.runtime_observation_rewrite is not None):
+            raise ValueError("provider rollover observation-rewrite matrix mismatch")
+        if self.runtime_observation_rewrite is not None:
+            authority = self.rollover_request.intent.authority
+            parent = self.runtime_observation_rewrite.parent_long_horizon_rewrite_event_reference
+            if (
+                getattr(authority, "authority_kind", None) != "long_horizon_rewrite"
+                or parent
+                != authority.rewrite_authority_reference.compaction_completed_event_reference
+            ):
+                raise ValueError("provider rollover observation rewrite lacks authority")
         return self
 
 
@@ -1542,8 +1590,8 @@ class ProviderInputGenerationClosedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_GENERATION_CLOSED] = (
         EventType.PROVIDER_INPUT_GENERATION_CLOSED
     )
-    schema_version: Literal["provider_input_generation_closed_event.v1"] = (
-        "provider_input_generation_closed_event.v1"
+    schema_version: Literal["provider_input_generation_closed_event.v2"] = (
+        "provider_input_generation_closed_event.v2"
     )
     generation_id: str = Field(min_length=1)
     generation_fingerprint: str = Field(min_length=1)
@@ -2554,12 +2602,81 @@ class ProjectionRequestedEvent(ProjectionEventBase):
     type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
 
 
+class RecalledMemoryProjectionEntryFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entry_index: int = Field(ge=0)
+    memory_ids: tuple[str, ...]
+    model_visible_text: str
+    text_utf8_sha256: str
+    entry_semantic_fingerprint: str
+
+    @model_validator(mode="after")
+    def _identity(self) -> "RecalledMemoryProjectionEntryFact":
+        if self.memory_ids != tuple(sorted(set(self.memory_ids))):
+            raise ValueError("recalled memory entry IDs must be ordered/unique")
+        encoded = self.model_visible_text.encode("utf-8")
+        if self.text_utf8_sha256 != f"sha256:{sha256(encoded).hexdigest()}":
+            raise ValueError("recalled memory entry text digest mismatch")
+        expected = sha256_fingerprint(
+            "recalled-memory-projection-entry:v1",
+            {
+                "entry_index": self.entry_index,
+                "memory_ids": self.memory_ids,
+                "model_visible_text": self.model_visible_text,
+                "text_utf8_sha256": self.text_utf8_sha256,
+            },
+        )
+        if self.entry_semantic_fingerprint != expected:
+            raise ValueError("recalled memory entry semantic fingerprint mismatch")
+        return self
+
+
 class ProjectionReadyEvent(ProjectionEventBase):
     type: Literal[EventType.PROJECTION_READY] = EventType.PROJECTION_READY
-    projection_kind: Literal["memory", "working_context", "mixed"]
+    projection_kind: Literal["memory"] = "memory"
     included_memory_ids: list[str] = Field(default_factory=list)
     filtered_memory_ids: list[str] = Field(default_factory=list)
+    recalled_memory_entries: tuple[RecalledMemoryProjectionEntryFact, ...] = ()
     summary: str
+
+    @model_validator(mode="after")
+    def _typed_projection(self) -> "ProjectionReadyEvent":
+        indices = tuple(item.entry_index for item in self.recalled_memory_entries)
+        if indices != tuple(range(len(indices))):
+            raise ValueError("recalled memory entry indices must be contiguous")
+        ids = tuple(sorted(set(self.included_memory_ids)))
+        entry_ids = tuple(
+            sorted(
+                {
+                    memory_id
+                    for entry in self.recalled_memory_entries
+                    for memory_id in entry.memory_ids
+                }
+            )
+        )
+        if ids != entry_ids:
+            raise ValueError("recalled memory IDs do not match typed entries")
+        expected_summary = _render_recalled_memory_projection_summary(
+            self.recalled_memory_entries
+        )
+        if self.summary != expected_summary:
+            raise ValueError("recalled memory summary is not derived from typed entries")
+        return self
+
+
+def _render_recalled_memory_projection_summary(
+    entries: tuple[RecalledMemoryProjectionEntryFact, ...],
+) -> str:
+    if not entries:
+        return ""
+    return "\n".join(
+        (
+            '<recalled-memory-projection do_not_write_back="true">',
+            *(f"- {entry.model_visible_text}" for entry in entries),
+            "</recalled-memory-projection>",
+        )
+    )
 
 
 class ProjectionFailedEvent(ProjectionEventBase):

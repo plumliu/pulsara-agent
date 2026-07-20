@@ -34,6 +34,7 @@ from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.primitives.context_source import (
     CapabilityToolCatalogRootFact,
     ContextSourceCandidateAttributionFact,
+    ContextSourceDispositionFact,
     ContextSourceId,
     ResolvedContextSourcePhysicalInputPolicyFact,
     context_source_payload_content,
@@ -796,6 +797,7 @@ class ContextFactSnapshotFact(FrozenContextFact):
     long_horizon_attribution: LongHorizonContextAttributionFact
     candidate_source_selections: tuple[ContextCandidateSourceSelectionFact, ...]
     context_source_candidates: tuple["ContextSectionCandidate", ...]
+    context_source_dispositions: tuple[ContextSourceDispositionFact, ...]
     capability_tool_catalog_root: CapabilityToolCatalogRootFact
     context_source_physical_input_policy: ResolvedContextSourcePhysicalInputPolicyFact
     context_source_registry_fingerprint: str = Field(min_length=1)
@@ -1145,7 +1147,9 @@ TranscriptBlockFact: TypeAlias = (
 
 class TranscriptMessageFact(FrozenContextFact):
     message_id: str = Field(min_length=1)
-    role: Literal["system", "user", "assistant"]
+    role: Literal[
+        "user", "assistant", "runtime_request", "runtime_observation"
+    ]
     name: str | None
     run_id: str | None
     turn_id: str | None

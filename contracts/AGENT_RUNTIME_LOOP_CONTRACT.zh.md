@@ -356,3 +356,15 @@ ledger UNKNOWN/reopen才允许bounded per-call reconstruction。
 rollout status hint 只陈述 phase、调用计数、remaining allowance 与 exact recurrence。它不得给出继续、停止、finalize 或下一步建议，
 也不得改变 capability exposure、permission、phase、reservation 或 gate 结果。所有 production primary/summarizer 与可启动 child pair
 必须在配置期和 pre-run 使用同一整数公式通过 feasibility validation。
+
+---
+
+## 17. Runtime request、clock与source snapshot ownership
+
+Main/subagent compiled calls在每次ModelStart preparation中冻结一个紧凑`runtime_clock` append-once observation；retry/reopen复用首次冻结时间，不能重新读时钟。
+Subagent/current-run task及compaction、window compaction、governance、reflection、summarizer one-shot请求必须使用registered `runtime_request` kind与typed owner；one-shot
+request只属于该invocation，不能进入runtime-observation stable state或rewrite。
+
+Memory/capability/workspace snapshot按model-visible semantic head比较：相同正文即使producer event不同也不追加；变化时追加完整replacement；显式empty/terminal使用typed
+transition。Source暂时缺席表示no-new-fact或retain-effective-head，不授权删除、rollover或auxiliary rebase。Preparation的NONE/FULL/UNKNOWN/PARTIAL继续由现有session-owned
+provider-input owner处理。

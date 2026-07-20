@@ -170,3 +170,22 @@ preflight compaction Started/Completed/Failed 必须携带同一个 `host_bounda
 mid-turn两字段均为空。Started预生成稳定 terminal event ID；所有 terminal fact必须引用唯一 Started。Inspector只按该
 boundary identity join到随后RunStart，不按“最近event”或run attribution猜测。Started后取消也必须写稳定 cancelled Failed；
 terminal commit outcome未知时阻止破坏性close，不能留下静默dangling Started。
+
+---
+
+## 10. Runtime-observation projection continuity
+
+Context compaction/Long-Horizon rewrite是压力驱动重建provider projection的唯一正常authority；`auxiliary_frame_rebase`已删除。Confirmed rewrite必须同时规划canonical transcript rewrite、
+runtime-observation stable state和current tail，并通过同一ordered-provider-projection validator确定因果顺序。它保护current run/window、latest clock、每个replacement source effective head、
+未闭合lifecycle/active skill/plan/rollout及pending control/continuation依赖。
+
+Observation rewrite只收缩active provider projection，EventLog中的原facts保持不变。Rewrite event嵌套Long-Horizon authority、bounded paged partition proof与transitive coverage；replacement
+unit使用首次commit时冻结的generation-neutral causal placement，不得从旧vector ordinal或当前compiler重猜位置。System/tool compatibility变化可以合法rollover并顺带物化effective heads，
+但source absence、cache miss或旧observation数量本身不能触发rebuild。
+
+Generation store必须从durable append增量维护唯一observation lifecycle reducer state，至少包含
+ordered observation identities、effective replacement heads、latest clock、closed run/workflow/
+child scopes与pending dependency identities。Plan terminal、subagent result delivery以及registered
+run/workflow terminal推进closure；current run、latest clock、effective heads与pending dependency继续
+protected。Long-Horizon planner只能消费该snapshot，不得以几个局部`if`重新分类。Rollover fold
+必须再次重算partition、coverage和resulting effective heads。

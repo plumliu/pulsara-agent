@@ -238,6 +238,7 @@ _LIVE_RUN_SPARSE_EVENT_TYPES = (
 _LIVE_SESSION_SPARSE_EVENT_TYPES = (
     EventType.PLAN_MODE_ENTERED.value,
     EventType.PLAN_EXIT_RESOLVED.value,
+    EventType.PLAN_MODE_EXITED.value,
 )
 
 
@@ -778,6 +779,12 @@ def collect_live_context_inputs(
         ),
         *(
             ref
+            for disposition in source_build.source_dispositions
+            for ref in disposition.source_event_refs
+            if ref.event_id not in external_authority_ids
+        ),
+        *(
+            ref
             for projection in projections
             for ref in projection.source_event_refs
             if ref.runtime_session_id == event_slice.runtime_session_id
@@ -834,6 +841,7 @@ def collect_live_context_inputs(
         subagent_graph_acceleration=subagent_graph_acceleration,
         candidate_source_selections=candidate_source_selections,
         context_source_candidates=source_build.candidates,
+        context_source_dispositions=source_build.source_dispositions,
         capability_tool_catalog_root=source_build.tool_catalog_root,
         context_source_physical_input_policy=source_build.physical_input_policy,
         context_source_registry_fingerprint=source_build.registry_fingerprint,

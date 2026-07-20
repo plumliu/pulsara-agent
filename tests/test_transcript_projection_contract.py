@@ -446,7 +446,7 @@ def test_message_provider_semantic_is_physically_separate_from_attribution() -> 
     )
     semantic = _fact(
         TranscriptMessageProviderSemanticFact,
-        schema_version="transcript_message_provider_semantic.v3",
+        schema_version="transcript_message_provider_semantic.v4",
         role="user",
         name=None,
         placement_semantic=placement,
@@ -508,7 +508,7 @@ def test_stable_projection_lowers_current_user_without_raw_stream_events() -> No
     )
     provider = _fact(
         TranscriptMessageProviderSemanticFact,
-        schema_version="transcript_message_provider_semantic.v3",
+        schema_version="transcript_message_provider_semantic.v4",
         role="user",
         name="user",
         placement_semantic=placement,
@@ -631,7 +631,7 @@ def test_oversized_non_terminal_message_uses_typed_content_artifact() -> None:
     )
     provider = _fact(
         TranscriptMessageProviderSemanticFact,
-        schema_version="transcript_message_provider_semantic.v3",
+        schema_version="transcript_message_provider_semantic.v4",
         role="user",
         name=None,
         placement_semantic=placement,

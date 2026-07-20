@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.input import MessageRole
@@ -69,9 +69,11 @@ def measure_long_horizon_context_budget(
             MessageRole.RUNTIME_OBSERVATION,
         }:
             continue
-        fixed_message = replace(message, content=())
-        fixed_tokens = target.token_estimator.estimate_message(fixed_message)
         message_tokens = estimate.message_tokens_by_index[index]
+        content_tokens = sum(
+            target.token_estimator.estimate_text(part) for part in message.content
+        )
+        fixed_tokens = message_tokens - content_tokens
         if fixed_tokens > message_tokens:
             raise ValueError("tool-result fixed framing exceeds message estimate")
         projected_tool_tokens += message_tokens - fixed_tokens

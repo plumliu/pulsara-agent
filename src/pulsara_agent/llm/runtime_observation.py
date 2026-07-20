@@ -15,7 +15,7 @@ from pulsara_agent.primitives.model_call import (
 class RuntimeDerivedObservationCarrierBinding:
     contract: RuntimeDerivedObservationCarrierContractFact
     implementation_build_fingerprint: str
-    wire_role: Literal["developer", "system"]
+    wire_role: Literal["user"]
 
 
 def runtime_observation_carrier_for_api(
@@ -28,22 +28,20 @@ def runtime_observation_carrier_for_api(
     supported_apis = {"openai_responses", "openai_chat_completions", "mock"}
     if api not in supported_apis and not allow_nonproduction_api:
         return None
-    wire_role: Literal["developer", "system"] = (
-        "system" if api == "openai_chat_completions" else "developer"
-    )
-    carrier_suffix = "system_message" if wire_role == "system" else "developer_message"
+    wire_role: Literal["user"] = "user"
+    carrier_suffix = "typed_user_message"
     payload = {
-        "schema_version": "runtime_derived_observation_carrier.v1",
+        "schema_version": "runtime_derived_observation_carrier.v2",
         "carrier_id": f"pulsara.runtime_observation.{carrier_suffix}",
-        "carrier_version": "v1",
+        "carrier_version": "v2",
         "provider_api": api,
-        "provider_role_contract": "runtime_inert_observation",
+        "provider_role_contract": "typed_provider_user_carrier",
         "wire_shape_fingerprint": sha256_fingerprint(
-            "runtime-derived-observation-wire-shape:v1",
+            "runtime-derived-observation-wire-shape:v2",
             {
                 "provider_api": api,
                 "wire_role": wire_role,
-                "content_shape": "string",
+                "content_shape": "canonical_json_typed_envelope",
                 "tool_call_identity": "forbidden",
             },
         ),
@@ -51,7 +49,7 @@ def runtime_observation_carrier_for_api(
     return RuntimeDerivedObservationCarrierContractFact(
         **payload,
         contract_fingerprint=sha256_fingerprint(
-            "runtime-derived-observation-carrier:v1", payload
+            "runtime-derived-observation-carrier:v2", payload
         ),
     )
 
@@ -71,14 +69,10 @@ def resolve_runtime_observation_binding(
     return RuntimeDerivedObservationCarrierBinding(
         contract=contract,
         implementation_build_fingerprint=sha256_fingerprint(
-            "runtime-derived-observation-implementation:v1",
-            {"implementation": "pulsara.llm.runtime_observation", "version": "v1"},
+            "runtime-derived-observation-implementation:v2",
+            {"implementation": "pulsara.llm.user_carrier", "version": "v2"},
         ),
-        wire_role=(
-            "system"
-            if contract.provider_api == "openai_chat_completions"
-            else "developer"
-        ),
+        wire_role="user",
     )
 
 

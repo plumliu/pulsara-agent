@@ -725,7 +725,7 @@ def _build_recovered_one_shot_close_event(
     payload.update(status="closed", reconciliation_reason=None)
     closed = build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         **payload,
     )
     return ProviderInputGenerationClosedEvent(

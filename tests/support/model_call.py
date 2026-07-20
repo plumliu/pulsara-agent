@@ -330,7 +330,7 @@ def _compiled_provider_input_candidate_fixture(
     )
     prepared_plan = build_frozen_fact(
         PreparedProviderInputPlanFact,
-        schema_version="prepared_provider_input_plan.v1",
+        schema_version="prepared_provider_input_plan.v2",
         plan_kind="initial_generation",
         resolved_model_call_id=call.resolved_model_call_id,
         continuity_scope_fingerprint=(
@@ -342,6 +342,7 @@ def _compiled_provider_input_candidate_fixture(
         causal_validation=validation,
         frame_placement=None,
         transcript_delta_proof=proof,
+        source_dispositions=(),
         rollover_intent=None,
         resulting_unit_vector_root_fingerprint=(
             candidate.provider_input_plan.unit_vector_root.reference_fingerprint
@@ -511,6 +512,7 @@ def prepared_provider_input_bundle_fixture(
         operation_kind="direct_model_call",
         operation_id=call.resolved_model_call_id,
         attempt_index=0,
+        clock_observed_at_utc="2026-01-01T00:00:00Z",
     )
 
 
@@ -1204,6 +1206,29 @@ def bind_test_context(
     return bound
 
 
+def bind_test_provider_input_context(
+    call,
+    provider_input,
+    context: LLMContext,
+) -> LLMContext:
+    """Hydrate a prepared carrier and freeze its final compiled estimate.
+
+    Production compiled calls receive this estimate from the context compiler.
+    Tests that intentionally route a compiled call through the one-shot planner
+    must recompute it after the planner appends its per-invocation clock.
+    """
+
+    bound = provider_input.carrier.to_llm_context(context)
+    if call.fact.context_mode == "compiled":
+        bound = replace(
+            bound,
+            compiler_estimated_input_tokens=(
+                call.target.token_estimator.estimate_context(bound).total_input_tokens
+            ),
+        )
+    return bound
+
+
 async def start_test_direct_model_stream(
     runtime,
     *,
@@ -1221,7 +1246,7 @@ async def start_test_direct_model_stream(
         operation_kind="direct_model_call",
         operation_id=call.fact.resolved_model_call_id,
     )
-    context = provider_input.carrier.to_llm_context(context)
+    context = bind_test_provider_input_context(call, provider_input, context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,

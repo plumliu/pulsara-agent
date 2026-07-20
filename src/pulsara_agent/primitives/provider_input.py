@@ -9,6 +9,7 @@ participates in provider-visible prefix identity.
 from __future__ import annotations
 
 from enum import StrEnum
+from hashlib import sha256
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field, PositiveInt, model_validator
@@ -17,12 +18,13 @@ from pulsara_agent.primitives._context_base import (
     ContextEventReferenceFact,
     FrozenJsonObjectFact,
     FrozenJsonValue,
+    canonical_json_bytes,
     context_fingerprint,
 )
 from pulsara_agent.primitives.context_source import (
-    CanonicalContextSourceRevisionFact,
     CapabilityToolCatalogRootFact,
     ContextArtifactReferenceFact,
+    ContextSourceDispositionFact,
     ContextSourceId,
     LedgerAuthorityHorizonFact,
     LedgerAuthorityHorizonSetReferenceFact,
@@ -67,8 +69,8 @@ class ProviderInputRolloverReason(StrEnum):
     PROVIDER_VISIBLE_COMPATIBILITY_CHANGED = (
         "provider_visible_compatibility_changed"
     )
-    AUXILIARY_FRAME_REBASE = "auxiliary_frame_rebase"
     EXPLICIT_LONG_HORIZON_REWRITE = "explicit_long_horizon_rewrite"
+    SOURCE_DISPOSITION_REWRITE_REQUIRED = "source_disposition_rewrite_required"
     CONFIRMED_OFFLINE_AUTHORITY_REPAIR = "confirmed_offline_authority_repair"
     EXPLICIT_ADMINISTRATIVE_RESET = "explicit_administrative_reset"
 
@@ -112,13 +114,13 @@ class ProviderInputReconciliationReason(StrEnum):
 
 
 @_fact(
-    "provider_visible_input_compatibility.v1",
+    "provider_visible_input_compatibility.v2",
     "semantic_fingerprint",
-    "provider-visible-input-compatibility:v1",
+    "provider-visible-input-compatibility:v2",
 )
 class ProviderVisibleInputCompatibilityFact(FrozenFactBase):
-    schema_version: Literal["provider_visible_input_compatibility.v1"] = (
-        "provider_visible_input_compatibility.v1"
+    schema_version: Literal["provider_visible_input_compatibility.v2"] = (
+        "provider_visible_input_compatibility.v2"
     )
     requested_model_identity: str = Field(min_length=1)
     provider_api_kind: str = Field(min_length=1)
@@ -129,6 +131,7 @@ class ProviderVisibleInputCompatibilityFact(FrozenFactBase):
     transcript_lowering_contract_fingerprint: Fingerprint
     context_source_lowering_contract_fingerprint: Fingerprint
     provider_input_framing_contract_fingerprint: Fingerprint
+    provider_user_carrier_protocol_fingerprint: Fingerprint
     semantic_fingerprint: Fingerprint
 
 
@@ -383,22 +386,86 @@ ProviderInputContentBlockFact: TypeAlias = (
 
 
 @_fact(
-    "provider_message_fragment.v1",
+    "provider_user_carrier_binding.v1",
+    "binding_fingerprint",
+    "provider-user-carrier-binding:v1",
+)
+class ProviderUserCarrierBindingFact(FrozenFactBase):
+    """Persisted proof needed to rebind a provider-user wire carrier exactly."""
+
+    schema_version: Literal["provider_user_carrier_binding.v1"] = (
+        "provider_user_carrier_binding.v1"
+    )
+    carrier_kind: Literal[
+        "human_input", "runtime_request", "runtime_observation"
+    ]
+    semantic_fact_schema_version: Literal[
+        "human_input_wire_semantic.v1",
+        "runtime_request_wire_semantic.v1",
+        "runtime_observation_wire_semantic.v2",
+    ]
+    carrier_semantic_fingerprint: Fingerprint
+    occurrence_semantic_fingerprint: Fingerprint
+    canonical_wire_utf8_sha256: Fingerprint
+    canonical_wire_utf8_bytes: int = Field(ge=0)
+    binding_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _kind_schema(self) -> "ProviderUserCarrierBindingFact":
+        expected = {
+            "human_input": "human_input_wire_semantic.v1",
+            "runtime_request": "runtime_request_wire_semantic.v1",
+            "runtime_observation": "runtime_observation_wire_semantic.v2",
+        }[self.carrier_kind]
+        if self.semantic_fact_schema_version != expected:
+            raise ValueError("provider user carrier kind/schema binding mismatch")
+        return self
+
+
+@_fact(
+    "provider_message_fragment.v3",
     "semantic_fingerprint",
-    "provider-message-fragment:v1",
+    "provider-message-fragment:v3",
 )
 class ProviderMessageFragmentFact(FrozenFactBase):
-    schema_version: Literal["provider_message_fragment.v1"] = (
-        "provider_message_fragment.v1"
+    schema_version: Literal["provider_message_fragment.v3"] = (
+        "provider_message_fragment.v3"
     )
     fragment_kind: Literal["message"] = "message"
     role: Literal[
-        "system", "user", "assistant", "tool_call", "tool_result", "runtime_observation"
+        "system", "user", "assistant", "tool_call", "tool_result", "runtime_request", "runtime_observation"
     ]
     name: str | None
     tool_call_id: str | None
     content_blocks: tuple[ProviderInputContentBlockFact, ...]
+    provider_user_carrier_binding: ProviderUserCarrierBindingFact | None
     semantic_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _provider_user_carrier(self) -> "ProviderMessageFragmentFact":
+        expected_kind = {
+            "user": "human_input",
+            "runtime_request": "runtime_request",
+            "runtime_observation": "runtime_observation",
+        }.get(self.role)
+        binding = self.provider_user_carrier_binding
+        if (expected_kind is None) != (binding is None):
+            raise ValueError("provider message carrier ownership matrix mismatch")
+        if binding is not None:
+            if binding.carrier_kind != expected_kind:
+                raise ValueError("provider message carrier kind differs from role")
+            if len(self.content_blocks) != 1 or not isinstance(
+                self.content_blocks[0], ProviderInputTextBlockFact
+            ):
+                raise ValueError("provider user carrier requires one text block")
+            encoded = self.content_blocks[0].text.encode("utf-8")
+            if (
+                len(encoded) != binding.canonical_wire_utf8_bytes
+                or f"sha256:{sha256(encoded).hexdigest()}"
+                != binding.canonical_wire_utf8_sha256
+            ):
+                raise ValueError("provider message carrier wire identity drifted")
+        return self
 
 
 @_fact(
@@ -961,13 +1028,13 @@ class ContextInputManifestProjectionReferenceFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_input_unit_semantic.v2",
+    "provider_input_unit_semantic.v3",
     "semantic_fingerprint",
-    "provider-input-unit-semantic:v2",
+    "provider-input-unit-semantic:v3",
 )
 class ProviderInputUnitSemanticFact(FrozenFactBase):
-    schema_version: Literal["provider_input_unit_semantic.v2"] = (
-        "provider_input_unit_semantic.v2"
+    schema_version: Literal["provider_input_unit_semantic.v3"] = (
+        "provider_input_unit_semantic.v3"
     )
     unit_kind: Literal[
         "transcript_message",
@@ -977,6 +1044,7 @@ class ProviderInputUnitSemanticFact(FrozenFactBase):
         "tool_catalog",
         "rollup_observation",
         "recovery_observation",
+        "runtime_observation_rewrite",
     ]
     provider_content_semantic_fingerprint: Fingerprint
     lowering_contract_id: str = Field(min_length=1)
@@ -1567,47 +1635,6 @@ class ProviderCompatibilityChangeAuthorityFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_auxiliary_frame_rebase_authority.v1",
-    "authority_fingerprint",
-    "provider-auxiliary-frame-rebase-authority:v1",
-)
-class ProviderAuxiliaryFrameRebaseAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
-        "provider_auxiliary_frame_rebase_authority.v1"
-    ] = "provider_auxiliary_frame_rebase_authority.v1"
-    authority_kind: Literal["auxiliary_frame_rebase"] = "auxiliary_frame_rebase"
-    predecessor_generation_id: str = Field(min_length=1)
-    predecessor_core_state_fingerprint: Fingerprint
-    ordered_projection_identity_fingerprint: Fingerprint
-    dropped_frame_fact_fingerprints: tuple[Fingerprint, ...] = Field(min_length=1)
-    dropped_unit_range_fingerprints: tuple[Fingerprint, ...] = Field(min_length=1)
-    dropped_unit_accumulator: Fingerprint
-    previous_source_head_set_fingerprint: Fingerprint
-    resulting_source_head_set_fingerprint: Fingerprint
-    retained_transcript_unit_count: int = Field(ge=0)
-    predecessor_transcript_frontier_fingerprint: Fingerprint
-    resulting_retained_transcript_prefix_fingerprint: Fingerprint
-    budget_decision_fingerprint: Fingerprint
-    rebase_contract_fingerprint: Fingerprint
-    authority_fingerprint: Fingerprint
-
-    @model_validator(mode="after")
-    def _ranges(self) -> "ProviderAuxiliaryFrameRebaseAuthorityFact":
-        for values in (
-            self.dropped_frame_fact_fingerprints,
-            self.dropped_unit_range_fingerprints,
-        ):
-            if values != tuple(sorted(set(values))):
-                raise ValueError("auxiliary rebase ranges must be sorted and unique")
-        if (
-            self.predecessor_transcript_frontier_fingerprint
-            != self.resulting_retained_transcript_prefix_fingerprint
-        ):
-            raise ValueError("auxiliary rebase changed the retained transcript prefix")
-        return self
-
-
-@_fact(
     "provider_long_horizon_rewrite_rollover_authority.v1",
     "authority_fingerprint",
     "provider-long-horizon-rewrite-rollover-authority:v1",
@@ -1623,6 +1650,43 @@ class ProviderLongHorizonRewriteRolloverAuthorityFact(FrozenFactBase):
     rewrite_authority_reference: ProviderCompactionRewriteAuthorityReferenceFact
     resulting_transcript_projection_semantic_fingerprint: Fingerprint
     authority_fingerprint: Fingerprint
+
+
+@_fact(
+    "provider_source_disposition_rewrite_authority.v1",
+    "authority_fingerprint",
+    "provider-source-disposition-rewrite-authority:v1",
+)
+class ProviderSourceDispositionRewriteAuthorityFact(FrozenFactBase):
+    schema_version: Literal[
+        "provider_source_disposition_rewrite_authority.v1"
+    ] = "provider_source_disposition_rewrite_authority.v1"
+    authority_kind: Literal["source_disposition_rewrite"] = (
+        "source_disposition_rewrite"
+    )
+    predecessor_generation_id: str = Field(min_length=1)
+    predecessor_core_state_fingerprint: Fingerprint
+    ordered_projection_identity_fingerprint: Fingerprint
+    rewrite_dispositions: tuple[ContextSourceDispositionFact, ...]
+    rewritten_predecessor_source_head_fingerprints: tuple[Fingerprint, ...]
+    authority_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _rewrite_set(self) -> "ProviderSourceDispositionRewriteAuthorityFact":
+        keys = tuple(
+            (item.source_id.value, item.source_instance_id)
+            for item in self.rewrite_dispositions
+        )
+        if not keys or keys != tuple(sorted(set(keys))):
+            raise ValueError("source-disposition rewrite set is not ordered/unique")
+        if any(
+            item.disposition != "rewrite_required"
+            for item in self.rewrite_dispositions
+        ):
+            raise ValueError("source-disposition rewrite has a non-rewrite member")
+        if len(self.rewritten_predecessor_source_head_fingerprints) != len(keys):
+            raise ValueError("source-disposition rewrite head vector length mismatch")
+        return self
 
 
 @_fact(
@@ -1674,8 +1738,8 @@ ProviderInputRolloverAuthorityFact: TypeAlias = Annotated[
     ProviderSystemRootChangeAuthorityFact
     | ProviderToolCatalogChangeAuthorityFact
     | ProviderCompatibilityChangeAuthorityFact
-    | ProviderAuxiliaryFrameRebaseAuthorityFact
     | ProviderLongHorizonRewriteRolloverAuthorityFact
+    | ProviderSourceDispositionRewriteAuthorityFact
     | ProviderOfflineRepairRolloverAuthorityFact
     | ProviderAdministrativeResetAuthorityFact,
     Field(discriminator="authority_kind"),
@@ -1688,9 +1752,11 @@ _ROLLOVER_AUTHORITY_KIND = {
     ProviderInputRolloverReason.PROVIDER_VISIBLE_COMPATIBILITY_CHANGED: (
         "provider_compatibility_change"
     ),
-    ProviderInputRolloverReason.AUXILIARY_FRAME_REBASE: "auxiliary_frame_rebase",
     ProviderInputRolloverReason.EXPLICIT_LONG_HORIZON_REWRITE: (
         "long_horizon_rewrite"
+    ),
+    ProviderInputRolloverReason.SOURCE_DISPOSITION_REWRITE_REQUIRED: (
+        "source_disposition_rewrite"
     ),
     ProviderInputRolloverReason.CONFIRMED_OFFLINE_AUTHORITY_REPAIR: "offline_repair",
     ProviderInputRolloverReason.EXPLICIT_ADMINISTRATIVE_RESET: (
@@ -1755,36 +1821,243 @@ class ProviderInputRolloverRequestFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_input_committed_source_head.v1",
-    "head_fingerprint",
-    "provider-input-committed-source-head:v1",
+    "provider_input_unit_semantic_materialization.v1",
+    "semantic_materialization_fingerprint",
+    "provider-input-unit-semantic-materialization:v1",
 )
-class ProviderInputCommittedSourceHeadFact(FrozenFactBase):
-    schema_version: Literal["provider_input_committed_source_head.v1"] = (
-        "provider_input_committed_source_head.v1"
+class ProviderInputUnitSemanticMaterializationFact(FrozenFactBase):
+    schema_version: Literal["provider_input_unit_semantic_materialization.v1"] = (
+        "provider_input_unit_semantic_materialization.v1"
     )
-    source_id: ContextSourceId
-    source_instance_id: str = Field(min_length=1)
-    candidate_key: str = Field(min_length=1)
-    canonical_source_revision: CanonicalContextSourceRevisionFact
-    candidate_semantic_fingerprint: Fingerprint
-    appended_unit_semantic_fingerprint: Fingerprint
-    committed_append_index: int = Field(ge=0)
-    head_fingerprint: Fingerprint
+    unit_semantic: ProviderInputUnitSemanticFact
+    canonical_provider_fragment: ProviderInputTypedFragmentFact
+    canonical_wire_utf8_sha256: Fingerprint
+    canonical_wire_utf8_bytes: int = Field(ge=0)
+    canonical_content_digest: Fingerprint
+    lowering_contract_fingerprint: Fingerprint
+    wire_codec_contract_fingerprint: Fingerprint
+    semantic_materialization_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _semantic(self) -> "ProviderInputUnitSemanticMaterializationFact":
+        if (
+            self.unit_semantic.provider_content_semantic_fingerprint
+            != self.canonical_provider_fragment.semantic_fingerprint
+            or self.unit_semantic.lowering_contract_fingerprint
+            != self.lowering_contract_fingerprint
+        ):
+            raise ValueError("provider semantic materialization join mismatch")
+        return self
 
 
 @_fact(
-    "provider_input_clock_head.v1",
+    "provider_input_unit_semantic_document_identity.v1",
+    "document_semantic_fingerprint",
+    "provider-input-unit-semantic-document-identity:v1",
+)
+class ProviderInputUnitSemanticDocumentIdentityFact(FrozenFactBase):
+    schema_version: Literal[
+        "provider_input_unit_semantic_document_identity.v1"
+    ] = "provider_input_unit_semantic_document_identity.v1"
+    document_schema_version: Literal[
+        "provider_input_unit_semantic_materialization.v1"
+    ] = "provider_input_unit_semantic_materialization.v1"
+    document_contract_fingerprint: Fingerprint
+    semantic_materialization_fingerprint: Fingerprint
+    canonical_document_sha256: Fingerprint
+    canonical_document_bytes: int = Field(ge=0)
+    canonical_wire_utf8_sha256: Fingerprint
+    canonical_wire_utf8_bytes: int = Field(ge=0)
+    document_semantic_fingerprint: Fingerprint
+
+
+@_fact(
+    "effective_provider_source_semantic_snapshot.v1",
+    "semantic_snapshot_fingerprint",
+    "effective-provider-source-semantic-snapshot:v1",
+)
+class EffectiveProviderSourceSemanticSnapshotFact(FrozenFactBase):
+    schema_version: Literal["effective_provider_source_semantic_snapshot.v1"] = (
+        "effective_provider_source_semantic_snapshot.v1"
+    )
+    source_id: ContextSourceId
+    source_instance_id: str = Field(min_length=1)
+    lifecycle_class: Literal["replacement_snapshot"] = "replacement_snapshot"
+    committed_revision: int = Field(ge=1)
+    observation_semantic_id: Fingerprint
+    predecessor_observation_semantic_id: Fingerprint | None
+    snapshot_semantic_fingerprint: Fingerprint
+    canonical_wire_semantic_fingerprint: Fingerprint
+    causal_placement_semantic_fingerprint: Fingerprint
+    unit_causal_semantic_fingerprint: Fingerprint
+    effective_status: Literal[
+        "active_snapshot", "explicit_empty_snapshot", "source_closed"
+    ]
+    unit_document_identity: ProviderInputUnitSemanticDocumentIdentityFact
+    semantic_snapshot_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _semantic(self) -> "EffectiveProviderSourceSemanticSnapshotFact":
+        if not self.unit_causal_semantic_fingerprint:
+            raise ValueError("effective source snapshot lacks causal identity")
+        if (self.committed_revision == 1) != (
+            self.predecessor_observation_semantic_id is None
+        ):
+            raise ValueError("effective source snapshot revision lineage mismatch")
+        return self
+
+
+@_fact(
+    "committed_runtime_observation_semantic_head.v1",
+    "semantic_head_fingerprint",
+    "committed-runtime-observation-semantic-head:v1",
+)
+class CommittedRuntimeObservationSemanticHeadFact(FrozenFactBase):
+    schema_version: Literal[
+        "committed_runtime_observation_semantic_head.v1"
+    ] = "committed_runtime_observation_semantic_head.v1"
+    effective_snapshot: EffectiveProviderSourceSemanticSnapshotFact
+    semantic_head_fingerprint: Fingerprint
+
+
+@_fact(
+    "inline_provider_input_unit_hydration_attribution.v1",
+    "hydration_fact_fingerprint",
+    "inline-provider-input-unit-hydration-attribution:v1",
+)
+class InlineProviderInputUnitHydrationAttributionFact(FrozenFactBase):
+    schema_version: Literal[
+        "inline_provider_input_unit_hydration_attribution.v1"
+    ] = "inline_provider_input_unit_hydration_attribution.v1"
+    hydration_kind: Literal["inline"] = "inline"
+    semantic_document_identity_fingerprint: Fingerprint
+    semantic_materialization: ProviderInputUnitSemanticMaterializationFact
+    hydration_fact_fingerprint: Fingerprint
+
+
+@_fact(
+    "artifact_provider_input_unit_hydration_attribution.v1",
+    "hydration_fact_fingerprint",
+    "artifact-provider-input-unit-hydration-attribution:v1",
+)
+class ArtifactProviderInputUnitHydrationAttributionFact(FrozenFactBase):
+    schema_version: Literal[
+        "artifact_provider_input_unit_hydration_attribution.v1"
+    ] = "artifact_provider_input_unit_hydration_attribution.v1"
+    hydration_kind: Literal["artifact"] = "artifact"
+    semantic_document_identity_fingerprint: Fingerprint
+    artifact_reference: ContextArtifactReferenceFact
+    artifact_document_contract_fingerprint: Fingerprint
+    observed_document_sha256: Fingerprint
+    observed_document_bytes: int = Field(ge=0)
+    hydrate_proof_fingerprint: Fingerprint
+    hydration_fact_fingerprint: Fingerprint
+
+
+ProviderInputUnitHydrationAttributionFact: TypeAlias = Annotated[
+    InlineProviderInputUnitHydrationAttributionFact
+    | ArtifactProviderInputUnitHydrationAttributionFact,
+    Field(discriminator="hydration_kind"),
+]
+
+
+@_fact(
+    "provider_input_unit_placement_attribution.v1",
+    "fact_fingerprint",
+    "provider-input-unit-placement-attribution:v1",
+)
+class ProviderInputUnitPlacementAttributionFact(FrozenFactBase):
+    schema_version: Literal["provider_input_unit_placement_attribution.v1"] = (
+        "provider_input_unit_placement_attribution.v1"
+    )
+    semantic_head_fingerprint: Fingerprint
+    hydration_attribution: ProviderInputUnitHydrationAttributionFact
+    origin_generation_id: str = Field(min_length=1)
+    committed_append_event_reference: ContextEventReferenceFact
+    committed_append_index: int = Field(ge=1)
+    committed_vector_root_reference: ProviderInputUnitVectorRootReferenceFact
+    vector_ordinal: int = Field(ge=0)
+    source_event_references: tuple[ContextEventReferenceFact, ...]
+    source_artifact_references: tuple[ContextArtifactReferenceFact, ...]
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
+    required_replay_bindings: tuple[ProviderInputReplayBindingIdentityFact, ...]
+    closure_event_reference: ContextEventReferenceFact | None
+    fact_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _placement(self) -> "ProviderInputUnitPlacementAttributionFact":
+        if self.vector_ordinal >= self.committed_vector_root_reference.unit_count:
+            raise ValueError("provider source-head vector ordinal is out of range")
+        owners = tuple(item.runtime_session_id for item in self.authority_horizons)
+        if owners != tuple(sorted(set(owners))):
+            raise ValueError("provider source-head horizons are not canonical")
+        return self
+
+
+@_fact(
+    "committed_runtime_observation_source_head.v1",
+    "fact_fingerprint",
+    "committed-runtime-observation-source-head:v1",
+)
+class CommittedRuntimeObservationSourceHeadFact(FrozenFactBase):
+    schema_version: Literal[
+        "committed_runtime_observation_source_head.v1"
+    ] = "committed_runtime_observation_source_head.v1"
+    semantic_head: CommittedRuntimeObservationSemanticHeadFact
+    placement_attribution: ProviderInputUnitPlacementAttributionFact
+    fact_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _join(self) -> "CommittedRuntimeObservationSourceHeadFact":
+        document = self.semantic_head.effective_snapshot.unit_document_identity
+        hydration = self.placement_attribution.hydration_attribution
+        if (
+            self.semantic_head.semantic_head_fingerprint
+            != self.placement_attribution.semantic_head_fingerprint
+            or document.document_semantic_fingerprint
+            != hydration.semantic_document_identity_fingerprint
+        ):
+            raise ValueError("runtime observation source-head join mismatch")
+        if isinstance(hydration, InlineProviderInputUnitHydrationAttributionFact):
+            materialization = hydration.semantic_materialization
+            encoded = canonical_json_bytes(materialization.model_dump(mode="json"))
+            if (
+                materialization.semantic_materialization_fingerprint
+                != document.semantic_materialization_fingerprint
+                or materialization.canonical_wire_utf8_sha256
+                != document.canonical_wire_utf8_sha256
+                or materialization.canonical_wire_utf8_bytes
+                != document.canonical_wire_utf8_bytes
+                or f"sha256:{sha256(encoded).hexdigest()}"
+                != document.canonical_document_sha256
+                or len(encoded) != document.canonical_document_bytes
+            ):
+                raise ValueError("inline provider source-head document drifted")
+        elif (
+            hydration.artifact_document_contract_fingerprint
+            != document.document_contract_fingerprint
+            or hydration.observed_document_sha256
+            != document.canonical_document_sha256
+            or hydration.observed_document_bytes != document.canonical_document_bytes
+        ):
+            raise ValueError("artifact provider source-head document drifted")
+        closed = self.semantic_head.effective_snapshot.effective_status == "source_closed"
+        if closed != (self.placement_attribution.closure_event_reference is not None):
+            raise ValueError("runtime observation source-head closure matrix mismatch")
+        return self
+
+
+@_fact(
+    "provider_input_clock_head.v2",
     "head_fingerprint",
-    "provider-input-clock-head:v1",
+    "provider-input-clock-head:v2",
 )
 class ProviderInputClockHeadFact(FrozenFactBase):
-    schema_version: Literal["provider_input_clock_head.v1"] = (
-        "provider_input_clock_head.v1"
+    schema_version: Literal["provider_input_clock_head.v2"] = (
+        "provider_input_clock_head.v2"
     )
     observation_semantic_fingerprint: Fingerprint
     observed_at_utc: str
-    committed_append_index: int = Field(ge=1)
     head_fingerprint: Fingerprint
 
 
@@ -1877,13 +2150,13 @@ class ProviderInputAwaitingControlDispositionFact(FrozenFactBase):
 
 
 @_fact(
-    "committed_provider_input_generation_core_state.v1",
+    "committed_provider_input_generation_core_state.v3",
     "core_state_fingerprint",
-    "committed-provider-input-generation-core-state:v1",
+    "committed-provider-input-generation-core-state:v3",
 )
 class CommittedProviderInputGenerationCoreStateFact(FrozenFactBase):
-    schema_version: Literal["committed_provider_input_generation_core_state.v1"] = (
-        "committed_provider_input_generation_core_state.v1"
+    schema_version: Literal["committed_provider_input_generation_core_state.v3"] = (
+        "committed_provider_input_generation_core_state.v3"
     )
     generation: ProviderInputGenerationFact
     root_reference: ProviderInputGenerationRootReferenceFact
@@ -1896,7 +2169,9 @@ class CommittedProviderInputGenerationCoreStateFact(FrozenFactBase):
     committed_authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
     replay_binding_set: ProviderInputReplayBindingSetReferenceFact
     transcript_frontier: ProviderTranscriptFrontierFact
-    committed_source_heads: tuple[ProviderInputCommittedSourceHeadFact, ...]
+    committed_source_heads: tuple[
+        CommittedRuntimeObservationSemanticHeadFact, ...
+    ]
     clock_head: ProviderInputClockHeadFact | None
     awaiting_control_disposition: ProviderInputAwaitingControlDispositionFact | None
     accepted_but_not_appended_continuation: ProviderInputPendingContinuationFact | None
@@ -1910,16 +2185,14 @@ class CommittedProviderInputGenerationCoreStateFact(FrozenFactBase):
         if self.unit_count != self.unit_vector_root.unit_count:
             raise ValueError("provider generation unit count/root mismatch")
         keys = tuple(
-            (item.source_id.value, item.source_instance_id, item.candidate_key)
+            (
+                item.effective_snapshot.source_id.value,
+                item.effective_snapshot.source_instance_id,
+            )
             for item in self.committed_source_heads
         )
         if keys != tuple(sorted(set(keys))):
             raise ValueError("provider source heads are not ordered/unique")
-        if any(
-            item.committed_append_index > self.revision
-            for item in self.committed_source_heads
-        ):
-            raise ValueError("provider source head is ahead of state revision")
         if (self.status == "reconciliation_latched") != (
             self.reconciliation_reason is not None
         ):
@@ -1935,15 +2208,17 @@ class CommittedProviderInputGenerationCoreStateFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_input_generation_attribution_state.v1",
+    "provider_input_generation_attribution_state.v3",
     "attribution_fingerprint",
-    "provider-input-generation-attribution-state:v1",
+    "provider-input-generation-attribution-state:v3",
 )
 class ProviderInputGenerationAttributionStateFact(FrozenFactBase):
-    schema_version: Literal["provider_input_generation_attribution_state.v1"] = (
-        "provider_input_generation_attribution_state.v1"
+    schema_version: Literal["provider_input_generation_attribution_state.v3"] = (
+        "provider_input_generation_attribution_state.v3"
     )
     core_state: CommittedProviderInputGenerationCoreStateFact
+    source_head_attribution_status: Literal["pending_hydration", "complete"]
+    source_head_attributions: tuple[ProviderInputUnitPlacementAttributionFact, ...]
     latest_model_start_event_ref: ContextEventReferenceFact | None
     latest_model_start_committed_core_fingerprint: Fingerprint | None
     close_or_rollover_event_ref: ContextEventReferenceFact | None
@@ -1956,6 +2231,24 @@ class ProviderInputGenerationAttributionStateFact(FrozenFactBase):
         ):
             raise ValueError(
                 "provider generation ModelStart attribution matrix mismatch"
+            )
+        attribution_keys = tuple(
+            item.semantic_head_fingerprint for item in self.source_head_attributions
+        )
+        if attribution_keys != tuple(sorted(set(attribution_keys))):
+            raise ValueError("provider source-head attributions are not canonical")
+        required = {
+            item.semantic_head_fingerprint
+            for item in self.core_state.committed_source_heads
+        }
+        if self.source_head_attribution_status == "complete":
+            if set(attribution_keys) != required:
+                raise ValueError(
+                    "provider source-head semantic/attribution join mismatch"
+                )
+        elif attribution_keys or not required:
+            raise ValueError(
+                "pending source-head attribution has an invalid hydration matrix"
             )
         return self
 
@@ -2127,13 +2420,13 @@ ProviderInputGenerationCommitGuardFact: TypeAlias = (
 
 
 @_fact(
-    "prepared_provider_input_plan.v1",
+    "prepared_provider_input_plan.v2",
     "plan_fingerprint",
-    "prepared-provider-input-plan:v1",
+    "prepared-provider-input-plan:v2",
 )
 class PreparedProviderInputPlanFact(FrozenFactBase):
-    schema_version: Literal["prepared_provider_input_plan.v1"] = (
-        "prepared_provider_input_plan.v1"
+    schema_version: Literal["prepared_provider_input_plan.v2"] = (
+        "prepared_provider_input_plan.v2"
     )
     plan_kind: Literal[
         "initial_generation",
@@ -2150,6 +2443,7 @@ class PreparedProviderInputPlanFact(FrozenFactBase):
     causal_validation: ProviderInputCausalValidationResult
     frame_placement: ProviderInvocationContextFramePlacementFact | None
     transcript_delta_proof: ProviderTranscriptDeltaCommitProofFact
+    source_dispositions: tuple[ContextSourceDispositionFact, ...]
     rollover_intent: ProviderInputRolloverIntentFact | None
     resulting_unit_vector_root_fingerprint: Fingerprint
     resolved_causal_physical_policy_fingerprint: Fingerprint
@@ -2157,6 +2451,12 @@ class PreparedProviderInputPlanFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _matrix(self) -> "PreparedProviderInputPlanFact":
+        disposition_keys = tuple(
+            (item.source_id.value, item.source_instance_id)
+            for item in self.source_dispositions
+        )
+        if disposition_keys != tuple(sorted(set(disposition_keys))):
+            raise ValueError("prepared provider source dispositions are not ordered/unique")
         if (
             self.ordered_transcript_projection_identity.identity_fingerprint
             != self.causal_validation.projection_identity_fingerprint

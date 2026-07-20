@@ -61,6 +61,7 @@ from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
     compaction_started_contract_fields,
@@ -81,7 +82,7 @@ from pulsara_agent.llm.errors import (
     ModelOptionUnsupported,
     ModelTargetBindingMismatch,
 )
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.raw_provider import RawProviderFailure
 from pulsara_agent.llm.result import TransportUsageReport
@@ -342,6 +343,15 @@ async def _compact(service: ContextCompactionService, **kwargs):
         target_model_target=_target(service),
         **kwargs,
     )
+
+
+def _runtime_request_text(context: LLMContext) -> str:
+    request = next(
+        message
+        for message in context.messages
+        if message.role is MessageRole.RUNTIME_REQUEST
+    )
+    return request.content[0]
 
 
 def _compaction_service(**kwargs: Any) -> ContextCompactionService:
@@ -685,6 +695,7 @@ async def _emit_turn(
             operation_id=call.fact.resolved_model_call_id,
         )
     )
+    context = bind_test_provider_input_context(call, provider_input, context)
     start_bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -2068,7 +2079,7 @@ def test_context_compaction_memory_candidate_policy_disabled_omits_prompt_and_au
     )
 
     assert event is not None
-    assert "memory_candidates_json" not in transport.contexts[0].messages[0].content[0]
+    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
     assert candidate_pool.list_pending() == []
     assert not any(
         isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
@@ -2112,7 +2123,7 @@ def test_context_compaction_transient_workspace_does_not_write_candidate_audit_e
     )
 
     assert event is not None
-    assert "memory_candidates_json" not in transport.contexts[0].messages[0].content[0]
+    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
     assert candidate_pool.list_pending() == []
     assert not any(
         isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
@@ -2150,7 +2161,7 @@ def test_repeated_compaction_carries_previous_summary_forward() -> None:
     )
 
     assert second is not None
-    second_input = transport.contexts[-1].messages[0].content[0]
+    second_input = _runtime_request_text(transport.contexts[-1])
     assert "Previous compact summary to carry forward" in second_input
     assert "FIRST_SENTINEL old context." in second_input
     messages = rebuild_prior_messages(log, archive=archive, session_id="runtime:test")
@@ -2316,7 +2327,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     assert completed is not None
     assert completed.sequence is not None
     assert completed.sequence > current_start.sequence
-    compact_input = transport.contexts[-1].messages[0].content[0]
+    compact_input = _runtime_request_text(transport.contexts[-1])
     assert "old request" in compact_input
     assert "current request" not in compact_input
 
@@ -2411,7 +2422,7 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
 
         assert result.compacted is True
         assert current_start.sequence is not None
-        compact_input = transport.contexts[-1].messages[0].content[0]
+        compact_input = _runtime_request_text(transport.contexts[-1])
         assert "old-a request" in compact_input
         assert "old-b request" not in compact_input
         assert "current request" not in compact_input
@@ -3176,7 +3187,7 @@ def test_preflight_current_user_input_affects_threshold_but_not_summary_input() 
         is True
     )
 
-    compact_input = transport.contexts[0].messages[0].content[0]
+    compact_input = _runtime_request_text(transport.contexts[0])
     assert "CURRENT_USER_INPUT_SHOULD_NOT_BE_SUMMARIZED" not in compact_input
     completed = [
         event

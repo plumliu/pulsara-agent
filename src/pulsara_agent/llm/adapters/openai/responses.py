@@ -40,6 +40,7 @@ from pulsara_agent.llm.raw_provider import (
     is_raw_provider_stream_item,
 )
 from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
+from pulsara_agent.llm.user_carrier import validate_provider_user_carrier_messages
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -281,10 +282,15 @@ def build_responses_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
+    validate_provider_user_carrier_messages(
+        context.messages,
+        system_prompt=context.system_prompt,
+    )
     model = call.target.model_profile
     options = call.target.effective_options
     if any(
-        message.role is MessageRole.RUNTIME_OBSERVATION
+        message.role
+        in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
         for message in context.messages
     ):
         carrier = call.target.fact.runtime_observation_carrier
@@ -480,8 +486,11 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
 
 def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
     role = message.role.value
-    if message.role is MessageRole.RUNTIME_OBSERVATION:
-        role = "developer"
+    if message.role in {
+        MessageRole.RUNTIME_REQUEST,
+        MessageRole.RUNTIME_OBSERVATION,
+    }:
+        role = "user"
     return {
         "role": role,
         # Use Responses' EasyInputMessage string form for maximum compatibility

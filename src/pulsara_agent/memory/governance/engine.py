@@ -20,6 +20,7 @@ from pulsara_agent.event import (
     MemoryGovernanceBatchPreparedEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    utc_now,
 )
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm import LLMRuntime, ModelRole
@@ -34,7 +35,7 @@ from pulsara_agent.llm.materialize import (
     MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES,
     materialize_committed_model_call_result_from_terminal_projection,
 )
-from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.terminal_projection import (
     hydrate_terminal_projection,
@@ -106,6 +107,10 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelTokenUsageFact,
     ResolvedModelCallFact,
+)
+from pulsara_agent.primitives.runtime_observation import (
+    RuntimeClockObservationPayloadFact,
+    RuntimeObservationWireSemanticFact,
 )
 
 if TYPE_CHECKING:
@@ -416,6 +421,7 @@ class MemoryGovernanceEngine:
             ),
             call=call,
             trigger_reason=trigger_reason,
+            clock_observed_at_utc=utc_now(),
         )
         await persist_governance_batch_input(
             prepared=prepared,
@@ -771,6 +777,7 @@ class MemoryGovernanceEngine:
             event_context=event_context,
             operation_kind="governance_model_call",
             operation_id=batch_id,
+            clock_observed_at_utc=_governance_clock_observed_at_utc(context),
         )
         try:
             context = provider_input.carrier.to_llm_context(context)
@@ -1085,6 +1092,17 @@ def _json_object_text(text: str) -> str:
     if start < 0 or end < start:
         raise ValueError("Memory governance response did not contain a JSON object")
     return stripped[start : end + 1]
+
+
+def _governance_clock_observed_at_utc(context: LLMContext) -> str:
+    if not context.messages:
+        raise ValueError("governance prepared input lacks its runtime clock")
+    semantic = context.messages[0].provider_user_carrier_semantic
+    if not isinstance(semantic, RuntimeObservationWireSemanticFact) or not isinstance(
+        semantic.payload, RuntimeClockObservationPayloadFact
+    ):
+        raise ValueError("governance prepared input lacks its exact clock authority")
+    return semantic.payload.observed_at_utc
 
 
 def _validate_decision_coverage(

@@ -72,6 +72,7 @@ from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.control import RunModelCallControlOwner
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     make_test_run_execution_activation,
     run_agent_task,
     test_llm_config,
@@ -1653,7 +1654,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             operation_kind="direct_model_call",
             operation_id=call.fact.resolved_model_call_id,
         )
-        context = provider_input.carrier.to_llm_context(context)
+        context = bind_test_provider_input_context(call, provider_input, context)
         start_bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,

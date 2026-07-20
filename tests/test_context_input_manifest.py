@@ -11,6 +11,7 @@ from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.foundation.records import ArtifactContentConflict
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.user_carrier import ROOT_USER_CARRIER_INTERPRETATION
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.context_source import (
@@ -468,7 +469,11 @@ def test_exact_replay_hydrates_artifact_backed_context_source(
         )
 
         assert replayed.status is ContextInputReplayStatus.EXACT_REPLAY
-        assert replayed.compiled_context.llm_context.system_prompt == system_prompt
+        replayed_root = replayed.compiled_context.llm_context.system_prompt
+        assert replayed_root is not None
+        assert replayed_root.startswith(system_prompt)
+        assert replayed_root.count(system_prompt) == 1
+        assert replayed_root.endswith(ROOT_USER_CARRIER_INTERPRETATION)
         assert (
             provider_neutral_payload_fingerprint(replayed.compiled_context.llm_context)
             == compiled.provider_neutral_payload_fingerprint

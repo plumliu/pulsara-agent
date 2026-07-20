@@ -11,6 +11,11 @@
 > prior art：`PULSARA_LONG_HORIZON_BUDGET_PRIOR_ART_RESEARCH.zh.md`
 >
 > 真实故障：`PULSARA_LONG_HORIZON_REAL_REPL_TRAJECTORY_ANALYSIS.zh.md`
+>
+> **ROAC carrier/rewrite hard cut（2026-07-20）：** 本文早期将runtime observation描述为非user inert system/developer carrier的条款已被
+> `PULSARA_RUNTIME_OBSERVATION_AND_AUXILIARY_CONTEXT_PREFIX_CONTINUITY_HARD_CUT_IMPLEMENTATION.zh.md`取代。现行contract使用typed
+> `pulsara_runtime_observation` user-wire envelope；runtime request是独立carrier。Long-Horizon rewrite domain包含runtime-observation stable state，必须保护effective
+> heads、current run/latest clock、未闭合lifecycle与pending依赖，并通过bounded partition/coverage proof重建provider projection。
 
 > 完成日期：2026-07-14
 >

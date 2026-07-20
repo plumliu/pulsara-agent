@@ -11,6 +11,7 @@ from pulsara_agent.event import (
     EventContext,
     EventType,
     ProviderInputAppendCommittedEvent,
+    utc_now,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm.terminal_projection import stable_event_identity
@@ -63,6 +64,20 @@ class ProviderInputGenerationCoordinator:
         self._prepare_lock = asyncio.Lock()
         self._attempt_lock = RLock()
         self._attempts: dict[str, _OwnedPreparationAttempt] = {}
+
+    def committed_source_heads_for_compiled_call(
+        self,
+        *,
+        prepared_context_input: PreparedLiveContextSnapshot,
+    ):
+        """Freeze historical replacement heads before compiler allocation."""
+
+        scope = build_session_provider_input_continuity_scope(
+            runtime_session_id=self._runtime_session.runtime_session_id,
+            prepared_context_input=prepared_context_input,
+        )
+        core = self._store.snapshot(scope.scope_fingerprint).core_state
+        return core.committed_source_heads if core is not None else ()
 
     async def prepare_compiled_call(
         self,
@@ -294,6 +309,7 @@ class ProviderInputGenerationCoordinator:
         operation_kind: str,
         operation_id: str,
         attempt_index: int = 0,
+        clock_observed_at_utc: str | None = None,
         deadline_monotonic: float | None = None,
     ) -> PreparedProviderInputStartBundle:
         """Prepare one direct invocation under its own exact generation."""
@@ -321,6 +337,7 @@ class ProviderInputGenerationCoordinator:
                 operation_kind=operation_kind,
                 operation_id=operation_id,
                 attempt_index=attempt_index,
+                clock_observed_at_utc=clock_observed_at_utc or utc_now(),
             )
             prepared = _bind_bundle_to_write_boundary(
                 runtime_session=self._runtime_session,

@@ -22,6 +22,9 @@ from pulsara_agent.runtime.context_input.sources.input import (
     ContextSourceCollectInput,
     recompute_context_source_input_dependency,
 )
+from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    context_source_lifecycle_entry,
+)
 
 
 class ContextSource(Protocol):
@@ -68,6 +71,15 @@ class ContextSourceBindingPolicy:
         )
         if lowering not in self.allowed_lowering_pairs:
             raise ValueError("ContextSource lowering intent is unauthorized")
+        registered = context_source_lifecycle_entry(self.source_id)
+        expected_lifecycle = {
+            "generation_root": "generation_root",
+            "replacement_snapshot": "append_revision",
+            "causal_append_once": "append_once",
+            "immutable_append_once": "append_once",
+        }[registered.lifecycle_class]
+        if source_input.lifecycle.lifecycle_kind != expected_lifecycle:
+            raise ValueError("ContextSource lifecycle differs from registry contract")
 
 
 def default_context_source_binding_policy(
@@ -184,6 +196,8 @@ class ContextSourceRegistry:
         ids = tuple(item.contract.source_id for item in ordered)
         if len(ids) != len(set(ids)):
             raise ValueError("ContextSource registry IDs are duplicated")
+        if set(ids) != set(ContextSourceId):
+            raise ValueError("ContextSource registry is not exhaustive")
         self._bindings = ordered
         self._by_id = {item.contract.source_id: item for item in ordered}
         self.registry_fingerprint = context_fingerprint(
@@ -286,10 +300,10 @@ _SOURCE_POLICY_MATRIX = {
         {"generation_root"},
         {20},
         {False},
-        {("leading_context", "user")},
+        {("system_instruction", "system")},
     ),
     ContextSourceId.RUNTIME_CLOCK: (
-        {"append_revision"},
+        {"append_once"},
         {89},
         {False},
         {("status_observation", "runtime")},
@@ -324,9 +338,15 @@ _SOURCE_POLICY_MATRIX = {
         {False},
         {("leading_context", "user")},
     ),
-    ContextSourceId.PLAN: (
-        {"append_revision", "append_once"},
-        {10, 11},
+    ContextSourceId.PLAN_STATUS: (
+        {"append_revision"},
+        {10},
+        {True},
+        {("leading_context", "user")},
+    ),
+    ContextSourceId.PLAN_GUIDANCE: (
+        {"append_once"},
+        {11, 12},
         {True},
         {("leading_context", "user")},
     ),

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from hashlib import sha256
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.primitives._context_base import freeze_json, thaw_json
-from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.context_source import (
     ContextArtifactReferenceFact,
@@ -28,6 +29,8 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputReplayBindingIdentityFact,
     ProviderInputUnitAttributionFact,
     ProviderInputUnitMaterializationFact,
+    ProviderInputUnitSemanticDocumentIdentityFact,
+    ProviderInputUnitSemanticMaterializationFact,
     ProviderInputUnitSemanticFact,
     ProviderMessageFragmentFact,
     ProviderToolSpecFragmentFact,
@@ -44,6 +47,14 @@ LOWERING_CONTRACT_FINGERPRINT = context_fingerprint(
         "system": "ordered-per-context-source-fragments:v1",
         "append_revision": "provider-visible-latest-wins-envelope:v1",
     },
+)
+PROVIDER_UNIT_SEMANTIC_DOCUMENT_CONTRACT_FINGERPRINT = context_fingerprint(
+    "provider-input-unit-semantic-document-contract:v1",
+    "typed-unit-semantic+typed-provider-fragment+canonical-wire-digest",
+)
+PROVIDER_UNIT_WIRE_CODEC_CONTRACT_FINGERPRINT = context_fingerprint(
+    "provider-input-unit-wire-codec-contract:v1",
+    "utf-8-final-provider-fragment-v1",
 )
 
 
@@ -91,7 +102,7 @@ def freeze_message_unit(
     fragment = freeze_provider_message_fragment(message)
     semantic = build_frozen_fact(
         ProviderInputUnitSemanticFact,
-        schema_version="provider_input_unit_semantic.v2",
+        schema_version="provider_input_unit_semantic.v3",
         unit_kind=unit_kind,
         provider_content_semantic_fingerprint=fragment.semantic_fingerprint,
         lowering_contract_id=LOWERING_CONTRACT_ID,
@@ -116,6 +127,71 @@ def freeze_message_unit(
         canonical_provider_fragment=fragment,
         estimated_tokens=max(0, estimated_tokens),
     )
+
+
+def build_provider_unit_semantic_document(
+    unit: ProviderInputUnitMaterializationFact,
+) -> tuple[
+    ProviderInputUnitSemanticMaterializationFact,
+    ProviderInputUnitSemanticDocumentIdentityFact,
+]:
+    """Build the placement-free semantic document for an exact provider unit."""
+
+    fragment = unit.canonical_provider_fragment
+    fragment_bytes = canonical_json_bytes(fragment.model_dump(mode="json"))
+    if isinstance(fragment, ProviderMessageFragmentFact) and (
+        fragment.role in {"runtime_observation", "runtime_request", "user"}
+        and len(fragment.content_blocks) == 1
+        and isinstance(fragment.content_blocks[0], ProviderInputTextBlockFact)
+    ):
+        wire_bytes = fragment.content_blocks[0].text.encode("utf-8")
+    else:
+        wire_bytes = fragment_bytes
+    semantic_materialization = build_frozen_fact(
+        ProviderInputUnitSemanticMaterializationFact,
+        schema_version="provider_input_unit_semantic_materialization.v1",
+        unit_semantic=unit.attribution.semantic,
+        canonical_provider_fragment=fragment,
+        canonical_wire_utf8_sha256=f"sha256:{sha256(wire_bytes).hexdigest()}",
+        canonical_wire_utf8_bytes=len(wire_bytes),
+        canonical_content_digest=context_fingerprint(
+            "provider-input-unit-canonical-content:v1",
+            fragment.model_dump(mode="json"),
+        ),
+        lowering_contract_fingerprint=(
+            unit.attribution.semantic.lowering_contract_fingerprint
+        ),
+        wire_codec_contract_fingerprint=(
+            PROVIDER_UNIT_WIRE_CODEC_CONTRACT_FINGERPRINT
+        ),
+    )
+    document_bytes = canonical_json_bytes(
+        semantic_materialization.model_dump(mode="json")
+    )
+    document_identity = build_frozen_fact(
+        ProviderInputUnitSemanticDocumentIdentityFact,
+        schema_version="provider_input_unit_semantic_document_identity.v1",
+        document_schema_version=(
+            "provider_input_unit_semantic_materialization.v1"
+        ),
+        document_contract_fingerprint=(
+            PROVIDER_UNIT_SEMANTIC_DOCUMENT_CONTRACT_FINGERPRINT
+        ),
+        semantic_materialization_fingerprint=(
+            semantic_materialization.semantic_materialization_fingerprint
+        ),
+        canonical_document_sha256=(
+            f"sha256:{sha256(document_bytes).hexdigest()}"
+        ),
+        canonical_document_bytes=len(document_bytes),
+        canonical_wire_utf8_sha256=(
+            semantic_materialization.canonical_wire_utf8_sha256
+        ),
+        canonical_wire_utf8_bytes=(
+            semantic_materialization.canonical_wire_utf8_bytes
+        ),
+    )
+    return semantic_materialization, document_identity
 
 
 def freeze_provider_message_fragment(message: LLMMessage) -> ProviderMessageFragmentFact:
@@ -156,11 +232,14 @@ def freeze_provider_message_fragment(message: LLMMessage) -> ProviderMessageFrag
         )
     fragment = build_frozen_fact(
         ProviderMessageFragmentFact,
-        schema_version="provider_message_fragment.v1",
+        schema_version="provider_message_fragment.v3",
         role=message.role.value,
         name=message.name,
         tool_call_id=message.tool_call_id,
         content_blocks=tuple(blocks),
+        provider_user_carrier_binding=(
+            message.provider_user_carrier_binding
+        ),
     )
     return fragment
 
@@ -178,7 +257,7 @@ def freeze_ordered_transcript_unit(
     fragment = unit.wire_semantic.provider_message
     semantic = build_frozen_fact(
         ProviderInputUnitSemanticFact,
-        schema_version="provider_input_unit_semantic.v2",
+        schema_version="provider_input_unit_semantic.v3",
         unit_kind="transcript_message",
         provider_content_semantic_fingerprint=fragment.semantic_fingerprint,
         lowering_contract_id=LOWERING_CONTRACT_ID,
@@ -259,7 +338,7 @@ def freeze_tool_unit(
     )
     semantic = build_frozen_fact(
         ProviderInputUnitSemanticFact,
-        schema_version="provider_input_unit_semantic.v2",
+        schema_version="provider_input_unit_semantic.v3",
         unit_kind="tool_catalog",
         provider_content_semantic_fingerprint=fragment.semantic_fingerprint,
         lowering_contract_id=LOWERING_CONTRACT_ID,
@@ -563,6 +642,18 @@ def _hydrate_message(fragment: ProviderMessageFragmentFact) -> LLMMessage:
             name=call.name,
             arguments=call.arguments,
         )
+    carrier_semantic = None
+    if fragment.provider_user_carrier_binding is not None:
+        from pulsara_agent.llm.user_carrier import (
+            rebind_provider_user_carrier_semantic,
+        )
+
+        if len(content) != 1:
+            raise ValueError("provider user carrier fragment requires one text block")
+        carrier_semantic = rebind_provider_user_carrier_semantic(
+            content[0],
+            binding=fragment.provider_user_carrier_binding,
+        )
     return LLMMessage(
         role=MessageRole(fragment.role),
         content=tuple(content),
@@ -571,6 +662,8 @@ def _hydrate_message(fragment: ProviderMessageFragmentFact) -> LLMMessage:
         tool_call_id=fragment.tool_call_id,
         name=fragment.name,
         arguments=None,
+        provider_user_carrier_semantic=carrier_semantic,
+        provider_user_carrier_binding=fragment.provider_user_carrier_binding,
     )
 
 
@@ -606,7 +699,10 @@ def _hydrate_tool_fragment(fragment: ProviderToolSpecFragmentFact) -> ToolSpec:
 
 __all__ = [
     "LOWERING_CONTRACT_FINGERPRINT",
+    "PROVIDER_UNIT_SEMANTIC_DOCUMENT_CONTRACT_FINGERPRINT",
+    "PROVIDER_UNIT_WIRE_CODEC_CONTRACT_FINGERPRINT",
     "RecursivelyImmutableProviderInputCarrier",
+    "build_provider_unit_semantic_document",
     "freeze_message_unit",
     "freeze_tool_unit",
     "hydrate_carrier",

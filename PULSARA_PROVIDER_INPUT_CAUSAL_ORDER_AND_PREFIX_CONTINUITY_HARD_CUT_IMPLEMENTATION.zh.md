@@ -7,6 +7,10 @@
 > 本文是 `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md` 的纠偏规格。凡涉及 transcript lowering order、generation scope、prefix continuity、rollover 判定和 fresh-generation rebuild 的条款，以本文为准。
 >
 > 本问题首先由 DeepSeek prompt-cache 命中率异常暴露，但其本质是 provider-visible trajectory 的语义与因果顺序错误，不得按纯性能问题处理。
+>
+> **ROAC supersession（2026-07-20）：** 本文的ordered transcript、strict suffix和causal frontier继续有效；动态non-root carrier、source semantic head与rollover矩阵由
+> `PULSARA_RUNTIME_OBSERVATION_AND_AUXILIARY_CONTEXT_PREFIX_CONTINUITY_HARD_CUT_IMPLEMENTATION.zh.md`进一步收紧。任何仍允许`auxiliary_frame_rebase`、mid-history
+> system/developer hint或按source absence重建generation的旧段落均已失效；observation收缩只能来自confirmed Long-Horizon rewrite。
 
 ---
 

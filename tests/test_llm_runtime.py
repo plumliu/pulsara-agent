@@ -1,5 +1,6 @@
 import asyncio
 from hashlib import sha256
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,6 +56,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
 from pulsara_agent.llm.config import LLMConfig
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     resolve_test_call,
     test_llm_config,
     test_llm_context,
@@ -66,6 +68,12 @@ from tests.conftest import open_test_root_rollout_run
 from pulsara_agent.llm.factory import build_llm_runtime
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
+from pulsara_agent.llm.user_carrier import (
+    ROOT_USER_CARRIER_INTERPRETATION,
+    RUNTIME_OBSERVATION_ENVELOPE_KEY,
+    compose_provider_root_policy,
+    encode_human_input,
+)
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.provider import (
     ModelIdentityPolicy,
@@ -219,7 +227,7 @@ async def _start_test_stream(
                 operation_id=call.fact.resolved_model_call_id,
             )
         )
-    context = provider_input.carrier.to_llm_context(context)
+    context = bind_test_provider_input_context(call, provider_input, context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -793,7 +801,7 @@ def test_main_model_start_freezes_event_safe_run_activation_in_recovery_plan(
                 operation_id=call.fact.resolved_model_call_id,
             )
         )
-        context = provider_input.carrier.to_llm_context(context)
+        context = bind_test_provider_input_context(call, provider_input, context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -863,7 +871,7 @@ def test_direct_model_start_has_no_reply_reservation_or_run_activation(
                 operation_id=call.fact.resolved_model_call_id,
             )
         )
-        context = provider_input.carrier.to_llm_context(context)
+        context = bind_test_provider_input_context(call, provider_input, context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -949,7 +957,7 @@ def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
                 operation_id=call.fact.resolved_model_call_id,
             )
         )
-        context = provider_input.carrier.to_llm_context(context)
+        context = bind_test_provider_input_context(call, provider_input, context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -1030,7 +1038,7 @@ def test_model_call_start_rejects_semantic_rollout_state_change_after_preparatio
                 operation_id=call.fact.resolved_model_call_id,
             )
         )
-        context = provider_input.carrier.to_llm_context(context)
+        context = bind_test_provider_input_context(call, provider_input, context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -2844,9 +2852,13 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     )
 
     assert payload["model"] == "pro"
-    assert payload["instructions"] == "You are Pulsara."
+    assert payload["instructions"] == compose_provider_root_policy(
+        "You are Pulsara."
+    )
     assert payload["input"][0]["role"] == "user"
-    assert payload["input"][0]["content"] == "Use the tool."
+    assert payload["input"][0]["content"] == encode_human_input(
+        "Use the tool."
+    ).canonical_text
     assert payload["tools"][0]["name"] == "lookup"
     assert payload["reasoning"] == {"effort": "medium"}
     assert payload["max_output_tokens"] == 128
@@ -2888,7 +2900,7 @@ def test_openai_responses_payload_uses_function_call_output_items() -> None:
     assert all(item.get("role") != "tool" for item in payload["input"])
 
 
-def test_openai_responses_payload_preserves_message_level_system_items() -> None:
+def test_openai_responses_payload_rejects_message_level_system_items() -> None:
     config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -2903,20 +2915,10 @@ def test_openai_responses_payload_preserves_message_level_system_items() -> None
         )
     )
 
-    payload = build_responses_payload(call=payload_call(config), context=context)
-
-    assert payload["input"][0] == {
-        "role": "user",
-        "content": "original user input",
-    }
-    assert payload["input"][1] == {
-        "role": "system",
-        "content": "Pulsara note: previous turn failed.",
-    }
-    assert payload["input"][2] == {
-        "role": "user",
-        "content": "please continue",
-    }
+    with pytest.raises(
+        ValueError, match="ordered provider history contains a system message"
+    ):
+        build_responses_payload(call=payload_call(config), context=context)
 
 
 def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text() -> (
@@ -2939,11 +2941,16 @@ def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text(
     payload = build_responses_payload(call=payload_call(config), context=context)
 
     assert payload["input"] == [
-        {"role": "user", "content": "hello"},
+        {
+            "role": "user",
+            "content": encode_human_input("hello").canonical_text,
+        },
         {"role": "assistant", "content": "Hello! How can I help?"},
         {
             "role": "user",
-            "content": "你能帮我把这个贪吃蛇小游戏做的再好一些吗？发挥你的能力",
+            "content": encode_human_input(
+                "你能帮我把这个贪吃蛇小游戏做的再好一些吗？发挥你的能力"
+            ).canonical_text,
         },
     ]
 
@@ -4140,8 +4147,14 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
     )
 
     assert payload["model"] == "pro"
-    assert payload["messages"][0] == {"role": "system", "content": "You are Pulsara."}
-    assert payload["messages"][1] == {"role": "user", "content": "Use lookup."}
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": compose_provider_root_policy("You are Pulsara."),
+    }
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": encode_human_input("Use lookup.").canonical_text,
+    }
     assert payload["messages"][2]["role"] == "assistant"
     assert payload["messages"][2]["tool_calls"][0]["id"] == "call_chat_123"
     assert payload["messages"][3] == {
@@ -4158,6 +4171,9 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
 def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier() -> (
     None
 ):
+    from pulsara_agent.llm.user_carrier import context_source_observation_payload
+    from pulsara_agent.primitives.context_source import ContextSourceId
+
     config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -4168,23 +4184,46 @@ def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier(
     call = payload_call(config, options=LLMOptions(), api="chat")
     carrier = call.target.fact.runtime_observation_carrier
     assert carrier is not None
-    assert carrier.carrier_id == "pulsara.runtime_observation.system_message"
+    assert carrier.carrier_id == "pulsara.runtime_observation.typed_user_message"
     context = bind_test_context(
         call,
         test_llm_context(
             messages=(
                 LLMMessage.user("continue"),
-                LLMMessage.runtime_observation("rollout_phase=finalization_only"),
+                LLMMessage.runtime_observation(
+                    context_source_observation_payload(
+                        source_id=ContextSourceId.RECOVERY,
+                        transition_kind="guidance",
+                        model_visible_content="rollout_phase=finalization_only",
+                        source_payload_schema_version=(
+                            "recovery_observation_payload.v1"
+                        ),
+                        source_payload_semantic_fingerprint=(
+                            "sha256:" + "2" * 64
+                        ),
+                        lifecycle_class="causal_append_once",
+                    ),
+                    observation_kind="recovery_guidance",
+                    source_instance_id="recovery:test",
+                    lifecycle_class="causal_append_once",
+                    authority_class="runtime_fact_and_guidance",
+                ),
             )
         ),
     )
 
     payload = build_chat_completions_payload(call=call, context=context)
 
-    assert payload["messages"][-1] == {
-        "role": "system",
-        "content": "rollout_phase=finalization_only",
-    }
+    observation = payload["messages"][-1]
+    assert observation["role"] == "user"
+    observation_body = json.loads(observation["content"])
+    assert tuple(observation_body) == (RUNTIME_OBSERVATION_ENVELOPE_KEY,)
+    assert (
+        observation_body[RUNTIME_OBSERVATION_ENVELOPE_KEY]["payload"][
+            "model_visible_content"
+        ]
+        == "rollout_phase=finalization_only"
+    )
 
 
 def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
@@ -4218,19 +4257,26 @@ def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
         context=context,
     )
 
-    assert payload["messages"][0] == {"role": "user", "content": "Use both tools."}
-    assert payload["messages"][1]["role"] == "assistant"
-    assert [call["id"] for call in payload["messages"][1]["tool_calls"]] == [
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": ROOT_USER_CARRIER_INTERPRETATION,
+    }
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": encode_human_input("Use both tools.").canonical_text,
+    }
+    assert payload["messages"][2]["role"] == "assistant"
+    assert [call["id"] for call in payload["messages"][2]["tool_calls"]] == [
         "call_1",
         "call_2",
     ]
-    assert payload["messages"][2]["role"] == "tool"
-    assert payload["messages"][2]["tool_call_id"] == "call_1"
     assert payload["messages"][3]["role"] == "tool"
-    assert payload["messages"][3]["tool_call_id"] == "call_2"
+    assert payload["messages"][3]["tool_call_id"] == "call_1"
+    assert payload["messages"][4]["role"] == "tool"
+    assert payload["messages"][4]["tool_call_id"] == "call_2"
 
 
-def test_openai_chat_completions_payload_preserves_message_level_system_items() -> None:
+def test_openai_chat_completions_payload_rejects_message_level_system_items() -> None:
     config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -4246,17 +4292,13 @@ def test_openai_chat_completions_payload_preserves_message_level_system_items() 
         )
     )
 
-    payload = build_chat_completions_payload(
-        call=payload_call(config, api="chat"),
-        context=context,
-    )
-
-    assert payload["messages"][0] == {"role": "user", "content": "original user input"}
-    assert payload["messages"][1] == {
-        "role": "system",
-        "content": "Pulsara note: previous turn failed.",
-    }
-    assert payload["messages"][2] == {"role": "user", "content": "please continue"}
+    with pytest.raises(
+        ValueError, match="ordered provider history contains a system message"
+    ):
+        build_chat_completions_payload(
+            call=payload_call(config, api="chat"),
+            context=context,
+        )
 
 
 def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_calls() -> (
@@ -4303,7 +4345,7 @@ def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_ca
         context=context,
     )
 
-    assistant = payload["messages"][1]
+    assistant = payload["messages"][2]
     assert assistant["role"] == "assistant"
     assert assistant["content"] == "I will look that up."
     assert assistant["reasoning_content"] == "Need a tool result before answering."

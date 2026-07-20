@@ -546,11 +546,7 @@ def _render_transcript_section(
         metadata=metadata,
         estimated_tokens=(
             message_tokens
-            + (
-                estimator.estimate_message(LLMMessage.runtime_observation(header))
-                if header is not None
-                else 0
-            )
+            + header_tokens
         ),
     )
 

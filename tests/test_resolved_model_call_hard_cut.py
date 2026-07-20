@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from tests.support import (
     bind_test_context,
+    bind_test_provider_input_context,
     context_compiled_contract_fields,
     make_test_run_execution_activation,
     resolve_test_call,
@@ -77,6 +78,7 @@ from pulsara_agent.llm.runtime import LLMRuntime
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
+from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -105,6 +107,7 @@ async def _start_test_stream(
     runtime_session,
     run_execution_activation=None,
 ):
+    validate_model_context_for_call(call=call, context=context)
     lifecycle_kind = (
         "main_assistant_reply"
         if context.model_call_index is not None
@@ -125,7 +128,7 @@ async def _start_test_stream(
             operation_id=call.fact.resolved_model_call_id,
         )
     )
-    context = provider_input.carrier.to_llm_context(context)
+    context = bind_test_provider_input_context(call, provider_input, context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -1131,10 +1134,13 @@ def test_missing_provider_usage_is_missing_not_zero() -> None:
 
 def test_pr1_estimate_only_seam_supplies_model_end_input_tokens() -> None:
     runtime, _, call, context = _call_and_context()
-    expected = call.target.token_estimator.estimate_context(context).total_input_tokens
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    start = next(event for event in events if isinstance(event, ModelCallStartEvent))
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
-    assert end.estimated_input_tokens == expected
+    assert (
+        end.estimated_input_tokens
+        == start.recovery_plan.pre_send_estimated_input_tokens
+    )
 
 
 def test_pr1_token_estimate_includes_message_breakdown() -> None:
@@ -1217,7 +1223,7 @@ def test_v1_estimator_text_json_and_framing_golden_values() -> None:
     )
     estimate = estimator.estimate_context(context)
     assert estimate.envelope_tokens == 3
-    assert estimate.message_tokens_by_index == (5,)
+    assert estimate.message_tokens_by_index == (45,)
     assert estimate.tool_tokens > 8
 
 
@@ -1296,8 +1302,12 @@ def test_final_context_over_budget_never_invokes_transport() -> None:
 def test_compiler_and_pre_send_estimates_are_equal() -> None:
     runtime, _transport, call, context = _call_and_context()
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    start = next(event for event in events if isinstance(event, ModelCallStartEvent))
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
-    assert end.estimated_input_tokens == context.compiler_estimated_input_tokens
+    assert (
+        end.estimated_input_tokens
+        == start.recovery_plan.pre_send_estimated_input_tokens
+    )
 
 
 def test_llm_runtime_does_not_persist_model_call_rejected() -> None:

@@ -356,3 +356,14 @@ projection三方join、pending continuation exact join，以及相邻revision的
 hydrated vector全部一致时才报告`exact_replay`。缺少generation start、artifact、causal validation、frame range或
 continuation proof时输出稳定diagnostic；不得从live compiler/cache补造缺失事实。Attribution-only drift可显示为
 manifest-local audit，但不得表现为durable append、rollover或provider semantic变化。
+
+Provider-input projection还必须展示唯一root privileged identity、每次append中的human/runtime-request/runtime-observation internal owner与user-wire kind、kind/producer/codec contract、
+runtime-observation no-op count、replacement semantic head及hydration/placement状态。Source semantic head与event/artifact/horizon attribution必须分栏，不能折成一个fingerprint。
+
+Inspector还必须展示每个historical replacement source的compile-time disposition及reason，区分
+`retain/projection_failed`、semantic no-op、explicit empty、terminal与typed allocation rewrite。
+Source candidate缺席不得显示为“removed”。One-shot generation必须显示其initial runtime clock和
+retry-stable operation owner。
+
+Long-Horizon rollover展示observation rewrite的source active/protected/eligible counts、stable-state/partition/coverage/projection roots、parent authority与resulting effective heads。Provider reported
+cached input只作为operation observation展示，并同时显示generation/revision/prefix和rollover reason；不能把cache usage冒充authority或用它修正历史projection。

@@ -915,7 +915,7 @@ def _compaction_window(
     )
     message_payload = {
         "message_id": message_id,
-        "role": "system",
+        "role": "runtime_observation",
         "name": "pulsara_compaction" if is_prefix else "pulsara_window_compaction",
         "run_id": None,
         "turn_id": None,

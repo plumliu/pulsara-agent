@@ -47,6 +47,7 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.context_source import (
     CapabilityToolCatalogRootFact,
+    ContextSourceDispositionFact,
     ResolvedContextSourcePhysicalInputPolicyFact,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
@@ -95,6 +96,7 @@ class ContextSnapshotBuildInput(FrozenContextFact):
     subagent_graph_acceleration: SubagentGraphAccelerationFact
     candidate_source_selections: tuple[ContextCandidateSourceSelectionFact, ...]
     context_source_candidates: tuple[ContextSectionCandidate, ...]
+    context_source_dispositions: tuple[ContextSourceDispositionFact, ...]
     capability_tool_catalog_root: CapabilityToolCatalogRootFact
     context_source_physical_input_policy: ResolvedContextSourcePhysicalInputPolicyFact
     context_source_registry_fingerprint: str

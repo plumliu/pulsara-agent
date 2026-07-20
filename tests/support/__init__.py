@@ -2,6 +2,7 @@
 
 from tests.support.model_call import (
     bind_test_context,
+    bind_test_provider_input_context,
     context_compiled_contract_fields,
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
@@ -24,6 +25,7 @@ from tests.support.model_call import (
 
 __all__ = [
     "bind_test_context",
+    "bind_test_provider_input_context",
     "context_compiled_contract_fields",
     "compaction_completed_contract_fields",
     "compaction_failed_contract_fields",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Mapping
 
 from pulsara_agent.primitives.context import ContextSectionCandidate
@@ -44,11 +43,9 @@ def render_context_source_candidate(
     elif isinstance(payload, RuntimeClockProposalPayloadFact):
         text = "\n".join(
             (
-                "<runtime-clock>",
                 f"Current date: {payload.local_date}",
                 f"Local timezone: {payload.timezone_name}",
                 f"Observed at UTC: {payload.observed_at_utc}",
-                "</runtime-clock>",
             )
         )
     else:
@@ -70,39 +67,7 @@ def render_context_source_candidate(
                 raise ValueError("hydrated artifact source content identity drifted")
         else:
             text = content.text
-    return _apply_provider_visible_revision_envelope(candidate, text)
-
-
-def _apply_provider_visible_revision_envelope(
-    candidate: ContextSectionCandidate,
-    text: str,
-) -> str:
-    semantic = candidate.attribution.semantic
-    lifecycle = semantic.lifecycle
-    if lifecycle.lifecycle_kind != "append_revision" or not text:
-        return text
-    revision = semantic.source_revision
-    predecessor_id = getattr(revision, "predecessor_source_revision_id", None)
-    revision_ordinal = getattr(revision, "source_revision_ordinal", None)
-    envelope = {
-        "source_id": semantic.source_id.value,
-        "source_instance_id": semantic.source_instance_id,
-        "candidate_key": semantic.candidate_key,
-        "revision_id": revision.source_revision_id,
-        "revision_kind": revision.revision_kind,
-        "revision_ordinal": revision_ordinal,
-        "supersedes": predecessor_id or "all_prior_revisions_for_source_instance",
-        "continuity_kind": lifecycle.continuity_kind,
-        "selection_rule": "latest_appended_revision_for_source_instance_wins",
-    }
-    return "\n".join(
-        (
-            "<context-source-revision>",
-            json.dumps(envelope, sort_keys=True, separators=(",", ":")),
-            text,
-            "</context-source-revision>",
-        )
-    )
+    return text
 
 
 __all__ = [

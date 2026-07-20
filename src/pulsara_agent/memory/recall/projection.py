@@ -26,6 +26,7 @@ class ProjectionBuilder:
         }
 
         units: list[str] = []
+        typed_entries: list[dict[str, object]] = []
         included_ids: set[str] = set()
         included_conflicts: list[dict[str, list[str] | str]] = []
         remaining = max_chars - len(_OPENING) - len(_CLOSING) - 1
@@ -42,6 +43,9 @@ class ProjectionBuilder:
                 max_chars=max(0, remaining - 3),
             )
             units.append(unit)
+            typed_entries.append(
+                {"memory_ids": [left_id, right_id], "model_visible_text": unit}
+            )
             included_ids.update((left_id, right_id))
             included_conflicts.append(group)
             remaining -= len(unit) + 3
@@ -59,6 +63,9 @@ class ProjectionBuilder:
             if unit is None:
                 continue
             units.append(unit)
+            typed_entries.append(
+                {"memory_ids": [item.memory_id], "model_visible_text": unit}
+            )
             included_ids.add(item.memory_id)
             remaining -= len(unit) + 3
 
@@ -70,6 +77,7 @@ class ProjectionBuilder:
             # These are the exact complete text units present in summary, not
             # reconstructed full item renderings that the model did not see.
             "items": list(units),
+            "typed_recalled_entries": typed_entries,
             "included_memory_ids": included,
             "filtered_memory_ids": list(result.filtered_ids),
             "conflict_groups": included_conflicts,

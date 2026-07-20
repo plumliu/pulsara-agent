@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field, replace
@@ -64,6 +65,7 @@ from pulsara_agent.event import (
     PlanQuestionAskedEvent,
     ProjectionFailedEvent,
     ProjectionReadyEvent,
+    RecalledMemoryProjectionEntryFact,
     ProjectionRequestedEvent,
     RequireUserConfirmEvent,
     RunEndEvent,
@@ -3360,6 +3362,12 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.CANDIDATE_INVALID
                     )
+                    historical_provider_source_heads = (
+                        self.runtime_session.provider_input_generation_coordinator
+                        .committed_source_heads_for_compiled_call(
+                            prepared_context_input=prepared_context_input
+                        )
+                    )
                     draft_compiled_context = compile_context_from_facts(
                         facts=prepared_context_input.invocation,
                         transcript=prepared_context_input.normalized_transcript.transcript,
@@ -3371,6 +3379,9 @@ class AgentRuntime:
                         ),
                         transcript_stable_entries=(
                             prepared_context_input.transcript_projection_evidence.stable_entries
+                        ),
+                        historical_provider_source_heads=(
+                            historical_provider_source_heads
                         ),
                     )
                     pre_manifest_failure_stage = (
@@ -3544,6 +3555,9 @@ class AgentRuntime:
                         ),
                         transcript_stable_entries=(
                             prepared_context_input.transcript_projection_evidence.stable_entries
+                        ),
+                        historical_provider_source_heads=(
+                            historical_provider_source_heads
                         ),
                     )
                     if (
@@ -5570,6 +5584,9 @@ class AgentRuntime:
                         token_budget=self.budget.projection_token_budget,
                         projection_kind=_memory_projection_kind(baseline),
                         included_memory_ids=_projection_ids(baseline),
+                        recalled_memory_entries=_typed_recalled_memory_entries(
+                            baseline
+                        ),
                         summary=_projection_summary(baseline),
                         metadata={
                             "degraded": True,
@@ -5616,6 +5633,7 @@ class AgentRuntime:
                 token_budget=self.budget.projection_token_budget,
                 projection_kind=_memory_projection_kind(projection),
                 included_memory_ids=_projection_ids(projection),
+                recalled_memory_entries=_typed_recalled_memory_entries(projection),
                 summary=_projection_summary(projection),
             ),
             state=state,
@@ -8240,11 +8258,43 @@ def _plan_exit_resolution_output(resolution: PlanExitResolution) -> dict[str, ob
 
 def _memory_projection_kind(
     projection: dict[str, Any] | None,
-) -> Literal["memory", "working_context", "mixed"]:
-    raw = projection.get("projection_kind") if projection else None
-    if raw in {"working_context", "mixed"}:
-        return raw
+) -> Literal["memory"]:
     return "memory"
+
+
+def _typed_recalled_memory_entries(
+    projection: dict[str, Any] | None,
+) -> tuple[RecalledMemoryProjectionEntryFact, ...]:
+    if projection is None:
+        return ()
+    raw_entries = projection.get("typed_recalled_entries")
+    if not isinstance(raw_entries, list):
+        raise ValueError("memory projection lacks typed recalled entries")
+    entries: list[RecalledMemoryProjectionEntryFact] = []
+    for index, raw in enumerate(raw_entries):
+        if not isinstance(raw, dict):
+            raise ValueError("typed recalled memory entry must be an object")
+        text = raw.get("model_visible_text")
+        memory_ids = raw.get("memory_ids")
+        if not isinstance(text, str) or not isinstance(memory_ids, list):
+            raise ValueError("typed recalled memory entry is malformed")
+        ordered_ids = tuple(sorted({str(item) for item in memory_ids}))
+        text_sha = f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+        payload = {
+            "entry_index": index,
+            "memory_ids": ordered_ids,
+            "model_visible_text": text,
+            "text_utf8_sha256": text_sha,
+        }
+        entries.append(
+            RecalledMemoryProjectionEntryFact(
+                **payload,
+                entry_semantic_fingerprint=sha256_fingerprint(
+                    "recalled-memory-projection-entry:v1", payload
+                ),
+            )
+        )
+    return tuple(entries)
 
 
 def _accepted_plan_artifact_id(run_id: str, exit_request_id: str) -> str:

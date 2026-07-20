@@ -15,15 +15,28 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.estimator import estimate_model_context_for_call
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.errors import ModelInputBudgetExceeded
+from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.user_carrier import (
+    ROOT_USER_CARRIER_INTERPRETATION,
+    ROOT_USER_CARRIER_INTERPRETATION_FINGERPRINT,
+    compose_provider_root_policy,
+    decode_runtime_observation_wire_semantic,
+    encode_one_shot_runtime_clock,
+    replace_runtime_observation_predecessor,
+)
 from pulsara_agent.primitives.context import (
     ContextSectionCandidate,
     context_fingerprint,
 )
-from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives._context_base import (
+    ContextEventReferenceFact,
+    canonical_utc_timestamp,
+)
 from pulsara_agent.primitives.context_source import (
     CapabilityToolCatalogRootFact,
     ContextSourceId,
+    ContextSourceDispositionFact,
     GenerationRootLifecycleFact,
     LedgerAuthorityHorizonFact,
     RuntimeClockProposalPayloadFact,
@@ -31,6 +44,7 @@ from pulsara_agent.primitives.context_source import (
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.provider_input import (
     CanonicalProviderInputPlanFact,
+    CommittedRuntimeObservationSemanticHeadFact,
     CommittedProviderInputGenerationCoreStateFact,
     CommittedProviderInputReferenceFact,
     ContextInputManifestProjectionReferenceFact,
@@ -40,7 +54,7 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputAppendSemanticFact,
     ProviderAcceptedContinuationProjectionJoinFact,
     ProviderInputClockHeadFact,
-    ProviderInputCommittedSourceHeadFact,
+    EffectiveProviderSourceSemanticSnapshotFact,
     ProviderInputContinuationMaterializationProofFact,
     ProviderInputGenerationCompatibilityFact,
     ProviderInputGenerationFact,
@@ -52,7 +66,6 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputPhysicalPolicyFailureReason,
     ProviderInputPendingContinuationFact,
     ProviderInputDispatchBarrierIdentityFact,
-    ProviderAuxiliaryFrameRebaseAuthorityFact,
     ProviderCompatibilityChangeAuthorityFact,
     ProviderSystemRootChangeAuthorityFact,
     ProviderToolCatalogChangeAuthorityFact,
@@ -60,6 +73,7 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputRolloverReason,
     ProviderInputRolloverRequestFact,
     ProviderInputSemanticIdentityFact,
+    ProviderInputUnitMaterializationFact,
     ProviderInvocationContextFramePlacementFact,
     ProviderInvocationContextFrameSemanticFact,
     ProviderTranscriptDeltaCommitProofFact,
@@ -73,6 +87,22 @@ from pulsara_agent.primitives.provider_input import (
     DirectStableMessageSourceAttributionFact,
     CompactionReplacementSummarySourceAttributionFact,
     ProviderLongHorizonRewriteRolloverAuthorityFact,
+    ProviderSourceDispositionRewriteAuthorityFact,
+)
+from pulsara_agent.primitives.runtime_observation import (
+    ContextSourceReplacementObservationPayloadFact,
+    PreparedRuntimeObservationProviderUnitFact,
+    RuntimeClockObservationPayloadFact,
+    RuntimeObservationCausalPlacementSemanticFact,
+    RuntimeObservationSourceAttributionFact,
+    RuntimeObservationWireSemanticFact,
+)
+from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    context_source_lifecycle_entry,
+    context_source_transition_kind,
+    default_provider_user_carrier_protocol,
+    runtime_observation_kind_contract,
+    runtime_observation_context_source_producer,
 )
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.context_engine.types import CompiledContext
@@ -83,6 +113,7 @@ from pulsara_agent.runtime.provider_input.materialization import (
     LOWERING_CONTRACT_VERSION,
     RecursivelyImmutableProviderInputCarrier,
     append_carrier,
+    build_provider_unit_semantic_document,
     freeze_message_unit,
     freeze_ordered_transcript_unit,
     freeze_provider_message_fragment,
@@ -98,6 +129,10 @@ from pulsara_agent.runtime.provider_input.causal import (
     ProviderInputPhysicalPolicyError,
     build_default_resolved_causal_physical_policy,
     validate_projection,
+)
+from pulsara_agent.runtime.provider_input.observation_rewrite import (
+    prepare_runtime_observation_effective_head_set,
+    prepare_runtime_observation_rewrite,
 )
 from pulsara_agent.runtime.provider_input.continuation import (
     PreparedProviderInputContinuationMaterialization,
@@ -201,7 +236,7 @@ def build_one_shot_generation_close_event(
     payload.update(status="closed", reconciliation_reason=None)
     closed = build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         **payload,
     )
     event_fields = event_context.event_fields()
@@ -272,6 +307,7 @@ def plan_one_shot_provider_input(
     operation_kind: str,
     operation_id: str,
     attempt_index: int,
+    clock_observed_at_utc: str,
 ) -> PreparedProviderInputStartBundle:
     """Build an exact one-call generation without a synthetic context window."""
 
@@ -415,7 +451,7 @@ def plan_one_shot_provider_input(
     empty_frontier = _empty_transcript_frontier(horizon_set.reference)
     genesis = build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         generation=generation,
         root_reference=root_reference,
         status="open",
@@ -434,7 +470,39 @@ def plan_one_shot_provider_input(
         reconciliation_reason=None,
     )
 
-    append_units = tuple(
+    clock_unit, clock_observation = _one_shot_runtime_clock_unit(
+        operation_kind=operation_kind,
+        operation_id=operation_id,
+        attempt_index=attempt_index,
+        observed_at_utc=clock_observed_at_utc,
+        replay_bindings=replay_bindings,
+    )
+    expected_clock_message = build_one_shot_runtime_clock_message(
+        operation_kind=operation_kind,
+        operation_id=operation_id,
+        attempt_index=attempt_index,
+        observed_at_utc=clock_observed_at_utc,
+    )
+    request_messages = context.messages
+    clock_indices = tuple(
+        index
+        for index, message in enumerate(request_messages)
+        if isinstance(
+            message.provider_user_carrier_semantic,
+            RuntimeObservationWireSemanticFact,
+        )
+        and isinstance(
+            message.provider_user_carrier_semantic.payload,
+            RuntimeClockObservationPayloadFact,
+        )
+    )
+    if clock_indices:
+        if clock_indices != (0,):
+            raise ValueError("one-shot frozen clock must be unique and first")
+        if request_messages[0] != expected_clock_message:
+            raise ValueError("one-shot frozen clock identity drifted")
+        request_messages = request_messages[1:]
+    request_units = tuple(
         freeze_message_unit(
             message,
             unit_kind="context_source",
@@ -443,8 +511,9 @@ def plan_one_shot_provider_input(
             estimated_tokens=0,
             required_replay_bindings=replay_bindings,
         )
-        for message in context.messages
+        for message in request_messages
     )
+    append_units = (clock_unit, *request_units)
     if not append_units:
         raise ValueError("one-shot provider input requires at least one message")
     if len(append_units) > 512:
@@ -509,7 +578,7 @@ def plan_one_shot_provider_input(
     )
     resulting_core = build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         generation=generation,
         root_reference=root_reference,
         status="open",
@@ -522,12 +591,25 @@ def plan_one_shot_provider_input(
         replay_binding_set=replay_set.reference,
         transcript_frontier=empty_frontier,
         committed_source_heads=(),
-        clock_head=None,
+        clock_head=build_frozen_fact(
+            ProviderInputClockHeadFact,
+            schema_version="provider_input_clock_head.v2",
+            observation_semantic_fingerprint=(
+                clock_observation.wire_semantic.wire_semantic_fingerprint
+            ),
+            observed_at_utc=clock_observed_at_utc,
+        ),
         awaiting_control_disposition=None,
         accepted_but_not_appended_continuation=None,
         reconciliation_reason=None,
     )
     carrier = hydrate_carrier(all_units)
+    _validate_planned_input_budget(
+        call=call,
+        carrier=carrier,
+        template=context,
+        retained_generation=False,
+    )
     identity = _provider_input_identity(
         carrier=carrier, vector_root=vector.root_reference
     )
@@ -629,6 +711,9 @@ def plan_one_shot_provider_input(
         causal_validation=None,
         frame_placement=None,
         transcript_delta_proof=None,
+        runtime_observation_units=(clock_observation,),
+        runtime_observation_semantic_noop_count=0,
+        source_dispositions=(),
         prepared_provider_input_candidate_fingerprint=None,
         predecessor_core_state_fingerprint=genesis.core_state_fingerprint,
         resulting_core_state=resulting_core,
@@ -731,6 +816,19 @@ def plan_provider_input_append(
         raise ValueError("provider generation already has an active preparation")
     if (rollover_from is None) != (rollover_intent is None):
         raise ValueError("provider rollover predecessor/intent must be paired")
+    source_snapshot = rollover_from or generation_snapshot
+    if (
+        source_snapshot.core_state is not None
+        and source_snapshot.core_state.committed_source_heads
+    ):
+        attribution = source_snapshot.attribution_state
+        if (
+            attribution is None
+            or attribution.source_head_attribution_status != "complete"
+        ):
+            raise ProviderInputResidentRestoreRequired(
+                source_snapshot.core_state.generation.generation_id
+            )
 
     selected_candidates = _selected_compiled_source_candidates(
         compiled_context=compiled_context,
@@ -744,6 +842,11 @@ def plan_provider_input_append(
                 for horizon in candidate.attribution.authority_horizons
             ),
             *prepared_context_input.invocation.fact.capability_tool_catalog_root.authority_horizons,
+            *(
+                horizon
+                for disposition in compiled_context.provider_source_dispositions
+                for horizon in disposition.authority_horizons
+            ),
         )
     )
     horizons = current_horizons
@@ -774,10 +877,34 @@ def plan_provider_input_append(
     ):
         raise ValueError("provider rollover predecessor is not at a safe point")
     predecessor = None if rollover_from is not None else generation_snapshot.core_state
+    source_dispositions = _resolved_source_dispositions(
+        compiled_context=compiled_context,
+        selected_candidates=selected_candidates,
+        predecessor=(rollover_predecessor or predecessor),
+    )
     initial = predecessor is None
     ordered_projection = compiled_context.prepared_ordered_transcript_projection
     if ordered_projection is None:
         raise ValueError("provider append lacks ordered transcript projection")
+    rewrite_dispositions = tuple(
+        item
+        for item in source_dispositions
+        if item.disposition == "rewrite_required"
+    )
+    if rewrite_dispositions:
+        source_predecessor = rollover_predecessor or predecessor
+        if source_predecessor is None:
+            raise ValueError("source-disposition rewrite lacks one open predecessor")
+        expected_rollover_intent = _source_disposition_rollover_intent(
+            predecessor=source_predecessor,
+            scope_fingerprint=scope.scope_fingerprint,
+            ordered_projection=ordered_projection,
+            rewrite_dispositions=rewrite_dispositions,
+        )
+        if rollover_from is None:
+            raise ProviderInputRolloverPlanningRequired(expected_rollover_intent)
+        if rollover_intent != expected_rollover_intent:
+            raise ValueError("source-disposition rollover intent drifted during retry")
     policy = compiled_context.provider_causal_physical_policy
     if policy.provider_input_vector_contract_fingerprint != VECTOR_CONTRACT_FINGERPRINT:
         raise ProviderInputPhysicalPolicyError(
@@ -800,6 +927,7 @@ def plan_provider_input_append(
         _validate_generation_root_sources(
             selected_candidates=selected_candidates,
             predecessor=predecessor,
+            resident=generation_snapshot.resident,
         )
     if not initial and predecessor.status != "open":
         raise ValueError("provider generation is not open")
@@ -820,19 +948,6 @@ def plan_provider_input_append(
         raise ProviderInputRolloverPlanningRequired(
             _long_horizon_rollover_intent(
                 predecessor=predecessor,
-                scope_fingerprint=scope.scope_fingerprint,
-                ordered_projection=ordered_projection,
-            )
-        )
-
-    if predecessor is not None and _removed_dynamic_source_keys(
-        predecessor=predecessor,
-        selected_candidates=selected_candidates,
-    ):
-        raise ProviderInputRolloverPlanningRequired(
-            _auxiliary_frame_rebase_rollover_intent(
-                predecessor_snapshot=generation_snapshot,
-                selected_candidates=selected_candidates,
                 scope_fingerprint=scope.scope_fingerprint,
                 ordered_projection=ordered_projection,
             )
@@ -953,7 +1068,7 @@ def plan_provider_input_append(
         empty_frontier = _empty_transcript_frontier(horizon_set.reference)
         genesis = build_frozen_fact(
             CommittedProviderInputGenerationCoreStateFact,
-            schema_version="committed_provider_input_generation_core_state.v1",
+            schema_version="committed_provider_input_generation_core_state.v3",
             generation=generation,
             root_reference=root_reference,
             status="open",
@@ -1012,21 +1127,98 @@ def plan_provider_input_append(
         pending=pending_continuation,
         pending_materialization=pending_continuation_materialization,
     )
-    source_units, changed_candidates = _changed_source_units(
-        compiled_context=compiled_context,
-        predecessor=predecessor,
-        initial=initial,
-        provider_lowering_binding=_provider_lowering_replay_binding(),
+    runtime_observation_rewrite_plan = None
+    if (
+        rollover_from is not None
+        and rollover_intent is not None
+        and rollover_intent.reason
+        is ProviderInputRolloverReason.EXPLICIT_LONG_HORIZON_REWRITE
+    ):
+        authority = rollover_intent.authority
+        if not isinstance(authority, ProviderLongHorizonRewriteRolloverAuthorityFact):
+            raise ValueError("Long-Horizon rollover authority contract drifted")
+        old_resident = rollover_from.resident
+        if old_resident is None:
+            raise ProviderInputResidentRestoreRequired(
+                rollover_from.core_state.generation.generation_id
+            )
+        runtime_observation_rewrite_plan = prepare_runtime_observation_rewrite(
+            generation_snapshot=rollover_from,
+            ordered_projection=ordered_projection,
+            parent_event_reference=(
+                authority.rewrite_authority_reference.compaction_completed_event_reference
+            ),
+            authority_horizons=_merge_horizons(
+                (*old_resident.authority_horizons, *current_horizons)
+            ),
+            artifact_namespace=artifact_namespace,
+            required_replay_bindings=current_replay_bindings,
+            current_run_protection_scope_semantic_id=(
+                _run_protection_scope_semantic_id(
+                    runtime_session_id=runtime_session_id,
+                    run_id=event_context.run_id,
+                )
+            ),
+        )
+        retained_rollover_units = runtime_observation_rewrite_plan.projected_units
+        retained_rollover_observations = (
+            runtime_observation_rewrite_plan.projected_observations
+        )
+    else:
+        retained_rollover_units, retained_rollover_observations = (
+            _retained_rollover_observations(
+                rollover_from=rollover_from,
+                selected_candidates=selected_candidates,
+                source_dispositions=source_dispositions,
+            )
+            if rollover_from is not None
+            else ((), ())
+        )
+    source_units, changed_candidates, runtime_observation_semantic_noop_count = (
+        _changed_source_units(
+            compiled_context=compiled_context,
+            predecessor=(rollover_predecessor or predecessor),
+            prior_observations=(
+                (rollover_from or generation_snapshot).runtime_observation_units
+            ),
+            provider_lowering_binding=_provider_lowering_replay_binding(),
+        )
     )
-    append_units, frame_placement = _arrange_transcript_delta_and_frame(
+    if rollover_from is not None:
+        append_units, frame_placement = _arrange_rollover_observations(
+            compiled_context=compiled_context,
+            transcript_units=transcript_units,
+            retained_units=retained_rollover_units,
+            retained_observations=retained_rollover_observations,
+            frame_units=source_units,
+            changed_candidates=changed_candidates,
+            previous_unit_count=len(previous_units),
+            generation_id=generation_id,
+            resolved_model_call_id=call.fact.resolved_model_call_id,
+            model_call_index=compiled_context.llm_context.model_call_index,
+        )
+    else:
+        append_units, frame_placement = _arrange_transcript_delta_and_frame(
+            compiled_context=compiled_context,
+            transcript_units=transcript_units,
+            frame_units=source_units,
+            changed_candidates=changed_candidates,
+            previous_unit_count=len(previous_units),
+            generation_id=generation_id,
+            resolved_model_call_id=call.fact.resolved_model_call_id,
+            model_call_index=compiled_context.llm_context.model_call_index,
+        )
+    new_runtime_observation_units = _prepared_runtime_observation_units(
         compiled_context=compiled_context,
-        transcript_units=transcript_units,
-        frame_units=source_units,
         changed_candidates=changed_candidates,
-        previous_unit_count=len(previous_units),
-        generation_id=generation_id,
-        resolved_model_call_id=call.fact.resolved_model_call_id,
-        model_call_index=compiled_context.llm_context.model_call_index,
+        source_units=source_units,
+        frame_placement=frame_placement,
+        runtime_session_id=runtime_session_id,
+        run_id=event_context.run_id,
+    )
+    runtime_observation_units = (
+        *retained_rollover_observations,
+        *new_runtime_observation_units,
     )
     if not append_units:
         raise ValueError("provider input plan produced an empty append")
@@ -1094,6 +1286,10 @@ def plan_provider_input_append(
             PROVIDER_INPUT_APPEND_ORDERING_CONTRACT_FINGERPRINT
         ),
     )
+    runtime_observation_rewrite = None
+    resulting_effective_head_artifacts: tuple[
+        PreparedProviderInputArtifact, ...
+    ] = ()
     append_artifact = prepared_json_artifact(
         "provider-input-append",
         {
@@ -1189,22 +1385,41 @@ def plan_provider_input_append(
     )
     source_heads = _source_heads(
         selected_candidates=selected_candidates,
-        predecessor=predecessor,
-        changed_candidates=changed_candidates,
+        source_dispositions=source_dispositions,
+        predecessor=rollover_predecessor or predecessor,
         available_source_units=(
             *(root_units if initial else ()),
+            *retained_rollover_units,
             *source_units,
         ),
-        append_index=expected_revision + 1,
+        runtime_observation_units=runtime_observation_units,
+        rollover=rollover_predecessor is not None,
     )
+    if runtime_observation_rewrite_plan is not None:
+        resulting_effective_heads, resulting_effective_head_artifacts = (
+            prepare_runtime_observation_effective_head_set(
+                source_heads,
+                artifact_namespace=artifact_namespace,
+                policy=runtime_observation_rewrite_plan.physical_policy,
+            )
+        )
+        runtime_observation_rewrite = runtime_observation_rewrite_plan.finalize(
+            resulting_ordered_provider_projection_fingerprint=context_fingerprint(
+                "runtime-observation-resulting-ordered-provider-projection:v1",
+                tuple(
+                    item.attribution.semantic.semantic_fingerprint
+                    for item in (*previous_units, *append_units)
+                ),
+            ),
+            resulting_effective_heads=resulting_effective_heads,
+        )
     clock_head = _clock_head(
         selected_candidates=selected_candidates,
         predecessor=predecessor,
-        append_index=expected_revision + 1,
     )
     resulting_core = build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         generation=generation,
         root_reference=root_reference,
         status="open",
@@ -1295,7 +1510,7 @@ def plan_provider_input_append(
 
     prepared_plan = build_frozen_fact(
         PreparedProviderInputPlanFact,
-        schema_version="prepared_provider_input_plan.v1",
+        schema_version="prepared_provider_input_plan.v2",
         plan_kind=(
             "rollover_initial_append"
             if rollover_predecessor is not None
@@ -1317,6 +1532,7 @@ def plan_provider_input_append(
         causal_validation=causal_validation,
         frame_placement=frame_placement,
         transcript_delta_proof=transcript_delta_proof,
+        source_dispositions=source_dispositions,
         rollover_intent=rollover_intent,
         resulting_unit_vector_root_fingerprint=(
             vector.root_reference.reference_fingerprint
@@ -1331,6 +1547,12 @@ def plan_provider_input_append(
             *horizon_set.artifacts,
             *replay_set.artifacts,
             *((root_artifact,) if initial else ()),
+            *(
+                runtime_observation_rewrite_plan.artifacts
+                if runtime_observation_rewrite_plan is not None
+                else ()
+            ),
+            *resulting_effective_head_artifacts,
             append_artifact,
         )
     )
@@ -1612,6 +1834,11 @@ def plan_provider_input_append(
         causal_validation=causal_validation,
         frame_placement=frame_placement,
         transcript_delta_proof=transcript_delta_proof,
+        runtime_observation_units=runtime_observation_units,
+        runtime_observation_semantic_noop_count=(
+            runtime_observation_semantic_noop_count
+        ),
+        source_dispositions=source_dispositions,
         prepared_provider_input_candidate_fingerprint=(
             prepared_candidate.candidate_fingerprint
         ),
@@ -1670,6 +1897,7 @@ def plan_provider_input_append(
             new_generation=generation,
             new_root_reference=root_reference,
             rollover_request=rollover_request,
+            runtime_observation_rewrite=runtime_observation_rewrite,
             authority_horizon_set=horizon_set.reference,
             expected_old_close_event_id=old_close_event_id,
             expected_new_start_event_id=generation_start_event_id,
@@ -1755,6 +1983,17 @@ class ProviderInputRolloverPlanningRequired(RuntimeError):
     def __init__(self, intent: ProviderInputRolloverIntentFact) -> None:
         super().__init__(intent.reason.value)
         self.intent = intent
+
+
+class ProviderInputSourceDispositionRequired(RuntimeError):
+    """A replacement source cannot be reconciled with the retained prefix."""
+
+    def __init__(self, disposition: ContextSourceDispositionFact) -> None:
+        super().__init__(
+            f"source disposition requires rewrite: "
+            f"{disposition.source_id.value}/{disposition.source_instance_id}"
+        )
+        self.disposition = disposition
 
 
 class ProviderInputRolloverRequired(RuntimeError):
@@ -1902,212 +2141,6 @@ def _long_horizon_rollover_intent(
     )
 
 
-def _removed_dynamic_source_keys(
-    *,
-    predecessor: CommittedProviderInputGenerationCoreStateFact,
-    selected_candidates: tuple[ContextSectionCandidate, ...],
-) -> tuple[tuple[ContextSourceId, str, str], ...]:
-    selected = {
-        (
-            item.source_id,
-            item.source_instance_id,
-            item.attribution.semantic.candidate_key,
-        )
-        for item in selected_candidates
-    }
-    return tuple(
-        sorted(
-            (
-                (item.source_id, item.source_instance_id, item.candidate_key)
-                for item in predecessor.committed_source_heads
-                if item.committed_append_index > 0
-                and item.source_id is not ContextSourceId.RUNTIME_CLOCK
-                and (
-                    item.source_id,
-                    item.source_instance_id,
-                    item.candidate_key,
-                )
-                not in selected
-            ),
-            key=lambda item: (item[0].value, item[1], item[2]),
-        )
-    )
-
-
-def _auxiliary_frame_rebase_rollover_intent(
-    *,
-    predecessor_snapshot: ProviderInputGenerationSnapshot,
-    selected_candidates: tuple[ContextSectionCandidate, ...],
-    scope_fingerprint: str,
-    ordered_projection,
-) -> ProviderInputRolloverIntentFact:
-    predecessor = predecessor_snapshot.core_state
-    resident = predecessor_snapshot.resident
-    if predecessor is None or resident is None:
-        raise ValueError("auxiliary frame rebase requires restored predecessor state")
-    if not _projection_extends_frontier(
-        projection=ordered_projection.projection,
-        frontier=predecessor.transcript_frontier,
-    ):
-        raise ValueError("auxiliary frame rebase cannot rewrite transcript history")
-    frames = predecessor_snapshot.frame_placements
-    if not frames:
-        raise ValueError("auxiliary frame rebase lacks durable frame attribution")
-    retained_count = predecessor.transcript_frontier.committed_transcript_unit_count
-    retained_units = ordered_projection.projection.ordered_units[:retained_count]
-    retained_frontier = build_frozen_fact(
-        ProviderTranscriptFrontierFact,
-        schema_version="provider_transcript_frontier.v2",
-        committed_transcript_unit_count=retained_count,
-        committed_ordered_wire_semantic_accumulator=(
-            _ordered_fingerprint_accumulator(
-                "provider-ordered-transcript-wire:v2",
-                tuple(
-                    item.wire_semantic.wire_semantic_fingerprint
-                    for item in retained_units
-                ),
-            )
-        ),
-        committed_ordered_causal_semantic_accumulator=(
-            _ordered_fingerprint_accumulator(
-                "provider-ordered-transcript-causal:v2",
-                tuple(
-                    item.unit_causal_semantic_fingerprint
-                    for item in retained_units
-                ),
-            )
-        ),
-        stable_transcript_prefix_fingerprint=context_fingerprint(
-            "provider-stable-transcript-prefix:v2",
-            tuple(
-                item.causal_placement.source.source_semantic_fingerprint
-                for item in retained_units
-            ),
-        ),
-    )
-    if (
-        retained_frontier.provider_semantic_frontier_fingerprint
-        != predecessor.transcript_frontier.provider_semantic_frontier_fingerprint
-    ):
-        raise ValueError("auxiliary frame rebase retained prefix proof drifted")
-    root_owner_fingerprints = {
-        item.candidate_semantic_fingerprint
-        for item in predecessor.committed_source_heads
-        if item.committed_append_index == 0
-    }
-    dropped_units = tuple(
-        item
-        for item in resident.units
-        if item.attribution.semantic.unit_kind in {"context_source", "runtime_clock"}
-        and item.attribution.owner_semantic_fingerprint
-        not in root_owner_fingerprints
-    )
-    if not dropped_units:
-        raise ValueError("auxiliary frame rebase has no droppable provider units")
-    previous_source_head_set = context_fingerprint(
-        "provider-committed-source-head-set:v1",
-        tuple(item.head_fingerprint for item in predecessor.committed_source_heads),
-    )
-    resulting_source_head_set = context_fingerprint(
-        "provider-selected-source-head-set:v1",
-        tuple(
-            sorted(
-                (
-                    item.source_id.value,
-                    item.source_instance_id,
-                    item.attribution.semantic.candidate_key,
-                    item.attribution.semantic.source_revision.revision_fingerprint,
-                    item.semantic_fingerprint,
-                )
-                for item in selected_candidates
-                if item.source_id is not ContextSourceId.RUNTIME_CLOCK
-            )
-        ),
-    )
-    dropped_ranges = tuple(
-        sorted(
-            set(
-            context_fingerprint(
-                "provider-auxiliary-frame-range:v1",
-                (
-                    item.frame_id,
-                    item.first_vector_ordinal,
-                    item.last_vector_ordinal,
-                    item.ordered_source_unit_range_accumulator,
-                ),
-            )
-            for item in frames
-            )
-        )
-    )
-    rebase_contract = context_fingerprint(
-        "provider-auxiliary-frame-rebase-contract:v1",
-        {
-            "retained_transcript": "wire-and-causal-prefix-exact",
-            "dropped_units": "non-root-context-frames-only",
-            "replacement": "current-compiler-selected-sources",
-        },
-    )
-    authority = build_frozen_fact(
-        ProviderAuxiliaryFrameRebaseAuthorityFact,
-        schema_version="provider_auxiliary_frame_rebase_authority.v1",
-        predecessor_generation_id=predecessor.generation.generation_id,
-        predecessor_core_state_fingerprint=predecessor.core_state_fingerprint,
-        ordered_projection_identity_fingerprint=(
-            ordered_projection.identity.identity_fingerprint
-        ),
-        dropped_frame_fact_fingerprints=tuple(
-            sorted({item.frame_fact_fingerprint for item in frames})
-        ),
-        dropped_unit_range_fingerprints=dropped_ranges,
-        dropped_unit_accumulator=_ordered_fingerprint_accumulator(
-            "provider-auxiliary-frame-dropped-units:v1",
-            tuple(
-                item.attribution.semantic.semantic_fingerprint
-                for item in dropped_units
-            ),
-        ),
-        previous_source_head_set_fingerprint=previous_source_head_set,
-        resulting_source_head_set_fingerprint=resulting_source_head_set,
-        retained_transcript_unit_count=retained_count,
-        predecessor_transcript_frontier_fingerprint=(
-            predecessor.transcript_frontier.provider_semantic_frontier_fingerprint
-        ),
-        resulting_retained_transcript_prefix_fingerprint=(
-            retained_frontier.provider_semantic_frontier_fingerprint
-        ),
-        budget_decision_fingerprint=context_fingerprint(
-            "provider-auxiliary-frame-rebase-decision:v1",
-            {
-                "reason": "committed_dynamic_source_absent",
-                "removed_source_keys": tuple(
-                    (
-                        source_id.value,
-                        source_instance_id,
-                        candidate_key,
-                    )
-                    for source_id, source_instance_id, candidate_key in (
-                        _removed_dynamic_source_keys(
-                            predecessor=predecessor,
-                            selected_candidates=selected_candidates,
-                        )
-                    )
-                ),
-            },
-        ),
-        rebase_contract_fingerprint=rebase_contract,
-    )
-    return build_frozen_fact(
-        ProviderInputRolloverIntentFact,
-        schema_version="provider_input_rollover_intent.v1",
-        continuity_scope_fingerprint=scope_fingerprint,
-        predecessor_generation_id=predecessor.generation.generation_id,
-        reason=ProviderInputRolloverReason.AUXILIARY_FRAME_REBASE,
-        authority=authority,
-        authority_fingerprint=authority.authority_fingerprint,
-    )
-
-
 def build_session_provider_input_continuity_scope(
     *,
     runtime_session_id: str,
@@ -2152,9 +2185,11 @@ def _validate_planned_input_budget(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PHYSICAL_POLICY_UNSATISFIED,
             "retained provider prefix exceeds budget without rewrite authority",
         )
-    raise ValueError(
+    exc = ModelInputBudgetExceeded(
         "fresh provider-input generation exceeds the resolved input budget"
     )
+    exc.estimate = estimate  # type: ignore[attr-defined]
+    raise exc
 
 
 class ProviderInputResidentRestoreRequired(RuntimeError):
@@ -2269,7 +2304,7 @@ def _compatibility(
     target = call.fact.target
     provider_visible = build_frozen_fact(
         ProviderVisibleInputCompatibilityFact,
-        schema_version="provider_visible_input_compatibility.v1",
+        schema_version="provider_visible_input_compatibility.v2",
         requested_model_identity=target.model_id,
         provider_api_kind=target.api,
         adapter_input_contract_id=target.transport_binding_id,
@@ -2284,6 +2319,9 @@ def _compatibility(
         context_source_lowering_contract_fingerprint=LOWERING_CONTRACT_FINGERPRINT,
         provider_input_framing_contract_fingerprint=(
             PROVIDER_INPUT_FRAMING_CONTRACT_FINGERPRINT
+        ),
+        provider_user_carrier_protocol_fingerprint=(
+            default_provider_user_carrier_protocol().contract_fingerprint
         ),
     )
     return build_frozen_fact(
@@ -2312,7 +2350,7 @@ def _one_shot_compatibility(
     target = call.fact.target
     provider_visible = build_frozen_fact(
         ProviderVisibleInputCompatibilityFact,
-        schema_version="provider_visible_input_compatibility.v1",
+        schema_version="provider_visible_input_compatibility.v2",
         requested_model_identity=target.model_id,
         provider_api_kind=target.api,
         adapter_input_contract_id=target.transport_binding_id,
@@ -2327,6 +2365,9 @@ def _one_shot_compatibility(
         context_source_lowering_contract_fingerprint=LOWERING_CONTRACT_FINGERPRINT,
         provider_input_framing_contract_fingerprint=(
             PROVIDER_INPUT_FRAMING_CONTRACT_FINGERPRINT
+        ),
+        provider_user_carrier_protocol_fingerprint=(
+            default_provider_user_carrier_protocol().contract_fingerprint
         ),
     )
     return build_frozen_fact(
@@ -2441,6 +2482,90 @@ def _selected_compiled_source_candidates(
     return tuple(selected)
 
 
+def _resolved_source_dispositions(
+    *,
+    compiled_context: CompiledContext,
+    selected_candidates: tuple[ContextSectionCandidate, ...],
+    predecessor: CommittedProviderInputGenerationCoreStateFact | None,
+) -> tuple[ContextSourceDispositionFact, ...]:
+    """Join current compiler allocation to every historical replacement head."""
+
+    dispositions = {
+        (item.source_id, item.source_instance_id): item
+        for item in compiled_context.provider_source_dispositions
+    }
+    if len(dispositions) != len(compiled_context.provider_source_dispositions):
+        raise ValueError("compiled source dispositions are duplicated")
+    selected = {item.semantic_fingerprint: item for item in selected_candidates}
+    for item in dispositions.values():
+        candidate_fingerprint = item.candidate_semantic_fingerprint
+        if candidate_fingerprint is not None and candidate_fingerprint not in selected:
+            if item.disposition != "rewrite_required":
+                raise ValueError("source disposition lost its selected candidate")
+    for head in predecessor.committed_source_heads if predecessor is not None else ():
+        snapshot = head.effective_snapshot
+        key = (snapshot.source_id, snapshot.source_instance_id)
+        if key in dispositions:
+            continue
+        raise ValueError(
+            "historical provider source lacks a compiler-frozen disposition"
+        )
+    return tuple(
+        dispositions[key]
+        for key in sorted(dispositions, key=lambda item: (item[0].value, item[1]))
+    )
+
+
+def _source_disposition_rollover_intent(
+    *,
+    predecessor: CommittedProviderInputGenerationCoreStateFact,
+    scope_fingerprint: str,
+    ordered_projection,
+    rewrite_dispositions: tuple[ContextSourceDispositionFact, ...],
+) -> ProviderInputRolloverIntentFact:
+    head_by_key = {
+        (
+            item.effective_snapshot.source_id,
+            item.effective_snapshot.source_instance_id,
+        ): item
+        for item in predecessor.committed_source_heads
+    }
+    ordered = tuple(
+        sorted(
+            rewrite_dispositions,
+            key=lambda item: (item.source_id.value, item.source_instance_id),
+        )
+    )
+    heads = []
+    for disposition in ordered:
+        head = head_by_key.get(
+            (disposition.source_id, disposition.source_instance_id)
+        )
+        if head is None:
+            raise ValueError("source-disposition rewrite lacks a predecessor head")
+        heads.append(head.semantic_head_fingerprint)
+    authority = build_frozen_fact(
+        ProviderSourceDispositionRewriteAuthorityFact,
+        schema_version="provider_source_disposition_rewrite_authority.v1",
+        predecessor_generation_id=predecessor.generation.generation_id,
+        predecessor_core_state_fingerprint=predecessor.core_state_fingerprint,
+        ordered_projection_identity_fingerprint=(
+            ordered_projection.identity.identity_fingerprint
+        ),
+        rewrite_dispositions=ordered,
+        rewritten_predecessor_source_head_fingerprints=tuple(heads),
+    )
+    return build_frozen_fact(
+        ProviderInputRolloverIntentFact,
+        schema_version="provider_input_rollover_intent.v1",
+        continuity_scope_fingerprint=scope_fingerprint,
+        predecessor_generation_id=predecessor.generation.generation_id,
+        reason=ProviderInputRolloverReason.SOURCE_DISPOSITION_REWRITE_REQUIRED,
+        authority=authority,
+        authority_fingerprint=authority.authority_fingerprint,
+    )
+
+
 def _root_units(
     *,
     compiled_context: CompiledContext,
@@ -2476,12 +2601,29 @@ def _root_units(
                 ),
             )
         )
-    if "\n\n".join(
+    source_system_prompt = "\n\n".join(
         fragment.message.content[0]
         for fragment in compiled_context.provider_source_fragments
         if fragment.provider_lane == "system_prompt"
-    ) != (compiled_context.llm_context.system_prompt or ""):
+    )
+    if compose_provider_root_policy(source_system_prompt or None) != (
+        compiled_context.llm_context.system_prompt or ""
+    ):
         raise ValueError("provider system fragment lowering drifted")
+    units.append(
+        freeze_message_unit(
+            LLMMessage.system(ROOT_USER_CARRIER_INTERPRETATION),
+            unit_kind="context_source",
+            owner_semantic_fingerprint=(
+                ROOT_USER_CARRIER_INTERPRETATION_FINGERPRINT
+            ),
+            authority_horizons=(),
+            estimated_tokens=0,
+            required_replay_bindings=(
+                _provider_lowering_replay_binding(),
+            ),
+        )
+    )
     materialized_tools = prepared_context_input.invocation.materialized_tool_specs
     if len(materialized_tools) != len(compiled_context.llm_context.tools):
         raise ValueError("compiled tool catalog/materialization count drifted")
@@ -2789,48 +2931,598 @@ def _arrange_transcript_delta_and_frame(
     return tuple(append_units), placement
 
 
+def _retained_rollover_observations(
+    *,
+    rollover_from: ProviderInputGenerationSnapshot,
+    selected_candidates: tuple[ContextSectionCandidate, ...],
+    source_dispositions: tuple[ContextSourceDispositionFact, ...],
+):
+    predecessor = rollover_from.core_state
+    resident = rollover_from.resident
+    if predecessor is None or resident is None:
+        raise ValueError("provider rollover lacks exact resident predecessor")
+    selected = {
+        (
+            item.source_id,
+            item.source_instance_id,
+            item.attribution.semantic.candidate_key,
+        ): item
+        for item in selected_candidates
+    }
+    dispositions = {
+        (item.source_id, item.source_instance_id): item
+        for item in source_dispositions
+    }
+    effective_replacement_ids = {
+        item.effective_snapshot.observation_semantic_id
+        for item in predecessor.committed_source_heads
+    }
+    unit_by_semantic = {
+        item.attribution.semantic.semantic_fingerprint: item
+        for item in resident.units
+    }
+    retained_units = []
+    retained_facts = []
+    for observation in rollover_from.runtime_observation_units:
+        kind = runtime_observation_kind_contract(
+            observation.wire_semantic.observation_kind
+        )
+        if kind.lifecycle_class == "replacement_snapshot":
+            if (
+                observation.wire_semantic.observation_semantic_id
+                not in effective_replacement_ids
+            ):
+                continue
+            if observation.source_id is None or observation.source_candidate_key is None:
+                raise ValueError("replacement observation lacks ContextSource identity")
+            disposition = dispositions.get(
+                (
+                    observation.source_id,
+                    observation.wire_semantic.source_instance_id,
+                )
+            )
+            if disposition is None:
+                raise ValueError("replacement observation lacks frozen disposition")
+            if disposition.disposition == "rewrite_required":
+                continue
+            current = selected.get(
+                (
+                    observation.source_id,
+                    observation.wire_semantic.source_instance_id,
+                    observation.source_candidate_key,
+                )
+            )
+            if current is not None and (
+                current.attribution.semantic.payload.semantic_fingerprint
+                != observation.source_payload_semantic_fingerprint
+            ):
+                continue
+            if current is None and disposition.disposition != "retain":
+                raise ValueError("replacement disposition lost its current candidate")
+        try:
+            unit = unit_by_semantic[observation.provider_unit_semantic_fingerprint]
+        except KeyError as exc:
+            raise ValueError(
+                "rollover observation cannot hydrate its committed provider unit"
+            ) from exc
+        if (
+            unit.canonical_provider_fragment.semantic_fingerprint
+            != observation.provider_fragment_semantic_fingerprint
+        ):
+            raise ValueError("rollover observation provider fragment drifted")
+        retained_units.append(unit)
+        retained_facts.append(observation)
+    return tuple(retained_units), tuple(retained_facts)
+
+
+def _arrange_rollover_observations(
+    *,
+    compiled_context: CompiledContext,
+    transcript_units,
+    retained_units,
+    retained_observations,
+    frame_units,
+    changed_candidates: tuple[ContextSectionCandidate, ...],
+    previous_unit_count: int,
+    generation_id: str,
+    resolved_model_call_id: str,
+    model_call_index: int | None,
+):
+    _, frame = _arrange_transcript_delta_and_frame(
+        compiled_context=compiled_context,
+        transcript_units=transcript_units,
+        frame_units=frame_units,
+        changed_candidates=changed_candidates,
+        previous_unit_count=previous_unit_count,
+        generation_id=generation_id,
+        resolved_model_call_id=resolved_model_call_id,
+        model_call_index=model_call_index,
+    )
+    projection = compiled_context.prepared_ordered_transcript_projection
+    if projection is None or len(projection.projection.ordered_units) != len(
+        transcript_units
+    ):
+        raise ValueError("rollover requires complete ordered transcript materialization")
+    retained_by_predecessor: dict[str | None, list[object]] = {}
+    for unit, observation in zip(
+        retained_units, retained_observations, strict=True
+    ):
+        predecessor = observation.causal_placement.stable_predecessor_transcript_node
+        key = predecessor.node_identity_fingerprint if predecessor is not None else None
+        retained_by_predecessor.setdefault(key, []).append(unit)
+    output = list(retained_by_predecessor.pop(None, ()))
+    frame_inserted = False
+    for projected, transcript_unit in zip(
+        projection.projection.ordered_units, transcript_units, strict=True
+    ):
+        node_id = projected.causal_placement.node_identity.node_identity_fingerprint
+        if (
+            frame is not None
+            and frame.insertion_kind == "before_new_current_user"
+            and frame.following_transcript_node_identity_fingerprint == node_id
+        ):
+            output.extend(frame_units)
+            frame_inserted = True
+        output.append(transcript_unit)
+        output.extend(retained_by_predecessor.pop(node_id, ()))
+    if retained_by_predecessor:
+        raise ValueError("rollover observation causal predecessor was rewritten away")
+    if frame is not None and not frame_inserted:
+        if frame.insertion_kind != "after_new_transcript_tail":
+            raise ValueError("rollover context frame has no causal insertion point")
+        output.extend(frame_units)
+        frame_inserted = True
+    if frame is None:
+        return tuple(output), None
+    first = next(
+        (
+            index
+            for index, item in enumerate(output)
+            if frame_units and item is frame_units[0]
+        ),
+        None,
+    )
+    if first is None:
+        raise ValueError("rollover context frame was not materialized")
+    adjusted = build_frozen_fact(
+        ProviderInvocationContextFramePlacementFact,
+        schema_version="provider_invocation_context_frame_placement.v1",
+        semantic=frame.semantic,
+        insertion_kind=frame.insertion_kind,
+        preceding_transcript_node_identity_fingerprint=(
+            frame.preceding_transcript_node_identity_fingerprint
+        ),
+        following_transcript_node_identity_fingerprint=(
+            frame.following_transcript_node_identity_fingerprint
+        ),
+        insertion_policy_id=frame.insertion_policy_id,
+        insertion_policy_version=frame.insertion_policy_version,
+        insertion_policy_fingerprint=frame.insertion_policy_fingerprint,
+        frame_id=frame.frame_id,
+        generation_id=frame.generation_id,
+        resolved_model_call_id=frame.resolved_model_call_id,
+        model_call_index=frame.model_call_index,
+        first_vector_ordinal=previous_unit_count + first,
+        last_vector_ordinal=previous_unit_count + first + len(frame_units) - 1,
+        ordered_source_unit_range_accumulator=(
+            frame.ordered_source_unit_range_accumulator
+        ),
+    )
+    return tuple(output), adjusted
+
+
+def _prepared_runtime_observation_units(
+    *,
+    compiled_context: CompiledContext,
+    changed_candidates: tuple[ContextSectionCandidate, ...],
+    source_units,
+    frame_placement: ProviderInvocationContextFramePlacementFact | None,
+    runtime_session_id: str,
+    run_id: str,
+) -> tuple[PreparedRuntimeObservationProviderUnitFact, ...]:
+    if not source_units:
+        return ()
+    if frame_placement is None or len(source_units) != len(changed_candidates):
+        raise ValueError("runtime observation frame attribution is incomplete")
+    projection = compiled_context.prepared_ordered_transcript_projection
+    if projection is None:
+        raise ValueError("runtime observation placement lacks transcript projection")
+    predecessor_fingerprint = (
+        frame_placement.preceding_transcript_node_identity_fingerprint
+    )
+    predecessor_node = next(
+        (
+            item.causal_placement.node_identity
+            for item in projection.projection.ordered_units
+            if item.causal_placement.node_identity.node_identity_fingerprint
+            == predecessor_fingerprint
+        ),
+        None,
+    )
+    if predecessor_fingerprint is not None and predecessor_node is None:
+        raise ValueError("runtime observation predecessor is not in the projection")
+    result = []
+    for order, (candidate, unit) in enumerate(
+        zip(changed_candidates, source_units, strict=True)
+    ):
+        fragment = unit.canonical_provider_fragment
+        if fragment.role != "runtime_observation" or len(fragment.content_blocks) != 1:
+            raise ValueError("dynamic ContextSource did not lower to one observation")
+        text = getattr(fragment.content_blocks[0], "text", None)
+        if not isinstance(text, str):
+            raise ValueError("runtime observation provider fragment is not textual")
+        occurrence = _context_source_occurrence_fingerprint(candidate)
+        wire_semantic = decode_runtime_observation_wire_semantic(
+            text,
+            causal_occurrence_semantic_fingerprint=occurrence,
+        )
+        lifecycle = context_source_lifecycle_entry(candidate.source_id)
+        protection_scope_kind, protection_scope_id = (
+            _context_source_protection_scope(
+                candidate,
+                runtime_session_id=runtime_session_id,
+                run_id=run_id,
+            )
+        )
+        scope_kind = (
+            "model_invocation"
+            if lifecycle.source_instance_scope == "model_call"
+            else protection_scope_kind
+        )
+        placement = build_frozen_fact(
+            RuntimeObservationCausalPlacementSemanticFact,
+            schema_version="runtime_observation_causal_placement_semantic.v1",
+            causal_scope_kind=scope_kind,
+            causal_scope_semantic_id=context_fingerprint(
+                "runtime-observation-causal-scope:v1",
+                (
+                    protection_scope_id,
+                    occurrence,
+                ),
+            ),
+            placement_phase="before_model_call",
+            stable_predecessor_transcript_node=predecessor_node,
+            source_occurrence_semantic_fingerprint=occurrence,
+            intra_boundary_order=order,
+            placement_contract_fingerprint=context_fingerprint(
+                "runtime-observation-causal-placement-contract:v1",
+                "frame-before-current-user-or-after-current-tail",
+            ),
+        )
+        transition_kind = context_source_transition_kind(
+            candidate.source_id,
+            candidate.attribution.semantic.payload,
+        )
+        attribution = build_frozen_fact(
+            RuntimeObservationSourceAttributionFact,
+            schema_version="runtime_observation_source_attribution.v3",
+            observation_semantic_fingerprint=(
+                wire_semantic.wire_semantic_fingerprint
+            ),
+            producer=runtime_observation_context_source_producer(
+                observation_kind=wire_semantic.observation_kind,
+                source_id=candidate.source_id,
+                transition_kind=transition_kind,
+            ),
+            transition_kind=transition_kind,
+            protection_scope_kind=protection_scope_kind,
+            protection_scope_semantic_id=protection_scope_id,
+            owning_run_protection_scope_semantic_id=(
+                _run_protection_scope_semantic_id(
+                    runtime_session_id=runtime_session_id,
+                    run_id=run_id,
+                )
+            ),
+            source_event_references=candidate.attribution.source_event_refs,
+            source_artifact_references=candidate.attribution.source_artifact_refs,
+            authority_horizons=candidate.attribution.authority_horizons,
+        )
+        unit_causal = context_fingerprint(
+            "runtime-observation-provider-unit-causal:v1",
+            (
+                wire_semantic.wire_semantic_fingerprint,
+                placement.placement_semantic_fingerprint,
+                fragment.semantic_fingerprint,
+                unit.attribution.semantic.semantic_fingerprint,
+            ),
+        )
+        result.append(
+            build_frozen_fact(
+                PreparedRuntimeObservationProviderUnitFact,
+                schema_version="prepared_runtime_observation_provider_unit.v1",
+                wire_semantic=wire_semantic,
+                causal_placement=placement,
+                source_attribution=attribution,
+                source_id=candidate.source_id,
+                source_candidate_key=(
+                    candidate.attribution.semantic.candidate_key
+                ),
+                source_payload_semantic_fingerprint=(
+                    candidate.attribution.semantic.payload.semantic_fingerprint
+                ),
+                owner_semantic_fingerprint=candidate.semantic_fingerprint,
+                provider_fragment_semantic_fingerprint=(
+                    fragment.semantic_fingerprint
+                ),
+                provider_unit_semantic_fingerprint=(
+                    unit.attribution.semantic.semantic_fingerprint
+                ),
+                unit_causal_semantic_fingerprint=unit_causal,
+            )
+        )
+    return tuple(result)
+
+
+def _one_shot_runtime_clock_unit(
+    *,
+    operation_kind: str,
+    operation_id: str,
+    attempt_index: int,
+    observed_at_utc: str,
+    replay_bindings: tuple[ProviderInputReplayBindingIdentityFact, ...],
+) -> tuple[
+    ProviderInputUnitMaterializationFact,
+    PreparedRuntimeObservationProviderUnitFact,
+]:
+    observed_at_utc = canonical_utc_timestamp(observed_at_utc)
+    message = build_one_shot_runtime_clock_message(
+        operation_kind=operation_kind,
+        operation_id=operation_id,
+        attempt_index=attempt_index,
+        observed_at_utc=observed_at_utc,
+    )
+    occurrence = context_fingerprint(
+        "one-shot-runtime-clock-occurrence:v1",
+        (operation_kind, operation_id, attempt_index, observed_at_utc),
+    )
+    semantic = message.provider_user_carrier_semantic
+    if not isinstance(semantic, RuntimeObservationWireSemanticFact) or not isinstance(
+        semantic.payload, RuntimeClockObservationPayloadFact
+    ):
+        raise AssertionError("one-shot clock factory lost its typed semantic")
+    payload = semantic.payload
+    unit = freeze_message_unit(
+        message,
+        unit_kind="runtime_clock",
+        owner_semantic_fingerprint=context_fingerprint(
+            "one-shot-runtime-clock-owner:v1",
+            (operation_kind, operation_id, attempt_index, occurrence),
+        ),
+        authority_horizons=(),
+        estimated_tokens=0,
+        required_replay_bindings=replay_bindings,
+    )
+    if len(message.content) != 1:
+        raise ValueError("one-shot runtime clock requires one provider carrier")
+    wire_semantic = decode_runtime_observation_wire_semantic(
+        message.content[0],
+        causal_occurrence_semantic_fingerprint=occurrence,
+    )
+    operation_scope = context_fingerprint(
+        "one-shot-runtime-clock-operation-scope:v1",
+        (operation_kind, operation_id, attempt_index),
+    )
+    placement = build_frozen_fact(
+        RuntimeObservationCausalPlacementSemanticFact,
+        schema_version="runtime_observation_causal_placement_semantic.v1",
+        causal_scope_kind="operation",
+        causal_scope_semantic_id=operation_scope,
+        placement_phase="before_model_call",
+        stable_predecessor_transcript_node=None,
+        source_occurrence_semantic_fingerprint=occurrence,
+        intra_boundary_order=0,
+        placement_contract_fingerprint=context_fingerprint(
+            "one-shot-runtime-clock-placement-contract:v1",
+            "root-tools-clock-request",
+        ),
+    )
+    attribution = build_frozen_fact(
+        RuntimeObservationSourceAttributionFact,
+        schema_version="runtime_observation_source_attribution.v3",
+        observation_semantic_fingerprint=wire_semantic.wire_semantic_fingerprint,
+        producer=runtime_observation_context_source_producer(
+            observation_kind="runtime_clock",
+            source_id=ContextSourceId.RUNTIME_CLOCK,
+            transition_kind="observation",
+        ),
+        transition_kind="observation",
+        protection_scope_kind="operation",
+        protection_scope_semantic_id=operation_scope,
+        owning_run_protection_scope_semantic_id=None,
+        source_event_references=(),
+        source_artifact_references=(),
+        authority_horizons=(),
+    )
+    fragment = unit.canonical_provider_fragment
+    causal_fingerprint = context_fingerprint(
+        "runtime-observation-provider-unit-causal:v1",
+        (
+            wire_semantic.wire_semantic_fingerprint,
+            placement.placement_semantic_fingerprint,
+            fragment.semantic_fingerprint,
+            unit.attribution.semantic.semantic_fingerprint,
+        ),
+    )
+    prepared = build_frozen_fact(
+        PreparedRuntimeObservationProviderUnitFact,
+        schema_version="prepared_runtime_observation_provider_unit.v1",
+        wire_semantic=wire_semantic,
+        causal_placement=placement,
+        source_attribution=attribution,
+        source_id=ContextSourceId.RUNTIME_CLOCK,
+        source_candidate_key=f"{operation_kind}:{operation_id}:{attempt_index}",
+        source_payload_semantic_fingerprint=payload.payload_semantic_fingerprint,
+        owner_semantic_fingerprint=unit.attribution.owner_semantic_fingerprint,
+        provider_fragment_semantic_fingerprint=fragment.semantic_fingerprint,
+        provider_unit_semantic_fingerprint=(
+            unit.attribution.semantic.semantic_fingerprint
+        ),
+        unit_causal_semantic_fingerprint=causal_fingerprint,
+    )
+    return unit, prepared
+
+
+def build_one_shot_runtime_clock_message(
+    *,
+    operation_kind: str,
+    operation_id: str,
+    attempt_index: int,
+    observed_at_utc: str,
+) -> LLMMessage:
+    """Build the exact retry-stable clock carrier for one direct invocation."""
+
+    return LLMMessage.from_provider_user_carrier(
+        role=MessageRole.RUNTIME_OBSERVATION,
+        carrier=encode_one_shot_runtime_clock(
+            operation_kind=operation_kind,
+            operation_id=operation_id,
+            attempt_index=attempt_index,
+            observed_at_utc=observed_at_utc,
+        ),
+    )
+
+
+def _context_source_protection_scope(
+    candidate: ContextSectionCandidate,
+    *,
+    runtime_session_id: str,
+    run_id: str,
+) -> tuple[str, str]:
+    lifecycle = context_source_lifecycle_entry(candidate.source_id)
+    payload = candidate.attribution.semantic.payload
+    if candidate.source_id in {ContextSourceId.PLAN_STATUS, ContextSourceId.PLAN_GUIDANCE}:
+        workflow_id = getattr(payload, "workflow_id", None)
+        if not workflow_id:
+            raise ValueError("plan observation lacks workflow protection identity")
+        return (
+            "workflow",
+            context_fingerprint("runtime-observation-workflow-scope:v1", workflow_id),
+        )
+    if candidate.source_id in {
+        ContextSourceId.SUBAGENT_HANDOFF,
+        ContextSourceId.SUBAGENT_RESULT,
+    }:
+        child_id = getattr(payload, "child_runtime_session_id", None)
+        if not child_id:
+            raise ValueError("subagent observation lacks child protection identity")
+        return (
+            "subagent",
+            context_fingerprint("runtime-observation-subagent-scope:v1", child_id),
+        )
+    if lifecycle.source_instance_scope in {"run", "turn", "model_call"}:
+        return (
+            "run",
+            _run_protection_scope_semantic_id(
+                runtime_session_id=runtime_session_id,
+                run_id=run_id,
+            ),
+        )
+    if lifecycle.source_instance_scope in {"runtime_session", "continuity_cohort"}:
+        return (
+            "runtime_session",
+            context_fingerprint(
+                "runtime-observation-session-source-scope:v1",
+                (runtime_session_id, candidate.source_id.value, candidate.source_instance_id),
+            ),
+        )
+    return (
+        "operation",
+        context_fingerprint(
+            "runtime-observation-operation-scope:v1",
+            (candidate.source_id.value, candidate.source_instance_id),
+        ),
+    )
+
+
+def _run_protection_scope_semantic_id(*, runtime_session_id: str, run_id: str) -> str:
+    return context_fingerprint(
+        "runtime-observation-run-protection-scope:v1",
+        (runtime_session_id, run_id),
+    )
+
+
+def _context_source_occurrence_fingerprint(
+    candidate: ContextSectionCandidate,
+) -> str:
+    revision = candidate.attribution.semantic.source_revision
+    for field_name in (
+        "producer_event_semantic_fingerprint",
+        "source_state_semantic_fingerprint",
+        "resulting_source_state_semantic_fingerprint",
+        "delta_semantic_fingerprint",
+    ):
+        value = getattr(revision, field_name, None)
+        if value:
+            return value
+    return candidate.attribution.semantic.payload.semantic_fingerprint
+
+
 def _changed_source_units(
     *,
     compiled_context: CompiledContext,
     predecessor: CommittedProviderInputGenerationCoreStateFact | None,
-    initial: bool,
+    prior_observations: tuple[PreparedRuntimeObservationProviderUnitFact, ...],
     provider_lowering_binding: ProviderInputReplayBindingIdentityFact,
 ):
     previous = {
-        (item.source_id, item.source_instance_id, item.candidate_key): item
+        (
+            item.effective_snapshot.source_id,
+            item.effective_snapshot.source_instance_id,
+        ): item
         for item in (predecessor.committed_source_heads if predecessor else ())
     }
-    changed_fragments = tuple(
-        fragment
-        for fragment in compiled_context.provider_source_fragments
-        for candidate in (fragment.candidate,)
-        if candidate.lowering_kind != "system_instruction"
-        and not isinstance(
+    prior_occurrences = {
+        item.owner_semantic_fingerprint for item in prior_observations
+    }
+    changed_fragments = []
+    semantic_noop_count = 0
+    for fragment in compiled_context.provider_source_fragments:
+        candidate = fragment.candidate
+        if candidate.lowering_kind == "system_instruction" or isinstance(
             candidate.attribution.semantic.lifecycle,
             GenerationRootLifecycleFact,
+        ):
+            continue
+        key = (
+            candidate.source_id,
+            candidate.source_instance_id,
         )
-        and (
-            initial
-            or previous.get(
-                (
-                    candidate.source_id,
-                    candidate.source_instance_id,
-                    candidate.attribution.semantic.candidate_key,
-                )
-            )
-            is None
-            or previous[
-                (
-                    candidate.source_id,
-                    candidate.source_instance_id,
-                    candidate.attribution.semantic.candidate_key,
-                )
-            ].canonical_source_revision
-            != candidate.attribution.semantic.source_revision
+        prior = previous.get(key)
+        registered_lifecycle = context_source_lifecycle_entry(candidate.source_id)
+        transition = context_source_transition_kind(
+            candidate.source_id,
+            candidate.attribution.semantic.payload,
         )
-    )
+        if prior is None and transition == "explicit_empty":
+            continue
+        # Producer events and source revisions are durable attribution.  A new
+        # event carrying the same effective snapshot must not append new wire
+        # bytes or perturb the provider prefix.
+        if prior is not None:
+            if (
+                registered_lifecycle.lifecycle_class == "replacement_snapshot"
+                and prior.effective_snapshot.snapshot_semantic_fingerprint
+                == candidate.attribution.semantic.payload.semantic_fingerprint
+            ):
+                semantic_noop_count += 1
+                continue
+            if (
+                registered_lifecycle.lifecycle_class
+                in {"causal_append_once", "immutable_append_once"}
+                and candidate.semantic_fingerprint in prior_occurrences
+            ):
+                semantic_noop_count += 1
+                continue
+        elif (
+            registered_lifecycle.lifecycle_class
+            in {"causal_append_once", "immutable_append_once"}
+            and candidate.semantic_fingerprint in prior_occurrences
+        ):
+            semantic_noop_count += 1
+            continue
+        changed_fragments.append(fragment)
     if not changed_fragments:
-        return (), ()
+        return (), (), semantic_noop_count
     changed_fragments = tuple(
         sorted(
             changed_fragments,
@@ -2840,6 +3532,35 @@ def _changed_source_units(
     units = []
     for fragment in changed_fragments:
         candidate = fragment.candidate
+        key = (
+            candidate.source_id,
+            candidate.source_instance_id,
+        )
+        prior = previous.get(key)
+        message = fragment.message
+        if (
+            context_source_lifecycle_entry(candidate.source_id).lifecycle_class
+            == "replacement_snapshot"
+        ):
+            if len(message.content) != 1:
+                raise ValueError("replacement ContextSource must lower to one message")
+            encoded = replace_runtime_observation_predecessor(
+                message.content[0],
+                predecessor_observation_semantic_id=(
+                    prior.effective_snapshot.observation_semantic_id
+                    if prior is not None
+                    else None
+                ),
+                replacement_revision=(
+                    prior.effective_snapshot.committed_revision + 1
+                    if prior is not None
+                    else 1
+                ),
+            )
+            message = LLMMessage.from_provider_user_carrier(
+                role=message.role,
+                carrier=encoded,
+            )
         required_replay_bindings = _ordered_replay_bindings(
             (
                 provider_lowering_binding,
@@ -2848,7 +3569,7 @@ def _changed_source_units(
         )
         units.append(
             freeze_message_unit(
-                fragment.message,
+                message,
                 unit_kind=(
                     "runtime_clock"
                     if candidate.source_id is ContextSourceId.RUNTIME_CLOCK
@@ -2862,7 +3583,11 @@ def _changed_source_units(
                 required_replay_bindings=required_replay_bindings,
             )
         )
-    return tuple(units), tuple(item.candidate for item in changed_fragments)
+    return (
+        tuple(units),
+        tuple(item.candidate for item in changed_fragments),
+        semantic_noop_count,
+    )
 
 
 def _source_append_sort_key(candidate: ContextSectionCandidate):
@@ -2889,10 +3614,16 @@ def _validate_generation_root_sources(
     *,
     selected_candidates: tuple[ContextSectionCandidate, ...],
     predecessor: CommittedProviderInputGenerationCoreStateFact,
+    resident,
 ) -> None:
-    previous = {
-        (item.source_id, item.source_instance_id, item.candidate_key): item
-        for item in predecessor.committed_source_heads
+    if resident is None:
+        raise ProviderInputResidentRestoreRequired(
+            predecessor.generation.generation_id
+        )
+    root_count = predecessor.root_reference.root_semantic.root_unit_count
+    root_owner_semantics = {
+        item.attribution.owner_semantic_fingerprint
+        for item in resident.units[:root_count]
     }
     for candidate in selected_candidates:
         if not isinstance(
@@ -2900,18 +3631,7 @@ def _validate_generation_root_sources(
             GenerationRootLifecycleFact,
         ):
             continue
-        key = (
-            candidate.source_id,
-            candidate.source_instance_id,
-            candidate.attribution.semantic.candidate_key,
-        )
-        head = previous.get(key)
-        if (
-            head is None
-            or head.canonical_source_revision
-            != candidate.attribution.semantic.source_revision
-            or head.candidate_semantic_fingerprint != candidate.semantic_fingerprint
-        ):
+        if candidate.semantic_fingerprint not in root_owner_semantics:
             raise ValueError(
                 "provider generation-root ContextSource changed without typed authority"
             )
@@ -2974,82 +3694,155 @@ def _ordered_fingerprint_accumulator(domain: str, values) -> str:
 def _source_heads(
     *,
     selected_candidates: tuple[ContextSectionCandidate, ...],
+    source_dispositions: tuple[ContextSourceDispositionFact, ...],
     predecessor: CommittedProviderInputGenerationCoreStateFact | None,
-    changed_candidates: tuple[ContextSectionCandidate, ...],
     available_source_units,
-    append_index: int,
+    runtime_observation_units: tuple[
+        PreparedRuntimeObservationProviderUnitFact, ...
+    ],
+    rollover: bool,
 ):
-    previous = {
-        (item.source_id, item.source_instance_id, item.candidate_key): item
+    historical = {
+        (
+            item.effective_snapshot.source_id,
+            item.effective_snapshot.source_instance_id,
+        ): item
         for item in (predecessor.committed_source_heads if predecessor else ())
     }
-    changed_keys = {
-        (
-            item.source_id,
-            item.source_instance_id,
-            item.attribution.semantic.candidate_key,
-        )
-        for item in changed_candidates
+    previous = dict(historical)
+    selected = {item.semantic_fingerprint: item for item in selected_candidates}
+    dispositions = {
+        (item.source_id, item.source_instance_id): item
+        for item in source_dispositions
     }
-    source_units_by_owner = {
-        item.attribution.owner_semantic_fingerprint: (
-            item.attribution.semantic.semantic_fingerprint
-        )
+    for key, head in historical.items():
+        disposition = dispositions.get(key)
+        if disposition is None:
+            raise ValueError("historical source head lacks a frozen disposition")
+        if disposition.disposition == "rewrite_required":
+            if not rollover:
+                raise ProviderInputSourceDispositionRequired(disposition)
+            previous.pop(key, None)
+            continue
+        candidate_fingerprint = disposition.candidate_semantic_fingerprint
+        if candidate_fingerprint is not None and candidate_fingerprint not in selected:
+            raise ValueError("source-head transition lost its selected candidate")
+        if disposition.disposition == "retain":
+            previous[key] = head
+    unit_by_semantic = {
+        item.attribution.semantic.semantic_fingerprint: item
         for item in available_source_units
     }
-    for candidate in selected_candidates:
-        if candidate.source_id is ContextSourceId.RUNTIME_CLOCK:
+    for observation in runtime_observation_units:
+        if observation.source_id in {None, ContextSourceId.RUNTIME_CLOCK}:
             continue
-        key = (
-            candidate.source_id,
-            candidate.source_instance_id,
-            candidate.attribution.semantic.candidate_key,
-        )
-        if key in previous and key not in changed_keys:
-            continue
-        if isinstance(
-            candidate.attribution.semantic.lifecycle,
-            GenerationRootLifecycleFact,
+        if (
+            runtime_observation_kind_contract(
+                observation.wire_semantic.observation_kind
+            ).lifecycle_class
+            != "replacement_snapshot"
         ):
-            try:
-                appended = source_units_by_owner[candidate.semantic_fingerprint]
-            except KeyError as exc:
-                raise ValueError(
-                    "generation-root source lacks its exact root unit"
-                ) from exc
-            committed_index = 0
-        elif key in changed_keys:
-            try:
-                appended = source_units_by_owner[candidate.semantic_fingerprint]
-            except KeyError as exc:
-                raise ValueError(
-                    "changed ContextSource lacks its exact provider unit"
-                ) from exc
-            committed_index = append_index
-        else:
             continue
+        if observation.source_candidate_key is None:
+            raise ValueError("ContextSource observation lacks candidate key")
+        try:
+            unit = unit_by_semantic[observation.provider_unit_semantic_fingerprint]
+        except KeyError as exc:
+            raise ValueError("ContextSource head lacks exact appended unit") from exc
+        key = (
+            observation.source_id,
+            observation.wire_semantic.source_instance_id,
+        )
+        disposition = dispositions.get(key)
+        if disposition is None:
+            raise ValueError("committed replacement observation lacks disposition")
+        if disposition.candidate_semantic_fingerprint != (
+            observation.owner_semantic_fingerprint
+        ):
+            raise ValueError("replacement observation/disposition owner mismatch")
+        prior = historical.get(key)
+        payload = observation.wire_semantic.payload
+        if not isinstance(payload, ContextSourceReplacementObservationPayloadFact):
+            raise ValueError("replacement source head lacks typed replacement payload")
+        predecessor_id = (
+            None
+            if payload.predecessor_observation_semantic_id == "genesis"
+            else payload.predecessor_observation_semantic_id
+        )
+        transition = observation.source_attribution.transition_kind
+        if transition is None:
+            raise ValueError("replacement ContextSource lacks transition attribution")
+        source_revision = (
+            prior.effective_snapshot.committed_revision
+            if prior is not None
+            and prior.effective_snapshot.observation_semantic_id
+            == observation.wire_semantic.observation_semantic_id
+            else (
+                prior.effective_snapshot.committed_revision + 1
+                if prior is not None
+                else 1
+            )
+        )
+        if payload.replacement_revision != source_revision:
+            raise ValueError("replacement payload/source-head revision mismatch")
+        effective_status = (
+            "explicit_empty_snapshot"
+            if transition == "explicit_empty"
+            else "source_closed"
+            if transition == "terminal"
+            else "active_snapshot"
+        )
+        _, document_identity = build_provider_unit_semantic_document(unit)
+        snapshot = build_frozen_fact(
+            EffectiveProviderSourceSemanticSnapshotFact,
+            schema_version="effective_provider_source_semantic_snapshot.v1",
+            source_id=observation.source_id,
+            source_instance_id=observation.wire_semantic.source_instance_id,
+            committed_revision=source_revision,
+            observation_semantic_id=(
+                observation.wire_semantic.observation_semantic_id
+            ),
+            predecessor_observation_semantic_id=predecessor_id,
+            snapshot_semantic_fingerprint=(
+                observation.source_payload_semantic_fingerprint
+            ),
+            canonical_wire_semantic_fingerprint=(
+                observation.wire_semantic.wire_semantic_fingerprint
+            ),
+            causal_placement_semantic_fingerprint=(
+                observation.causal_placement.placement_semantic_fingerprint
+            ),
+            unit_causal_semantic_fingerprint=(
+                observation.unit_causal_semantic_fingerprint
+            ),
+            effective_status=effective_status,
+            unit_document_identity=document_identity,
+        )
         previous[key] = build_frozen_fact(
-            ProviderInputCommittedSourceHeadFact,
-            schema_version="provider_input_committed_source_head.v1",
-            source_id=candidate.source_id,
-            source_instance_id=candidate.source_instance_id,
-            candidate_key=candidate.attribution.semantic.candidate_key,
-            canonical_source_revision=candidate.attribution.semantic.source_revision,
-            candidate_semantic_fingerprint=candidate.semantic_fingerprint,
-            appended_unit_semantic_fingerprint=appended,
-            committed_append_index=committed_index,
+            CommittedRuntimeObservationSemanticHeadFact,
+            schema_version="committed_runtime_observation_semantic_head.v1",
+            effective_snapshot=snapshot,
         )
     return tuple(
         previous[key]
-        for key in sorted(previous, key=lambda item: (item[0].value, item[1], item[2]))
+        for key in sorted(previous, key=lambda item: (item[0].value, item[1]))
     )
+
+
+def _runtime_observation_wire_text(unit) -> str:
+    fragment = unit.canonical_provider_fragment
+    if fragment.role != "runtime_observation" or len(fragment.content_blocks) != 1:
+        raise ValueError("runtime observation source head requires one text block")
+    text = getattr(fragment.content_blocks[0], "text", None)
+    if not isinstance(text, str):
+        raise ValueError("runtime observation source head lacks canonical text")
+    return text
 
 
 def _clock_head(
     *,
     selected_candidates: tuple[ContextSectionCandidate, ...],
     predecessor: CommittedProviderInputGenerationCoreStateFact | None,
-    append_index: int,
 ):
     clock = next(
         (
@@ -3075,10 +3868,9 @@ def _clock_head(
         return predecessor.clock_head
     return build_frozen_fact(
         ProviderInputClockHeadFact,
-        schema_version="provider_input_clock_head.v1",
+        schema_version="provider_input_clock_head.v2",
         observation_semantic_fingerprint=clock.semantic_fingerprint,
         observed_at_utc=payload.observed_at_utc,
-        committed_append_index=append_index,
     )
 
 
@@ -3109,7 +3901,7 @@ def _copy_core_state(
     payload.update(updates)
     return build_frozen_fact(
         CommittedProviderInputGenerationCoreStateFact,
-        schema_version="committed_provider_input_generation_core_state.v1",
+        schema_version="committed_provider_input_generation_core_state.v3",
         **payload,
     )
 

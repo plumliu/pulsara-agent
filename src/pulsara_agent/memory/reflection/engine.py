@@ -514,11 +514,15 @@ class MemoryReflectionEngine:
         context = LLMContext(
             system_prompt=_reflection_system_prompt(self.allowed_scopes),
             messages=(
-                LLMMessage.user(
+                LLMMessage.runtime_request(
                     "Reflect on this run and output JSON only:\n"
                     + json.dumps(
                         reflection_input.model_dump(mode="json"), ensure_ascii=False
-                    )
+                    ),
+                    request_kind="reflection_request",
+                    business_occurrence_semantic_fingerprint=context_fingerprint(
+                        "reflection-runtime-request:v1", reflection_id
+                    ),
                 ),
             ),
             tools=(),

@@ -205,9 +205,9 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
         latest = store.get_latest(memory_domain_id=domain.memory_domain_id)
         assert latest is not None
         assert "Recent run used tools" in latest.summary
-        assert projection is not None
-        assert "working-context-projection" in projection["summary"]
-        assert "do_not_write_back" in projection["summary"]
+        # ROAC V1 keeps recent working context operational, but refuses to infer a
+        # provider-visible typed fact from the legacy summary prose.
+        assert projection is None
     finally:
         _delete_working_context(dsn, domain.memory_domain_id)
 

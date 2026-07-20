@@ -41,6 +41,84 @@ TOOLS_DIR = REPO_ROOT / "src" / "pulsara_agent" / "tools"
 MEMORY_GOVERNANCE_DIR = (
     REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
 )
+SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
+
+
+def test_runtime_observation_hard_cut_has_no_legacy_carrier_or_rebase() -> None:
+    forbidden = (
+        "<pulsara_context",
+        "<runtime-clock>",
+        "pulsara.runtime_observation.system_message",
+        "pulsara.runtime_observation.developer_message",
+        "AUXILIARY_FRAME_REBASE",
+        "ProviderAuxiliaryFrameRebaseAuthorityFact",
+        "auxiliary_frame_rebase",
+    )
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in forbidden:
+            if marker in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
+                )
+    assert violations == []
+
+
+def test_runtime_observation_cannot_reintroduce_dynamic_system_messages() -> None:
+    allowed_system_factories = {
+        "src/pulsara_agent/runtime/context_input/compiler.py",
+        "src/pulsara_agent/runtime/provider_input/planner.py",
+    }
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "LLMMessage"
+                and node.func.attr == "system"
+            ):
+                continue
+            if relative not in allowed_system_factories:
+                violations.append(f"{relative}:{node.lineno}")
+    assert violations == []
+
+
+def test_runtime_observation_producers_require_typed_payload_factories() -> None:
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "LLMMessage"
+                and node.func.attr == "runtime_observation"
+                and node.args
+            ):
+                continue
+            if isinstance(node.args[0], ast.Constant | ast.Dict):
+                violations.append(f"{relative}:{node.lineno}")
+    assert violations == []
+
+
+def test_runtime_request_is_outside_observation_rewrite_domain() -> None:
+    source = (
+        SOURCE_ROOT / "runtime" / "provider_input" / "observation_rewrite.py"
+    ).read_text(encoding="utf-8")
+    forbidden = (
+        "RuntimeRequest",
+        "RUNTIME_REQUEST",
+        "pulsara_runtime_request",
+        "MessageRole.RUNTIME_REQUEST",
+    )
+    assert [marker for marker in forbidden if marker in source] == []
 
 
 def test_governance_source_evidence_has_no_legacy_event_guessing() -> None:

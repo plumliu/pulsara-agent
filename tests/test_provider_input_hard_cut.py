@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -12,9 +13,11 @@ from pulsara_agent.event import (
     ExistingGenerationPreparationAbandonedEvent,
     ProviderInputAppendCommittedEvent,
     ProviderInputGenerationClosedEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
 )
 from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.context_source import (
@@ -31,6 +34,9 @@ from pulsara_agent.runtime.context_input.sources.builder import (
 from pulsara_agent.runtime.context_input.sources.input import (
     CONTEXT_SOURCE_INPUT_TYPES,
     context_source_input_dependency_fingerprint,
+)
+from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    context_source_transition_kind,
 )
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
@@ -62,9 +68,16 @@ from tests.support import (
     run_agent_task,
     test_llm_config,
     test_model_limits,
+    test_resolved_call,
 )
+from tests.support.model_call import prepared_provider_input_bundle_fixture
 from tests.support.runtime_session import in_memory_runtime_session
-from tests.test_agent_runtime_loop import ScriptedTransport, make_llm_runtime
+from tests.test_agent_runtime_loop import (
+    ScriptedTransport,
+    _workspace_only_capability_provider,
+    _write_workspace_skill,
+    make_llm_runtime,
+)
 
 
 class _OversizedOptionalMemoryInstruction(NoopMemoryHooks):
@@ -80,6 +93,113 @@ class _SmallMemoryInstruction(NoopMemoryHooks):
 class _BudgetPressureMemoryInstruction(NoopMemoryHooks):
     def memory_context_prompt(self) -> str:
         return "PROVIDER_SOURCE_MUST_BE_OMITTED_" * 800
+
+
+class _StableMemoryProjection(NoopMemoryHooks):
+    async def project(self, state, *, token_budget: int):
+        del state, token_budget
+        return {
+            "summary": (
+                '<recalled-memory-projection do_not_write_back="true">\n'
+                "- SEMANTICALLY_STABLE_RECALLED_MEMORY\n"
+                "</recalled-memory-projection>"
+            ),
+            "included_memory_ids": ["memory:stable"],
+            "typed_recalled_entries": [
+                {
+                    "memory_ids": ["memory:stable"],
+                    "model_visible_text": "SEMANTICALLY_STABLE_RECALLED_MEMORY",
+                }
+            ],
+        }
+
+
+class _MemoryThenExplicitEmpty(NoopMemoryHooks):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def project(self, state, *, token_budget: int):
+        del state, token_budget
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "summary": (
+                    '<recalled-memory-projection do_not_write_back="true">\n'
+                    "- MEMORY_THAT_IS_EXPLICITLY_CLEARED\n"
+                    "</recalled-memory-projection>"
+                ),
+                "included_memory_ids": ["memory:cleared"],
+                "typed_recalled_entries": [
+                    {
+                        "memory_ids": ["memory:cleared"],
+                        "model_visible_text": "MEMORY_THAT_IS_EXPLICITLY_CLEARED",
+                    }
+                ],
+            }
+        return {
+            "summary": "",
+            "included_memory_ids": [],
+            "typed_recalled_entries": [],
+        }
+
+
+class _MemoryThenFailure(_MemoryThenExplicitEmpty):
+    async def project(self, state, *, token_budget: int):
+        if self.calls:
+            raise RuntimeError("synthetic memory projection failure")
+        return await super().project(state, token_budget=token_budget)
+
+
+class _MemoryThenBudgetOmittedReplacement(NoopMemoryHooks):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def project(self, state, *, token_budget: int):
+        del state, token_budget
+        self.calls += 1
+        text = (
+            "SMALL_COMMITTED_RECALLED_MEMORY"
+            if self.calls == 1
+            else "CHANGED_MEMORY_OMITTED_BY_BUDGET_" * 4_000
+        )
+        return {
+            "summary": (
+                '<recalled-memory-projection do_not_write_back="true">\n'
+                f"- {text}\n"
+                "</recalled-memory-projection>"
+            ),
+            "included_memory_ids": [f"memory:revision:{self.calls}"],
+            "typed_recalled_entries": [
+                {
+                    "memory_ids": [f"memory:revision:{self.calls}"],
+                    "model_visible_text": text,
+                }
+            ],
+        }
+
+
+def test_one_shot_provider_input_commits_one_stable_runtime_clock() -> None:
+    call = test_resolved_call()
+    bundle = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:one-shot-clock",
+        model_call_index=None,
+    )
+    append = next(
+        event
+        for event in bundle.companion_events
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
+
+    assert len(append.runtime_observation_units) == 1
+    clock = append.runtime_observation_units[0]
+    assert clock.wire_semantic.observation_kind == "runtime_clock"
+    assert append.resulting_core_state.clock_head is not None
+    assert (
+        append.resulting_core_state.clock_head.observation_semantic_fingerprint
+        == clock.wire_semantic.wire_semantic_fingerprint
+    )
+    assert bundle.carrier.ordered_messages[0].role.value == "runtime_observation"
 
 
 async def _capture_prepared_snapshot(tmp_path, monkeypatch):
@@ -378,7 +498,7 @@ def test_unselected_optional_artifact_is_not_eagerly_hydrated(
     assert memory_instruction.content_artifact_id not in read_artifact_ids
 
 
-def test_append_revision_has_provider_visible_latest_wins_envelope(
+def test_runtime_clock_source_renderer_is_not_a_latest_wins_envelope(
     tmp_path, monkeypatch
 ) -> None:
     prepared = asyncio.run(_capture_prepared_snapshot(tmp_path, monkeypatch))
@@ -390,14 +510,11 @@ def test_append_revision_has_provider_visible_latest_wins_envelope(
 
     rendered = render_context_source_candidate(clock)
 
-    assert rendered.startswith("<context-source-revision>\n")
-    assert '"source_instance_id":"runtime:clock"' in rendered
-    assert (
-        '"selection_rule":"latest_appended_revision_for_source_instance_wins"'
-        in rendered
-    )
-    assert '"supersedes":"all_prior_revisions_for_source_instance"' in rendered
-    assert rendered.endswith("</context-source-revision>")
+    assert rendered.startswith("Current date:")
+    assert "Observed at UTC:" in rendered
+    assert "<runtime-clock>" not in rendered
+    assert "context-source-revision" not in rendered
+    assert "latest_appended_revision" not in rendered
 
 
 def test_system_prompt_retains_per_source_fragment_ownership(
@@ -429,11 +546,12 @@ def test_system_prompt_retains_per_source_fragment_ownership(
     assert tuple(item.source_instance_id for item in fragments) == (
         "system:prompt",
         "memory:instruction",
+        "runtime:environment",
     )
-    assert len({item.owner_semantic_fingerprint for item in fragments}) == 2
-    assert "\n\n".join(item.rendered_text for item in fragments) == (
-        final.llm_context.system_prompt
-    )
+    assert len({item.owner_semantic_fingerprint for item in fragments}) == 3
+    assert compose_provider_root_policy(
+        "\n\n".join(item.rendered_text for item in fragments)
+    ) == final.llm_context.system_prompt
 
 
 def test_compiler_omission_is_final_provider_payload_truth(
@@ -542,8 +660,14 @@ def test_provider_units_preserve_exact_compiler_source_authority(
     units = bundles[-1].resident.units
     by_owner = {item.attribution.owner_semantic_fingerprint: item for item in units}
     for fragment in final.provider_source_fragments:
-        unit = by_owner[fragment.owner_semantic_fingerprint]
         candidate = fragment.candidate
+        unit = by_owner.get(fragment.owner_semantic_fingerprint)
+        if unit is None:
+            assert context_source_transition_kind(
+                candidate.source_id,
+                candidate.attribution.semantic.payload,
+            ) == "explicit_empty"
+            continue
         assert (
             unit.attribution.source_event_refs
             == candidate.attribution.source_event_refs
@@ -846,6 +970,321 @@ def test_accepted_continuation_commits_exact_materialization_proof(tmp_path) -> 
     assert proof.appended_unit_ordinals
     assert len(proof.appended_unit_ordinals) == len(
         proof.ordered_appended_unit_materialization_fingerprints
+    )
+
+
+def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:memory-noop", "name": "noop", "arguments": "{}"}
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=_StableMemoryProjection(),
+    )
+
+    result = asyncio.run(run_agent_task(agent, "reuse stable memory"))
+
+    assert result.status is LoopStatus.FINISHED
+    appends = tuple(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
+    memory_observations = tuple(
+        observation
+        for event in appends
+        for observation in event.runtime_observation_units
+        if observation.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert len(memory_observations) == 1
+    assert sum(event.runtime_observation_semantic_noop_count for event in appends) >= 1
+    noop_disposition = next(
+        disposition
+        for event in appends[1:]
+        for disposition in event.source_dispositions
+        if disposition.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert noop_disposition.disposition == "retain"
+    assert noop_disposition.reason == "semantic_noop"
+    assert sum(
+        text.count("SEMANTICALLY_STABLE_RECALLED_MEMORY")
+        for message in transport.contexts[-1].messages
+        for text in message.content
+    ) == 1
+    snapshot = (
+        runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+            call_lane="main_agent"
+        )
+    )
+    assert snapshot is not None and snapshot.core_state is not None
+    memory_head = next(
+        item
+        for item in snapshot.core_state.committed_source_heads
+        if item.effective_snapshot.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    core_payload = json.dumps(
+        memory_head.model_dump(mode="json"), sort_keys=True
+    )
+    for forbidden in (
+        "source_event_references",
+        "source_artifact_references",
+        "authority_horizons",
+        "committed_append_event_reference",
+        "canonical_provider_fragment",
+    ):
+        assert forbidden not in core_payload
+    assert snapshot.attribution_state is not None
+    assert snapshot.attribution_state.source_head_attribution_status == "complete"
+    placement = next(
+        item
+        for item in snapshot.attribution_state.source_head_attributions
+        if item.semantic_head_fingerprint == memory_head.semantic_head_fingerprint
+    )
+    assert placement.hydration_attribution.hydration_kind == "inline"
+    assert (
+        placement.hydration_attribution.semantic_materialization.canonical_wire_utf8_sha256
+        == memory_head.effective_snapshot.unit_document_identity.canonical_wire_utf8_sha256
+    )
+
+
+def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=_MemoryThenExplicitEmpty(),
+    )
+
+    first = asyncio.run(run_agent_task(agent, "remember recalled memory"))
+    second = asyncio.run(run_agent_task(agent, "clear recalled memory"))
+
+    assert first.status is second.status is LoopStatus.FINISHED
+    observations = tuple(
+        observation
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+        for observation in event.runtime_observation_units
+        if observation.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert len(observations) == 2
+    wire_bodies = tuple(
+        json.loads(text)["pulsara_runtime_observation"]
+        for message in transport.contexts[-1].messages
+        if message.role.value == "runtime_observation"
+        for text in message.content
+        if json.loads(text)["pulsara_runtime_observation"]["kind"]
+        == "recalled_memory_snapshot"
+    )
+    assert len(wire_bodies) == 2
+    assert wire_bodies[-1]["payload"]["model_visible_content"] == ""
+    assert wire_bodies[-1]["payload"]["predecessor_observation_semantic_id"] == (
+        observations[0].wire_semantic.observation_semantic_id
+    )
+
+
+def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=_MemoryThenFailure(),
+    )
+
+    first = asyncio.run(run_agent_task(agent, "establish recalled memory"))
+    second = asyncio.run(run_agent_task(agent, "survive failed memory projection"))
+
+    assert first.status is second.status is LoopStatus.FINISHED
+    compiled = tuple(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ContextCompiledEvent)
+    )[-1]
+    disposition = next(
+        item
+        for item in compiled.prepared_provider_input.prepared_plan.source_dispositions
+        if item.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert disposition.disposition == "retain"
+    assert disposition.reason == "projection_failed"
+    append = tuple(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+    )[-1]
+    assert disposition in append.source_dispositions
+    assert sum(
+        text.count("MEMORY_THAT_IS_EXPLICITLY_CLEARED")
+        for message in transport.contexts[-1].messages
+        for text in message.content
+    ) == 1
+
+
+def test_budget_omitted_changed_memory_uses_typed_rollover(tmp_path) -> None:
+    limits = test_model_limits(
+        total_context_tokens=8_192,
+        max_input_tokens=8_192,
+        max_output_tokens=512,
+        default_output_tokens=512,
+        input_safety_margin_tokens=512,
+    )
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api="scripted",
+        pro_limits=limits,
+        flash_limits=limits,
+    )
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=LLMRuntime(config=config, registry=registry),
+        memory_hooks=_MemoryThenBudgetOmittedReplacement(),
+    )
+
+    first = asyncio.run(run_agent_task(agent, "establish small recalled memory"))
+    second = asyncio.run(run_agent_task(agent, "omit changed recalled memory"))
+
+    assert first.status is second.status is LoopStatus.FINISHED
+    rollover = next(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+    )
+    assert (
+        rollover.rollover_request.intent.reason.value
+        == "source_disposition_rewrite_required"
+    )
+    initial_append = next(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+        and event.id == rollover.expected_initial_append_event_id
+    )
+    rewrite = next(
+        item
+        for item in initial_append.source_dispositions
+        if item.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert rewrite.disposition == "rewrite_required"
+    assert rewrite.reason == "allocation_omitted"
+    assert all(
+        head.effective_snapshot.source_id is not ContextSourceId.MEMORY_PROJECTION
+        for head in initial_append.resulting_core_state.committed_source_heads
+    )
+    wire_text = "\n".join(
+        text for message in transport.contexts[-1].messages for text in message.content
+    )
+    assert "SMALL_COMMITTED_RECALLED_MEMORY" not in wire_text
+    assert "CHANGED_MEMORY_OMITTED_BY_BUDGET_" not in wire_text
+
+
+def test_budget_omitted_new_memory_does_not_create_a_phantom_rollover(tmp_path) -> None:
+    limits = test_model_limits(
+        total_context_tokens=8_192,
+        max_input_tokens=8_192,
+        max_output_tokens=512,
+        default_output_tokens=512,
+        input_safety_margin_tokens=512,
+    )
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api="scripted",
+        pro_limits=limits,
+        flash_limits=limits,
+    )
+    hooks = _MemoryThenBudgetOmittedReplacement()
+    hooks.calls = 1
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport([{"text": "done"}])
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=LLMRuntime(config=config, registry=registry),
+        memory_hooks=hooks,
+    )
+
+    result = asyncio.run(run_agent_task(agent, "omit new recalled memory"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert not any(
+        isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+        for event in runtime_session.event_log.iter()
+    )
+    wire_text = "\n".join(
+        text for message in transport.contexts[-1].messages for text in message.content
+    )
+    assert "CHANGED_MEMORY_OMITTED_BY_BUDGET_" not in wire_text
+
+
+def test_active_skill_deactivation_is_an_explicit_empty_replacement(tmp_path) -> None:
+    _write_workspace_skill(
+        tmp_path,
+        "review-pr",
+        """---
+name: review-pr
+description: Review pull requests.
+---
+# Review PR
+""",
+    )
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            _workspace_only_capability_provider()
+        ),
+    )
+
+    first = asyncio.run(
+        run_agent_task(
+            agent,
+            "activate review skill",
+            active_skill_names=frozenset({"review-pr"}),
+        )
+    )
+    second = asyncio.run(run_agent_task(agent, "deactivate review skill"))
+
+    assert first.status is second.status is LoopStatus.FINISHED
+    observations = tuple(
+        observation
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+        for observation in event.runtime_observation_units
+        if observation.source_id is ContextSourceId.ACTIVE_SKILL
+    )
+    assert len(observations) == 2
+    assert observations[-1].source_attribution.transition_kind == "explicit_empty"
+    assert observations[-1].wire_semantic.payload.model_visible_content == ""
+    assert (
+        observations[-1].wire_semantic.payload.predecessor_observation_semantic_id
+        == observations[0].wire_semantic.observation_semantic_id
     )
 
 

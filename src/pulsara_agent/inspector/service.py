@@ -2095,6 +2095,10 @@ def _provider_input_generation_projection(
                 "close": None,
                 "awaiting_control_disposition": None,
                 "pending_continuation": None,
+                "runtime_observation_semantic_noop_count": 0,
+                "runtime_observation_kind_counts": {},
+                "source_semantic_heads": [],
+                "root_privileged_carrier": None,
                 "exact_replay_status": "exact_replay",
                 # Historical Inspector cannot observe process-local memoization.
                 "resident_cache": None,
@@ -2124,6 +2128,20 @@ def _provider_input_generation_projection(
             entry = entry_for(event.generation.generation_id)
             entry["generation"] = event.generation.model_dump(mode="json")
             entry["durable_core"] = event.genesis_core_state.model_dump(mode="json")
+            entry["root_privileged_carrier"] = {
+                "system_instruction_semantic_fingerprint": (
+                    event.generation.compatibility.system_instruction_semantic_fingerprint
+                ),
+                "root_semantic_fingerprint": (
+                    event.root_reference.root_semantic.root_semantic_fingerprint
+                ),
+                "root_artifact_id": (
+                    event.root_reference.root_artifact_reference.artifact_id
+                ),
+                "root_reference_fingerprint": (
+                    event.root_reference.reference_fingerprint
+                ),
+            }
             continue
         if isinstance(event, ProviderInputAppendCommittedEvent):
             entry = entry_for(event.generation_id)
@@ -2145,6 +2163,40 @@ def _provider_input_generation_projection(
             entry["durable_core"] = event.resulting_core_state.model_dump(mode="json")
             entry["awaiting_control_disposition"] = None
             entry["pending_continuation"] = None
+            entry["runtime_observation_semantic_noop_count"] += (
+                event.runtime_observation_semantic_noop_count
+            )
+            for observation in event.runtime_observation_units:
+                kind = observation.wire_semantic.observation_kind
+                entry["runtime_observation_kind_counts"][kind] = (
+                    entry["runtime_observation_kind_counts"].get(kind, 0) + 1
+                )
+            entry["source_semantic_heads"] = [
+                {
+                    "source_id": item.effective_snapshot.source_id.value,
+                    "source_instance_id": (
+                        item.effective_snapshot.source_instance_id
+                    ),
+                    "lifecycle_class": (
+                        item.effective_snapshot.lifecycle_class
+                    ),
+                    "committed_source_revision": (
+                        item.effective_snapshot.committed_revision
+                    ),
+                    "source_payload_semantic_fingerprint": (
+                        item.effective_snapshot.snapshot_semantic_fingerprint
+                    ),
+                    "observation_semantic_id": (
+                        item.effective_snapshot.observation_semantic_id
+                    ),
+                    "provider_unit_document_semantic_fingerprint": (
+                        item.effective_snapshot.unit_document_identity.document_semantic_fingerprint
+                    ),
+                    "effective_status": item.effective_snapshot.effective_status,
+                    "head_fingerprint": item.semantic_head_fingerprint,
+                }
+                for item in event.resulting_core_state.committed_source_heads
+            ]
             entry["appends"].append(
                 {
                     "sequence": event.sequence,
@@ -2269,6 +2321,28 @@ def _provider_input_generation_projection(
                 ),
                 "authority_fingerprint": (
                     event.rollover_request.intent.authority_fingerprint
+                ),
+                "runtime_observation_rewrite": (
+                    {
+                        "rewrite_id": event.runtime_observation_rewrite.rewrite_id,
+                        "source_active_count": (
+                            event.runtime_observation_rewrite.source_stable_state.active_observations.member_count
+                        ),
+                        "protected_count": (
+                            event.runtime_observation_rewrite.source_stable_state.protected_observations.member_count
+                        ),
+                        "eligible_count": (
+                            event.runtime_observation_rewrite.source_stable_state.eligible_observations.member_count
+                        ),
+                        "replacement_unit_count": (
+                            event.runtime_observation_rewrite.prepared_replacement_projection.unit_count
+                        ),
+                        "fact_fingerprint": (
+                            event.runtime_observation_rewrite.fact_fingerprint
+                        ),
+                    }
+                    if event.runtime_observation_rewrite is not None
+                    else None
                 ),
             }
             entry_for(event.new_generation.generation_id)

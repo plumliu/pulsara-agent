@@ -210,3 +210,13 @@ ordered projection中的同一个unit，不能回查raw model stream、按fragme
 复用旧start carrier。Explicit compaction rollover必须恢复old-close + authority + new-start + append + ModelStart的
 完整atomic矩阵。缺artifact、prefix/frontier mismatch或invalid causal proof时不得报告exact replay；cache/resident
 丢失可以从durable vector exact restore，但canonical authority conflict必须latch而非静默rollover。
+
+Source-head恢复先读取committed semantic document identity，再从append artifact/vector unit重建hydration与placement attribution；不得调用当前memory/capability/source renderer。相同
+semantic snapshot保持原revision和wire bytes。Runtime-observation rewrite恢复必须验证parent Long-Horizon authority、内嵌stable state、partition proof、transitive coverage与全部confirmed
+artifacts；缺失/冲突时latch，不得回退为完整旧observation replay或standalone auxiliary rebase。
+
+恢复任何open generation时，所有historical replacement source head必须有compiler-frozen
+disposition。`projection_failed/no_new_fact/semantic_noop`保留exact head；empty/terminal消费
+exact predecessor；`rewrite_required/allocation_omitted`只能恢复同一typed source-disposition
+rollover candidate。不得因当前collector没有candidate而删除或复活旧head。One-shot recovery还要
+恢复initial append中的exact clock；不得以当前时间补造新clock。

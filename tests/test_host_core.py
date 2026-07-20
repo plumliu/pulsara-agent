@@ -1559,7 +1559,7 @@ def test_host_session_injects_failed_turn_note_into_next_context(
     assert len(transport.contexts) == 4
     second_context = transport.contexts[-1]
     assert any(
-        message.role.value == "system"
+        message.role.value == "runtime_observation"
         and FAILURE_NOTE_TEXT in "\n".join(message.content)
         for message in second_context.messages
     )
@@ -2954,6 +2954,86 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     assert len(transport.contexts) == 1
 
 
+def test_plan_terminal_snapshot_closes_prior_guidance_for_observation_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from pulsara_agent.runtime.provider_input.observation_rewrite import (
+        classify_runtime_observation_lifecycle,
+    )
+
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit-for-rewrite",
+                        "name": "exit_plan",
+                        "arguments": json.dumps(
+                            {"plan": "1. Inspect. 2. Implement.", "summary": "do work"}
+                        ),
+                    }
+                ]
+            },
+            {"text": "execution resumed"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        session.enter_plan(reason="close lifecycle for rewrite")
+        waiting = await session.run_turn("submit the plan")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        assert pending.kind == "exit"
+        await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=pending.interaction_id,
+                decision="approve",
+                user_feedback="approved",
+            )
+        )
+        resumed = await session.run_turn("continue after plan approval")
+        return session, waiting, resumed
+
+    session, waiting, resumed = asyncio.run(run())
+
+    assert waiting.status.value == "waiting_user"
+    assert resumed.status.value == "finished"
+    runtime_session = session.wiring.runtime_wiring.runtime_session
+    snapshot = (
+        runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+            call_lane="main_agent"
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.runtime_observation_lifecycle_state is not None
+    current_run_scope = next(
+        item.source_attribution.protection_scope_semantic_id
+        for item in reversed(snapshot.runtime_observation_units)
+        if item.wire_semantic.observation_kind == "runtime_clock"
+    )
+    lifecycle = classify_runtime_observation_lifecycle(
+        state=snapshot.runtime_observation_lifecycle_state,
+        observations=snapshot.runtime_observation_units,
+        current_run_protection_scope_semantic_id=current_run_scope,
+    )
+    assert any(
+        item.wire_semantic.observation_kind == "plan_guidance"
+        for item in lifecycle.eligible
+    )
+    assert any(
+        item.wire_semantic.observation_kind == "plan_status_snapshot"
+        and item.source_attribution.transition_kind == "terminal"
+        for item in lifecycle.protected
+    )
+
+
 def test_exit_plan_revise_keeps_plan_active_and_read_only(
     tmp_path, monkeypatch
 ) -> None:
@@ -3041,7 +3121,9 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
         authority
         for prepared in prepared_snapshots
         for authority in prepared.invocation.fact.context_source_candidates
-        if authority.source_instance_id == "plan:revision"
+        if authority.source_instance_id.endswith(
+            f":revision:{revise_event.id}"
+        )
     ]
     assert revision_authorities
     assert all(
@@ -3454,7 +3536,7 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(
         "aborted"
     ]
     assert any(
-        message.role.value == "system"
+        message.role.value == "runtime_observation"
         and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
         for message in transport.contexts[-1].messages
     )
@@ -3526,7 +3608,7 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(
         event.status for event in first_events if isinstance(event, RunEndEvent)
     ] == ["aborted"]
     assert any(
-        message.role.value == "system"
+        message.role.value == "runtime_observation"
         and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
         for message in transport.contexts[-1].messages
     )

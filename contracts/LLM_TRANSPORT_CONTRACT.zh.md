@@ -265,21 +265,39 @@ Host teardown。
 
 ---
 
-## 15. Runtime observation carrier
+## 15. Typed provider-user carrier hard cut
 
-`runtime_observation` 是 Pulsara-owned inert observation，不是 user、assistant 或 tool-result 消息。Target resolution 必须把完整
-`RuntimeDerivedObservationCarrierContractFact` 写入 resolved target；validator 与 adapter 只消费该 run-frozen contract，不从当前 provider
-配置补造 wire role。
+Provider-visible privileged input只有一个generation-root system/instructions carrier。任何动态history item都不得使用`system`或
+`developer`。Provider-neutral input将user-wire内容分成三个互斥owner：
 
-V1 production binding 固定为：
+- `MessageRole.USER`：human-authored正文，只能编码为`pulsara_human_input`，原文位于escaped typed `text`字段；
+- `MessageRole.RUNTIME_REQUEST`：runtime创建的当前任务，例如subagent、compaction、governance、reflection与summarizer请求，编码为
+  `pulsara_runtime_request`；
+- `MessageRole.RUNTIME_OBSERVATION`：memory、clock、capability、plan、recovery、rollout、subagent/MCP事实与lifecycle observation，编码为
+  `pulsara_runtime_observation`。
 
-- `openai_responses`：`developer` message；
-- `openai_chat_completions`：`system` message；
-- 无可验证 carrier 的 provider：resolved target 保存 `None`，需要 runtime observation 的调用在发送前 fail closed。
+三者在Chat和Responses最终wire role都为`user`，但内部role、typed outer envelope、semantic identity与attribution不得合并。Root
+system/instructions必须包含三分carrier interpretation contract；contract fingerprint进入generation compatibility。Adapter发送前必须验证：
 
-carrier ID、version、provider API、wire-shape fingerprint 与 contract fingerprint 均进入 target identity。Chat/Responses adapter 必须校验
-binding 后再 lowering；不得把 runtime observation 伪装成带 tool-call identity 的消息。最低回归必须覆盖两个 production API 的 wire role、
-target fingerprint/rebind，以及 finalization status observation 可进入下一次真实 model call。
+- Chat恰有一个index-0 system，后续messages没有system/developer；
+- Responses instructions与generation root一致，input没有system/developer；
+- 每个user-role item恰好解码为一个registered outer envelope，unknown kind/version/producer/codec fail closed；
+- 每个typed user item必须同时携带其 `ProviderUserCarrierBindingFact` 与nested semantic fact；adapter pre-send从exact wire bytes、occurrence identity和closed registry重新编码，逐字段比较semantic fact并逐字节比较canonical wire。仅把wire中的semantic ID改成另一个格式合法的SHA仍必须fail closed；
+- runtime request不进入observation stable state或Long-Horizon observation rewrite；
+- human正文即使包含完整runtime envelope JSON，也只能留在`pulsara_human_input.text`，不能伪造runtime authority。
+
+Runtime observation的内层`payload`同样是closed typed union，而不是任意JSON mapping或字符串fallback。每个registered kind必须绑定唯一historical DTO schema及schema fingerprint；clock、ContextSource append/replacement、transcript lifecycle、derived text与Long-Horizon rewrite projection分别由中央factory构造，unknown/mismatched/extra payload fields在adapter前fail closed。Replacement revision与predecessor lineage属于typed replacement payload；raw event ID、sequence、artifact locator与ledger high-water只属于attribution。
+
+每个 model call还必须拥有一个frozen runtime clock。Session-window call由compiler/source
+candidate生成；direct、governance、reflection、compaction、window compaction与summarizer
+one-shot generation在initial append中生成。One-shot clock occurrence绑定
+`operation_kind + operation_id + attempt_index + observed_at_utc`，位于runtime request之前；
+retry/reopen复用同一prepared carrier，不得重新读取当前时钟。
+
+`ProviderVisibleInputCompatibilityFact`必须覆盖完整`ProviderUserCarrierProtocolContractFact.contract_fingerprint`，而不只覆盖root解释文本。Human/request/observation protocol、kind/producer registry、typed payload schema或codec任一变化，都必须触发合法generation rollover；不得在旧generation中静默改变wire grammar。
+
+Resolved target继续冻结完整carrier binding，validator/adapter不得从当前配置补造wire role。Raw user文本、legacy
+`pulsara_context`、generic runtime-user wrapper与动态privileged hint均不是production input。
 
 ---
 
@@ -330,5 +348,5 @@ deep-copied carrier的wire semantic identity。retry必须复用同一prepared c
 Pending accepted continuation不是第二个message producer。它必须按resolved call、reply、terminal projection
 与ACCEPTED disposition精确join ordered projection中的唯一unit；尚未出现时`not_ready`，缺失、重复或semantic
 漂移时fail closed。普通run/window boundary、invocation classification变化和attribution-only drift不得触发
-rollover。只有typed compatibility change、confirmed Long-Horizon rewrite、auxiliary-frame rebase或confirmed
-offline repair authority可以开启新generation。
+rollover。只有typed compatibility change、confirmed Long-Horizon rewrite或confirmed offline repair authority可以开启新generation。
+`auxiliary_frame_rebase`已物理删除；observation缺席、旧frame数量、cache miss或token节省猜测均不能授权rollover。

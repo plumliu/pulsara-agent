@@ -39,6 +39,7 @@ from pulsara_agent.runtime.context_input.render import (
 from pulsara_agent.runtime.context_input.compiler import _apply_section_budget
 from pulsara_agent.runtime.context_engine.types import AllocatedContextSection
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
+from pulsara_agent.llm.user_carrier import ROOT_USER_CARRIER_INTERPRETATION
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.conftest import open_test_root_rollout_run
 from tests.test_agent_runtime_loop import (
@@ -447,7 +448,11 @@ def test_required_source_above_legacy_64k_uses_resolved_physical_policy(
     result = asyncio.run(run_agent_task(agent, "verify resolved source policy"))
 
     assert result.status.value == "finished"
-    assert transport.contexts[0].system_prompt == system_prompt
+    provider_root = transport.contexts[0].system_prompt
+    assert provider_root is not None
+    assert provider_root.startswith(system_prompt)
+    assert provider_root.count(system_prompt) == 1
+    assert provider_root.endswith(ROOT_USER_CARRIER_INTERPRETATION)
     system_candidate = next(
         candidate
         for candidate in captured[0].snapshot_build_input.context_source_candidates

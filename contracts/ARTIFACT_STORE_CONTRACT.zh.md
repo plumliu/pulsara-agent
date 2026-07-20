@@ -253,3 +253,15 @@ Checkpoint artifact 是可丢弃 cache。Historical context manifest 不永久 p
 delta 能恢复相同 semantic source，exact replay 可以 rebase。Physical GC 不删 checkpoint events，且只能在 session
 closed/quiescent、持有 checkpoint maintenance exclusive advisory lock 时，使用 artifact ID/digest/media type/semantic metadata fingerprint
 条件删除。Exact replay/Inspector 读 checkpoint event + artifact 时必须持有同锁域 shared lease。
+
+---
+
+## 14. Provider-input semantic documents与observation rewrite artifacts
+
+Provider source-head semantic core只保存content digest、canonical wire hash/bytes与semantic document identity。Inline hydration正文或content-addressed artifact locator属于attribution；
+hydrator必须验证document contract、SHA、bytes、wire hash与semantic materialization fingerprint后才能形成joined head。Artifact missing、hash/codec conflict或vector placement drift是
+`authority_untrusted`，不能当作source absent或cache miss，也不能重新调用当前ContextSource renderer猜测历史正文。
+
+Runtime-observation stable/partition/projection pages使用稳定ID与canonical bytes。所有pages/root在引用它们的rollover batch之前必须FULL confirmed；同ID不同body/metadata冲突。
+Successor rewrite FULL前旧stable-state、proof和projection artifacts持续pinned，FULL reducer fold后才切换reachable roots。Event payload只携带bounded roots/counts/accumulators，禁止
+内嵌O(history) member tuple。

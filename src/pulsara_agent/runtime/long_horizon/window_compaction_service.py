@@ -24,6 +24,7 @@ from pulsara_agent.llm.direct import (
     collect_direct_model_call_handle,
 )
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.user_carrier import derived_text_runtime_observation_payload
 from pulsara_agent.llm.lifecycle import (
     PreparedModelRolloutReservation,
     prepare_model_lifecycle_start_bundle,
@@ -646,7 +647,20 @@ class ContextWindowCompactionService:
                     "window compaction summary exceeds its resolved output budget"
                 )
             summary_message_tokens = call.target.token_estimator.estimate_message(
-                LLMMessage.system(summary_text)
+                LLMMessage.runtime_observation(
+                    derived_text_runtime_observation_payload(
+                        derivation_kind="compaction_replacement_summary",
+                        model_visible_content=summary_text,
+                        source_semantic_fingerprint=context_fingerprint(
+                            "window-compaction-summary-observation-source:v1",
+                            (compaction_id, summary_text),
+                        ),
+                    ),
+                    observation_kind="compaction_replacement_summary",
+                    source_instance_id=f"window-compaction:{compaction_id}",
+                    lifecycle_class="causal_append_once",
+                    authority_class="runtime_fact",
+                )
             )
             observed_post_tokens = (
                 plan.fixed_new_window_tokens
@@ -980,7 +994,15 @@ def _build_summarizer_context(
         "retained_tail_entry_ids": source.retained_entry_ids,
     }
     return LLMContext(
-        messages=(LLMMessage.user(canonical_json_bytes(payload).decode("utf-8")),),
+        messages=(
+            LLMMessage.runtime_request(
+                canonical_json_bytes(payload).decode("utf-8"),
+                request_kind="window_compaction_request",
+                business_occurrence_semantic_fingerprint=context_fingerprint(
+                    "window-compaction-runtime-request:v1", source.compaction_id
+                ),
+            ),
+        ),
         system_prompt=WINDOW_COMPACTION_PROMPT,
         context_id=f"context:window-compaction:{source.compaction_id}",
         resolved_model_call_id=call.fact.resolved_model_call_id,

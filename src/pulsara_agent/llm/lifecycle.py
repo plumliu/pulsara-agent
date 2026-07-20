@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    ProviderInputAppendCommittedEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
 )
@@ -359,12 +360,24 @@ def validate_model_lifecycle_start_bundle(
         )
 
         prepared = provider_bundle.prepared_candidate
+        append_events = tuple(
+            event
+            for event in provider_bundle.companion_events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        )
+        expected_dispositions = (
+            prepared.prepared_plan.source_dispositions
+            if prepared.prepared_plan is not None
+            else ()
+        )
         if (
             prepared.provider_input_plan.resolved_model_call_fact != call.fact
             or prepared.preparation_ownership.resolved_model_call_id
             != call.fact.resolved_model_call_id
             or provider_event_ids != prepared.stable_companion_event_ids
             or provider_bundle.carrier.to_llm_context(context) != context
+            or len(append_events) != 1
+            or append_events[0].source_dispositions != expected_dispositions
         ):
             raise ValueError("provider input lifecycle bundle identity drifted")
         validate_dispatch_context_against_plan(

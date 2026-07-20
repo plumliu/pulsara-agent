@@ -178,18 +178,18 @@ class ModelTokenUsageFact(BaseModel):
 
 
 class RuntimeDerivedObservationCarrierContractFact(BaseModel):
-    """Run-frozen provider wire contract for inert runtime observations."""
+    """Run-frozen provider wire contract for typed runtime observations."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["runtime_derived_observation_carrier.v1"] = (
-        "runtime_derived_observation_carrier.v1"
+    schema_version: Literal["runtime_derived_observation_carrier.v2"] = (
+        "runtime_derived_observation_carrier.v2"
     )
     carrier_id: str = Field(min_length=1)
     carrier_version: str = Field(min_length=1)
     provider_api: str = Field(min_length=1)
-    provider_role_contract: Literal["runtime_inert_observation"] = (
-        "runtime_inert_observation"
+    provider_role_contract: Literal["typed_provider_user_carrier"] = (
+        "typed_provider_user_carrier"
     )
     wire_shape_fingerprint: str = Field(min_length=1)
     contract_fingerprint: str = Field(min_length=1)
@@ -197,7 +197,7 @@ class RuntimeDerivedObservationCarrierContractFact(BaseModel):
     @model_validator(mode="after")
     def _validate_contract(self) -> "RuntimeDerivedObservationCarrierContractFact":
         expected = sha256_fingerprint(
-            "runtime-derived-observation-carrier:v1",
+            "runtime-derived-observation-carrier:v2",
             self.model_dump(mode="json", exclude={"contract_fingerprint"}),
         )
         if self.contract_fingerprint != expected:

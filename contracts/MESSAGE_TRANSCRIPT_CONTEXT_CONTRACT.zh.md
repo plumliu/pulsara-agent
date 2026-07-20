@@ -253,3 +253,16 @@ Model context 中不得直接内联任意 binary/data body。
 - live/replay生成相同snapshot/transcript/unit/manifest fingerprint。
 - malformed arguments、parallel pairing、typed terminal deny/execute/process variants均可exact replay。
 - 修改display JSON不能改变typed execution semantics；缺少typed terminal semantics必须fail closed。
+
+---
+
+## 11. Provider-user carrier ownership hard cut
+
+Canonical transcript semantic与provider wire carrier分层。Human message仍以typed current-user/stable transcript fact作为authority；lowering时正文必须完整放入
+`pulsara_human_input.text`。Runtime创建的当前任务使用`runtime_request` transcript role与`pulsara_runtime_request`，不得产生human attribution；child
+subagent task进入child canonical transcript后必须保留request kind、owner与semantic identity。Memory、clock、capability、plan、recovery、rollout、subagent/MCP
+事实及RunEnd/TerminalProcess lifecycle note使用`runtime_observation` internal role，wire为typed user envelope，不得生成动态system/developer message。
+
+Lifecycle observation只由原RunEnd、TerminalProcess或registered source event派生；不新增第二个business event。Invocation classification、provider vector ordinal与
+artifact locator只属于attribution，不得改变stable transcript/provider wire semantic。`working_context|mixed` summary不是memory transcript source；V1近期活动只来自
+canonical transcript或confirmed Long-Horizon projection。

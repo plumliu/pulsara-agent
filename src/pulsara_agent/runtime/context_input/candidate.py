@@ -28,6 +28,10 @@ from pulsara_agent.primitives.context_source import (
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
 )
+from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    context_source_lifecycle_entry,
+    context_source_transition_kind,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.subagent.facts import SubagentGraphState
@@ -591,7 +595,19 @@ def _candidate_content_metadata(
     if isinstance(content, ArtifactContextSourceContentSemanticFact):
         return content.expected_utf8_bytes, content.expected_chars > 0
     rendered = render_context_source_candidate(candidate)
-    return len(rendered.encode("utf-8")), bool(rendered)
+    if rendered:
+        return len(rendered.encode("utf-8")), True
+    lifecycle = context_source_lifecycle_entry(candidate.source_id)
+    if lifecycle.lifecycle_class != "replacement_snapshot":
+        return 0, False
+    return (
+        0,
+        context_source_transition_kind(
+            candidate.source_id,
+            candidate.attribution.semantic.payload,
+        )
+        == "explicit_empty",
+    )
 
 
 __all__ = [
