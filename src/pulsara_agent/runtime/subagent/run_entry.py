@@ -84,6 +84,8 @@ class SubagentRunEntryDriver:
             subagent_run_entry=prepared.entry_fact,
             long_horizon=prepared.long_horizon,
             child_rollout_subaccount=prepared.child_rollout_subaccount,
+            host_run_ingress=None,
+            host_ingress_admission_proof=None,
             prior_messages=prior_messages,
         )
         candidate = draft.run_start_event

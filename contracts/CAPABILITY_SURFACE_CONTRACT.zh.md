@@ -158,7 +158,7 @@ Skill manifest 中的 CLI hints（如 suggested_tools、required_binaries、exte
 
 ## 7. Active skill attribution
 
-当本 turn 存在 active skill injection，且模型调用 `terminal` 或 `terminal_process` 时，runtime 必须在 `CapabilityGateDecisionEvent.capability_context` 中写入轻量归因：
+当本 turn 存在 active skill injection，且模型调用 `terminal`、`terminal_process` 或 `terminal_monitor` 时，runtime 必须在 `CapabilityGateDecisionEvent.capability_context` 中写入轻量归因：
 
 ```json
 {
@@ -298,7 +298,7 @@ Inspector 必须从 event log 投影这些事件，而不是依赖 transient scr
 - hidden / unavailable / deferred / unknown tool call-local deny，不拖累同批合法 tool。
 - workflow control tools descriptor missing 时不得执行。
 - approval resume / pending confirmed tool 必须重新经过 capability fail-closed。
-- `terminal_process` observe actions 的 action-level classifier 行为保持：非 read-only 且 terminal 非 off 时 ALLOW；terminal off 时 DENY。
+- `terminal_process`的`list/log/poll/wait`与`terminal_monitor.list`按action-level classifier作为观察；`terminal_monitor.register/cancel`保持scheduling mutation；terminal off时全部DENY。
 - skill catalog progressive disclosure 保证所有 prompt-visible skill 至少进入 compact index。
 - active skill terminal attribution 只在 active skill turn 出现。
 - inspector 能解释 latest exposure 与 gate decisions。
@@ -356,7 +356,7 @@ class、tool cost units，以及允许按 invocation 细分的 action classes。
 不同 contract fingerprint。
 
 具体调用进入 tool execution gate 前，runtime 必须使用 frozen descriptor contract 与 typed arguments 生成
-`ToolActionClassificationFact`。terminal/terminal_process 使用共享 invocation classifier 区分 evidence acquisition、artifact hydration、
+`ToolActionClassificationFact`。terminal/terminal_process/terminal_monitor 使用共享 invocation classifier 区分 evidence acquisition、artifact hydration、
 synthesis mutation、bounded verification、process control 与 external action；unknown action 在 finalization fail closed。
 
 phase narrowing 发生在 exposure/permission 之后、真实执行之前，并与 tool reservation 在同一 durable batch 中提交。deny 仍写 canonical

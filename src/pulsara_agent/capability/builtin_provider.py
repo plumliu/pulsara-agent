@@ -24,6 +24,13 @@ from pulsara_agent.capability.types import (
     CapabilityExecutionSurfaceSnapshotContext,
 )
 from pulsara_agent.runtime.tool_action import builtin_tool_action_policy
+from pulsara_agent.terminal_public_api import (
+    TERMINAL_MONITOR_TOOL_DESCRIPTION,
+    TERMINAL_PROCESS_TOOL_DESCRIPTION,
+    TERMINAL_TOOL_DESCRIPTION,
+    terminal_monitor_input_schema,
+    terminal_process_input_schema,
+)
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
@@ -31,7 +38,6 @@ DEFAULT_READ_LINES = 500
 MAX_READ_LINES = 2_000
 DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
-DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 _SOURCE_AUTHORITIES = [
     "explicit_user_instruction",
     "tool_result",
@@ -369,7 +375,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "terminal": _descriptor(
         name="terminal",
-        description="Run a shell command inside workspace_root. Large output is retained as an artifact.",
+        description=TERMINAL_TOOL_DESCRIPTION,
         input_schema=object_schema(
             properties={
                 "command": {"type": "string"},
@@ -392,37 +398,19 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "terminal_process": _descriptor(
         name="terminal_process",
-        description="List, inspect, poll, wait for, kill, or send stdin to managed terminal processes.",
-        input_schema=object_schema(
-            properties={
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "list",
-                        "log",
-                        "poll",
-                        "wait",
-                        "kill",
-                        "write",
-                        "submit",
-                        "close_stdin",
-                    ],
-                },
-                "process_id": {"type": "string"},
-                "data": {"type": "string"},
-                "timeout_seconds": {
-                    "type": "integer",
-                    "default": DEFAULT_WAIT_TIMEOUT_SECONDS,
-                },
-                "max_output_chars": {
-                    "type": "integer",
-                    "default": DEFAULT_MAX_OUTPUT_CHARS,
-                },
-                "include_finished": {"type": "boolean", "default": True},
-                "include_running": {"type": "boolean", "default": True},
-            },
-            required=["action"],
-        ),
+        description=TERMINAL_PROCESS_TOOL_DESCRIPTION,
+        input_schema=terminal_process_input_schema(),
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="terminal",
+        artifact_mode=CapabilityArtifactMode.LARGE_OUTPUT,
+        is_destructive=True,
+        is_open_world=True,
+    ),
+    "terminal_monitor": _descriptor(
+        name="terminal_monitor",
+        description=TERMINAL_MONITOR_TOOL_DESCRIPTION,
+        input_schema=terminal_monitor_input_schema(),
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="terminal",

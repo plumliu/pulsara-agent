@@ -65,6 +65,7 @@ ObservationLifecycleClass = Literal[
 RuntimeRequestKind = Literal[
     "subagent_task",
     "current_run_task",
+    "terminal_process_observation",
     "compaction_request",
     "window_compaction_request",
     "governance_request",
@@ -122,10 +123,29 @@ class LongHorizonRewriteObservationProducerFact(FrozenFactBase):
     producer_fingerprint: Fingerprint
 
 
+@_fact(
+    "terminal_monitor_observation_producer.v1",
+    "producer_fingerprint",
+    "terminal-monitor-observation-producer:v1",
+)
+class TerminalMonitorObservationProducerFact(FrozenFactBase):
+    schema_version: Literal["terminal_monitor_observation_producer.v1"] = (
+        "terminal_monitor_observation_producer.v1"
+    )
+    producer_kind: Literal["terminal_monitor"] = "terminal_monitor"
+    observation_contract_id: Literal["pulsara.terminal-process-monitor"] = (
+        "pulsara.terminal-process-monitor"
+    )
+    observation_contract_version: Literal["1"] = "1"
+    observation_contract_fingerprint: Fingerprint
+    producer_fingerprint: Fingerprint
+
+
 RuntimeObservationProducerFact: TypeAlias = Annotated[
     ContextSourceObservationProducerFact
     | TranscriptLifecycleObservationProducerFact
-    | LongHorizonRewriteObservationProducerFact,
+    | LongHorizonRewriteObservationProducerFact
+    | TerminalMonitorObservationProducerFact,
     Field(discriminator="producer_kind"),
 ]
 
@@ -276,6 +296,7 @@ class RuntimeRequestKindContractFact(FrozenFactBase):
         Literal[
             "subagent_spawn",
             "current_run",
+            "host_autonomous_run_entry",
             "compaction_operation",
             "window_compaction_operation",
             "governance_batch",
@@ -536,6 +557,42 @@ class DerivedTextRuntimeObservationPayloadFact(FrozenFactBase):
 
 
 @_fact(
+    "terminal_monitor_runtime_observation_payload.v1",
+    "payload_semantic_fingerprint",
+    "terminal-monitor-runtime-observation-payload:v1",
+)
+class TerminalMonitorRuntimeObservationPayloadFact(FrozenFactBase):
+    schema_version: Literal[
+        "terminal_monitor_runtime_observation_payload.v1"
+    ] = "terminal_monitor_runtime_observation_payload.v1"
+    payload_kind: Literal["terminal_monitor"] = "terminal_monitor"
+    process_id: str = Field(min_length=1)
+    monitor_id: str | None
+    observation_kind: Literal[
+        "heartbeat",
+        "output_progress",
+        "process_completed",
+        "monitor_expired",
+    ]
+    source_semantic_fingerprint: Fingerprint
+    model_visible_content: str
+    content_utf8_sha256: Fingerprint
+    content_utf8_bytes: int = Field(ge=0)
+    payload_semantic_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _content_and_monitor(self) -> "TerminalMonitorRuntimeObservationPayloadFact":
+        _validate_payload_text(
+            text=self.model_visible_content,
+            expected_sha256=self.content_utf8_sha256,
+            expected_utf8_bytes=self.content_utf8_bytes,
+        )
+        if self.monitor_id is None and self.observation_kind != "process_completed":
+            raise ValueError("unmonitored terminal notification must be completion")
+        return self
+
+
+@_fact(
     "runtime_observation_rewrite_projection_payload.v2",
     "payload_semantic_fingerprint",
     "runtime-observation-rewrite-projection-payload:v2",
@@ -577,6 +634,7 @@ RuntimeObservationPayloadFact: TypeAlias = Annotated[
     | ContextSourceReplacementObservationPayloadFact
     | TranscriptLifecycleObservationPayloadFact
     | DerivedTextRuntimeObservationPayloadFact
+    | TerminalMonitorRuntimeObservationPayloadFact
     | RuntimeObservationRewriteProjectionPayloadFact,
     Field(discriminator="payload_kind"),
 ]

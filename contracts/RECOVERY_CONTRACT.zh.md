@@ -220,3 +220,19 @@ disposition。`projection_failed/no_new_fact/semantic_noop`保留exact head；em
 exact predecessor；`rewrite_required/allocation_omitted`只能恢复同一typed source-disposition
 rollover candidate。不得因当前collector没有candidate而删除或复活旧head。One-shot recovery还要
 恢复initial append中的exact clock；不得以当前时间补造新clock。
+
+---
+
+## 13. Terminal monitor recovery
+
+Restart从durable registration/observation/termination/disposition/account events exact重建monitor core、双cursor、progress limiter、pending notification和reservation余额。`FIRING`的NONE保留相同stable candidate重试；UNKNOWN/PARTIAL进入reconciliation，不得发布notification。Rate-window历史、progress count、completion-only状态、wake chain和automatic ordinal均不得因进程重启归零。
+
+正常reopen先验证notification/account与monitor projection checkpoint的exact ledger prefix，再从checkpoint保存的previous state重放bounded typed delta并逐字段核对resulting state；随后才消费checkpoint后的bounded sparse delta和其中显式引用的exact ToolResult，不得退化为全ledger bootstrap。首次checkpoint的sequence-zero base必须逐字段等于projection-kind-specific canonical genesis；后续base必须与PostgreSQL前一checkpoint完整state/fingerprint精确相等。Monitor physical recovery是Host-open拥有的async owner，不在`RuntimeSession.__post_init__`同步无限重试。HostCore在runtime wiring前只创建一个absolute reopen deadline；RuntimeSession materialization/transcript/provider-input/tool/long-horizon bootstrap、notification restore、monitor restore、双projection cross-join、HostSession plan bootstrap、physical monitor-owner recovery及其嵌套checkpoint I/O必须复用同一个monotonic timestamp，任一阶段不得以`now + timeout`续期。持续NONE在deadline后以typed blocked-open终结，UNKNOWN/PARTIAL继续latch。Host listener安装后必须立即检查checkpoint恢复出的pending notification，不能等下一次human turn才启动dispatch。
+
+Restart遇到已经FULL但尚未delivery的`active_pending_delivery` progress/heartbeat时，必须保留原pending observation并让Host ingress先完成delivery/disposition；不得用`interrupted_by_host_restart` termination覆盖它。Disposition FULL后，session-owned recovery owner再根据confirmed completion authority生成terminal observation，或以该disposition为cause提交`interrupted_by_host_restart` termination与monitor-slot release。任何termination都不得无处分地清除一个durable pending observation。
+
+Host处于`WAITING_USER`时，confirmed monitor notification写durable`host_waiting_user` defer并等待human merge；不得每200ms重复尝试runtime ingress。Registration返回正文与`initial_baseline_cursor`必须来自同一次typed journal snapshot，禁止随后再次poll形成重复输出窗口。
+
+Public tool hard cut后，unfinished `terminal_monitor.list`在能恢复exact action时可归类为read-only；`register/cancel`归为terminal side effect。当前event缺少可验证action或参数损坏时必须保守归为terminal。旧`terminal_process` monitor action、result projection与decoder不可恢复，runtime store reset后只接受新catalog。
+
+Output recovery先验证journal stream identity、retained/spooled cursors、page manifest与hash。Range完整时可恢复exact delta；range已淘汰或spool发生typed gap时只能生成`UnavailableRecoveredTerminalOutputDeltaFact`，保留completion/status/cursor authority但不伪造正文。Artifact/page hash conflict属于authority untrusted；spool普通不可用不得阻止completion terminalization。Session close将无法继续delivery的confirmed notification稳定 disposition为`session_closed`并释放对应slot。

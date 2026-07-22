@@ -21,6 +21,11 @@ from pulsara_agent.primitives.model_call import (
     ProviderSanitizedErrorFact,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalProcessMonitorCancellationSemanticFact,
+    TerminalProcessObservationReceiptFact,
+    TerminalProcessMonitorRegistrationSemanticFact,
+)
 from pulsara_agent.primitives.tool_result import (
     ContextToolResultArtifactRefFact,
     ToolResultExecutionSemanticsFact,
@@ -433,6 +438,15 @@ class ToolTerminalProjectionSemanticFact(FrozenFactBase):
     execution_semantics: ToolResultExecutionSemanticsFact
     observation_timing: ToolObservationTimingFact
     semantic_artifact_content_fingerprints: tuple[Fingerprint, ...]
+    terminal_process_observation_receipt: (
+        TerminalProcessObservationReceiptFact | None
+    ) = None
+    terminal_process_monitor_registration: (
+        TerminalProcessMonitorRegistrationSemanticFact | None
+    ) = None
+    terminal_process_monitor_cancellation: (
+        TerminalProcessMonitorCancellationSemanticFact | None
+    ) = None
     semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -447,6 +461,13 @@ class ToolTerminalProjectionSemanticFact(FrozenFactBase):
             != self.canonical_result_block_semantic.artifact_content_fingerprints
         ):
             raise ValueError("tool projection artifact semantics mismatch")
+        if (
+            self.terminal_process_monitor_registration is not None
+            and self.terminal_process_monitor_cancellation is not None
+        ):
+            raise ValueError(
+                "tool projection monitor registration/cancellation are mutually exclusive"
+            )
         return self
 
 
@@ -472,7 +493,22 @@ class ToolTerminalProjectionSemanticJoinFact(FrozenFactBase):
     tool_call_id: str = Field(min_length=1, max_length=128)
     model_tool_name: str = Field(min_length=1, max_length=256)
     result_state: ToolResultStateFact
+    terminal_process_monitor_registration_semantic_fingerprint: str | None = None
+    terminal_process_monitor_cancellation_semantic_fingerprint: str | None = None
     semantic_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _monitor_action(self) -> "ToolTerminalProjectionSemanticJoinFact":
+        if (
+            self.terminal_process_monitor_registration_semantic_fingerprint
+            is not None
+            and self.terminal_process_monitor_cancellation_semantic_fingerprint
+            is not None
+        ):
+            raise ValueError(
+                "tool projection join monitor actions are mutually exclusive"
+            )
+        return self
 
 
 TerminalProjectionSemanticJoinFact: TypeAlias = Annotated[

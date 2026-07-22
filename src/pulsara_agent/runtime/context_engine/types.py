@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from pulsara_agent.primitives._context_base import ContextEventReferenceFact
     from pulsara_agent.primitives.context import ContextSectionCandidate
     from pulsara_agent.primitives.context_source import ContextSourceDispositionFact
+    from pulsara_agent.primitives.host_ingress import (
+        HostRuntimeNotificationAttachmentFact,
+    )
     from pulsara_agent.runtime.context_input.provider_projection import (
         PreparedTranscriptProviderProjectionFact,
     )
@@ -262,6 +265,9 @@ class CompiledContext:
     provider_source_dispositions: tuple[ContextSourceDispositionFact, ...] = ()
     transcript_source_event_refs_by_message: tuple[
         tuple[ContextEventReferenceFact, ...], ...
+    ] = ()
+    active_run_monitor_attachments: tuple[
+        HostRuntimeNotificationAttachmentFact, ...
     ] = ()
 
     @property

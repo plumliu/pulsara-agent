@@ -83,7 +83,14 @@ class TerminalSession:
                 owner_conversation_id=self.state.owner_conversation_id,
                 origin_event_context=request.metadata.get("origin_event_context"),
                 origin_tool_call_id=request.metadata.get("tool_call_id"),
+                origin_runtime_session_id=request.metadata.get("runtime_session_id"),
+                origin_run_entry_kind=request.metadata.get("run_entry_kind"),
                 record_event=record_event,
+                require_completion_notification_reservation=bool(
+                    request.metadata.get(
+                        "require_completion_notification_reservation", False
+                    )
+                ),
             )
         except ProcessLimitError as exc:
             return TerminalResult(

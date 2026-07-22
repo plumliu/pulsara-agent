@@ -350,3 +350,11 @@ Pending accepted continuation不是第二个message producer。它必须按resol
 漂移时fail closed。普通run/window boundary、invocation classification变化和attribution-only drift不得触发
 rollover。只有typed compatibility change、confirmed Long-Horizon rewrite或confirmed offline repair authority可以开启新generation。
 `auxiliary_frame_rebase`已物理删除；observation缺席、旧frame数量、cache miss或token节省猜测均不能授权rollover。
+
+---
+
+## 18. Monitor notification carrier与ModelStart原子性
+
+Terminal monitor delivery在provider-neutral层使用typed `runtime_observation` semantic fact，wire lowering仍服从中央runtime-observation protocol；不得构造动态system/developer message或把notification伪装成human input。Attachment唯一拥有exact source event references；placement和autonomous owner只保存ordered attachment fingerprints。
+
+Safe-point delivery不是对已dispatch request的修改。只有在下一次ModelStart preparation前冻结的companion才能进入input；adapter dispatch前必须逐字节重算typed carrier。`ModelStreamStartCommitPort`接纳monitor safe-point companion时，ProviderInput append、delivery disposition、autonomy chain CAS与ModelCallStart必须属于同一writer operation。Retry复用同一stable input/attachment candidate；caller cancellation、NONE或UNKNOWN不能令provider input已前进而notification仍未消费，反之亦然。

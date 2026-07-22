@@ -32,6 +32,14 @@ from pulsara_agent.primitives.tool_result import (
     TerminalProcessObservationEssentialFact,
     TerminalProcessObservationDomainSubmissionFact,
     TerminalProcessSummaryFact,
+    TerminalMonitorCancellationDomainSubmissionFact,
+    TerminalMonitorCancellationEssentialFact,
+    TerminalMonitorErrorDomainSubmissionFact,
+    TerminalMonitorErrorEssentialFact,
+    TerminalMonitorInventoryDomainSubmissionFact,
+    TerminalMonitorInventoryEssentialFact,
+    TerminalMonitorRegistrationDomainSubmissionFact,
+    TerminalMonitorRegistrationEssentialFact,
     TerminalPayloadTimingFact,
     ToolResultErrorPreviewFact,
     ToolResultDomainSubmissionFact,
@@ -223,6 +231,7 @@ def build_default_tool_result_semantics_registry() -> (
 ):
     from pulsara_agent.capability.result_contracts import (
         generic_result_render_contract,
+        terminal_monitor_result_render_contract,
         terminal_process_result_render_contract,
         terminal_result_render_contract,
     )
@@ -232,6 +241,7 @@ def build_default_tool_result_semantics_registry() -> (
         generic_result_render_contract(),
         terminal_result_render_contract(),
         terminal_process_result_render_contract(),
+        terminal_monitor_result_render_contract(),
     ):
         builder = DeclarativeToolResultSemanticsBuilder(
             builder_id=contract.semantics_builder_id,
@@ -351,6 +361,27 @@ def build_adapter_failure_runtime_input(
                 backend_type=None,
             ),
         )
+    if contract.semantics_builder_id == "tool-result-semantics:terminal-monitor":
+        requested_action = str(call.arguments.get("action") or "unknown")
+        return FrozenToolResultSemanticsRuntimeInput(
+            semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_MONITOR_ADAPTER_ERROR,
+            domain_submission=TerminalMonitorErrorDomainSubmissionFact(
+                requested_action=requested_action,
+                process_id=(
+                    _str_or_none(call.arguments.get("process_id"))
+                    if requested_action == "register"
+                    else None
+                ),
+                monitor_id=(
+                    _str_or_none(call.arguments.get("monitor_id"))
+                    if requested_action == "cancel"
+                    else None
+                ),
+                status=state.value,
+                error=error,
+                policy_code="tool_adapter_error",
+            ),
+        )
     return FrozenToolResultSemanticsRuntimeInput(
         semantics_input_kind=ToolResultRenderVariantCode.GENERIC_RESULT,
         domain_submission=None,
@@ -425,6 +456,24 @@ def build_pre_execution_denial_semantics(
             policy_code=reason_code,
             terminal_session_id=None,
             backend_type=None,
+        )
+    elif variant.operational_kind.value == "terminal_monitor_error":
+        requested_action = _argument_string(requested_arguments, "action") or "unknown"
+        domain_submission = TerminalMonitorErrorDomainSubmissionFact(
+            requested_action=requested_action,
+            process_id=(
+                _argument_string(requested_arguments, "process_id")
+                if requested_action == "register"
+                else None
+            ),
+            monitor_id=(
+                _argument_string(requested_arguments, "monitor_id")
+                if requested_action == "cancel"
+                else None
+            ),
+            status=result_state.value,
+            error=unbounded_error_preview(message),
+            policy_code=reason_code,
         )
     else:
         domain_submission = None
@@ -553,9 +602,7 @@ def _rollup_semantics(
     payload = {
         "schema_version": "tool-result-rollup-semantics.v1",
         "rollup_kind": rollup_kind,
-        "family_key": context_fingerprint(
-            "tool-result-rollup-family:v1", family_basis
-        ),
+        "family_key": context_fingerprint("tool-result-rollup-family:v1", family_basis),
         "evidence_keys": evidence,
         "renderer_id": contract.rollup_renderer_id,
         "renderer_version": contract.rollup_renderer_version,
@@ -659,6 +706,52 @@ def _essential_from_domain_submission(
                 or len(domain_submission.process_summaries)
                 > capture_policy.max_process_summaries
             ),
+        )
+    if isinstance(domain_submission, TerminalMonitorRegistrationDomainSubmissionFact):
+        return TerminalMonitorRegistrationEssentialFact(
+            capture_policy_fingerprint=policy_fp,
+            process_id=domain_submission.process_id,
+            monitor_id=domain_submission.monitor_id,
+            expires_at_utc=domain_submission.expires_at_utc,
+            status=domain_submission.status,
+            exit_code=domain_submission.exit_code,
+            output_truncated=domain_submission.output_truncated,
+            terminal_session_id=domain_submission.terminal_session_id,
+            backend_type=domain_submission.backend_type,
+        )
+    if isinstance(domain_submission, TerminalMonitorInventoryDomainSubmissionFact):
+        visible_summaries = domain_submission.monitor_summaries[
+            : capture_policy.max_process_summaries
+        ]
+        return TerminalMonitorInventoryEssentialFact(
+            capture_policy_fingerprint=policy_fp,
+            status=domain_submission.status,
+            monitor_summaries=visible_summaries,
+            omitted_monitor_count=(
+                domain_submission.omitted_monitor_count
+                + len(domain_submission.monitor_summaries)
+                - len(visible_summaries)
+            ),
+            summaries_truncated=(
+                domain_submission.summaries_truncated
+                or len(visible_summaries) != len(domain_submission.monitor_summaries)
+            ),
+        )
+    if isinstance(domain_submission, TerminalMonitorCancellationDomainSubmissionFact):
+        return TerminalMonitorCancellationEssentialFact(
+            capture_policy_fingerprint=policy_fp,
+            monitor_id=domain_submission.monitor_id,
+            outcome=domain_submission.outcome,
+        )
+    if isinstance(domain_submission, TerminalMonitorErrorDomainSubmissionFact):
+        return TerminalMonitorErrorEssentialFact(
+            capture_policy_fingerprint=policy_fp,
+            requested_action=domain_submission.requested_action,
+            process_id=domain_submission.process_id,
+            monitor_id=domain_submission.monitor_id,
+            status=domain_submission.status,
+            error=_recapture_required_error(domain_submission.error, capture_policy),
+            policy_code=domain_submission.policy_code,
         )
     if isinstance(domain_submission, TerminalProcessErrorDomainSubmissionFact):
         return TerminalProcessErrorEssentialFact(

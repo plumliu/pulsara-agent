@@ -29,6 +29,10 @@ from pulsara_agent.primitives.run_entry import (
     SubagentRunEntryFact,
 )
 from pulsara_agent.primitives.context import ContextEventReferenceFact
+from pulsara_agent.primitives.host_ingress import (
+    HostIngressAdmissionProofFact,
+    HostRunIngressFact,
+)
 from pulsara_agent.primitives.long_horizon import (
     ChildRolloutSubaccountFact,
     RunLongHorizonContractFact,
@@ -151,6 +155,8 @@ class AgentRunDraft:
     prior_messages: tuple[Msg, ...]
     long_horizon: PreparedLongHorizonRunFacts
     run_transcript_seed: Any
+    host_run_ingress: HostRunIngressFact | None
+    host_ingress_admission_proof: HostIngressAdmissionProofFact | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +251,8 @@ async def prepare_agent_run_draft(
     subagent_run_entry: SubagentRunEntryFact | None,
     long_horizon: PreparedLongHorizonRunFacts,
     child_rollout_subaccount: ChildRolloutSubaccountFact | None,
+    host_run_ingress: HostRunIngressFact | None,
+    host_ingress_admission_proof: HostIngressAdmissionProofFact | None,
     prior_messages: list[Msg] | None = None,
 ) -> AgentRunDraft:
     """Freeze one RunStart candidate without granting AgentRuntime commit ownership."""
@@ -362,6 +370,8 @@ async def prepare_agent_run_draft(
         ),
         run_entry_kind=run_entry_kind,
         current_user_message=current_user_message,
+        host_run_ingress=host_run_ingress,
+        host_ingress_admission_proof=host_ingress_admission_proof,
         run_transcript_seed_semantic=prepared_seed.seed_semantic,
         run_transcript_seed_reference=prepared_seed.seed_reference,
         terminal_run_end_event_id=terminal_run_end_event_id,
@@ -387,6 +397,8 @@ async def prepare_agent_run_draft(
         ),
         long_horizon=long_horizon,
         run_transcript_seed=prepared_seed,
+        host_run_ingress=host_run_ingress,
+        host_ingress_admission_proof=host_ingress_admission_proof,
     )
 
 

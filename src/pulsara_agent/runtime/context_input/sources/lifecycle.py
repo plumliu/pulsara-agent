@@ -33,6 +33,7 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeObservationProtocolContractFact,
     RuntimeRequestKindContractFact,
     RuntimeRequestProtocolContractFact,
+    TerminalMonitorObservationProducerFact,
     TranscriptLifecycleObservationProducerFact,
 )
 
@@ -251,7 +252,11 @@ def _context_source_producer(
 
 
 def _kind_policy(kind: str) -> tuple[str, str, str, str, str]:
-    if kind in {"runtime_clock", "lifecycle_observation"}:
+    if kind in {
+        "runtime_clock",
+        "lifecycle_observation",
+        "terminal_process_monitor_observation",
+    }:
         return (
             "runtime_fact",
             "causal_append_once",
@@ -352,6 +357,9 @@ _KIND_PAYLOAD_SCHEMA = {
     "runtime_observation_rewrite_projection": (
         "runtime_observation_rewrite_projection_payload.v2"
     ),
+    "terminal_process_monitor_observation": (
+        "terminal_monitor_runtime_observation_payload.v1"
+    ),
 }
 
 
@@ -373,11 +381,11 @@ def default_runtime_observation_protocol() -> RuntimeObservationProtocolContract
         event_domain_contract_id="pulsara.transcript-lifecycle-observation",
         event_domain_contract_version="1",
         event_domain_contract_fingerprint=context_fingerprint(
-            "transcript-lifecycle-event-domain:v1", "RunEnd+TerminalProcessCompleted"
+            "transcript-lifecycle-event-domain:v2", "RunEnd"
         ),
         supported_source_event_contract_set_fingerprint=context_fingerprint(
-            "transcript-lifecycle-supported-events:v1",
-            ("RunEndEvent", "TerminalProcessCompletedEvent"),
+            "transcript-lifecycle-supported-events:v2",
+            ("RunEndEvent",),
         ),
         reducer_contract_fingerprint=context_fingerprint(
             "transcript-lifecycle-reducer:v1", "typed-causal-append"
@@ -392,6 +400,16 @@ def default_runtime_observation_protocol() -> RuntimeObservationProtocolContract
             "runtime-observation-long-horizon-rewrite:v1", "typed-bounded-proof"
         ),
     )
+    terminal_monitor_producer = build_frozen_fact(
+        TerminalMonitorObservationProducerFact,
+        schema_version="terminal_monitor_observation_producer.v1",
+        observation_contract_id="pulsara.terminal-process-monitor",
+        observation_contract_version="1",
+        observation_contract_fingerprint=context_fingerprint(
+            "terminal-process-monitor-observation-contract:v1",
+            "confirmed-observation-event",
+        ),
+    )
     producers: dict[str, tuple[object, ...]] = {
         kind: tuple(items) for kind, items in source_kind_producers.items()
     }
@@ -401,6 +419,7 @@ def default_runtime_observation_protocol() -> RuntimeObservationProtocolContract
             "compaction_replacement_summary": (rewrite_producer,),
             "long_horizon_rollup_observation": (rewrite_producer,),
             "runtime_observation_rewrite_projection": (rewrite_producer,),
+            "terminal_process_monitor_observation": (terminal_monitor_producer,),
         }
     )
     kind_contracts = []
@@ -472,6 +491,11 @@ def default_runtime_request_protocol() -> RuntimeRequestProtocolContractFact:
             "persist_current_run_canonical_transcript",
             ("current_run",),
         ),
+        "terminal_process_observation": (
+            "current_run_transcript",
+            "persist_current_run_canonical_transcript",
+            ("host_autonomous_run_entry",),
+        ),
         "compaction_request": (
             "one_shot_invocation",
             "invocation_scoped_only",
@@ -509,7 +533,11 @@ def default_runtime_request_protocol() -> RuntimeRequestProtocolContractFact:
             allowed_owner_kinds=values[2],
             payload_schema_version=(
                 "runtime_task_request_payload.v1"
-                if kind in {"subagent_task", "current_run_task"}
+                if kind in {
+                    "subagent_task",
+                    "current_run_task",
+                    "terminal_process_observation",
+                }
                 else "runtime_operation_request_payload.v1"
             ),
             payload_schema_fingerprint=context_fingerprint(

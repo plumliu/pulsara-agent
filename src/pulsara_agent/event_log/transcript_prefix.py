@@ -26,7 +26,6 @@ TRANSCRIPT_SEMANTIC_EVENT_TYPES = frozenset(
         EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED.value,
         EventType.REQUIRE_EXTERNAL_EXECUTION.value,
         EventType.EXTERNAL_EXECUTION_RESULT.value,
-        EventType.TERMINAL_PROCESS_COMPLETED.value,
         EventType.PLAN_EXIT_RESOLVED.value,
         EventType.CONTEXT_COMPACTION_COMPLETED.value,
         EventType.CONTEXT_WINDOW_OPENED.value,

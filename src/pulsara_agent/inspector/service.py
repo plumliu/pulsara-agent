@@ -50,6 +50,13 @@ from pulsara_agent.event import (
     ScopedGenerationPreparationAbandonedEvent,
     SubagentGraphCheckpointCommittedEvent,
     SubagentRunCompletedEvent,
+    TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessMonitorReceiptAppliedEvent,
+    TerminalProcessMonitorRegisteredEvent,
+    TerminalProcessMonitorTerminatedEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
+    ToolResultEndEvent,
     ToolResultTerminalProjectionCommittedEvent,
     TranscriptProjectionCheckpointCancelledEvent,
     TranscriptProjectionCheckpointCommittedEvent,
@@ -196,6 +203,11 @@ class InspectorService:
             self.store,
             session_id=session_id,
         )
+        terminal_monitors = _terminal_monitor_projection(
+            events,
+            runtime_session_id=session_id,
+        )
+        diagnostics.extend(terminal_monitors["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -234,6 +246,7 @@ class InspectorService:
                 "ledger_materialization_account"
             ],
             "memory_governance": governance_projection,
+            "terminal_monitors": terminal_monitors,
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
             "events": _event_summaries(
@@ -349,6 +362,12 @@ class InspectorService:
             context_compilations=context_compilations["contexts"],
         )
         diagnostics.extend(long_horizon["diagnostics"])
+        terminal_monitors = _terminal_monitor_projection(
+            session_events,
+            runtime_session_id=session_id,
+            run_id=run_id,
+        )
+        diagnostics.extend(terminal_monitors["diagnostics"])
 
         return {
             "inspect_kind": "run",
@@ -396,6 +415,7 @@ class InspectorService:
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
             "provider_input_generations": provider_input_generations["generations"],
+            "terminal_monitors": terminal_monitors,
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "subagent_graph": _subagent_graph_projection(
@@ -736,6 +756,214 @@ def _mcp_run_installation_projection(
             if audit is not None
             else None
         ),
+    }
+
+
+def _terminal_monitor_projection(
+    events: Iterable[AgentEvent],
+    *,
+    runtime_session_id: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild terminal-monitor authority from the durable session ledger."""
+
+    from pulsara_agent.runtime.terminal.monitor import TerminalMonitorStore
+    from pulsara_agent.runtime.terminal.notification import (
+        HostIngressNotificationProjectionStore,
+    )
+
+    ordered = tuple(sorted(events, key=lambda item: item.sequence or 0))
+    monitor_related = tuple(
+        event
+        for event in ordered
+        if isinstance(
+            event,
+            (
+                TerminalProcessCompletedEvent,
+                TerminalProcessMonitorRegisteredEvent,
+                TerminalProcessMonitorObservationCommittedEvent,
+                TerminalProcessMonitorReceiptAppliedEvent,
+                TerminalProcessObservationDeliveryDispositionEvent,
+                TerminalProcessMonitorTerminatedEvent,
+                ToolResultEndEvent,
+                RunStartEvent,
+                ModelCallStartEvent,
+            ),
+        )
+    )
+    if not any(
+        isinstance(
+            event,
+            (
+                TerminalProcessCompletedEvent,
+                TerminalProcessMonitorRegisteredEvent,
+                TerminalProcessMonitorObservationCommittedEvent,
+                TerminalProcessObservationDeliveryDispositionEvent,
+                TerminalProcessMonitorTerminatedEvent,
+            ),
+        )
+        for event in monitor_related
+    ):
+        return {
+            "status": "absent",
+            "through_sequence": max(
+                (item.sequence or 0 for item in ordered), default=0
+            ),
+            "registrations": [],
+            "receipts": [],
+            "receipt_applications": [],
+            "delivery_dispositions": [],
+            "run_ingresses": [],
+            "notification_projection": None,
+            "notification_account": None,
+            "diagnostics": [],
+        }
+    diagnostics: list[dict[str, Any]] = []
+    try:
+        monitor_store = TerminalMonitorStore(
+            ordered,
+            runtime_session_id=runtime_session_id,
+            retain_terminal_history=True,
+        )
+        notification_store = HostIngressNotificationProjectionStore(
+            ordered,
+            runtime_session_id=runtime_session_id,
+        )
+    except Exception as exc:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "terminal_monitor_exact_replay_failed",
+                "message": "Terminal monitor durable projection could not be rebuilt.",
+                "details": {
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:512],
+                },
+            }
+        )
+        return {
+            "status": "authority_untrusted",
+            "through_sequence": max(
+                (item.sequence or 0 for item in ordered), default=0
+            ),
+            "registrations": [],
+            "receipts": [],
+            "receipt_applications": [],
+            "delivery_dispositions": [],
+            "run_ingresses": [],
+            "notification_projection": None,
+            "notification_account": None,
+            "diagnostics": diagnostics,
+        }
+
+    records = tuple(
+        record
+        for record in monitor_store.snapshots()
+        if run_id is None or record.registration_event.run_id == run_id
+    )
+    receipts = tuple(
+        event
+        for event in ordered
+        if isinstance(event, ToolResultEndEvent)
+        and event.terminal_process_observation_receipt is not None
+        and (run_id is None or event.run_id == run_id)
+    )
+    dispositions = tuple(
+        event
+        for event in ordered
+        if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        and (run_id is None or event.run_id == run_id)
+    )
+    receipt_applications = tuple(
+        event
+        for event in ordered
+        if isinstance(event, TerminalProcessMonitorReceiptAppliedEvent)
+        and (run_id is None or event.run_id == run_id)
+    )
+    ingresses = tuple(
+        event
+        for event in ordered
+        if isinstance(event, RunStartEvent)
+        and event.host_run_ingress is not None
+        and (run_id is None or event.run_id == run_id)
+    )
+    return {
+        "status": "exact_replay",
+        "through_sequence": monitor_store.through_sequence,
+        "registrations": [
+            {
+                "monitor_id": record.registration_event.registration_semantic.monitor_id,
+                "registration_event_id": record.registration_event.id,
+                "registration_sequence": record.registration_event.sequence,
+                "process_id": (
+                    record.registration_event.registration_semantic.initial_baseline_cursor.stream_identity.process_id
+                ),
+                "origin_run_id": record.registration_event.run_id,
+                "owner_host_session_id": (
+                    record.registration_event.registration_attribution.owner_host_session_id
+                ),
+                "wake_chain_id": (
+                    record.registration_event.registration_attribution.wake_chain.wake_chain_id
+                ),
+                "permission_authority": record.registration_event.registration_attribution.permission_authority.model_dump(
+                    mode="json"
+                ),
+                "core_state": record.core_state.model_dump(mode="json"),
+                "pending_observation_event_id": (
+                    record.pending_observation_event.id
+                    if record.pending_observation_event is not None
+                    else None
+                ),
+                "latest_observation_event_id": (
+                    record.latest_observation_event.id
+                    if record.latest_observation_event is not None
+                    else None
+                ),
+                "termination_event_id": (
+                    record.latest_termination_event.id
+                    if record.latest_termination_event is not None
+                    else None
+                ),
+            }
+            for record in records
+        ],
+        "receipts": [
+            {
+                "tool_result_end_event_id": event.id,
+                "sequence": event.sequence,
+                "receipt": event.terminal_process_observation_receipt.model_dump(
+                    mode="json"
+                ),
+            }
+            for event in receipts
+            if event.terminal_process_observation_receipt is not None
+        ],
+        "receipt_applications": [
+            event.model_dump(mode="json") for event in receipt_applications
+        ],
+        "delivery_dispositions": [
+            event.model_dump(mode="json") for event in dispositions
+        ],
+        "run_ingresses": [
+            {
+                "run_start_event_id": event.id,
+                "sequence": event.sequence,
+                "ingress": event.host_run_ingress.model_dump(mode="json"),
+                "admission_proof": event.host_ingress_admission_proof.model_dump(
+                    mode="json"
+                ),
+            }
+            for event in ingresses
+            if event.host_run_ingress is not None
+            and event.host_ingress_admission_proof is not None
+        ],
+        "notification_projection": notification_store.projection_snapshot().model_dump(
+            mode="json"
+        ),
+        "notification_account": notification_store.account_snapshot().model_dump(
+            mode="json"
+        ),
+        "diagnostics": diagnostics,
     }
 
 

@@ -24,7 +24,6 @@ from pulsara_agent.event import (
     EventContext,
     LedgerMaterializationConsumerHorizonAdvancedEvent,
     PlanExitResolvedEvent,
-    TerminalProcessCompletedEvent,
 )
 from pulsara_agent.event_log import (
     InMemoryEventLog,
@@ -1842,21 +1841,21 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         previous_checkpoint_id=None,
         previously_reachable_artifact_ids=frozenset(),
     )
+    from pulsara_agent.event import RunEndEvent
+
+    def transcript_entry_event(*, ordinal: int) -> RunEndEvent:
+        return RunEndEvent(
+            id=f"run_end:checkpoint-fallback:{ordinal}",
+            **context.event_fields(),
+            status="failed",
+            stop_reason="model_error",
+            terminalization_kind="execution_failure",
+            error_message=f"checkpoint fallback failure {ordinal}",
+        )
+
     lifecycle = coordinator.commit_one_shot_operation(
         context=context,
-        business_events=(
-            TerminalProcessCompletedEvent(
-                id="terminal_process_completed:checkpoint-fallback",
-                **context.event_fields(),
-                process_id="process:checkpoint-fallback",
-                terminal_session_id="terminal:checkpoint-fallback",
-                command="pytest -q",
-                status="success",
-                exit_code=0,
-                cwd="/workspace",
-                duration_seconds=1.0,
-            ),
-        ),
+        business_events=(transcript_entry_event(ordinal=1),),
         reservation_id="reservation:checkpoint-fallback-lifecycle",
         owner_id="owner:checkpoint-fallback-lifecycle",
         burst_contract=contracts.burst_registry.unique_binding_for_operation(
@@ -1912,19 +1911,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
 
     later = coordinator.commit_one_shot_operation(
         context=context,
-        business_events=(
-            TerminalProcessCompletedEvent(
-                id="terminal_process_completed:checkpoint-fallback-later",
-                **context.event_fields(),
-                process_id="process:checkpoint-fallback-later",
-                terminal_session_id="terminal:checkpoint-fallback",
-                command="pytest tests/test_authority_materialization_contract.py -q",
-                status="success",
-                exit_code=0,
-                cwd="/workspace",
-                duration_seconds=2.0,
-            ),
-        ),
+        business_events=(transcript_entry_event(ordinal=2),),
         reservation_id="reservation:checkpoint-fallback-later",
         owner_id="owner:checkpoint-fallback-later",
         burst_contract=contracts.burst_registry.unique_binding_for_operation(

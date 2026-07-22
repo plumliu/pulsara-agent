@@ -308,6 +308,34 @@ class RawTranscriptDomainPrefixFact:
 
 
 @dataclass(frozen=True, slots=True)
+class RawRuntimeProjectionCheckpoint:
+    projection_kind: str
+    through_sequence: int
+    projection_schema_version: str
+    ledger_prefix: RawTranscriptDomainPrefixFact
+    validation_base_through_sequence: int
+    validation_base_state_payload: dict[str, Any]
+    state_payload: dict[str, Any]
+    payload_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.projection_kind or not self.projection_schema_version:
+            raise ValueError("runtime projection checkpoint identity is required")
+        if self.through_sequence < 0:
+            raise ValueError("runtime projection checkpoint sequence is invalid")
+        if self.ledger_prefix.through_sequence != self.through_sequence:
+            raise ValueError(
+                "runtime projection checkpoint ledger prefix is not exact"
+            )
+        if not 0 <= self.validation_base_through_sequence <= self.through_sequence:
+            raise ValueError(
+                "runtime projection checkpoint validation base is invalid"
+            )
+        if not self.payload_fingerprint.startswith("sha256:"):
+            raise ValueError("runtime projection checkpoint fingerprint is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class RawTranscriptDomainDeltaSnapshot:
     runtime_session_id: str
     before: RawTranscriptDomainPrefixFact
@@ -814,6 +842,20 @@ class EventLog(Protocol):
         *,
         deadline_monotonic: float | None = None,
     ) -> LedgerMaterializationAccountStateFact | None: ...
+
+    def read_runtime_projection_checkpoint(
+        self,
+        projection_kind: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawRuntimeProjectionCheckpoint | None: ...
+
+    def write_runtime_projection_checkpoint(
+        self,
+        checkpoint: RawRuntimeProjectionCheckpoint,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None: ...
 
     def extend_with_materialization_state(
         self,

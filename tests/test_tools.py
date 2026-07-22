@@ -10,6 +10,7 @@ from tests.support.runtime_session import in_memory_runtime_session
 from pulsara_agent.event import (
     EventContext,
     TerminalProcessCompletedEvent,
+    TerminalProcessMonitorRegisteredEvent,
     ToolResultEndEvent,
     ToolResultTextDeltaEvent,
 )
@@ -33,6 +34,9 @@ from pulsara_agent.runtime.tool_artifacts import (
 )
 from pulsara_agent.runtime.tool_execution import build_tool_result_terminal_event
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
+from pulsara_agent.primitives.terminal_observation import (
+    ArtifactTerminalObservationCoverageFact,
+)
 from pulsara_agent.tools import (
     ToolCall,
     ToolExecutionResult,
@@ -134,9 +138,41 @@ def _commit_prepared_terminal(
         event_context=CTX,
         prepared=prepared,
     )
-    events = asyncio.run(
-        runtime_session.tool_terminal_projection_service.prepare_batch((candidate,))
+    registration = prepared.prepared_terminal_monitor_registration
+    cancellation = prepared.prepared_terminal_monitor_cancellation
+    source_candidates = (
+        *(cancellation.stable_candidates if cancellation is not None else ()),
+        candidate,
+        *((registration.registered_event,) if registration is not None else ()),
     )
+    events = asyncio.run(
+        runtime_session.tool_terminal_projection_service.prepare_batch(
+            source_candidates
+        )
+    )
+    committed_terminal = next(
+        event for event in events if isinstance(event, ToolResultEndEvent)
+    )
+    reservation = prepared.prepared_terminal_notification_reservation
+    if reservation is not None:
+        committed_registration = next(
+            (
+                event
+                for event in events
+                if isinstance(event, TerminalProcessMonitorRegisteredEvent)
+            ),
+            None,
+        )
+        reservation_event = runtime_session.terminal_notification_account_coordinator.freeze_created_event(
+            prepared=reservation,
+            cause_events=tuple(
+                event
+                for event in (committed_terminal, committed_registration)
+                if event is not None
+            ),
+            registration_event=committed_registration,
+        )
+        events = (*events, reservation_event)
     committed = runtime_session.write_events_from_thread(events).committed_events
     return next(event for event in committed if isinstance(event, ToolResultEndEvent))
 
@@ -218,12 +254,16 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
         "read_file",
         "search_files",
         "terminal",
+        "terminal_monitor",
         "terminal_process",
         "todo",
         "write_file",
     ]
     assert [spec.name for spec in registry.tool_specs()] == registry.names()
-    assert all(spec.parameters["type"] == "object" for spec in registry.tool_specs())
+    assert all(
+        spec.parameters.get("type") == "object" or "oneOf" in spec.parameters
+        for spec in registry.tool_specs()
+    )
     assert not any(name.startswith("remember_") for name in registry.names())
     assert "propose_memory" not in registry.names()
 
@@ -783,53 +823,21 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
     assert logged.metadata["timing"] == log_payload["timing"]
 
 
-def test_terminal_process_wait_without_timeout_uses_finite_default(
-    monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setattr(
-        "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
-        1,
-    )
-    registry = make_registry(tmp_path)
-    executor = ToolExecutor(registry=registry)
-
-    start = executor.execute(
-        ToolCall(
-            id="call:terminal",
-            name="terminal",
-            arguments={"command": "sleep 5", "yield_time_ms": 0},
-        ),
-        event_context=CTX,
-    )
-    process_id = json.loads(start.output)["process_id"]
-    wait = executor.execute(
-        ToolCall(
-            id="call:wait",
-            name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id},
-        ),
-        event_context=CTX,
-    )
-    kill = executor.execute(
-        ToolCall(
-            id="call:kill",
-            name="terminal_process",
-            arguments={"action": "kill", "process_id": process_id},
-        ),
-        event_context=CTX,
+def test_terminal_process_wait_without_timeout_uses_finite_default() -> None:
+    from pulsara_agent.terminal_public_api import (
+        TerminalProcessWaitInput,
+        parse_terminal_process_input,
     )
 
-    assert json.loads(wait.output)["status"] == "running"
-    assert json.loads(kill.output)["status"] == "killed"
-
-
-def test_terminal_process_wait_zero_timeout_uses_finite_default(
-    monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setattr(
-        "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
-        1,
+    parsed = parse_terminal_process_input(
+        {"action": "wait", "process_id": "process:test"}
     )
+
+    assert isinstance(parsed, TerminalProcessWaitInput)
+    assert parsed.timeout_seconds == 30
+
+
+def test_terminal_process_wait_zero_timeout_is_rejected(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
@@ -856,9 +864,9 @@ def test_terminal_process_wait_zero_timeout_uses_finite_default(
     )
     payload = json.loads(wait.output)
 
-    assert wait.status is ToolResultState.SUCCESS
-    assert payload["status"] == "success"
-    assert payload["output"] == "done"
+    assert wait.status is ToolResultState.ERROR
+    assert payload["status"] == "malformed_arguments"
+    assert payload["policy_code"] == "terminal_process_malformed_arguments"
 
 
 def test_terminal_removed_background_arguments_are_hard_cut(tmp_path) -> None:
@@ -959,7 +967,7 @@ def test_terminal_max_output_chars_tiny_value_is_floored(tmp_path) -> None:
     assert payload["truncated"] is True
 
 
-def test_terminal_process_max_output_chars_tiny_value_is_floored(tmp_path) -> None:
+def test_terminal_process_max_output_chars_tiny_value_is_rejected(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
@@ -987,11 +995,9 @@ def test_terminal_process_max_output_chars_tiny_value_is_floored(tmp_path) -> No
     )
     payload = json.loads(wait.output)
 
-    assert wait.status is ToolResultState.SUCCESS
-    assert payload["status"] == "success"
-    assert payload["output"].startswith("p" * 100)
-    assert "OUTPUT TRUNCATED" in payload["output"]
-    assert payload["truncated"] is True
+    assert wait.status is ToolResultState.ERROR
+    assert payload["status"] == "malformed_arguments"
+    assert payload["policy_code"] == "terminal_process_malformed_arguments"
 
 
 def test_terminal_shell_background_wrapper_returns_guidance(tmp_path) -> None:
@@ -1883,10 +1889,15 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
                 "action": "wait",
                 "process_id": process_id,
                 "timeout_seconds": 5,
-                "max_output_chars": 200,
+                "max_output_chars": 512,
             },
         ),
         event_context=CTX,
+    )
+    assert waited.terminal_process_observation_receipt is not None
+    assert isinstance(
+        waited.terminal_process_observation_receipt.observation_semantic.output_coverage,
+        ArtifactTerminalObservationCoverageFact,
     )
     _commit_prepared_terminal(runtime_session, waited)
     logged = executor.execute(
@@ -1896,7 +1907,7 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
             arguments={
                 "action": "log",
                 "process_id": process_id,
-                "max_output_chars": 200,
+                "max_output_chars": 512,
             },
         ),
         event_context=CTX,

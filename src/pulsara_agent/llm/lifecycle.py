@@ -14,9 +14,13 @@ from typing import TYPE_CHECKING, Literal
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    ModelCallStartEvent,
     ProviderInputAppendCommittedEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
+    TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
 )
 from pulsara_agent.llm.control_contract import (
     build_model_call_control_downstream_contract,
@@ -44,6 +48,9 @@ from pulsara_agent.primitives.run_boundary import (
     ModelStreamRecoveryPlanFact,
     RunExecutionActivationFact,
 )
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives.host_ingress import HostActiveRunMonitorDeliveryFact
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.request import LLMContext
@@ -80,6 +87,10 @@ class ModelLifecycleStartCommitBundle:
     companion_candidates: tuple[FrozenEventWriteCandidate, ...]
     governance_input_attribution: GovernanceModelInputAttributionFact | None
     provider_input_start_bundle: PreparedProviderInputStartBundle | None
+    active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None
+    active_run_monitor_source_event_references: tuple[
+        ContextEventReferenceFact, ...
+    ]
     bundle_fingerprint: str
 
     @property
@@ -120,6 +131,10 @@ def prepare_model_lifecycle_start_bundle(
     prepared_rollout_reservation: PreparedModelRolloutReservation | None = None,
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None,
     provider_input_start_bundle: PreparedProviderInputStartBundle | None = None,
+    active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None,
+    active_run_monitor_source_event_references: tuple[
+        ContextEventReferenceFact, ...
+    ] = (),
 ) -> ModelLifecycleStartCommitBundle:
     """Freeze estimate-only lifecycle facts without starting provider I/O."""
 
@@ -191,6 +206,10 @@ def prepare_model_lifecycle_start_bundle(
         companion_candidates=frozen_companions,
         governance_input_attribution=governance_input_attribution,
         provider_input_start_bundle=provider_input_start_bundle,
+        active_run_monitor_delivery=active_run_monitor_delivery,
+        active_run_monitor_source_event_references=(
+            active_run_monitor_source_event_references
+        ),
     )
     bundle = ModelLifecycleStartCommitBundle(
         **payload,
@@ -384,6 +403,51 @@ def validate_model_lifecycle_start_bundle(
             context=context,
             plan=prepared.provider_input_plan,
         )
+    delivery = bundle.active_run_monitor_delivery
+    source_refs = bundle.active_run_monitor_source_event_references
+    if (delivery is None) != (not source_refs):
+        raise ValueError("active-run monitor delivery/source matrix mismatch")
+    if delivery is not None:
+        if not main or provider_bundle is None:
+            raise ValueError(
+                "active-run monitor delivery requires a compiled main lifecycle"
+            )
+        append_event = next(
+            event
+            for event in provider_bundle.companion_events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        )
+        attachment_refs = tuple(
+            sorted(
+                {
+                    (ref.runtime_session_id, ref.sequence, ref.event_id): ref
+                    for attachment in append_event.runtime_observation_units
+                    if attachment.source_attribution.producer.producer_kind
+                    == "terminal_monitor"
+                    for ref in attachment.source_attribution.source_event_references
+                }.values(),
+                key=lambda item: (
+                    item.runtime_session_id,
+                    item.sequence,
+                    item.event_id,
+                ),
+            )
+        )
+        attachment_keys = {
+            (item.runtime_session_id, item.sequence, item.event_id)
+            for item in attachment_refs
+        }
+        source_keys = {
+            (item.runtime_session_id, item.sequence, item.event_id)
+            for item in source_refs
+        }
+        if (
+            len(source_refs) != len(delivery.ordered_attachment_fingerprints)
+            or not source_keys.issubset(attachment_keys)
+        ):
+            raise ValueError(
+                "active-run monitor delivery/provider observation refs drifted"
+            )
     governance = call.fact.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
     if governance != (bundle.governance_input_attribution is not None):
         raise ValueError("governance model lifecycle attribution matrix mismatch")
@@ -409,6 +473,10 @@ def validate_model_lifecycle_start_bundle(
         companion_candidates=bundle.companion_candidates,
         governance_input_attribution=bundle.governance_input_attribution,
         provider_input_start_bundle=bundle.provider_input_start_bundle,
+        active_run_monitor_delivery=bundle.active_run_monitor_delivery,
+        active_run_monitor_source_event_references=(
+            bundle.active_run_monitor_source_event_references
+        ),
     )
     expected = context_fingerprint(
         "model-lifecycle-start-bundle:v1",
@@ -586,6 +654,10 @@ def _bundle_payload(
     companion_candidates: tuple[FrozenEventWriteCandidate, ...],
     governance_input_attribution: GovernanceModelInputAttributionFact | None,
     provider_input_start_bundle: PreparedProviderInputStartBundle | None,
+    active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None,
+    active_run_monitor_source_event_references: tuple[
+        ContextEventReferenceFact, ...
+    ],
 ) -> dict[str, object]:
     return {
         "resolved_model_call_id": call_id,
@@ -602,7 +674,71 @@ def _bundle_payload(
         "companion_candidates": companion_candidates,
         "governance_input_attribution": governance_input_attribution,
         "provider_input_start_bundle": provider_input_start_bundle,
+        "active_run_monitor_delivery": active_run_monitor_delivery,
+        "active_run_monitor_source_event_references": (
+            active_run_monitor_source_event_references
+        ),
     }
+
+
+def build_active_run_monitor_start_companions(
+    *,
+    bundle: ModelLifecycleStartCommitBundle,
+    start_event: ModelCallStartEvent,
+    runtime_session: RuntimeSession,
+) -> tuple[AgentEvent, ...]:
+    delivery = bundle.active_run_monitor_delivery
+    if delivery is None:
+        return ()
+    references = bundle.active_run_monitor_source_event_references
+    disposition = TerminalProcessObservationDeliveryDispositionEvent(
+        id=context_fingerprint(
+            "terminal-monitor-safe-point-disposition-id:v1",
+            (start_event.id, tuple(item.event_id for item in references)),
+        ).replace("sha256:", "terminal_notification_disposition:"),
+        run_id=start_event.run_id,
+        turn_id=start_event.turn_id,
+        reply_id=start_event.reply_id,
+        observation_source_references=references,
+        outcome="active_run_safe_point",
+        model_call_start_event_identity=stable_event_identity(
+            start_event,
+            runtime_session_id=runtime_session.runtime_session_id,
+        ),
+        autonomy_delivery=delivery.autonomy_delivery,
+    )
+    source_events = tuple(
+        runtime_session.event_log.get_by_id(item.event_id) for item in references
+    )
+    if any(item is None for item in source_events):
+        raise ValueError("active-run monitor source event cannot be hydrated")
+    terminal_process_ids: set[str] = set()
+    for source in source_events:
+        if isinstance(source, TerminalProcessCompletedEvent):
+            terminal_process_ids.add(source.process_id)
+        elif isinstance(source, TerminalProcessMonitorObservationCommittedEvent):
+            if source.observation.observation_kind != "process_completed":
+                continue
+            output = source.observation.output_authority
+            cursor = getattr(output, "end_cursor", None) or getattr(
+                output, "terminal_cursor", None
+            )
+            if cursor is None:
+                raise ValueError("terminal monitor completion lacks output cursor")
+            terminal_process_ids.add(cursor.stream_identity.process_id)
+    release_ids = tuple(
+        f"terminal_completion_head:{process_id}"
+        for process_id in sorted(terminal_process_ids)
+    )
+    releases = (
+        runtime_session.terminal_notification_account_coordinator.freeze_released_events(
+            reservation_ids=release_ids,
+            cause_events=(disposition,),
+        )
+        if release_ids
+        else ()
+    )
+    return disposition, *releases
 
 
 def _bundle_fingerprint_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -638,6 +774,7 @@ __all__ = [
     "ModelLifecycleKind",
     "ModelLifecycleStartCommitBundle",
     "PreparedModelRolloutReservation",
+    "build_active_run_monitor_start_companions",
     "prepare_model_lifecycle_start_bundle",
     "prepare_model_rollout_reservation",
     "validate_model_lifecycle_start_bundle",

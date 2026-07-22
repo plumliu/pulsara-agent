@@ -367,3 +367,11 @@ retry-stable operation owner。
 
 Long-Horizon rollover展示observation rewrite的source active/protected/eligible counts、stable-state/partition/coverage/projection roots、parent authority与resulting effective heads。Provider reported
 cached input只作为operation observation展示，并同时显示generation/revision/prefix和rollover reason；不能把cache usage冒充authority或用它修正历史projection。
+
+---
+
+## 17. Terminal monitor projection
+
+Inspector从session ledger exact重建每个monitor的registration、policy、双cursor、observation ordinal、progress limiter、lifecycle state、pending observation、termination和delivery disposition；同时展示notification account余额、process heads、reservation acquire/release与Host run ingress/admission proof。`pending_count`由heads重算，autonomous eligibility按当前selection policy展示为观察结果，不作为durable head字段。
+
+UI `x.pulsara/terminal_monitor_event`是bounded operational stream，不是authority。它提供stream reconnect cursor、retained replay和显式gap；slow/detached subscriber只能丢自己的窗口，不得阻塞journal、monitor writer或模型delivery。Inspector不得从UI stream补造durable observation，也不得在spool range缺失时显示伪造output delta。

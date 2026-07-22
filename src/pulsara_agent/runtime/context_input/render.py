@@ -362,11 +362,7 @@ def apply_tool_observation_projection(
 ) -> PreparedToolResultRenderOutput:
     """Render the exact representation selected by the durable projection."""
 
-    if not (
-        len(units)
-        == len(rendered.fragments)
-        == len(rendered.canonical_decisions)
-    ):
+    if not (len(units) == len(rendered.fragments) == len(rendered.canonical_decisions)):
         raise ValueError("projection render input cardinality mismatch")
     projections = {item.unit_id: item for item in projection_state.unit_projections}
     projected_fragments: list[RenderedToolResultFragment] = []
@@ -390,7 +386,8 @@ def apply_tool_observation_projection(
             projection.source_rollup_id is None
             and projection.rendered_fragment_fingerprint
             == fragment.rendered_text_fingerprint
-            and projection.estimated_tokens == token_estimator.estimate_text(fragment.text)
+            and projection.estimated_tokens
+            == token_estimator.estimate_text(fragment.text)
         ):
             projected_fragment, projected_decision = fragment, decision
         else:
@@ -462,9 +459,9 @@ def render_tool_result_projection_variant(
         if source_rollup_id is not None:
             raise ValueError("full projection cannot reference a rollup")
         return base_fragment, base_decision
-    if (
-        representation is ToolObservationRepresentation.ROLLUP_MEMBER
-    ) != (source_rollup_id is not None):
+    if (representation is ToolObservationRepresentation.ROLLUP_MEMBER) != (
+        source_rollup_id is not None
+    ):
         raise ValueError("rollup-member projection requires exact rollup identity")
 
     observation = _observation_payload(unit)
@@ -815,9 +812,7 @@ class _TypedToolResultAllocator:
             "latest_reserved_applied": False,
             "latest_reserved_reason": ToolResultLatestReserveReasonCode.NOT_LATEST,
             "visible_body_chars": visible_body,
-            "rendered_tool_observation": (
-                rendered_observation
-            ),
+            "rendered_tool_observation": (rendered_observation),
             "observation_timing_policy": (
                 "full" if rendered_observation is not None else "omitted"
             ),
@@ -1015,10 +1010,14 @@ def _render_unit_payload(
                 primary_artifact_id=primary_artifact_id,
             )
         )
-        if policy in {
-            ToolResultEnvelopePolicy.MINIMAL,
-            ToolResultEnvelopePolicy.OMITTED,
-        } and len(rendered) > envelope_allowed:
+        if (
+            policy
+            in {
+                ToolResultEnvelopePolicy.MINIMAL,
+                ToolResultEnvelopePolicy.OMITTED,
+            }
+            and len(rendered) > envelope_allowed
+        ):
             # Once the preview body has been dropped its former body allowance
             # cannot be reclassified as envelope budget.
             rendered, policy, observation_included, terminal_timing_included = (
@@ -1102,13 +1101,21 @@ def _essential_envelope(
         raw["error_truncated"] = bool(error.get("truncated"))
         raw["error_original_chars"] = int(error.get("original_chars") or 0)
     action = raw.pop("action", None)
+    if essential.kind == "terminal_monitor_error":
+        action = raw.get("requested_action")
     if essential.kind.startswith("terminal_process") and action is not None:
         raw["terminal_process_action"] = action
+    if essential.kind.startswith("terminal_monitor") and action is not None:
+        raw["terminal_monitor_action"] = action
     if "output_truncated" in raw:
         raw["truncated"] = raw.pop("output_truncated")
     if "process_summaries" in raw:
         raw["processes_summary"] = raw.pop("process_summaries")
-    if "summaries_truncated" in raw:
+    if "monitor_summaries" in raw:
+        raw["monitors_summary"] = raw.pop("monitor_summaries")
+    if "summaries_truncated" in raw and essential.kind == "terminal_monitor_inventory":
+        raw["monitors_summary_truncated"] = raw.pop("summaries_truncated")
+    elif "summaries_truncated" in raw:
         raw["processes_summary_truncated"] = raw.pop("summaries_truncated")
     payload: dict[str, object] = {
         "output_preview": (
@@ -1148,7 +1155,9 @@ def _projection_envelope_payload(
         payload["projection"] = "essential"
     elif representation is ToolObservationRepresentation.ARTIFACT_LOCATOR:
         if primary is None:
-            raise ValueError("artifact-locator projection requires primary text artifact")
+            raise ValueError(
+                "artifact-locator projection requires primary text artifact"
+            )
         payload = {
             "projection": "artifact_locator",
             "status": unit.result_state.value,
@@ -1207,9 +1216,7 @@ def _projected_render_decision(
             "observation_timing_policy": "full",
             "rendered_terminal_payload_timing": unit.terminal_payload_timing,
             "terminal_payload_timing_policy": (
-                "not_applicable"
-                if unit.terminal_payload_timing is None
-                else "full"
+                "not_applicable" if unit.terminal_payload_timing is None else "full"
             ),
             "rendered_header_chars": len(
                 _tool_result_header(
@@ -1224,11 +1231,11 @@ def _projected_render_decision(
             "payload_preserved": False,
             "payload_format": ToolResultPayloadFormat.JSON,
             "body_budget_remaining": max(0, base.original_chars - visible_body),
-            "message_body_budget_remaining": max(
-                0, base.message_body_budget_remaining
-            ),
+            "message_body_budget_remaining": max(0, base.message_body_budget_remaining),
             "envelope_budget_remaining": max(
-                0, base.rendered_envelope_chars + base.envelope_budget_remaining
+                0,
+                base.rendered_envelope_chars
+                + base.envelope_budget_remaining
                 - rendered_envelope,
             ),
             "primary_artifact_id": primary.artifact_id if primary else None,
@@ -1283,9 +1290,7 @@ def _projection_render_report(
         "projection": {
             "window_id": projection_state.window_id,
             "generation": projection_state.projection_generation,
-            "state_semantic_fingerprint": (
-                projection_state.state_semantic_fingerprint
-            ),
+            "state_semantic_fingerprint": (projection_state.state_semantic_fingerprint),
             "representations": {
                 representation.value: sum(
                     item.representation is representation
@@ -1352,7 +1357,9 @@ def _fit_envelope(
     for key in (
         "exit_code",
         "process_id",
+        "monitor_id",
         "terminal_process_action",
+        "terminal_monitor_action",
         "error",
     ):
         if key in payload:

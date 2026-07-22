@@ -266,3 +266,11 @@ subagent task进入child canonical transcript后必须保留request kind、owner
 Lifecycle observation只由原RunEnd、TerminalProcess或registered source event派生；不新增第二个business event。Invocation classification、provider vector ordinal与
 artifact locator只属于attribution，不得改变stable transcript/provider wire semantic。`working_context|mixed` summary不是memory transcript source；V1近期活动只来自
 canonical transcript或confirmed Long-Horizon projection。
+
+---
+
+## 12. Terminal lifecycle与monitor可见投影
+
+`TerminalProcessCompletedEvent`只属于lifecycle authority，不直接追加模型可见completion note，也不进入transcript semantic accumulator。模型可见的terminal事实只能由以下一个owner投影：显式`poll/log/wait` ToolResult receipt、monitor observation attachment，或下一次human run携带的unmonitored completion attachment。Matching receipt/monitor delivery必须有durable disposition，禁止同一completion重复进入provider input。
+
+Progress observation最多一个pending；completion可supersede progress，但最终output range必须从`last_consumed_cursor`开始，不能从仅已落盘、尚未交付的`last_observation_cursor`开始。Receipt只有在visible/artifact range完整覆盖pending的available-start到end，并在completion分支同时join相同typed lifecycle outcome时，才可消费notification。Running receipt不得消费completion。

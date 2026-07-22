@@ -30,6 +30,7 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeRequestKind,
     RuntimeRequestWireSemanticFact,
     RuntimeTaskRequestPayloadFact,
+    TerminalMonitorRuntimeObservationPayloadFact,
     TranscriptLifecycleObservationPayloadFact,
 )
 
@@ -535,6 +536,54 @@ def encode_runtime_observation(
     )
 
 
+def terminal_monitor_observation_payload(
+    *,
+    process_id: str,
+    monitor_id: str | None,
+    observation_kind: str,
+    source_semantic_fingerprint: str,
+    model_visible_content: str,
+) -> TerminalMonitorRuntimeObservationPayloadFact:
+    content = unicodedata.normalize("NFC", model_visible_content)
+    content_bytes = content.encode("utf-8")
+    return build_frozen_fact(
+        TerminalMonitorRuntimeObservationPayloadFact,
+        schema_version="terminal_monitor_runtime_observation_payload.v1",
+        payload_kind="terminal_monitor",
+        process_id=process_id,
+        monitor_id=monitor_id,
+        observation_kind=observation_kind,
+        source_semantic_fingerprint=source_semantic_fingerprint,
+        model_visible_content=content,
+        content_utf8_sha256=_sha256(content_bytes),
+        content_utf8_bytes=len(content_bytes),
+    )
+
+
+def canonical_runtime_observation_wire_from_semantic(
+    semantic: RuntimeObservationWireSemanticFact,
+) -> str:
+    """Reconstruct the exact canonical wire owned by a durable semantic fact."""
+
+    body: dict[str, object] = {
+        "authority_class": semantic.authority_class,
+        "kind": semantic.observation_kind,
+        "lifecycle": semantic.lifecycle_class,
+        "observation_semantic_id": semantic.observation_semantic_id,
+        "payload": _runtime_observation_payload_wire(semantic.payload),
+        "protocol_version": semantic.protocol_version,
+        "source_instance_id": semantic.source_instance_id,
+    }
+    wire = canonical_user_carrier_json({RUNTIME_OBSERVATION_ENVELOPE_KEY: body})
+    encoded = wire.encode("utf-8")
+    if (
+        _sha256(encoded) != semantic.canonical_wire_utf8_sha256
+        or len(encoded) != semantic.canonical_wire_utf8_bytes
+    ):
+        raise ValueError("runtime observation semantic/wire identity drifted")
+    return wire
+
+
 def validate_provider_user_carrier_text(text: str) -> str:
     try:
         value = json.loads(text)
@@ -900,6 +949,9 @@ _RUNTIME_OBSERVATION_PAYLOAD_TYPES = {
     "runtime_observation_rewrite_projection_payload.v2": (
         RuntimeObservationRewriteProjectionPayloadFact
     ),
+    "terminal_monitor_runtime_observation_payload.v1": (
+        TerminalMonitorRuntimeObservationPayloadFact
+    ),
 }
 
 
@@ -976,6 +1028,8 @@ def _validate_runtime_observation_payload_binding(
         expected_kind = payload.derivation_kind
     elif isinstance(payload, RuntimeObservationRewriteProjectionPayloadFact):
         expected_kind = "runtime_observation_rewrite_projection"
+    elif isinstance(payload, TerminalMonitorRuntimeObservationPayloadFact):
+        expected_kind = "terminal_process_monitor_observation"
     else:  # pragma: no cover - closed typed union
         raise TypeError("unsupported runtime observation payload fact")
     if observation_kind != expected_kind:
@@ -1062,6 +1116,7 @@ __all__ = [
     "RUNTIME_REQUEST_ENVELOPE_KEY",
     "USER_CARRIER_ENVELOPE_KEYS",
     "canonical_user_carrier_json",
+    "canonical_runtime_observation_wire_from_semantic",
     "compose_provider_root_policy",
     "context_source_observation_payload",
     "derived_text_runtime_observation_payload",
@@ -1075,6 +1130,7 @@ __all__ = [
     "replace_runtime_observation_predecessor",
     "runtime_clock_observation_payload",
     "runtime_observation_rewrite_projection_payload",
+    "terminal_monitor_observation_payload",
     "runtime_observation_wire_body",
     "transcript_lifecycle_observation_payload",
     "validate_provider_user_carrier_messages",

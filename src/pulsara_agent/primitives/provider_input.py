@@ -1038,6 +1038,7 @@ class ProviderInputUnitSemanticFact(FrozenFactBase):
         "tool_catalog",
         "rollup_observation",
         "recovery_observation",
+        "terminal_monitor_observation",
         "runtime_observation_rewrite",
     ]
     provider_content_semantic_fingerprint: Fingerprint

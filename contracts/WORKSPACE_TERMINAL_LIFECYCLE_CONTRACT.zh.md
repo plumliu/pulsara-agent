@@ -283,3 +283,11 @@ OPEN -> CLOSING -> CLOSED
 ### 11.3 由 real LLM dogfood 守护（本契约不强制其在 CI 通过）
 
 - 两个 HostSession 在同一 workspace 各跑长任务、各自只能操作自己的 process；关闭一个 conversation 后另一个任务仍可被模型继续操作；workspace close 后旧 process id 不可用；pending approval 时 host close 不留可恢复但无 owner 的悬空 run；HostCore shutdown 后 resume 被拒绝。
+
+---
+
+## 12. Terminal journal、monitor与Host close
+
+每个managed process使用`SanitizedOutputJournal`作为唯一output authority：内存segment、disk spool、sanitized cursor和successfully-spooled cursor均有独立bound。Spool I/O由bounded async owner执行，不得反压child stdout reader；ENOSPC、permission failure、queue overflow、fsync timeout或retained eviction产生typed gap，不得伪造exact recovery。
+
+HostSession拥有monitor coordinator、notification account和UI-only stream。Close顺序固定为：关闭ingress/tool/process admission，停止active run，终结active monitors，kill/close owned processes并finalize journals，drain completion/monitor terminal owners，将剩余notification disposition为`session_closed`，再做final writer/projection drain并释放Host资源。Monitor/completion reservation在terminal disposition后必须release，且无pending owner的process head确定性retire；顺序运行超过account capacity的process不得泄漏slot。

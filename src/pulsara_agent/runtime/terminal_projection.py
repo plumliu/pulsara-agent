@@ -62,6 +62,11 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalProcessMonitorCancellationSemanticFact,
+    TerminalProcessMonitorRegistrationSemanticFact,
+    TerminalProcessObservationReceiptFact,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import RuntimeSession
@@ -205,6 +210,15 @@ class ToolResultEndCandidate:
     observation_timing: ToolObservationTimingFact
     execution_semantics: ToolResultExecutionSemanticsFact
     metadata: Mapping[str, Any]
+    terminal_process_observation_receipt: (
+        TerminalProcessObservationReceiptFact | None
+    ) = None
+    terminal_process_monitor_registration: (
+        TerminalProcessMonitorRegistrationSemanticFact | None
+    ) = None
+    terminal_process_monitor_cancellation: (
+        TerminalProcessMonitorCancellationSemanticFact | None
+    ) = None
 
     def __post_init__(self) -> None:
         if not all((self.id, self.run_id, self.turn_id, self.reply_id, self.tool_call_id)):
@@ -213,6 +227,25 @@ class ToolResultEndCandidate:
             raise ValueError("tool terminal candidate timing identity mismatch")
         if self.execution_semantics.result_state.value != self.state.value:
             raise ValueError("tool terminal candidate semantics state mismatch")
+        if (
+            self.terminal_process_observation_receipt is not None
+            and self.terminal_process_observation_receipt.origin_tool_call_id
+            != self.tool_call_id
+        ):
+            raise ValueError("tool terminal candidate receipt call mismatch")
+        if (
+            self.terminal_process_monitor_registration is not None
+            and self.terminal_process_monitor_cancellation is not None
+        ):
+            raise ValueError(
+                "tool terminal candidate monitor actions are mutually exclusive"
+            )
+        if (
+            self.terminal_process_monitor_cancellation is not None
+            and self.terminal_process_monitor_cancellation.cancel_intent.origin_cancel_tool_call_id
+            != self.tool_call_id
+        ):
+            raise ValueError("tool terminal candidate cancellation call mismatch")
 
     @property
     def render_profile(self):
@@ -254,6 +287,15 @@ class ToolResultEndCandidate:
             essential_result=self.essential_result,
             terminal_payload_timing=self.terminal_payload_timing,
             rollup_semantics=self.rollup_semantics,
+            terminal_process_observation_receipt=(
+                self.terminal_process_observation_receipt
+            ),
+            terminal_process_monitor_registration=(
+                self.terminal_process_monitor_registration
+            ),
+            terminal_process_monitor_cancellation=(
+                self.terminal_process_monitor_cancellation
+            ),
             terminal_projection=projection,
         )
 
@@ -510,6 +552,9 @@ class ToolTerminalProjectionService:
             semantic_artifact_content_fingerprints=tuple(
                 item.ref_fingerprint for item in artifact_refs
             ),
+            terminal_process_observation_receipt=None,
+            terminal_process_monitor_registration=None,
+            terminal_process_monitor_cancellation=None,
         )
         payload = ToolTerminalProjectionPayloadFact(
             schema_version="tool_terminal_projection_payload.v2",
@@ -570,6 +615,8 @@ class ToolTerminalProjectionService:
             tool_call_id=block.id,
             model_tool_name=block.name,
             result_state=ToolResultStateFact(block.state.value),
+            terminal_process_monitor_registration_semantic_fingerprint=None,
+            terminal_process_monitor_cancellation_semantic_fingerprint=None,
             semantic_fingerprint=semantic.semantic_fingerprint,
         )
         reference = build_frozen_fact(
@@ -725,6 +772,15 @@ class ToolTerminalProjectionService:
             execution_semantics=execution_semantics,
             observation_timing=terminal.observation_timing,
             semantic_artifact_content_fingerprints=artifact_fingerprints,
+            terminal_process_observation_receipt=(
+                terminal.terminal_process_observation_receipt
+            ),
+            terminal_process_monitor_registration=(
+                terminal.terminal_process_monitor_registration
+            ),
+            terminal_process_monitor_cancellation=(
+                terminal.terminal_process_monitor_cancellation
+            ),
         )
         payload = ToolTerminalProjectionPayloadFact(
             schema_version="tool_terminal_projection_payload.v2",
@@ -776,6 +832,16 @@ class ToolTerminalProjectionService:
             tool_call_id=terminal.tool_call_id,
             model_tool_name=source.start.tool_call_name,
             result_state=ToolResultStateFact(terminal.state.value),
+            terminal_process_monitor_registration_semantic_fingerprint=(
+                None
+                if terminal.terminal_process_monitor_registration is None
+                else terminal.terminal_process_monitor_registration.registration_semantic_fingerprint
+            ),
+            terminal_process_monitor_cancellation_semantic_fingerprint=(
+                None
+                if terminal.terminal_process_monitor_cancellation is None
+                else terminal.terminal_process_monitor_cancellation.cancellation_semantic_fingerprint
+            ),
             semantic_fingerprint=semantic.semantic_fingerprint,
         )
         reference = build_frozen_fact(

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass, field, replace
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import RLock
 from time import monotonic
@@ -38,6 +39,15 @@ from pulsara_agent.event import (
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
     RequireExternalExecutionEvent,
+    TerminalNotificationReservationCreatedEvent,
+    TerminalNotificationReservationReleasedEvent,
+    TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessMonitorReceiptAppliedEvent,
+    TerminalProcessMonitorRegisteredEvent,
+    TerminalProcessMonitorTerminatedEvent,
+    TerminalProcessObservationDeliveryDeferredEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
     ToolResultEndEvent,
     ToolResultDataDeltaEvent,
     ToolResultStartEvent,
@@ -50,6 +60,8 @@ from pulsara_agent.event_log import (
     EventLog,
     EventLogWriteConflict,
     InMemoryEventLog,
+    RawRuntimeProjectionCheckpoint,
+    RawTranscriptDomainPrefixFact,
     DEFAULT_EVENT_SCHEMA_REGISTRY,
 )
 from pulsara_agent.event_log.protocol import EventLogTransactionCompanion
@@ -58,6 +70,7 @@ from pulsara_agent.llm.execution import ModelStreamExecutionRegistry
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives.context import (
     ContextStaticInstructionFact,
+    canonical_json_bytes,
     context_fingerprint,
 )
 from pulsara_agent.primitives.authority_materialization import (
@@ -313,6 +326,7 @@ class RuntimeSession:
     context_event_log_locator: Any | None = None
     rollout_account_owner_state_store: Any | None = None
     allow_unbootstrapped_test_events: bool = False
+    reopen_deadline_monotonic: float | None = None
     default_event_metadata: dict[str, Any] = field(default_factory=dict)
     publisher: RuntimeEventPublisher = field(init=False)
     write_coordinator: SessionWriteCoordinator = field(
@@ -446,6 +460,27 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    terminal_monitor_store: Any = field(init=False, repr=False)
+    terminal_monitor_coordinator: Any = field(init=False, repr=False)
+    terminal_monitor_event_channel: Any = field(init=False, repr=False)
+    terminal_notification_store: Any = field(init=False, repr=False)
+    terminal_notification_account_coordinator: Any = field(init=False, repr=False)
+    _terminal_notification_checkpoint_head: tuple[int, dict[str, object]] = field(
+        init=False,
+        repr=False,
+    )
+    _terminal_monitor_checkpoint_head: tuple[int, dict[str, object]] = field(
+        init=False,
+        repr=False,
+    )
+    _runtime_open_deadline_monotonic: float = field(init=False, repr=False)
+    _terminal_notification_listener: Callable[[tuple[AgentEvent, ...]], None] | None = (
+        field(
+            default=None,
+            init=False,
+            repr=False,
+        )
+    )
     _owns_terminal_manager: bool = field(default=False, init=False, repr=False)
     _terminal_owner: TerminalOwnerContext | None = field(
         default=None, init=False, repr=False
@@ -479,8 +514,33 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    _host_ingress_commit_validator: Callable[[RunStartEvent], None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _host_ingress_commit_guard_factory: (
+        Callable[[RunStartEvent], AbstractContextManager[None]] | None
+    ) = field(default=None, init=False, repr=False)
+    _active_run_monitor_safe_point_provider: (
+        Callable[[Any, int], Awaitable[Any]] | None
+    ) = field(default=None, init=False, repr=False)
+    _active_run_monitor_safe_point_validator: Callable[..., None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_run_monitor_safe_point_releaser: Callable[[Any], None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_run_monitor_safe_point_commit_guard_factory: (
+        Callable[..., AbstractContextManager[None]] | None
+    ) = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._runtime_open_deadline_monotonic = (
+            monotonic() + 30.0
+            if self.reopen_deadline_monotonic is None
+            else self.reopen_deadline_monotonic
+        )
+        if self._runtime_open_deadline_monotonic <= monotonic():
+            raise TimeoutError("runtime session open deadline expired before bootstrap")
         self.workspace_root = self.workspace_root.expanduser().resolve()
         if self.allow_unbootstrapped_test_events and not isinstance(
             self.event_log, InMemoryEventLog
@@ -536,10 +596,10 @@ class RuntimeSession:
         )
 
         durable_account = self.event_log.read_materialization_account_state(
-            deadline_monotonic=monotonic() + 30.0
+            deadline_monotonic=self._runtime_open_deadline_monotonic
         )
         ledger_usage = self.event_log.read_ledger_usage_snapshot(
-            deadline_monotonic=monotonic() + 30.0
+            deadline_monotonic=self._runtime_open_deadline_monotonic
         )
         if (
             durable_account is None
@@ -611,7 +671,7 @@ class RuntimeSession:
                 self.transcript_projection_materialization_contracts
             ),
             limits=self.authority_materialization_contracts.limits,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
             allow_seedless_test_bootstrap=(
                 self.allow_unbootstrapped_test_events
                 and isinstance(self.event_log, InMemoryEventLog)
@@ -653,7 +713,7 @@ class RuntimeSession:
             # run/window generation.  Restricting this sparse read to active
             # runs drops the durable rollover basis after restart.
             active_runs_only=False,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
         )
         self.provider_input_generation_store = (
             ProviderInputGenerationStore.from_sparse_bootstrap(
@@ -708,7 +768,7 @@ class RuntimeSession:
                 EventType.TOOL_RESULT_END.value,
             ),
             active_runs_only=True,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
         )
         self.tool_terminal_projection_state_store = ToolTerminalProjectionStateStore(
             tuple(
@@ -777,7 +837,7 @@ class RuntimeSession:
             EventType.CONTEXT_WINDOW_COMPACTION_COMPLETED.value,
             EventType.CONTEXT_WINDOW_COMPACTION_FAILED.value,
         )
-        bootstrap_deadline = monotonic() + 30.0
+        bootstrap_deadline = self._runtime_open_deadline_monotonic
         long_horizon_bootstrap = self.event_log.read_raw_events_by_types(
             long_horizon_types,
             active_runs_only=True,
@@ -805,7 +865,9 @@ class RuntimeSession:
             usage_through = self.long_horizon_state_store.through_sequence
             usage_payload_bytes = 0
         else:
-            usage = usage_reader(deadline_monotonic=monotonic() + 30.0)
+            usage = usage_reader(
+                deadline_monotonic=self._runtime_open_deadline_monotonic
+            )
             usage_through = usage.through_sequence
             usage_payload_bytes = usage.candidate_payload_bytes
         burst_contracts = tuple(
@@ -836,8 +898,462 @@ class RuntimeSession:
             apply_committed=self.authority_materialization_shadow.apply_committed,
         )
         self._bind_terminal(self.terminal_binding)
+        from pulsara_agent.runtime.terminal.notification import (
+            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            TerminalNotificationAccountCoordinator,
+        )
+        from pulsara_agent.runtime.terminal.monitor import (
+            TERMINAL_MONITOR_CHECKPOINT_KIND,
+            TerminalMonitorCoordinator,
+        )
+        from pulsara_agent.runtime.terminal.ui_stream import (
+            TerminalMonitorEventChannel,
+        )
+
+        self.terminal_notification_store = (
+            self._restore_terminal_notification_projection(
+                deadline_monotonic=self._runtime_open_deadline_monotonic,
+            )
+        )
+        self.terminal_notification_account_coordinator = (
+            TerminalNotificationAccountCoordinator(
+                runtime_session_id=self.runtime_session_id,
+                store=self.terminal_notification_store,
+            )
+        )
+        self.terminal_monitor_event_channel = TerminalMonitorEventChannel(
+            projection_revision=lambda: (
+                self.terminal_notification_store.projection_snapshot().source_through_sequence
+            ),
+            event_resolver=self.event_log.get_by_id,
+        )
+        self.register_committed_reducer(
+            reducer_id=f"terminal_notification:{self.runtime_session_id}",
+            through_sequence=self.terminal_notification_store.through_sequence,
+            apply_committed=self._apply_terminal_notification_committed,
+            rebuild_committed=self._rebuild_terminal_notification_committed,
+        )
+
+        self.terminal_monitor_store = self._restore_terminal_monitor_projection(
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self._validate_terminal_projection_checkpoint_join(
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.terminal_monitor_coordinator = TerminalMonitorCoordinator(
+            runtime_session=self,
+            store=self.terminal_monitor_store,
+            event_channel=self.terminal_monitor_event_channel,
+        )
+        self.register_committed_reducer(
+            reducer_id=f"terminal_monitor:{self.runtime_session_id}",
+            through_sequence=self.terminal_monitor_store.through_sequence,
+            apply_committed=self._apply_terminal_monitor_committed,
+            rebuild_committed=self._rebuild_terminal_monitor_committed,
+        )
+        self.terminal_monitor_coordinator.on_committed(
+            tuple(
+                record.registration_event
+                for record in self.terminal_monitor_store.snapshots()
+                if record.core_state.lifecycle_state
+                not in {"terminated", "reconciliation_required"}
+            )
+        )
         self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
         self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
+
+        # Keep the imported identities live for architecture guards and make it
+        # impossible for the two checkpoint kinds to silently collapse.
+        if TERMINAL_NOTIFICATION_CHECKPOINT_KIND == TERMINAL_MONITOR_CHECKPOINT_KIND:
+            raise RuntimeError("terminal reducer checkpoint identities collide")
+
+    @property
+    def runtime_open_deadline_monotonic(self) -> float:
+        """Return the immutable deadline shared by all open/recovery owners."""
+
+        return self._runtime_open_deadline_monotonic
+
+    def _validate_terminal_projection_checkpoint_join(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Join the independently checkpointed monitor and notification cores."""
+
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError(
+                "runtime session open deadline expired before terminal projection join"
+            )
+
+        from pulsara_agent.llm.terminal_projection import stable_event_identity
+        from pulsara_agent.runtime.context_input.event_slice import (
+            event_reference_from_stored,
+        )
+
+        projection = self.terminal_notification_store.projection_snapshot()
+        notification_heads = {
+            monitor.monitor_id: monitor
+            for process in projection.process_heads
+            for monitor in process.monitor_heads
+        }
+        monitor_records = {
+            item.registration_event.registration_semantic.monitor_id: item
+            for item in self.terminal_monitor_store.snapshots()
+        }
+        if set(notification_heads) != set(monitor_records):
+            raise ValueError(
+                "terminal projection checkpoints disagree on active monitor heads"
+            )
+        for monitor_id, record in monitor_records.items():
+            head = notification_heads[monitor_id]
+            core = record.core_state
+            pending = record.pending_observation_event
+            if (
+                stable_event_identity(
+                    record.registration_event,
+                    runtime_session_id=self.runtime_session_id,
+                )
+                != head.registration_event_identity
+                or core.core_state_fingerprint != head.monitor_core_state_fingerprint
+                or core.last_committed_observation_ordinal
+                != head.last_committed_observation_ordinal
+                or core.last_observation_cursor.cursor_fingerprint
+                != head.last_observation_cursor_fingerprint
+                or core.last_consumed_cursor.cursor_fingerprint
+                != head.last_consumed_cursor_fingerprint
+                or (
+                    None
+                    if pending is None
+                    else event_reference_from_stored(
+                        pending,
+                        runtime_session_id=self.runtime_session_id,
+                    )
+                )
+                != head.pending_observation_event_reference
+            ):
+                raise ValueError(
+                    "terminal projection checkpoints disagree on monitor core state"
+                )
+
+    def _restore_terminal_notification_projection(
+        self,
+        *,
+        deadline_monotonic: float,
+    ):
+        from pulsara_agent.runtime.terminal.notification import (
+            HostIngressNotificationProjectionStore,
+            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
+        )
+
+        deadline = deadline_monotonic
+        checkpoint = self.event_log.read_runtime_projection_checkpoint(
+            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            deadline_monotonic=deadline,
+        )
+        if checkpoint is None:
+            store = HostIngressNotificationProjectionStore(
+                runtime_session_id=self.runtime_session_id
+            )
+            self._terminal_notification_checkpoint_head = (
+                0,
+                store.checkpoint_payload(),
+            )
+            minimum_sequence = 1
+        else:
+            self._validate_runtime_projection_checkpoint(
+                checkpoint,
+                expected_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+                expected_schema_version=(
+                    TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION
+                ),
+                deadline_monotonic=deadline,
+            )
+            if checkpoint.validation_base_through_sequence == 0:
+                canonical_genesis = HostIngressNotificationProjectionStore.canonical_checkpoint_genesis_payload(
+                    runtime_session_id=self.runtime_session_id
+                )
+                if not self._runtime_projection_payloads_equal(
+                    checkpoint.validation_base_state_payload,
+                    canonical_genesis,
+                ):
+                    raise ValueError(
+                        "terminal notification checkpoint genesis is untrusted"
+                    )
+            validation_store = (
+                HostIngressNotificationProjectionStore.from_checkpoint_payload(
+                    checkpoint.validation_base_state_payload,
+                    runtime_session_id=self.runtime_session_id,
+                )
+            )
+            validation_events, validation_through = (
+                self._read_terminal_projection_delta(
+                    event_types=(
+                        EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
+                        EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED.value,
+                        EventType.TERMINAL_PROCESS_COMPLETED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED.value,
+                    ),
+                    minimum_sequence=(checkpoint.validation_base_through_sequence + 1),
+                    through_sequence=checkpoint.through_sequence,
+                    deadline_monotonic=deadline,
+                )
+                if checkpoint.validation_base_through_sequence
+                < checkpoint.through_sequence
+                else ((), checkpoint.through_sequence)
+            )
+            validation_store.apply_committed(validation_events)
+            validation_store.through_sequence = max(
+                validation_store.through_sequence,
+                validation_through,
+            )
+            if not self._runtime_projection_payloads_equal(
+                validation_store.checkpoint_payload(),
+                checkpoint.state_payload,
+            ):
+                raise ValueError(
+                    "terminal notification checkpoint reducer transition is untrusted"
+                )
+            store = HostIngressNotificationProjectionStore.from_checkpoint_payload(
+                checkpoint.state_payload,
+                runtime_session_id=self.runtime_session_id,
+            )
+            self._terminal_notification_checkpoint_head = (
+                checkpoint.through_sequence,
+                checkpoint.state_payload,
+            )
+            minimum_sequence = checkpoint.through_sequence + 1
+        events, through_sequence = self._read_terminal_projection_delta(
+            event_types=(
+                EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
+                EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED.value,
+                EventType.TERMINAL_PROCESS_COMPLETED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED.value,
+            ),
+            minimum_sequence=minimum_sequence,
+            deadline_monotonic=deadline,
+        )
+        store.apply_committed(events)
+        store.through_sequence = max(store.through_sequence, through_sequence)
+        return store
+
+    def _restore_terminal_monitor_projection(
+        self,
+        *,
+        deadline_monotonic: float,
+    ):
+        from pulsara_agent.runtime.terminal.monitor import (
+            TERMINAL_MONITOR_CHECKPOINT_KIND,
+            TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+            TerminalMonitorStore,
+        )
+
+        deadline = deadline_monotonic
+        checkpoint = self.event_log.read_runtime_projection_checkpoint(
+            TERMINAL_MONITOR_CHECKPOINT_KIND,
+            deadline_monotonic=deadline,
+        )
+        if checkpoint is None:
+            store = TerminalMonitorStore(runtime_session_id=self.runtime_session_id)
+            self._terminal_monitor_checkpoint_head = (
+                0,
+                store.checkpoint_payload(),
+            )
+            minimum_sequence = 1
+        else:
+            self._validate_runtime_projection_checkpoint(
+                checkpoint,
+                expected_kind=TERMINAL_MONITOR_CHECKPOINT_KIND,
+                expected_schema_version=TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+                deadline_monotonic=deadline,
+            )
+            if checkpoint.validation_base_through_sequence == 0:
+                canonical_genesis = (
+                    TerminalMonitorStore.canonical_checkpoint_genesis_payload(
+                        runtime_session_id=self.runtime_session_id
+                    )
+                )
+                if not self._runtime_projection_payloads_equal(
+                    checkpoint.validation_base_state_payload,
+                    canonical_genesis,
+                ):
+                    raise ValueError("terminal monitor checkpoint genesis is untrusted")
+            validation_store = TerminalMonitorStore.from_checkpoint_payload(
+                checkpoint.validation_base_state_payload,
+                runtime_session_id=self.runtime_session_id,
+            )
+            validation_events, validation_through = (
+                self._read_terminal_projection_delta(
+                    event_types=(
+                        EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                    ),
+                    minimum_sequence=(checkpoint.validation_base_through_sequence + 1),
+                    through_sequence=checkpoint.through_sequence,
+                    deadline_monotonic=deadline,
+                )
+                if checkpoint.validation_base_through_sequence
+                < checkpoint.through_sequence
+                else ((), checkpoint.through_sequence)
+            )
+            validation_store.apply_committed(validation_events)
+            validation_store.through_sequence = max(
+                validation_store.through_sequence,
+                validation_through,
+            )
+            if not self._runtime_projection_payloads_equal(
+                validation_store.checkpoint_payload(),
+                checkpoint.state_payload,
+            ):
+                raise ValueError(
+                    "terminal monitor checkpoint reducer transition is untrusted"
+                )
+            store = TerminalMonitorStore.from_checkpoint_payload(
+                checkpoint.state_payload,
+                runtime_session_id=self.runtime_session_id,
+            )
+            self._terminal_monitor_checkpoint_head = (
+                checkpoint.through_sequence,
+                checkpoint.state_payload,
+            )
+            minimum_sequence = checkpoint.through_sequence + 1
+        events, through_sequence = self._read_terminal_projection_delta(
+            event_types=(
+                EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+            ),
+            minimum_sequence=minimum_sequence,
+            deadline_monotonic=deadline,
+        )
+        store.apply_committed(events)
+        store.through_sequence = max(store.through_sequence, through_sequence)
+        return store
+
+    def _read_terminal_projection_delta(
+        self,
+        *,
+        event_types: tuple[str, ...],
+        minimum_sequence: int,
+        deadline_monotonic: float,
+        through_sequence: int | None = None,
+    ) -> tuple[tuple[AgentEvent, ...], int]:
+        snapshot = self.event_log.read_raw_events_by_types(
+            event_types,
+            minimum_sequence=minimum_sequence,
+            through_sequence=through_sequence,
+            max_events=4_096,
+            max_payload_bytes=16 * 1024 * 1024,
+            deadline_monotonic=deadline_monotonic,
+        )
+        selected = [
+            item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in snapshot.events
+        ]
+        tool_result_ids = {
+            event.tool_result_end_event_identity.event_id
+            for event in selected
+            if isinstance(event, TerminalProcessMonitorReceiptAppliedEvent)
+        }
+        tool_result_ids.update(
+            event.tool_result_end_event_identity.event_id
+            for event in selected
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+            and event.tool_result_end_event_identity is not None
+        )
+        if tool_result_ids:
+            exact = self.event_log.read_raw_events_by_id(
+                tuple(sorted(tool_result_ids)),
+                deadline_monotonic=deadline_monotonic,
+            )
+            if len(exact) != len(tool_result_ids):
+                raise ValueError(
+                    "terminal projection delta lacks exact ToolResult authority"
+                )
+            selected.extend(
+                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in exact
+            )
+        by_id = {event.id: event for event in selected}
+        ordered = tuple(
+            sorted(by_id.values(), key=lambda event: (event.sequence or 0, event.id))
+        )
+        return ordered, snapshot.through_sequence
+
+    def _validate_runtime_projection_checkpoint(
+        self,
+        checkpoint: RawRuntimeProjectionCheckpoint,
+        *,
+        expected_kind: str,
+        expected_schema_version: str,
+        deadline_monotonic: float,
+    ) -> None:
+        expected = self._runtime_projection_checkpoint_fingerprint(
+            projection_kind=checkpoint.projection_kind,
+            through_sequence=checkpoint.through_sequence,
+            projection_schema_version=checkpoint.projection_schema_version,
+            ledger_prefix=checkpoint.ledger_prefix,
+            validation_base_through_sequence=(
+                checkpoint.validation_base_through_sequence
+            ),
+            validation_base_state_payload=(checkpoint.validation_base_state_payload),
+            state_payload=checkpoint.state_payload,
+        )
+        committed_prefix = self.event_log.read_raw_ledger_prefix(
+            through_sequence=checkpoint.through_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if (
+            checkpoint.projection_kind != expected_kind
+            or checkpoint.projection_schema_version != expected_schema_version
+            or checkpoint.ledger_prefix != committed_prefix
+            or checkpoint.payload_fingerprint != expected
+        ):
+            raise ValueError("terminal runtime projection checkpoint is untrusted")
+
+    @staticmethod
+    def _runtime_projection_payloads_equal(
+        left: dict[str, object],
+        right: dict[str, object],
+    ) -> bool:
+        return canonical_json_bytes(left) == canonical_json_bytes(right)
+
+    @staticmethod
+    def _runtime_projection_checkpoint_fingerprint(
+        *,
+        projection_kind: str,
+        through_sequence: int,
+        projection_schema_version: str,
+        ledger_prefix: RawTranscriptDomainPrefixFact,
+        validation_base_through_sequence: int,
+        validation_base_state_payload: dict[str, object],
+        state_payload: dict[str, object],
+    ) -> str:
+        return context_fingerprint(
+            "runtime-projection-checkpoint:v2",
+            {
+                "projection_kind": projection_kind,
+                "through_sequence": through_sequence,
+                "projection_schema_version": projection_schema_version,
+                "ledger_prefix": asdict(ledger_prefix),
+                "validation_base_through_sequence": (validation_base_through_sequence),
+                "validation_base_state_payload": validation_base_state_payload,
+                "state_payload": state_payload,
+            },
+        )
 
     def _restore_active_physical_reservations(self, durable_account: Any) -> None:
         self._physical_reservation_facts = {}
@@ -850,7 +1366,7 @@ class RuntimeSession:
         )
         raw_events = self.event_log.read_raw_events_by_id(
             event_ids,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
         )
         if len(raw_events) != len(event_ids):
             raise ValueError(
@@ -884,6 +1400,145 @@ class RuntimeSession:
                         operation_owner_id=_physical_operation_admission_owner_id(key)
                     )
                 )
+
+    def _apply_terminal_monitor_committed(self, events: tuple[AgentEvent, ...]) -> None:
+        self.terminal_monitor_store.apply_committed(events)
+        if any(
+            isinstance(
+                event,
+                (
+                    TerminalProcessMonitorRegisteredEvent,
+                    TerminalProcessMonitorObservationCommittedEvent,
+                    TerminalProcessMonitorReceiptAppliedEvent,
+                    TerminalProcessMonitorTerminatedEvent,
+                    TerminalProcessObservationDeliveryDispositionEvent,
+                ),
+            )
+            for event in events
+        ):
+            self._persist_terminal_monitor_checkpoint()
+        self.terminal_monitor_coordinator.on_committed(events)
+
+    def _apply_terminal_notification_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        self.terminal_notification_store.apply_committed(events)
+        if any(
+            isinstance(
+                event,
+                (
+                    TerminalNotificationReservationCreatedEvent,
+                    TerminalNotificationReservationReleasedEvent,
+                    TerminalProcessCompletedEvent,
+                    TerminalProcessMonitorRegisteredEvent,
+                    TerminalProcessMonitorObservationCommittedEvent,
+                    TerminalProcessMonitorReceiptAppliedEvent,
+                    TerminalProcessMonitorTerminatedEvent,
+                    TerminalProcessObservationDeliveryDispositionEvent,
+                    TerminalProcessObservationDeliveryDeferredEvent,
+                ),
+            )
+            for event in events
+        ):
+            self._persist_terminal_notification_checkpoint()
+        self.terminal_notification_account_coordinator.on_committed(events)
+        self.terminal_monitor_event_channel.publish_committed(events)
+        listener = self._terminal_notification_listener
+        if listener is not None:
+            listener(events)
+
+    def _rebuild_terminal_notification_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        self.terminal_notification_store.rebuild(events)
+        self.terminal_notification_account_coordinator.on_committed(events)
+
+    def _rebuild_terminal_monitor_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        self.terminal_monitor_store.rebuild(events)
+        self.terminal_monitor_coordinator.on_committed(events)
+
+    def _persist_terminal_notification_checkpoint(self) -> None:
+        from pulsara_agent.runtime.terminal.notification import (
+            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
+        )
+
+        self._persist_runtime_projection_checkpoint(
+            projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
+            through_sequence=self.terminal_notification_store.through_sequence,
+            state_payload=self.terminal_notification_store.checkpoint_payload(),
+        )
+
+    def _persist_terminal_monitor_checkpoint(self) -> None:
+        from pulsara_agent.runtime.terminal.monitor import (
+            TERMINAL_MONITOR_CHECKPOINT_KIND,
+            TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+        )
+
+        self._persist_runtime_projection_checkpoint(
+            projection_kind=TERMINAL_MONITOR_CHECKPOINT_KIND,
+            projection_schema_version=TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+            through_sequence=self.terminal_monitor_store.through_sequence,
+            state_payload=self.terminal_monitor_store.checkpoint_payload(),
+        )
+
+    def _persist_runtime_projection_checkpoint(
+        self,
+        *,
+        projection_kind: str,
+        projection_schema_version: str,
+        through_sequence: int,
+        state_payload: dict[str, object],
+    ) -> None:
+        deadline = self.event_write_service.current_deadline_monotonic()
+        if projection_kind == "terminal_notification_projection.v1":
+            head_attr = "_terminal_notification_checkpoint_head"
+        elif projection_kind == "terminal_monitor_projection.v1":
+            head_attr = "_terminal_monitor_checkpoint_head"
+        else:  # pragma: no cover - the runtime checkpoint registry is closed
+            raise ValueError("unknown runtime projection checkpoint kind")
+        base_through_sequence, base_state_payload = getattr(self, head_attr)
+        if through_sequence < base_through_sequence:
+            raise ValueError("runtime projection checkpoint cannot move backwards")
+        if through_sequence == base_through_sequence:
+            if not self._runtime_projection_payloads_equal(
+                state_payload,
+                base_state_payload,
+            ):
+                raise ValueError(
+                    "runtime projection state changed without ledger progress"
+                )
+            return
+        ledger_prefix = self.event_log.read_raw_ledger_prefix(
+            through_sequence=through_sequence,
+            deadline_monotonic=deadline,
+        )
+        checkpoint = RawRuntimeProjectionCheckpoint(
+            projection_kind=projection_kind,
+            through_sequence=through_sequence,
+            projection_schema_version=projection_schema_version,
+            ledger_prefix=ledger_prefix,
+            validation_base_through_sequence=base_through_sequence,
+            validation_base_state_payload=base_state_payload,
+            state_payload=state_payload,
+            payload_fingerprint=self._runtime_projection_checkpoint_fingerprint(
+                projection_kind=projection_kind,
+                through_sequence=through_sequence,
+                projection_schema_version=projection_schema_version,
+                ledger_prefix=ledger_prefix,
+                validation_base_through_sequence=base_through_sequence,
+                validation_base_state_payload=base_state_payload,
+                state_payload=state_payload,
+            ),
+        )
+        self.event_log.write_runtime_projection_checkpoint(
+            checkpoint,
+            deadline_monotonic=deadline,
+        )
+        setattr(self, head_attr, (through_sequence, state_payload))
 
     def _adopt_unbootstrapped_in_memory_account_for_test(
         self,
@@ -1163,6 +1818,121 @@ class RuntimeSession:
             self._terminal_owner.conversation_id
             if self._terminal_owner is not None
             else None
+        )
+
+    def bind_host_ingress_commit_validator(
+        self,
+        validator: Callable[[RunStartEvent], None] | None,
+    ) -> None:
+        with self.write_coordinator.lock:
+            self._host_ingress_commit_validator = validator
+
+    def bind_host_ingress_commit_guard(
+        self,
+        guard_factory: (Callable[[RunStartEvent], AbstractContextManager[None]] | None),
+    ) -> None:
+        with self.write_coordinator.lock:
+            self._host_ingress_commit_guard_factory = guard_factory
+
+    @contextmanager
+    def _host_ingress_commit_guard(
+        self,
+        events: Sequence[AgentEvent],
+    ):
+        starts = tuple(
+            item
+            for item in events
+            if isinstance(item, RunStartEvent) and item.run_entry_kind.value == "host"
+        )
+        if len(starts) > 1:
+            raise ValueError(
+                "one physical batch cannot commit multiple Host RunStart events"
+            )
+        factory = self._host_ingress_commit_guard_factory
+        if not starts or factory is None:
+            yield
+            return
+        with factory(starts[0]):
+            yield
+
+    def bind_terminal_notification_listener(
+        self,
+        listener: Callable[[tuple[AgentEvent, ...]], None] | None,
+    ) -> None:
+        with self.write_coordinator.lock:
+            self._terminal_notification_listener = listener
+
+    def bind_active_run_monitor_safe_point(
+        self,
+        *,
+        provider: Callable[[Any, int], Awaitable[Any]] | None,
+        validator: Callable[..., None] | None,
+        releaser: Callable[[Any], None] | None,
+        commit_guard_factory: (
+            Callable[..., AbstractContextManager[None]] | None
+        ) = None,
+    ) -> None:
+        with self.write_coordinator.lock:
+            self._active_run_monitor_safe_point_provider = provider
+            self._active_run_monitor_safe_point_validator = validator
+            self._active_run_monitor_safe_point_releaser = releaser
+            self._active_run_monitor_safe_point_commit_guard_factory = (
+                commit_guard_factory
+            )
+
+    @contextmanager
+    def active_run_monitor_safe_point_commit_guard(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard: Any,
+        state: Any,
+    ):
+        factory = self._active_run_monitor_safe_point_commit_guard_factory
+        if guard is None or factory is None:
+            yield
+            return
+        with factory(
+            start_event=start_event,
+            candidate_events=candidate_events,
+            guard=guard,
+            state=state,
+        ):
+            yield
+
+    async def borrow_active_run_monitor_safe_point(
+        self,
+        *,
+        state: Any,
+        next_model_call_index: int,
+    ) -> Any:
+        provider = self._active_run_monitor_safe_point_provider
+        if provider is None:
+            return None
+        return await provider(state, next_model_call_index)
+
+    def release_active_run_monitor_safe_point(self, lease: Any) -> None:
+        releaser = self._active_run_monitor_safe_point_releaser
+        if releaser is not None:
+            releaser(lease)
+
+    def validate_active_run_monitor_safe_point(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard: Any,
+        state: Any,
+    ) -> None:
+        validator = self._active_run_monitor_safe_point_validator
+        if validator is None:
+            raise ValueError("active-run monitor safe-point owner is unavailable")
+        validator(
+            start_event=start_event,
+            candidate_events=candidate_events,
+            guard=guard,
+            state=state,
         )
 
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
@@ -1727,6 +2497,7 @@ class RuntimeSession:
         *,
         expected_last_sequence: int | None = None,
         state: LoopState | None = None,
+        deadline_monotonic: float | None = None,
     ) -> EventWriteResult:
         self._require_tool_terminal_projection_ready(events)
         prepared = self._prepare_event_batch(events)
@@ -1742,10 +2513,15 @@ class RuntimeSession:
             raise EventReconciliationRequired(
                 "non-empty durable ledger lacks its materialization account"
             )
-        deadline = (
+        owned_deadline = (
             self.event_write_service.current_deadline_monotonic()
             if self.event_write_service.is_current_owner()
             else self.event_write_service.new_deadline_monotonic()
+        )
+        deadline = (
+            owned_deadline
+            if deadline_monotonic is None
+            else min(owned_deadline, deadline_monotonic)
         )
         tool_reservation = self._active_tool_reservation_for_batch(prepared)
         if tool_reservation is not None:
@@ -1903,7 +2679,7 @@ class RuntimeSession:
         if not prepared:
             raise ValueError("physical dispatch reservation requires business facts")
         deadline = self.event_write_service.current_deadline_monotonic()
-        with self.write_coordinator.lock:
+        with self._host_ingress_commit_guard(prepared), self.write_coordinator.lock:
             self.require_mutation_allowed()
             self._validate_run_lifecycle_batch(prepared)
             self.long_horizon_state_store.validate_next_batch(prepared)
@@ -2593,6 +3369,17 @@ class RuntimeSession:
 
         self._validate_memory_governance_batch(events)
         self._validate_terminal_projection_batch(events)
+        self._validate_terminal_monitor_registration_batch(events)
+        self._validate_terminal_monitor_cancellation_batch(events)
+        self.terminal_monitor_store.validate_receipt_application_batch(events)
+        self.terminal_notification_store.validate_candidate_batch(events)
+
+        if self._host_ingress_commit_validator is not None:
+            for run_start in (
+                item for item in events if isinstance(item, RunStartEvent)
+            ):
+                if run_start.run_entry_kind.value == "host":
+                    self._host_ingress_commit_validator(run_start)
 
         if not self.allow_unbootstrapped_test_events:
             for event in events:
@@ -3029,6 +3816,106 @@ class RuntimeSession:
                         "resume boundary MCP audits must precede its exposure"
                     )
 
+    @staticmethod
+    def _validate_terminal_monitor_registration_batch(
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.event import TerminalProcessMonitorRegisteredEvent
+
+        registrations = tuple(
+            item
+            for item in events
+            if isinstance(item, TerminalProcessMonitorRegisteredEvent)
+        )
+        if not registrations:
+            return
+        ends = {
+            item.id: item for item in events if isinstance(item, ToolResultEndEvent)
+        }
+        for registration in registrations:
+            end = ends.get(registration.tool_result_end_event_id)
+            if end is None:
+                raise ValueError(
+                    "terminal monitor registration requires same-batch ToolResultEnd"
+                )
+            semantic = end.terminal_process_monitor_registration
+            if (
+                end.tool_call_id
+                != registration.registration_attribution.origin_tool_call_id
+                or semantic is None
+                or semantic != registration.registration_semantic
+            ):
+                raise ValueError(
+                    "terminal monitor registration/tool terminal identity drifted"
+                )
+
+    def _validate_terminal_monitor_cancellation_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.event import (
+            TerminalNotificationReservationReleasedEvent,
+            TerminalProcessMonitorTerminatedEvent,
+        )
+        from pulsara_agent.llm.terminal_projection import stable_event_identity
+
+        ends = tuple(
+            item
+            for item in events
+            if isinstance(item, ToolResultEndEvent)
+            and item.terminal_process_monitor_cancellation is not None
+        )
+        for end in ends:
+            cancellation = end.terminal_process_monitor_cancellation
+            assert cancellation is not None
+            intent = cancellation.cancel_intent
+            record = self.terminal_monitor_store.snapshot(intent.monitor_id)
+            if (
+                cancellation.expected_monitor_state_revision
+                != record.core_state.state_revision
+                or cancellation.expected_monitor_core_state_fingerprint
+                != record.core_state.core_state_fingerprint
+                or intent.tool_result_end_event_id != end.id
+                or intent.origin_cancel_tool_call_id != end.tool_call_id
+            ):
+                raise ValueError("terminal monitor cancellation source CAS failed")
+            terminations = tuple(
+                item
+                for item in events
+                if isinstance(item, TerminalProcessMonitorTerminatedEvent)
+                and item.id == intent.monitor_termination_event_id
+            )
+            if len(terminations) != 1:
+                raise ValueError(
+                    "terminal monitor cancellation requires one same-batch termination"
+                )
+            termination = terminations[0]
+            if (
+                termination.termination_semantic.monitor_id != intent.monitor_id
+                or termination.termination_semantic.terminal_reason != "explicit_cancel"
+            ):
+                raise ValueError("terminal monitor cancellation termination drifted")
+            releases = tuple(
+                item
+                for item in events
+                if isinstance(item, TerminalNotificationReservationReleasedEvent)
+                and item.transition.reservation.reservation_id
+                == termination.notification_reservation_id
+            )
+            if len(releases) != 1:
+                raise ValueError(
+                    "terminal monitor cancellation requires one same-batch release"
+                )
+            termination_identity = stable_event_identity(
+                termination,
+                runtime_session_id=self.runtime_session_id,
+            )
+            if (
+                termination_identity
+                not in releases[0].transition.cause_event_identities
+            ):
+                raise ValueError("terminal monitor cancellation release cause drifted")
+
     def _validate_terminal_projection_batch(
         self,
         events: tuple[AgentEvent, ...],
@@ -3213,7 +4100,7 @@ class RuntimeSession:
             return _WriteAttempt(
                 result=result, delivery_futures=(), published_events=()
             )
-        with self.write_coordinator.lock:
+        with self._host_ingress_commit_guard(events), self.write_coordinator.lock:
             if self.reconciliation_required:
                 failed = tuple(
                     f"{item.reducer_id}: {item.last_error or 'reconciliation required'}"
@@ -3541,7 +4428,7 @@ class RuntimeSession:
     ) -> _WriteAttempt:
         """Commit the first business facts and canonical account genesis together."""
 
-        with self.write_coordinator.lock:
+        with self._host_ingress_commit_guard(events), self.write_coordinator.lock:
             self.require_mutation_allowed()
             if self.materialization_account_store.snapshot() is not None:
                 raise EventWriteConflict(
@@ -3947,6 +4834,8 @@ class RuntimeSession:
             raise RuntimeError(
                 "cannot close RuntimeSession with active physical operation admissions"
             )
+        self.terminal_monitor_coordinator.close()
+        self._terminal_notification_listener = None
         self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
         self.provider_input_generation_coordinator.close_open_session_generations_sync()
         self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
@@ -4101,6 +4990,8 @@ _HOST_BOUNDARY_FIXED_EVENT_TYPES = frozenset(
         EventType.CONTEXT_WINDOW_CLOSED,
         EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED,
         EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED,
+        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION,
+        EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED,
     }
 )
 _EXTERNAL_EXECUTION_FIXED_EVENT_TYPES = frozenset(

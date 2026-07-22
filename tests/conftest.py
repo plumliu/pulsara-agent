@@ -537,7 +537,7 @@ def run_start_permission_fields(
     )
 
     runtime_session_id = mcp_installation_owner_runtime_session_id
-    observed_at = "1970-01-01T00:00:00Z"
+    observed_at = "1970-01-01T00:00:00.000000Z"
     resolved_turn_id = turn_id or run_id.replace("run:", "turn:", 1)
     resolved_reply_id = reply_id or run_id.replace("run:", "reply:", 1)
     current_user = CurrentUserMessageFact(
@@ -645,6 +645,8 @@ def run_start_permission_fields(
             "long_horizon": child_long_horizon.contract,
             "child_rollout_subaccount": child_subaccount,
             "run_entry_kind": "subagent_child",
+            "host_run_ingress": None,
+            "host_ingress_admission_proof": None,
             "new_run_boundary": None,
             "subagent_run_entry": SubagentRunEntryFact(
                 subagent_run_id=run_id,
@@ -704,11 +706,80 @@ def run_start_permission_fields(
         mcp_installation_id=mcp_installation_id,
         execution_surface_identity=surface,
     )
+    from pulsara_agent.llm.user_carrier import encode_human_input
+    from pulsara_agent.primitives.frozen import build_frozen_fact
+    from pulsara_agent.primitives.host_ingress import (
+        HostIngressAdmissionProofFact,
+        HostIngressItemPlacementFact,
+        HostRunIngressAttributionFact,
+        HostRunIngressSemanticFact,
+        HumanRunIngressFact,
+    )
+
+    ingress_id = f"host_ingress:test:{run_id}"
+    human = encode_human_input(
+        user_input,
+        causal_occurrence_semantic_fingerprint=context_fingerprint(
+            "test-host-ingress-occurrence:v1", (runtime_session_id, run_id)
+        ),
+    ).semantic_fact
+    placement = build_frozen_fact(
+        HostIngressItemPlacementFact,
+        schema_version="host_ingress_item_placement.v1",
+        item_kind="human_input",
+        item_semantic_fingerprint=human.semantic_fingerprint,
+        accepted_ingress_ordinal=1,
+        item_ordinal=0,
+    )
+    ingress_semantic = build_frozen_fact(
+        HostRunIngressSemanticFact,
+        schema_version="host_run_ingress_semantic.v1",
+        ordered_current_input_semantic_fingerprints=(human.semantic_fingerprint,),
+    )
+    ingress_attribution = build_frozen_fact(
+        HostRunIngressAttributionFact,
+        schema_version="host_run_ingress_attribution.v1",
+        ingress_id=ingress_id,
+        host_session_id=f"host:test:{runtime_session_id}",
+        conversation_id=f"conversation:test:{runtime_session_id}",
+        observed_at_utc=observed_at,
+        ingress_semantic_fingerprint=(
+            ingress_semantic.ingress_semantic_fingerprint
+        ),
+        ordered_item_placements=(placement,),
+    )
+    host_ingress = build_frozen_fact(
+        HumanRunIngressFact,
+        schema_version="human_run_ingress.v1",
+        semantic_identity=ingress_semantic,
+        attribution=ingress_attribution,
+        human_message=human,
+        attached_runtime_notifications=(),
+    )
+    admission = build_frozen_fact(
+        HostIngressAdmissionProofFact,
+        schema_version="host_ingress_admission_proof.v1",
+        admission_id=ingress_id,
+        admission_generation=1,
+        ingress_fact_fingerprint=host_ingress.fact_fingerprint,
+        selected_ingress_item_ids=(ingress_id,),
+        selected_notification_head_fingerprints=(),
+        expected_host_state_generation=0,
+        expected_permission_policy_revision=0,
+        expected_permission_policy_fingerprint=context_fingerprint(
+            "test-host-ingress-permission:v1", permission_snapshot_id
+        ),
+        expected_close_intent_revision=0,
+        expected_autonomy_chain_state_fingerprint=None,
+        proposed_automatic_delivery_ordinal=None,
+    )
     return {
         **common,
         "long_horizon": root_long_horizon.contract,
         "child_rollout_subaccount": None,
         "run_entry_kind": "host",
+        "host_run_ingress": host_ingress,
+        "host_ingress_admission_proof": admission,
         "new_run_boundary": NewRunBoundaryFact(
             identity=identity,
             transcript=BoundaryTranscriptSnapshotFact(

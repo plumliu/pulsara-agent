@@ -107,6 +107,7 @@ class ToolExecutor:
         permission_snapshot_id: str | None = None,
         permission_mode: str | None = None,
         permission_policy: dict | None = None,
+        run_entry_kind: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         start_event = self._append(
             ToolResultStartEvent(
@@ -126,6 +127,7 @@ class ToolExecutor:
                     permission_snapshot_id=permission_snapshot_id,
                     permission_mode=permission_mode,
                     permission_policy=permission_policy,
+                    run_entry_kind=run_entry_kind,
                 )
                 if self.runtime_session_id is not None
                 else None
@@ -199,6 +201,7 @@ class ToolExecutor:
         permission_snapshot_id: str | None = None,
         permission_mode: str | None = None,
         permission_policy: dict | None = None,
+        run_entry_kind: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         start_event = self._append(
             ToolResultStartEvent(
@@ -224,6 +227,7 @@ class ToolExecutor:
                     permission_snapshot_id=permission_snapshot_id,
                     permission_mode=permission_mode,
                     permission_policy=permission_policy,
+                    run_entry_kind=run_entry_kind,
                 ),
             )
             if isinstance(result, ToolExecutionSuspended):
@@ -332,6 +336,18 @@ class ToolExecutor:
             artifacts=tuple(artifact_refs),
             observation_timing=timing,
             semantics=semantics,
+            terminal_process_observation_receipt=(
+                result.terminal_process_observation_receipt
+            ),
+            prepared_terminal_monitor_registration=(
+                result.prepared_terminal_monitor_registration
+            ),
+            prepared_terminal_notification_reservation=(
+                result.prepared_terminal_notification_reservation
+            ),
+            prepared_terminal_monitor_cancellation=(
+                result.prepared_terminal_monitor_cancellation
+            ),
         )
         return replace(result, prepared_terminal_result=prepared_terminal)
 
@@ -469,7 +485,7 @@ def _tool_origin_from_descriptor(descriptor: CapabilityDescriptor | None) -> str
 
 
 def _tool_observation_freshness(tool_name: str, metadata: dict) -> str:
-    if tool_name == "terminal_process":
+    if tool_name in {"terminal_process", "terminal_monitor"}:
         return "background_process_observation"
     if tool_name == "terminal" and metadata.get("process_id"):
         return "background_process_observation"
@@ -479,7 +495,7 @@ def _tool_observation_freshness(tool_name: str, metadata: dict) -> str:
 def _trusted_tool_reported_duration_seconds(
     tool_name: str, metadata: dict
 ) -> float | None:
-    if tool_name not in {"terminal", "terminal_process"}:
+    if tool_name not in {"terminal", "terminal_process", "terminal_monitor"}:
         return None
     timing = metadata.get("timing")
     if isinstance(timing, dict):

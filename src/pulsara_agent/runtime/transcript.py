@@ -13,7 +13,6 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     RunEndEvent,
     RunStartEvent,
-    TerminalProcessCompletedEvent,
     ToolResultEndEvent,
 )
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY, EventLog
@@ -48,7 +47,6 @@ __all__ = [
     "rebuild_prior_messages_bounded",
 ]
 
-_MAX_COMPLETION_NOTES = 3
 _MAX_TRANSCRIPT_CONTROL_EVENTS = 16_384
 _MAX_TRANSCRIPT_CONTROL_BYTES = 16 * 1024 * 1024
 _MAX_REPLY_EVENTS = 16_384
@@ -107,7 +105,6 @@ def rebuild_prior_messages_bounded(
         str(EventType.TOOL_RESULT_START),
         str(EventType.TOOL_RESULT_END),
         str(EventType.REQUIRE_USER_CONFIRM),
-        str(EventType.TERMINAL_PROCESS_COMPLETED),
         str(EventType.PLAN_MODE_ENTERED),
         str(EventType.PLAN_MODE_EXITED),
     )
@@ -167,7 +164,6 @@ def rebuild_prior_messages_bounded(
     messages = _rebuild_messages_from_events(
         event_log,
         events,
-        include_completion_note=True,
         reply_loader=load_reply,
     )
     if boundary is not None:
@@ -210,7 +206,6 @@ def rebuild_prior_messages(
         ]
     recovery = project_recovery_from_events(events)
     note_target = _last_terminal_run_note_target(events, recovery)
-    completion_note = _completion_note_after_last_run_start(events)
     terminal_run_ids = _terminal_run_ids(events)
     completed_tool_call_ids_by_run = _completed_tool_call_ids_by_run(events)
     messages: list[Msg] = []
@@ -254,8 +249,6 @@ def rebuild_prior_messages(
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
         messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
-    if completion_note is not None:
-        messages.append(completion_note)
     return prefix + messages
 
 
@@ -293,7 +286,7 @@ def rebuild_prior_messages_before_sequence(
         if event.sequence is not None
         and keep_after_sequence < event.sequence < before_sequence
     ]
-    return prefix + _rebuild_messages_from_events(event_log, replay_events, include_completion_note=False)
+    return prefix + _rebuild_messages_from_events(event_log, replay_events)
 
 
 def _latest_completed_boundary_before_sequence(
@@ -324,12 +317,10 @@ def _rebuild_messages_from_events(
     event_log: EventLog,
     events: list[AgentEvent],
     *,
-    include_completion_note: bool,
     reply_loader: Callable[[str], Msg] | None = None,
 ) -> list[Msg]:
     recovery = project_recovery_from_events(events)
     note_target = _last_terminal_run_note_target(events, recovery)
-    completion_note = _completion_note_after_last_run_start(events) if include_completion_note else None
     terminal_run_ids = _terminal_run_ids(events)
     completed_tool_call_ids_by_run = _completed_tool_call_ids_by_run(events)
     messages: list[Msg] = []
@@ -377,8 +368,6 @@ def _rebuild_messages_from_events(
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
         messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
-    if completion_note is not None:
-        messages.append(completion_note)
     return messages
 
 
@@ -469,47 +458,4 @@ def _note_message(
         id=f"{note_target.id_prefix}:{note_target.run_id}",
         created_at=created_at,
         metadata={"run_id": note_target.run_id, "kind": note_target.kind},
-    )
-
-
-def _completion_note_after_last_run_start(events: list) -> SystemMsg | None:
-    last_run_start_sequence = max(
-        ((event.sequence or 0) for event in events if isinstance(event, RunStartEvent)),
-        default=0,
-    )
-    if last_run_start_sequence <= 0:
-        return None
-    completions = [
-        event
-        for event in events
-        if isinstance(event, TerminalProcessCompletedEvent)
-        and (event.sequence or 0) > last_run_start_sequence
-    ]
-    if not completions:
-        return None
-    selected = completions[:_MAX_COMPLETION_NOTES]
-    lines = [_completion_note_line(event) for event in selected]
-    remaining = len(completions) - len(selected)
-    if remaining > 0:
-        lines.append(f"{remaining} more terminal task(s) completed; use terminal_process list if still retained.")
-    latest = completions[-1]
-    process_ids = ",".join(event.process_id for event in selected)
-    return SystemMsg(
-        name="pulsara",
-        content="Pulsara note: terminal background task update. " + " ".join(lines),
-        id=f"terminal-completion-note:{latest.sequence or latest.id}",
-        created_at=latest.created_at,
-        metadata={
-            "kind": "terminal_process_completed",
-            "process_ids": process_ids,
-        },
-    )
-
-
-def _completion_note_line(event: TerminalProcessCompletedEvent) -> str:
-    exit_code = event.exit_code
-    return (
-        f"Process {event.process_id} completed with status {event.status} "
-        f"and exit code {exit_code}. This note is lifecycle-only, not the full output; "
-        f"if still retained, inspect retained output with terminal_process log."
     )

@@ -5,15 +5,19 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pulsara_agent.primitives.subagent import ChildResultRenderPolicyFact
 
+if TYPE_CHECKING:
+    from pulsara_agent.primitives.host_ingress import HostRunIngressFact
+
 
 class HostRunBoundaryKind(StrEnum):
     PRE_RUN = "pre_run"
+    PRE_RUNTIME_REQUEST = "pre_runtime_request"
     PRE_INTERACTION_RESUME = "pre_interaction_resume"
 
 
@@ -75,7 +79,10 @@ class CurrentUserMessageFact(BaseModel):
 
     message_id: str = Field(min_length=1)
     source_kind: Literal[
-        "host_user_input", "subagent_task", "subagent_primitive_objective"
+        "host_user_input",
+        "host_runtime_request",
+        "subagent_task",
+        "subagent_primitive_objective",
     ]
     text: str
     observed_at_utc: str
@@ -91,7 +98,7 @@ class CurrentUserMessageFact(BaseModel):
     def _validate_message(self) -> "CurrentUserMessageFact":
         if self.content_sha256 != text_sha256(self.text):
             raise ValueError("current user content_sha256 mismatch")
-        if self.source_kind == "host_user_input":
+        if self.source_kind in {"host_user_input", "host_runtime_request"}:
             if self.source_artifact_id is not None:
                 raise ValueError("host current user cannot reference an artifact")
         elif not self.source_artifact_id:
@@ -154,10 +161,39 @@ def validate_host_current_user_attribution(
     *,
     boundary: HostRunBoundaryIdentityFact,
     current_user: CurrentUserMessageFact,
+    ingress: "HostRunIngressFact",
 ) -> None:
-    if current_user.source_kind != "host_user_input":
-        raise ValueError("host boundary requires host_user_input current user")
-    if current_user.observed_at_utc != boundary.observed_at_utc:
+    from pulsara_agent.primitives.host_ingress import (
+        HumanRunIngressFact,
+        RuntimeRequestRunIngressFact,
+    )
+    from pulsara_agent.primitives.runtime_observation import (
+        RuntimeTaskRequestPayloadFact,
+    )
+
+    if isinstance(ingress, HumanRunIngressFact):
+        if boundary.kind is not HostRunBoundaryKind.PRE_RUN:
+            raise ValueError("human Host ingress requires a pre-run boundary")
+        if current_user.source_kind != "host_user_input":
+            raise ValueError("human Host ingress requires host_user_input")
+        expected_text = ingress.human_message.text
+    elif isinstance(ingress, RuntimeRequestRunIngressFact):
+        if boundary.kind is not HostRunBoundaryKind.PRE_RUNTIME_REQUEST:
+            raise ValueError("runtime Host ingress requires a runtime-request boundary")
+        if current_user.source_kind != "host_runtime_request":
+            raise ValueError("runtime Host ingress requires host_runtime_request")
+        payload = ingress.runtime_request.payload
+        if not isinstance(payload, RuntimeTaskRequestPayloadFact):
+            raise ValueError("Host runtime ingress requires a task payload")
+        expected_text = payload.task_text
+    else:  # pragma: no cover - the discriminated union is closed.
+        raise TypeError(type(ingress))
+    if current_user.text != expected_text:
+        raise ValueError("Host current input text differs from typed ingress")
+    if (
+        current_user.observed_at_utc != boundary.observed_at_utc
+        or ingress.attribution.observed_at_utc != boundary.observed_at_utc
+    ):
         raise ValueError("host current user observation must match boundary ingress")
 
 

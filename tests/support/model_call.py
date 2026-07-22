@@ -31,7 +31,10 @@ from pulsara_agent.primitives.model_call import (
     ModelTokenUsageFact,
     sha256_fingerprint,
 )
-from pulsara_agent.primitives.context import ContextCompileInputAuditFact
+from pulsara_agent.primitives.context import (
+    ContextCompileInputAuditFact,
+    context_fingerprint,
+)
 from pulsara_agent.primitives.run_boundary import (
     ModelStreamRecoveryPlanFact,
     RunExecutionActivationFact,
@@ -723,6 +726,10 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         frozen_execution_surface=state.scratchpad[
             "frozen_capability_execution_surface"
         ],
+        host_run_ingress=state.scratchpad["host_run_ingress"],
+        host_ingress_admission_proof=state.scratchpad[
+            "host_ingress_admission_proof"
+        ],
         new_run_boundary=state.scratchpad["new_run_boundary_fact"],
         subagent_run_entry=None,
         long_horizon=long_horizon,
@@ -837,6 +844,14 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         HostRunBoundaryIdentityFact,
         text_sha256,
     )
+    from pulsara_agent.llm.user_carrier import encode_human_input
+    from pulsara_agent.primitives.host_ingress import (
+        HostIngressAdmissionProofFact,
+        HostIngressItemPlacementFact,
+        HostRunIngressAttributionFact,
+        HostRunIngressSemanticFact,
+        HumanRunIngressFact,
+    )
     from pulsara_agent.tools.registry import build_tool_binding_contract
     from pulsara_agent.primitives.permission import preset_permission_policy_fact
     from pulsara_agent.runtime.run_entry import CapabilityResolveBasis
@@ -930,11 +945,71 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         content_sha256=text_sha256(user_input),
         source_artifact_id=None,
     )
+    ingress_id = f"host_ingress:test:{state.run_id}"
+    human = encode_human_input(
+        user_input,
+        causal_occurrence_semantic_fingerprint=context_fingerprint(
+            "test-host-ingress-occurrence:v1",
+            (agent.runtime_session.runtime_session_id, state.run_id),
+        ),
+    ).semantic_fact
+    placement = build_frozen_fact(
+        HostIngressItemPlacementFact,
+        schema_version="host_ingress_item_placement.v1",
+        item_kind="human_input",
+        item_semantic_fingerprint=human.semantic_fingerprint,
+        accepted_ingress_ordinal=1,
+        item_ordinal=0,
+    )
+    ingress_semantic = build_frozen_fact(
+        HostRunIngressSemanticFact,
+        schema_version="host_run_ingress_semantic.v1",
+        ordered_current_input_semantic_fingerprints=(human.semantic_fingerprint,),
+    )
+    ingress_attribution = build_frozen_fact(
+        HostRunIngressAttributionFact,
+        schema_version="host_run_ingress_attribution.v1",
+        ingress_id=ingress_id,
+        host_session_id=f"host:test:{agent.runtime_session.runtime_session_id}",
+        conversation_id=None,
+        observed_at_utc=observed_at,
+        ingress_semantic_fingerprint=(
+            ingress_semantic.ingress_semantic_fingerprint
+        ),
+        ordered_item_placements=(placement,),
+    )
+    host_ingress = build_frozen_fact(
+        HumanRunIngressFact,
+        schema_version="human_run_ingress.v1",
+        semantic_identity=ingress_semantic,
+        attribution=ingress_attribution,
+        human_message=human,
+        attached_runtime_notifications=(),
+    )
+    host_admission = build_frozen_fact(
+        HostIngressAdmissionProofFact,
+        schema_version="host_ingress_admission_proof.v1",
+        admission_id=ingress_id,
+        admission_generation=1,
+        ingress_fact_fingerprint=host_ingress.fact_fingerprint,
+        selected_ingress_item_ids=(ingress_id,),
+        selected_notification_head_fingerprints=(),
+        expected_host_state_generation=0,
+        expected_permission_policy_revision=0,
+        expected_permission_policy_fingerprint=context_fingerprint(
+            "test-host-ingress-permission:v1", permission.snapshot_id
+        ),
+        expected_close_intent_revision=0,
+        expected_autonomy_chain_state_fingerprint=None,
+        proposed_automatic_delivery_ordinal=None,
+    )
     state.permission_snapshot = permission
     state.run_model_target = target
     state.scratchpad.update(
         {
             "current_user_message_fact": current_user,
+            "host_run_ingress": host_ingress,
+            "host_ingress_admission_proof": host_admission,
             "terminal_run_end_event_id": f"run_end:test:{uuid4().hex}",
             "new_run_boundary_fact": NewRunBoundaryFact(
                 identity=boundary,

@@ -38,6 +38,13 @@ from pulsara_agent.primitives.capability import (
     empty_capability_projection,
 )
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.host_ingress import (
+    HostIngressItemPlacementFact,
+    HostRunIngressAttributionFact,
+    HostRunIngressSemanticFact,
+    HumanRunIngressFact,
+)
 from pulsara_agent.primitives.permission import (
     PermissionMode,
     PresetPermissionPolicyFact,
@@ -72,6 +79,8 @@ from pulsara_agent.tools.registry import (
     ToolRegistry,
     build_tool_binding_contract,
 )
+from pulsara_agent.llm.user_carrier import encode_human_input
+from pulsara_agent.primitives import context_fingerprint
 
 
 UTC = "2026-07-12T01:02:03Z"
@@ -156,6 +165,7 @@ def test_host_boundary_timestamp_is_canonical_utc() -> None:
 
 
 def test_current_user_hash_and_host_attribution_are_enforced() -> None:
+    boundary = _identity()
     current = CurrentUserMessageFact(
         message_id="message:1",
         source_kind="host_user_input",
@@ -164,7 +174,49 @@ def test_current_user_hash_and_host_attribution_are_enforced() -> None:
         content_sha256=text_sha256("hello"),
         source_artifact_id=None,
     )
-    validate_host_current_user_attribution(boundary=_identity(), current_user=current)
+    human = encode_human_input(
+        "hello",
+        causal_occurrence_semantic_fingerprint=context_fingerprint(
+            "test-host-human-ingress:v1",
+            {"boundary_id": boundary.boundary_id},
+        ),
+    ).semantic_fact
+    placement = build_frozen_fact(
+        HostIngressItemPlacementFact,
+        schema_version="host_ingress_item_placement.v1",
+        item_kind="human_input",
+        item_semantic_fingerprint=human.semantic_fingerprint,
+        accepted_ingress_ordinal=1,
+        item_ordinal=0,
+    )
+    semantic = build_frozen_fact(
+        HostRunIngressSemanticFact,
+        schema_version="host_run_ingress_semantic.v1",
+        ordered_current_input_semantic_fingerprints=(human.semantic_fingerprint,),
+    )
+    attribution = build_frozen_fact(
+        HostRunIngressAttributionFact,
+        schema_version="host_run_ingress_attribution.v1",
+        ingress_id="ingress:1",
+        host_session_id="host:1",
+        conversation_id="conversation:1",
+        observed_at_utc=boundary.observed_at_utc,
+        ingress_semantic_fingerprint=semantic.ingress_semantic_fingerprint,
+        ordered_item_placements=(placement,),
+    )
+    ingress = build_frozen_fact(
+        HumanRunIngressFact,
+        schema_version="human_run_ingress.v1",
+        semantic_identity=semantic,
+        attribution=attribution,
+        human_message=human,
+        attached_runtime_notifications=(),
+    )
+    validate_host_current_user_attribution(
+        boundary=boundary,
+        current_user=current,
+        ingress=ingress,
+    )
     with pytest.raises(ValidationError):
         CurrentUserMessageFact(
             **{

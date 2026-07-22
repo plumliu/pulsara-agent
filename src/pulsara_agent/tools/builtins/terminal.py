@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
@@ -35,6 +35,7 @@ from pulsara_agent.runtime.tool_artifacts import (
     build_adaptive_preview,
     effective_terminal_output_cap,
 )
+from pulsara_agent.terminal_public_api import TERMINAL_TOOL_DESCRIPTION
 from pulsara_agent.tools.base import (
     ToolCall,
     ToolExecutionResult,
@@ -53,6 +54,11 @@ from pulsara_agent.tools.builtins.schemas import (
 )
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.terminal.notification import (
+        TerminalNotificationAccountCoordinator,
+    )
+
 
 @dataclass(slots=True)
 class TerminalTool(WorkspaceTool):
@@ -60,16 +66,11 @@ class TerminalTool(WorkspaceTool):
     owner_host_session_id: str | None = None
     owner_conversation_id: str | None = None
     permission_state: PermissionState | None = None
-    name: str = "terminal"
-    description: str = (
-        "Run a shell command inside workspace_root. "
-        "The inline output is a bounded preview, not the complete retained output; "
-        "when artifacts[] is present, use artifact_read for the full retained tool output. "
-        "If it is still running after yield_time_ms, return a process_id for terminal_process while the command keeps running. "
-        "Use terminal_process log to inspect retained output for yielded/background processes. "
-        "Use read_file/search_files/write_file/edit_file for file operations; "
-        "reserve terminal for builds, tests, git, package managers, scripts, network commands, and external CLIs."
+    terminal_notification_account: "TerminalNotificationAccountCoordinator | None" = (
+        None
     )
+    name: str = "terminal"
+    description: str = TERMINAL_TOOL_DESCRIPTION
     parameters: dict[str, Any] = field(
         default_factory=lambda: object_schema(
             properties={
@@ -250,6 +251,14 @@ class TerminalTool(WorkspaceTool):
             metadata["origin_event_context"] = event_context
             metadata["tool_call_id"] = call.id
             metadata["record_event"] = record_event
+        if runtime_context is not None:
+            metadata["runtime_session_id"] = runtime_context.runtime_session_id
+            metadata["run_entry_kind"] = runtime_context.run_entry_kind
+            metadata["require_completion_notification_reservation"] = bool(
+                self.terminal_notification_account is not None
+                and self.owner_host_session_id is not None
+                and runtime_context.run_entry_kind == "host_main_run"
+            )
 
         result = terminal_session.execute(
             TerminalRequest(
@@ -276,6 +285,29 @@ class TerminalTool(WorkspaceTool):
             backend_type=terminal_session.state.backend_type.value,
             timing=timing,
         )
+        prepared_completion_reservation = None
+        if (
+            result.status is TerminalStatus.RUNNING
+            and result.process_id is not None
+            and self.terminal_notification_account is not None
+            and self.owner_host_session_id is not None
+            and runtime_context is not None
+            and runtime_context.run_entry_kind == "host_main_run"
+        ):
+            process = self.terminal_sessions.monitorable_process(
+                result.process_id,
+                owner_host_session_id=self.owner_host_session_id,
+                origin_runtime_session_id=runtime_context.runtime_session_id,
+            )
+            prepared_completion_reservation = (
+                self.terminal_notification_account.prepare_completion_reservation(
+                    process=process,
+                    tool_result_end_event_id=(
+                        f"tool_result_end:{runtime_context.event_context.run_id}:"
+                        f"{call.id}"
+                    ),
+                )
+            )
         return self._result(
             call,
             status=_tool_result_state(result.status),
@@ -335,6 +367,9 @@ class TerminalTool(WorkspaceTool):
                 ),
             ),
             terminal_payload_timing=terminal_payload_timing_fact(timing),
+            prepared_terminal_notification_reservation=(
+                prepared_completion_reservation
+            ),
         )
 
     def _blocked_result(
@@ -762,6 +797,18 @@ class _StreamingTerminalJsonBuilder:
             semantics_input=semantics_input,
             terminal_payload_timing=result.terminal_payload_timing,
             semantics=result.semantics,
+            terminal_process_observation_receipt=(
+                result.terminal_process_observation_receipt
+            ),
+            prepared_terminal_monitor_registration=(
+                result.prepared_terminal_monitor_registration
+            ),
+            prepared_terminal_notification_reservation=(
+                result.prepared_terminal_notification_reservation
+            ),
+            prepared_terminal_monitor_cancellation=(
+                result.prepared_terminal_monitor_cancellation
+            ),
         )
 
     def _emit_preview(self, text: str) -> None:

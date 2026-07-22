@@ -368,3 +368,11 @@ request只属于该invocation，不能进入runtime-observation stable state或r
 Memory/capability/workspace snapshot按model-visible semantic head比较：相同正文即使producer event不同也不追加；变化时追加完整replacement；显式empty/terminal使用typed
 transition。Source暂时缺席表示no-new-fact或retain-effective-head，不授权删除、rollover或auxiliary rebase。Preparation的NONE/FULL/UNKNOWN/PARTIAL继续由现有session-owned
 provider-input owner处理。
+
+---
+
+## 18. Host ingress与terminal monitor safe point
+
+Human input、pending-interaction resume和confirmed runtime notification只能进入唯一`HostIngressCoordinator`。每个ingress由`QUEUED -> PREPARING -> COMMITTED -> ACTIVE/FINISHED` owner管理；queued取消撤回，preparing取消只detach。`RunStartEvent`必须嵌唯一`HostIngressAdmissionProofFact`，writer在同一linearization lock重验Host generation、permission、close/stop revision和notification heads；stale preparation只能typed replan，不能消费delivery ordinal。
+
+Terminal monitor observation FULL后才可进入Host selection。Human优先于runtime notification；同一wake chain的bounded attachments可合并成一次sampling并只消耗一个automatic ordinal，跨chain不得合并。Active run只可在前一tool/control FULL、无pending interaction/open tool pair、下一次Context/ProviderInput尚未冻结的`PRE_MODEL_STEP`借用notification。`ActiveRunMonitorSafePointCommitGuardFact`必须在ModelStart writer lock内重验segment、stop/close、permission、control disposition、ProviderInput generation/frontier与notification-head CAS，并原子提交ProviderInput append、delivery disposition、chain transition与ModelStart；NONE/UNKNOWN不能消费notification。

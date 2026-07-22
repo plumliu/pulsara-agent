@@ -36,6 +36,10 @@ class ToolResultOperationalKind(StrEnum):
     TERMINAL_PROCESS_OBSERVATION = "terminal_process_observation"
     TERMINAL_PROCESS_INVENTORY = "terminal_process_inventory"
     TERMINAL_PROCESS_ERROR = "terminal_process_error"
+    TERMINAL_MONITOR_REGISTRATION = "terminal_monitor_registration"
+    TERMINAL_MONITOR_INVENTORY = "terminal_monitor_inventory"
+    TERMINAL_MONITOR_CANCELLATION = "terminal_monitor_cancellation"
+    TERMINAL_MONITOR_ERROR = "terminal_monitor_error"
     ARTIFACT = "artifact"
 
 
@@ -46,6 +50,10 @@ class ToolResultEssentialEnvelopeKind(StrEnum):
     TERMINAL_PROCESS_OBSERVATION = "terminal_process_observation"
     TERMINAL_PROCESS_INVENTORY = "terminal_process_inventory"
     TERMINAL_PROCESS_ERROR = "terminal_process_error"
+    TERMINAL_MONITOR_REGISTRATION = "terminal_monitor_registration"
+    TERMINAL_MONITOR_INVENTORY = "terminal_monitor_inventory"
+    TERMINAL_MONITOR_CANCELLATION = "terminal_monitor_cancellation"
+    TERMINAL_MONITOR_ERROR = "terminal_monitor_error"
     ARTIFACT = "artifact"
 
 
@@ -60,6 +68,11 @@ class ToolResultRenderVariantCode(StrEnum):
     TERMINAL_PROCESS_OBSERVATION = "terminal_process_observation"
     TERMINAL_PROCESS_ERROR = "terminal_process_error"
     TERMINAL_PROCESS_ADAPTER_ERROR = "terminal_process_adapter_error"
+    TERMINAL_MONITOR_REGISTRATION = "terminal_monitor_registration"
+    TERMINAL_MONITOR_INVENTORY = "terminal_monitor_inventory"
+    TERMINAL_MONITOR_CANCELLATION = "terminal_monitor_cancellation"
+    TERMINAL_MONITOR_ERROR = "terminal_monitor_error"
+    TERMINAL_MONITOR_ADAPTER_ERROR = "terminal_monitor_adapter_error"
     EXTERNAL_GENERIC_RESULT = "external_generic_result"
     EXTERNAL_TERMINAL_RESULT = "external_terminal_result"
 
@@ -449,7 +462,15 @@ class TerminalCommandErrorEssentialFact(FrozenContextFact):
 class TerminalProcessObservationEssentialFact(FrozenContextFact):
     kind: Literal["terminal_process_observation"] = "terminal_process_observation"
     capture_policy_fingerprint: str
-    action: Literal["log", "poll", "wait", "kill", "write", "submit", "close_stdin"]
+    action: Literal[
+        "log",
+        "poll",
+        "wait",
+        "kill",
+        "write",
+        "submit",
+        "close_stdin",
+    ]
     process_id: str = Field(min_length=1)
     status: str
     exit_code: int | None
@@ -479,6 +500,72 @@ class TerminalProcessInventoryEssentialFact(FrozenContextFact):
     summaries_truncated: bool
 
 
+class TerminalMonitorSummaryFact(FrozenContextFact):
+    monitor_id: str = Field(min_length=1)
+    process_id: str = Field(min_length=1)
+    lifecycle_state: str = Field(min_length=1)
+    observation_ordinal: int = Field(ge=0)
+    has_pending_observation: bool
+
+
+class TerminalMonitorRegistrationEssentialFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_registration"] = "terminal_monitor_registration"
+    capture_policy_fingerprint: str
+    action: Literal["register"] = "register"
+    process_id: str = Field(min_length=1)
+    monitor_id: str = Field(min_length=1)
+    monitor_status: Literal["registered"] = "registered"
+    expires_at_utc: str
+    status: str = Field(min_length=1)
+    exit_code: int | None
+    output_truncated: bool
+    terminal_session_id: str = Field(min_length=1)
+    backend_type: str = Field(min_length=1)
+
+    @field_validator("expires_at_utc")
+    @classmethod
+    def _expires_at(cls, value: str) -> str:
+        return canonical_utc_timestamp(value)
+
+
+class TerminalMonitorInventoryEssentialFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_inventory"] = "terminal_monitor_inventory"
+    capture_policy_fingerprint: str
+    action: Literal["list"] = "list"
+    status: str = Field(min_length=1)
+    monitor_summaries: tuple[TerminalMonitorSummaryFact, ...]
+    omitted_monitor_count: int = Field(ge=0)
+    summaries_truncated: bool
+
+
+class TerminalMonitorCancellationEssentialFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_cancellation"] = "terminal_monitor_cancellation"
+    capture_policy_fingerprint: str
+    action: Literal["cancel"] = "cancel"
+    monitor_id: str = Field(min_length=1)
+    outcome: Literal["cancelled", "already_terminal"]
+
+
+class TerminalMonitorErrorEssentialFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_error"] = "terminal_monitor_error"
+    capture_policy_fingerprint: str
+    requested_action: str = Field(min_length=1)
+    process_id: str | None
+    monitor_id: str | None
+    status: str = Field(min_length=1)
+    error: ToolResultErrorPreviewFact
+    policy_code: str | None
+
+    @model_validator(mode="after")
+    def _branch(self) -> "TerminalMonitorErrorEssentialFact":
+        _validate_terminal_monitor_error_branch(
+            action=self.requested_action,
+            process_id=self.process_id,
+            monitor_id=self.monitor_id,
+        )
+        return self
+
+
 class TerminalProcessErrorEssentialFact(FrozenContextFact):
     kind: Literal["terminal_process_error"] = "terminal_process_error"
     capture_policy_fingerprint: str
@@ -504,6 +591,10 @@ ToolResultEssentialFact: TypeAlias = (
     | TerminalCommandErrorEssentialFact
     | TerminalProcessObservationEssentialFact
     | TerminalProcessInventoryEssentialFact
+    | TerminalMonitorRegistrationEssentialFact
+    | TerminalMonitorInventoryEssentialFact
+    | TerminalMonitorCancellationEssentialFact
+    | TerminalMonitorErrorEssentialFact
     | TerminalProcessErrorEssentialFact
     | ArtifactEssentialResultFact
 )
@@ -570,7 +661,9 @@ class ToolResultRollupSemanticsFact(FrozenContextFact):
         if len(self.evidence_keys) > 16:
             raise ValueError("tool-result rollup evidence keys exceed bound")
         if tuple(sorted(set(self.evidence_keys))) != self.evidence_keys:
-            raise ValueError("tool-result rollup evidence keys must be sorted and unique")
+            raise ValueError(
+                "tool-result rollup evidence keys must be sorted and unique"
+            )
         if any(not value or len(value) > 256 for value in self.evidence_keys):
             raise ValueError("tool-result rollup evidence key is invalid")
         _validate_fingerprint(
@@ -960,7 +1053,15 @@ class TerminalCommandErrorDomainSubmissionFact(FrozenContextFact):
 
 class TerminalProcessObservationDomainSubmissionFact(FrozenContextFact):
     kind: Literal["terminal_process_observation"] = "terminal_process_observation"
-    action: str
+    action: Literal[
+        "log",
+        "poll",
+        "wait",
+        "kill",
+        "write",
+        "submit",
+        "close_stdin",
+    ]
     process_id: str
     status: str
     exit_code: int | None
@@ -988,6 +1089,60 @@ class TerminalProcessInventoryDomainSubmissionFact(FrozenContextFact):
     summaries_truncated: bool
 
 
+class TerminalMonitorRegistrationDomainSubmissionFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_registration"] = "terminal_monitor_registration"
+    action: Literal["register"] = "register"
+    process_id: str = Field(min_length=1)
+    monitor_id: str = Field(min_length=1)
+    monitor_status: Literal["registered"] = "registered"
+    expires_at_utc: str
+    status: str = Field(min_length=1)
+    exit_code: int | None
+    output_truncated: bool
+    terminal_session_id: str = Field(min_length=1)
+    backend_type: str = Field(min_length=1)
+
+    @field_validator("expires_at_utc")
+    @classmethod
+    def _expires_at(cls, value: str) -> str:
+        return canonical_utc_timestamp(value)
+
+
+class TerminalMonitorInventoryDomainSubmissionFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_inventory"] = "terminal_monitor_inventory"
+    action: Literal["list"] = "list"
+    status: str = Field(min_length=1)
+    monitor_summaries: tuple[TerminalMonitorSummaryFact, ...]
+    omitted_monitor_count: int = Field(ge=0)
+    summaries_truncated: bool
+
+
+class TerminalMonitorCancellationDomainSubmissionFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_cancellation"] = "terminal_monitor_cancellation"
+    action: Literal["cancel"] = "cancel"
+    monitor_id: str = Field(min_length=1)
+    outcome: Literal["cancelled", "already_terminal"]
+
+
+class TerminalMonitorErrorDomainSubmissionFact(FrozenContextFact):
+    kind: Literal["terminal_monitor_error"] = "terminal_monitor_error"
+    requested_action: str = Field(min_length=1)
+    process_id: str | None
+    monitor_id: str | None
+    status: str = Field(min_length=1)
+    error: ToolResultErrorPreviewFact
+    policy_code: str | None
+
+    @model_validator(mode="after")
+    def _branch(self) -> "TerminalMonitorErrorDomainSubmissionFact":
+        _validate_terminal_monitor_error_branch(
+            action=self.requested_action,
+            process_id=self.process_id,
+            monitor_id=self.monitor_id,
+        )
+        return self
+
+
 class TerminalProcessErrorDomainSubmissionFact(FrozenContextFact):
     kind: Literal["terminal_process_error"] = "terminal_process_error"
     requested_action: str
@@ -1011,9 +1166,35 @@ ToolResultDomainSubmissionFact: TypeAlias = (
     | TerminalCommandErrorDomainSubmissionFact
     | TerminalProcessObservationDomainSubmissionFact
     | TerminalProcessInventoryDomainSubmissionFact
+    | TerminalMonitorRegistrationDomainSubmissionFact
+    | TerminalMonitorInventoryDomainSubmissionFact
+    | TerminalMonitorCancellationDomainSubmissionFact
+    | TerminalMonitorErrorDomainSubmissionFact
     | TerminalProcessErrorDomainSubmissionFact
     | ArtifactDomainSubmissionFact
 )
+
+
+def _validate_terminal_monitor_error_branch(
+    *,
+    action: str,
+    process_id: str | None,
+    monitor_id: str | None,
+) -> None:
+    if action == "register":
+        if monitor_id is not None:
+            raise ValueError("terminal monitor register error identity mismatch")
+        return
+    if action == "list":
+        if process_id is not None or monitor_id is not None:
+            raise ValueError("terminal monitor list error identity mismatch")
+        return
+    if action == "cancel":
+        if process_id is not None:
+            raise ValueError("terminal monitor cancel error identity mismatch")
+        return
+    if process_id is not None or monitor_id is not None:
+        raise ValueError("unknown terminal monitor action cannot claim an identity")
 
 
 class ExternalToolResultSubmissionFact(FrozenContextFact):

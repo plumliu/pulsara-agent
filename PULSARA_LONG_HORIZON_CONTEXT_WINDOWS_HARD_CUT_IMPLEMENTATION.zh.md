@@ -198,7 +198,7 @@ rendered_total_chars > total_context_chars
 - raw artifact archive threshold与persistence cap；
 - adaptive head/tail preview；
 - per-tool/per-message/per-envelope chars cap；
-- terminal/terminal_process typed essential envelope；
+- terminal/terminal_process/terminal_monitor typed essential envelope；
 - artifact locator与`artifact_read`；
 - tool-call/result pairing与timing；
 - final provider payload token validation。
@@ -3281,11 +3281,11 @@ classification必须在完整tool arguments可用、真实执行之前生成。`
 `action_classification: ToolActionClassificationFact | None`；known descriptor必填，descriptor-missing才允许为空。allow decision与tool rollout
 reservation atomic commit后才能执行；phase deny不创建tool reservation，但仍写classification、gate decision和typed denied result。
 
-单一语义工具的classifier可返回固定class；`terminal_process`按normalized action/arguments保守分类。无法证明是hydration/verification/synthesis
+单一语义工具的classifier可返回固定class；`terminal_process`与`terminal_monitor`按normalized action/arguments保守分类。无法证明是hydration/verification/synthesis
 时归为`evidence_acquisition`或`external_action`，在finalization fail closed。classification cost必须在`0..max_rollout_cost_units`内。
 
 classifier registry采用与tool-result semantics builder相同的durable contract fingerprint纪律：same ID/version不同contract fingerprint为配置
-冲突；当前进程build fingerprint仅诊断。禁止在AgentRuntime写`if tool_name == "terminal_process"`第二分类真源。
+冲突；当前进程build fingerprint仅诊断。禁止在AgentRuntime按terminal tool name另写第二分类真源。
 
 MCP/remote server返回的description、annotations或自报cost不具有governance authority。Host-side MCP descriptor adapter按本地versioned policy映射；
 无可信映射的remote tool保守归为`external_action`，restricted/finalization下deny。operator override必须进入event-safe descriptor fingerprint，

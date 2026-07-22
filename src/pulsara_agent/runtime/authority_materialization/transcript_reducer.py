@@ -16,7 +16,6 @@ from pulsara_agent.event import (
     RequireExternalExecutionEvent,
     RunEndEvent,
     RunStartEvent,
-    TerminalProcessCompletedEvent,
     ToolExecutionSuspendedEvent,
     ToolResultTerminalProjectionCommittedEvent,
 )
@@ -40,6 +39,9 @@ from pulsara_agent.primitives.authority_materialization import (
     TranscriptProjectionStableSemanticStateFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.llm.user_carrier import (
+    canonical_runtime_observation_wire_from_semantic,
+)
 from pulsara_agent.primitives.terminal_projection import (
     ModelTerminalProjectionPayloadFact,
     ModelToolCallBlockSemanticFact,
@@ -514,13 +516,11 @@ class TranscriptProjectionStateStore:
     def _apply_semantic(self, event: AgentEvent) -> None:
         if isinstance(event, RunStartEvent):
             self._append_current_user(event)
+            self._append_run_ingress_notifications(event)
             return
         if isinstance(event, RunEndEvent):
             self._discard_incomplete_run_assemblies(event.run_id)
             self._append_run_recovery_note(event)
-            return
-        if isinstance(event, TerminalProcessCompletedEvent):
-            self._append_terminal_completion_note(event)
             return
         if isinstance(event, ModelCallTerminalProjectionCommittedEvent):
             if event.sequence is None:
@@ -854,9 +854,16 @@ class TranscriptProjectionStateStore:
         provider_role = (
             "user" if current.source_kind == "host_user_input" else "runtime_request"
         )
+        provider_name = (
+            "user"
+            if provider_role == "user"
+            else "terminal_process_observation"
+            if current.source_kind == "host_runtime_request"
+            else "subagent_task"
+        )
         provider = _message_provider_semantic(
             role=provider_role,
-            name="user" if provider_role == "user" else "pulsara_runtime",
+            name=provider_name,
             segment="current_user",
             ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
         )
@@ -883,6 +890,70 @@ class TranscriptProjectionStateStore:
             content=content,
             source_event=event,
         )
+
+    def _append_run_ingress_notifications(self, event: RunStartEvent) -> None:
+        ingress = event.host_run_ingress
+        if ingress is None:
+            return
+        attachments = (
+            ingress.attached_runtime_notifications
+            if ingress.ingress_kind == "human"
+            else ingress.source_notifications
+        )
+        for index, attachment in enumerate(attachments):
+            wire = canonical_runtime_observation_wire_from_semantic(
+                attachment.observation_wire_semantic
+            )
+            block_semantic = build_frozen_fact(
+                TranscriptProviderTextBlockSemanticFact,
+                schema_version="transcript_provider_text_block_semantic.v1",
+                block_kind="text",
+                text=wire,
+            )
+            message_id = (
+                f"terminal-notification:{event.id}:{index}:"
+                f"{attachment.attachment_fingerprint.removeprefix('sha256:')[:16]}"
+            )
+            block = build_frozen_fact(
+                TranscriptInlineBlockFact,
+                schema_version="transcript_inline_block.v1",
+                provider_semantic_identity=block_semantic,
+                attribution=build_frozen_fact(
+                    TranscriptInlineBlockAttributionFact,
+                    schema_version="transcript_inline_block_attribution.v1",
+                    block_id=f"text:{message_id}",
+                    block_index=0,
+                    source_projection_order=None,
+                ),
+            )
+            provider = _message_provider_semantic(
+                role="runtime_observation",
+                name="terminal_process_monitor_observation",
+                segment="current_user",
+                ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
+            )
+            self._append_message_entry(
+                provider=provider,
+                attribution=build_frozen_fact(
+                    TranscriptMessageAttributionFact,
+                    schema_version="transcript_message_attribution.v2",
+                    message_id=message_id,
+                    run_id=event.run_id,
+                    turn_id=event.turn_id,
+                    reply_id=event.reply_id,
+                    created_at_utc=event.current_user_message.observed_at_utc,
+                    finished_at_utc=event.current_user_message.observed_at_utc,
+                    segment="current_user",
+                ),
+                content=build_frozen_fact(
+                    InlineNormalizedMessageContentFact,
+                    schema_version="inline_normalized_message_content.v3",
+                    content_kind="inline_normalized_message",
+                    provider_semantic_identity=provider,
+                    blocks=(block,),
+                ),
+                source_event=event,
+            )
 
     def _append_run_recovery_note(self, event: RunEndEvent) -> None:
         if event.status == "finished":
@@ -931,65 +1002,6 @@ class TranscriptProjectionStateStore:
                 created_at_utc=event.created_at,
                 finished_at_utc=event.created_at,
                 segment="recovery_note",
-            ),
-            content=build_frozen_fact(
-                InlineNormalizedMessageContentFact,
-                schema_version="inline_normalized_message_content.v3",
-                content_kind="inline_normalized_message",
-                provider_semantic_identity=provider,
-                blocks=(block,),
-            ),
-            source_event=event,
-        )
-
-    def _append_terminal_completion_note(
-        self,
-        event: TerminalProcessCompletedEvent,
-    ) -> None:
-        text = (
-            "Pulsara note: terminal background task update. "
-            f"Process {event.process_id} completed with status {event.status} "
-            f"and exit code {event.exit_code}. This note is lifecycle-only, not "
-            "the full output; if still retained, inspect retained output with "
-            "terminal_process log."
-        )
-        message_id = f"terminal-completion-note:{event.id}"
-        block_semantic = build_frozen_fact(
-            TranscriptProviderTextBlockSemanticFact,
-            schema_version="transcript_provider_text_block_semantic.v1",
-            block_kind="text",
-            text=text,
-        )
-        block = build_frozen_fact(
-            TranscriptInlineBlockFact,
-            schema_version="transcript_inline_block.v1",
-            provider_semantic_identity=block_semantic,
-            attribution=build_frozen_fact(
-                TranscriptInlineBlockAttributionFact,
-                schema_version="transcript_inline_block_attribution.v1",
-                block_id=f"{message_id}:text",
-                block_index=0,
-                source_projection_order=None,
-            ),
-        )
-        provider = _message_provider_semantic(
-            role="runtime_observation",
-            name="pulsara",
-            segment="prior_history",
-            ordered_block_fingerprints=(block_semantic.semantic_fingerprint,),
-        )
-        self._append_message_entry(
-            provider=provider,
-            attribution=build_frozen_fact(
-                TranscriptMessageAttributionFact,
-                schema_version="transcript_message_attribution.v2",
-                message_id=message_id,
-                run_id=event.run_id,
-                turn_id=event.turn_id,
-                reply_id=event.reply_id,
-                created_at_utc=event.created_at,
-                finished_at_utc=event.created_at,
-                segment="terminal_lifecycle_note",
             ),
             content=build_frozen_fact(
                 InlineNormalizedMessageContentFact,

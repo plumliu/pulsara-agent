@@ -21,6 +21,8 @@ from pulsara_agent.event import (
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
+    TerminalNotificationReservationReleasedEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
 )
 from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
@@ -36,6 +38,9 @@ from pulsara_agent.primitives.model_call import (
 from pulsara_agent.primitives.terminal_projection import ModelCallSemanticSourceFact
 from pulsara_agent.primitives.provider_input import (
     ProviderInputGenerationCommitGuardFact,
+)
+from pulsara_agent.primitives.host_ingress import (
+    ActiveRunMonitorSafePointCommitGuardFact,
 )
 from pulsara_agent.llm.terminal_projection import (
     MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
@@ -93,6 +98,9 @@ class ModelStreamStartCommitGuard:
     provider_input_generation_guard: ProviderInputGenerationCommitGuardFact | None
     prepared_provider_input_candidate_fingerprint: str | None
     committed_provider_input_reference_fingerprint: str | None
+    active_run_monitor_safe_point_guard: (
+        ActiveRunMonitorSafePointCommitGuardFact | None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,11 @@ def build_model_stream_start_commit_guard(
             provider.committed_reference.reference_fingerprint
             if provider is not None
             else None
+        ),
+        active_run_monitor_safe_point_guard=(
+            None
+            if bundle.active_run_monitor_delivery is None
+            else bundle.active_run_monitor_delivery.commit_guard
         ),
     )
 
@@ -267,6 +280,8 @@ class RuntimeSessionModelStreamEventCommitPort:
             ProviderInputAppendCommittedEvent,
             ProviderInputGenerationClosedEvent,
             ProviderInputGenerationRolloverResolvedEvent,
+            TerminalProcessObservationDeliveryDispositionEvent,
+            TerminalNotificationReservationReleasedEvent,
         )
         if any(not isinstance(event, allowed) for event in events):
             raise ModelStreamCommitContractError(
@@ -283,6 +298,21 @@ class RuntimeSessionModelStreamEventCommitPort:
         ):
             raise ModelStreamCommitContractError(
                 "model start batch does not match its frozen commit guard"
+            )
+        safe_point_guard = guard.active_run_monitor_safe_point_guard
+        if (safe_point_guard is None) != (
+            start.active_run_monitor_delivery is None
+        ):
+            raise ModelStreamCommitContractError(
+                "model start active-run monitor guard matrix mismatch"
+            )
+        if (
+            safe_point_guard is not None
+            and start.active_run_monitor_delivery is not None
+            and start.active_run_monitor_delivery.commit_guard != safe_point_guard
+        ):
+            raise ModelStreamCommitContractError(
+                "model start active-run monitor guard drifted"
             )
         provider_guard = guard.provider_input_generation_guard
         if (provider_guard is None) != (start.provider_input_reference is None):
@@ -359,10 +389,25 @@ class RuntimeSessionModelStreamEventCommitPort:
         def commit_start_in_writer() -> ConfirmedCommittedBatch:
             # The same reentrant session lock covers state comparison and the
             # append, so an unrelated settlement cannot slip between them.
-            with self._runtime_session.write_coordinator.lock:
+            with (
+                self._runtime_session.active_run_monitor_safe_point_commit_guard(
+                    start_event=start,
+                    candidate_events=events,
+                    guard=safe_point_guard,
+                    state=self._state,
+                ),
+                self._runtime_session.write_coordinator.lock,
+            ):
                 if provider_guard is not None:
                     self._runtime_session.provider_input_generation_store.validate_start_guard(
                         provider_guard
+                    )
+                if safe_point_guard is not None:
+                    self._runtime_session.validate_active_run_monitor_safe_point(
+                        start_event=start,
+                        candidate_events=events,
+                        guard=safe_point_guard,
+                        state=self._state,
                     )
                 if reservation is not None:
                     self._require_expected_rollout_state(

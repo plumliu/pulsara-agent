@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
+
+from pydantic import ValidationError
 
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.capability.result_semantics import (
@@ -12,6 +14,11 @@ from pulsara_agent.capability.result_semantics import (
     unbounded_error_preview,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalProcessLifecycleOutcomeFact,
+    TerminalProcessObservationReceiptFact,
+)
 from pulsara_agent.primitives.tool_result import (
     TerminalProcessErrorDomainSubmissionFact,
     TerminalProcessInventoryDomainSubmissionFact,
@@ -24,13 +31,19 @@ from pulsara_agent.runtime.terminal import TerminalSessionManager, TerminalStatu
 from pulsara_agent.runtime.terminal.process import ProcessInputError
 from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
-from pulsara_agent.tools.builtins.schemas import (
+from pulsara_agent.terminal_public_api import (
     DEFAULT_MAX_OUTPUT_CHARS,
-    MIN_TERMINAL_OUTPUT_CHARS,
-    bounded_int_arg,
-    bool_arg,
-    object_schema,
-    required_str_arg,
+    TERMINAL_PROCESS_TOOL_DESCRIPTION,
+    TerminalProcessCloseStdinInput,
+    TerminalProcessKillInput,
+    TerminalProcessListInput,
+    TerminalProcessLogInput,
+    TerminalProcessPollInput,
+    TerminalProcessSubmitInput,
+    TerminalProcessWaitInput,
+    TerminalProcessWriteInput,
+    parse_terminal_process_input,
+    terminal_process_input_schema,
 )
 from pulsara_agent.tools.builtins.terminal import (
     terminal_artifact_candidates,
@@ -42,65 +55,17 @@ from pulsara_agent.tools.builtins.terminal import (
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
 
-_SUPPORTED_ACTIONS = {
-    "list",
-    "log",
-    "poll",
-    "wait",
-    "kill",
-    "write",
-    "submit",
-    "close_stdin",
-}
-_PROCESS_ID_ACTIONS = {"log", "poll", "wait", "kill", "write", "submit", "close_stdin"}
-DEFAULT_WAIT_TIMEOUT_SECONDS = 30
-
-
 @dataclass(slots=True)
 class TerminalProcessTool(WorkspaceTool):
+    _SUPPORTED_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"list", "log", "poll", "wait", "write", "submit", "close_stdin", "kill"}
+    )
     terminal_sessions: TerminalSessionManager | None = None
     owner_host_session_id: str | None = None
     permission_state: PermissionState | None = None
     name: str = "terminal_process"
-    description: str = (
-        "List, inspect, poll, wait for, kill, or send stdin to managed terminal processes returned when terminal yields a process_id. "
-        "Use list to see retained tasks. Use log to inspect retained output; its inline output is a bounded preview and may include artifacts[] "
-        "for the complete retained log. Use poll or wait for current lifecycle state and bounded output snapshots. "
-        "Use write or submit for pipe/PTY input, close_stdin to send EOF, and kill only when you intend to stop the process."
-    )
-    parameters: dict[str, Any] = field(
-        default_factory=lambda: object_schema(
-            properties={
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "list",
-                        "log",
-                        "poll",
-                        "wait",
-                        "kill",
-                        "write",
-                        "submit",
-                        "close_stdin",
-                    ],
-                    "description": "Process action for managed pipe or PTY terminal processes returned by terminal.",
-                },
-                "process_id": {"type": "string"},
-                "data": {"type": "string"},
-                "timeout_seconds": {
-                    "type": "integer",
-                    "default": DEFAULT_WAIT_TIMEOUT_SECONDS,
-                },
-                "max_output_chars": {
-                    "type": "integer",
-                    "default": DEFAULT_MAX_OUTPUT_CHARS,
-                },
-                "include_finished": {"type": "boolean", "default": True},
-                "include_running": {"type": "boolean", "default": True},
-            },
-            required=["action"],
-        )
-    )
+    description: str = TERMINAL_PROCESS_TOOL_DESCRIPTION
+    parameters: dict[str, Any] = field(default_factory=terminal_process_input_schema)
     is_read_only: bool = False
     is_concurrency_safe: bool = False
 
@@ -115,8 +80,18 @@ class TerminalProcessTool(WorkspaceTool):
         *,
         runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
-        action = required_str_arg(call.arguments, "action").strip()
-        process_id = _optional_process_id(call.arguments)
+        try:
+            request = parse_terminal_process_input(call.arguments)
+        except ValidationError as exc:
+            return self._error_result(
+                call,
+                process_id=_optional_process_id(call.arguments),
+                error=_validation_error_text(exc),
+                status="malformed_arguments",
+                policy_code="terminal_process_malformed_arguments",
+            )
+        action = request.action
+        process_id = getattr(request, "process_id", None)
         if _terminal_access_off(
             runtime_context=runtime_context, permission_state=self.permission_state
         ):
@@ -127,85 +102,44 @@ class TerminalProcessTool(WorkspaceTool):
                 status="blocked",
                 policy_code="terminal_access_off",
             )
-        max_output = bounded_int_arg(
-            call.arguments,
-            "max_output_chars",
-            default=DEFAULT_MAX_OUTPUT_CHARS,
-            minimum=MIN_TERMINAL_OUTPUT_CHARS,
-            maximum=DEFAULT_MAX_OUTPUT_CHARS,
-        )
-        if action not in _SUPPORTED_ACTIONS:
-            return self._error_result(
-                call,
-                process_id=process_id,
-                error=f"terminal_process action is not supported yet: {action}",
-                status="not_supported_yet",
-            )
-        if action in _PROCESS_ID_ACTIONS and not process_id:
-            return self._error_result(
-                call,
-                process_id=process_id,
-                error=f"process_id is required for terminal_process action: {action}",
-                status="blocked",
-            )
         try:
-            if action == "list":
-                include_finished = bool_arg(call.arguments, "include_finished", True)
-                include_running = bool_arg(call.arguments, "include_running", True)
+            if isinstance(request, TerminalProcessListInput):
                 processes = self.terminal_sessions.list_processes(
                     owner_host_session_id=self.owner_host_session_id,
-                    include_finished=include_finished,
-                    include_running=include_running,
+                    include_finished=request.include_finished,
+                    include_running=request.include_running,
                 )
                 return self._list_result(call, processes, action=action)
-            if action == "log":
-                assert process_id is not None
+            if isinstance(request, TerminalProcessLogInput):
                 log = self.terminal_sessions.log_process(
-                    process_id,
-                    max_output_chars=max_output,
+                    request.process_id,
+                    max_output_chars=request.max_output_chars,
                     owner_host_session_id=self.owner_host_session_id,
                 )
                 return self._log_result(call, log, action=action)
-            if action == "poll":
-                assert process_id is not None
+            if isinstance(request, TerminalProcessPollInput):
                 result = self.terminal_sessions.poll_process(
-                    process_id,
-                    max_output_chars=max_output,
+                    request.process_id,
+                    max_output_chars=request.max_output_chars,
                     owner_host_session_id=self.owner_host_session_id,
                 )
-            elif action == "wait":
-                assert process_id is not None
-                timeout = bounded_int_arg(
-                    call.arguments,
-                    "timeout_seconds",
-                    default=DEFAULT_WAIT_TIMEOUT_SECONDS,
-                    minimum=1,
-                    maximum=DEFAULT_WAIT_TIMEOUT_SECONDS,
-                )
+            elif isinstance(request, TerminalProcessWaitInput):
                 result = self.terminal_sessions.wait_process(
-                    process_id,
-                    timeout_seconds=timeout,
-                    max_output_chars=max_output,
+                    request.process_id,
+                    timeout_seconds=request.timeout_seconds,
+                    max_output_chars=request.max_output_chars,
                     owner_host_session_id=self.owner_host_session_id,
                 )
-            elif action == "kill":
-                assert process_id is not None
+            elif isinstance(request, TerminalProcessKillInput):
                 result = self.terminal_sessions.kill_process(
-                    process_id,
-                    max_output_chars=max_output,
+                    request.process_id,
+                    max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
                     owner_host_session_id=self.owner_host_session_id,
                 )
-            elif action in {"write", "submit"}:
-                assert process_id is not None
-                data = call.arguments.get("data")
-                if not isinstance(data, str):
-                    return self._error_result(
-                        call,
-                        process_id=process_id,
-                        error="data must be a string",
-                        status="blocked",
-                    )
-                if is_hardline_terminal_command(data):
+            elif isinstance(
+                request, TerminalProcessWriteInput | TerminalProcessSubmitInput
+            ):
+                if is_hardline_terminal_command(request.data):
                     return self._error_result(
                         call,
                         process_id=process_id,
@@ -214,17 +148,16 @@ class TerminalProcessTool(WorkspaceTool):
                         policy_code="hardline_terminal_process_input",
                     )
                 result = self.terminal_sessions.write_process(
-                    process_id,
-                    data,
-                    append_newline=action == "submit",
-                    max_output_chars=max_output,
+                    request.process_id,
+                    request.data,
+                    append_newline=isinstance(request, TerminalProcessSubmitInput),
+                    max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
                     owner_host_session_id=self.owner_host_session_id,
                 )
-            elif action == "close_stdin":
-                assert process_id is not None
+            elif isinstance(request, TerminalProcessCloseStdinInput):
                 result = self.terminal_sessions.close_process_stdin(
-                    process_id,
-                    max_output_chars=max_output,
+                    request.process_id,
+                    max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
                     owner_host_session_id=self.owner_host_session_id,
                 )
             else:
@@ -357,10 +290,20 @@ class TerminalProcessTool(WorkspaceTool):
                 ),
             ),
             terminal_payload_timing=terminal_payload_timing_fact(timing),
+            terminal_process_observation_receipt=_observation_receipt(
+                call=call,
+                action=action,
+                observation_semantic=log.observation_semantic,
+                completion_event_reference=log.completion_event_reference,
+            ),
         )
 
     def _process_result(
-        self, call: ToolCall, result, *, action: str
+        self,
+        call: ToolCall,
+        result,
+        *,
+        action: str,
     ) -> ToolExecutionResult:
         if (
             result.status in {TerminalStatus.RUNNING, TerminalStatus.SUCCESS}
@@ -476,6 +419,12 @@ class TerminalProcessTool(WorkspaceTool):
                 if result.status in {TerminalStatus.RUNNING, TerminalStatus.SUCCESS}
                 else terminal_payload_timing_fact(timing)
             ),
+            terminal_process_observation_receipt=_observation_receipt(
+                call=call,
+                action=action,
+                observation_semantic=result.observation_semantic,
+                completion_event_reference=result.completion_event_reference,
+            ),
         )
 
     def _error_result(
@@ -539,6 +488,13 @@ def _optional_process_id(args: dict[str, Any]) -> str | None:
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
+def _validation_error_text(error: ValidationError) -> str:
+    first = error.errors(include_url=False)[0]
+    location = ".".join(str(item) for item in first.get("loc", ()))
+    message = str(first.get("msg") or "invalid arguments")
+    return f"{location}: {message}" if location else message
+
+
 def _process_summary_fact(process) -> TerminalProcessSummaryFact:
     payload = {
         "process_id": process.process_id,
@@ -584,3 +540,28 @@ class _LogArtifactResult:
     cwd: str
     full_output_text: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _observation_receipt(
+    *,
+    call: ToolCall,
+    action: str,
+    observation_semantic,
+    completion_event_reference,
+) -> TerminalProcessObservationReceiptFact | None:
+    if action not in {"poll", "log", "wait", "kill"} or observation_semantic is None:
+        return None
+    terminal = isinstance(
+        observation_semantic.observed_state,
+        TerminalProcessLifecycleOutcomeFact,
+    )
+    if terminal and completion_event_reference is None:
+        return None
+    return build_frozen_fact(
+        TerminalProcessObservationReceiptFact,
+        schema_version="terminal_process_observation_receipt.v1",
+        observation_semantic=observation_semantic,
+        action_kind=action,
+        origin_tool_call_id=call.id,
+        completion_event_reference=completion_event_reference,
+    )

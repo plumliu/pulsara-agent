@@ -134,7 +134,7 @@ _VERIFICATION_WORKER_TOOL_NAMES = frozenset(
     {"read_file", "search_files", "artifact_read", "terminal", "terminal_process"}
 )
 _WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
-_TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
+_TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process", "terminal_monitor"})
 
 
 class SubagentRuntimeError(RuntimeError):
@@ -192,11 +192,9 @@ class SubagentRuntime:
         self._execution_registry = ChildExecutionRegistry()
         self._command_planner = SubagentCommandPlanner()
         self._parent_capability_snapshot: SubagentCapabilityProfile | None = None
-        graph_state = (
-            self.parent_runtime_session.subagent_graph_checkpoint_service.restore_for_live_store(
-                requested_through_sequence=(
-                    self.parent_runtime_session.long_horizon_state_store.through_sequence
-                )
+        graph_state = self.parent_runtime_session.subagent_graph_checkpoint_service.restore_for_live_store(
+            requested_through_sequence=(
+                self.parent_runtime_session.long_horizon_state_store.through_sequence
             )
         )
         self._graph_store = SubagentGraphStateStore.from_state(graph_state)
@@ -417,8 +415,10 @@ class SubagentRuntime:
             return True
         if parent_start is None:
             return False
-        account_state = self.parent_runtime_session.long_horizon_state_store.rollout_state(
-            parent_start.long_horizon.rollout_account_id
+        account_state = (
+            self.parent_runtime_session.long_horizon_state_store.rollout_state(
+                parent_start.long_horizon.rollout_account_id
+            )
         )
         if account_state is None:
             return False
@@ -2227,8 +2227,7 @@ class SubagentRuntime:
         )
         native_child_owner = (
             has_rollout_admission
-            and
-            handle is not None
+            and handle is not None
             and handle.child_session is not None
             and handle.coroutine is not None
         )
@@ -2930,9 +2929,7 @@ class SubagentRuntime:
                 f"Materialized batch has conflicting creation attribution: {batch_id}"
             )
         create_tool_call_id = next(iter(create_tool_call_ids), None)
-        native_terminal_by_run_id: dict[
-            str, ChildNativeTerminalReferenceFact
-        ] = {}
+        native_terminal_by_run_id: dict[str, ChildNativeTerminalReferenceFact] = {}
         native_terminal_created_at_by_run_id: dict[str, str] = {}
         if self._rollout_terminal_augmenter is not None:
             for run in run_facts:
@@ -2949,7 +2946,9 @@ class SubagentRuntime:
                 )
                 lifecycle = child_log.read_raw_events_by_types(
                     (EventType.RUN_START.value, EventType.RUN_END.value),
-                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    run_ids=(
+                        (run.child_run_id,) if run.child_run_id is not None else None
+                    ),
                     max_events=2,
                     max_payload_bytes=1024 * 1024,
                 )
@@ -3598,7 +3597,9 @@ class SubagentRuntime:
                 )
                 terminal_snapshot = child_log.read_raw_events_by_types(
                     (EventType.RUN_END.value,),
-                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    run_ids=(
+                        (run.child_run_id,) if run.child_run_id is not None else None
+                    ),
                     max_events=1,
                     max_payload_bytes=512 * 1024,
                 )
@@ -3866,10 +3867,7 @@ def _recovered_child_terminal_batch(
     )
     subaccount = start.child_rollout_subaccount
     rollout_close = ChildRolloutSubaccountClosedEvent(
-        id=(
-            "child_rollout_subaccount_closed:"
-            f"{subaccount.subaccount_fingerprint}"
-        ),
+        id=(f"child_rollout_subaccount_closed:{subaccount.subaccount_fingerprint}"),
         **event_fields,
         subaccount_fingerprint=subaccount.subaccount_fingerprint,
         settlement_aggregate=child_settlement_aggregate(child_rollout),
@@ -3911,8 +3909,7 @@ def _require_complete_child_terminal_batch(
     rollout_close = rollout_closes[0]
     if (
         rollout_close.run_end_event_id != terminal.id
-        or rollout_close.subaccount_fingerprint
-        != subaccount.subaccount_fingerprint
+        or rollout_close.subaccount_fingerprint != subaccount.subaccount_fingerprint
     ):
         raise SubagentRuntimeError("child terminal batch attribution drifted")
 
@@ -4297,9 +4294,7 @@ def _read_child_run_events(
         max_events=16_384,
         max_payload_bytes=16 * 1024 * 1024,
     )
-    return tuple(
-        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw
-    )
+    return tuple(item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw)
 
 
 def _mcp_binding_identities(

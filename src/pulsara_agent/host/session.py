@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
@@ -20,6 +22,10 @@ from pulsara_agent.event import (
     EventContext,
     EventType,
     McpCapabilitySnapshotInstalledEvent,
+    ModelCallControlDispositionResolvedEvent,
+    ModelCallEndEvent,
+    ModelCallStartEvent,
+    ProviderInputAppendCommittedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
@@ -27,6 +33,10 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunStartEvent,
     RolloutBudgetAccountOpenedEvent,
+    TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessObservationDeliveryDeferredEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
     utc_now,
 )
 from pulsara_agent.host.run_boundary import (
@@ -61,11 +71,23 @@ from pulsara_agent.primitives.mcp import (
 )
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
     RunTerminationIntentAttributionFact,
     sha256_fingerprint,
 )
 from pulsara_agent.llm.control import RunModelCallControlOwner
 from pulsara_agent.llm import ModelRole
+from pulsara_agent.llm.user_carrier import encode_human_input, encode_runtime_request
+from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.host.ingress import (
+    ActiveRunMonitorSafePointLease,
+    HostIngressAdmissionStale,
+    HostIngressAttemptOwner,
+    HostIngressCapacityError,
+    HostIngressClosedError,
+    HostIngressCoordinator,
+    default_permission_policy_fingerprint,
+)
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.primitives.permission import (
     PermissionMode,
@@ -91,6 +113,16 @@ from pulsara_agent.primitives.run_entry import (
     HostRunBoundaryIdentityFact,
     text_sha256,
 )
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.host_ingress import (
+    HostIngressItemPlacementFact,
+    HostRunIngressAttributionFact,
+    HostRunIngressSemanticFact,
+    HumanRunIngressFact,
+    RuntimeRequestRunIngressFact,
+)
+from pulsara_agent.primitives.terminal_observation import TerminalAutonomousDeliveryFact
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages_bounded
 from pulsara_agent.message import SystemMsg
@@ -157,6 +189,7 @@ from pulsara_agent.runtime.mcp.types import (
     redact_mcp_error_message,
 )
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
+from pulsara_agent.runtime.terminal.ui_stream import TerminalMonitorUISubscription
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 from pulsara_agent.capability.providers.mcp import (
     McpCapabilityProvider,
@@ -457,6 +490,7 @@ class HostSession:
     wiring: AgentRuntimeWiring
     terminal_lease: WorkspaceTerminalLease | None = None
     mcp_supervisor: McpServerSupervisor | None = None
+    reopen_deadline_monotonic: float | None = None
     created_at: float = field(default_factory=time.monotonic)
     last_active_at: float = field(default_factory=time.monotonic)
     active_run_id: str | None = None
@@ -469,6 +503,7 @@ class HostSession:
     _active_state: LoopState | None = None
     _active_task: asyncio.Task[Any] | None = None
     _boundary_task: asyncio.Task[Any] | None = None
+    _boundary_execution_task: asyncio.Task[Any] | None = None
     _boundary_attempt: HostRunBoundaryAttempt | None = None
     _boundary_observer: _StreamObserver | None = None
     _preparing_state: LoopState | None = None
@@ -496,13 +531,72 @@ class HostSession:
         init=False,
         repr=False,
     )
+    _ingress_coordinator: HostIngressCoordinator = field(init=False, repr=False)
+    _host_event_loop: asyncio.AbstractEventLoop | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _terminal_notification_dispatch_task: asyncio.Task[None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _terminal_notification_dispatch_error: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _terminal_notification_dispatch_enabled: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
+    _active_run_monitor_safe_point_lease: ActiveRunMonitorSafePointLease | None = field(
+        default=None, init=False, repr=False
+    )
+    _stop_intent_revision: int = field(default=0, init=False, repr=False)
+    _termination_intent_revision: int = field(default=0, init=False, repr=False)
+    _host_open_deadline_monotonic: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        runtime_deadline = runtime_session.runtime_open_deadline_monotonic
+        self._host_open_deadline_monotonic = (
+            runtime_deadline
+            if self.reopen_deadline_monotonic is None
+            else self.reopen_deadline_monotonic
+        )
+        if self._host_open_deadline_monotonic != runtime_deadline:
+            raise ValueError("Host and RuntimeSession reopen deadlines diverged")
+        if self._host_open_deadline_monotonic <= time.monotonic():
+            raise TimeoutError(
+                "Host open deadline expired before HostSession bootstrap"
+            )
+        self._ingress_coordinator = HostIngressCoordinator(
+            host_session_id=self.host_session_id,
+            permission_policy_fingerprint=default_permission_policy_fingerprint(),
+        )
+        self.wiring.runtime_wiring.runtime_session.bind_host_ingress_commit_validator(
+            self._ingress_coordinator.validate_run_start_event
+        )
+        self.wiring.runtime_wiring.runtime_session.bind_host_ingress_commit_guard(
+            self._ingress_coordinator.run_start_commit_guard
+        )
+        self.wiring.runtime_wiring.runtime_session.bind_terminal_notification_listener(
+            self._on_terminal_notification_committed
+        )
+        self.wiring.runtime_wiring.runtime_session.bind_active_run_monitor_safe_point(
+            provider=self._borrow_active_run_monitor_safe_point,
+            validator=self._validate_active_run_monitor_safe_point,
+            releaser=self._release_active_run_monitor_safe_point,
+            commit_guard_factory=(self._active_run_monitor_safe_point_commit_guard),
+        )
         snapshot = self.wiring.runtime_wiring.event_log.read_raw_events_by_types(
             (EventType.PLAN_MODE_ENTERED.value, EventType.PLAN_MODE_EXITED.value),
             max_events=4_096,
             max_payload_bytes=4 * 1024 * 1024,
-            deadline_monotonic=time.monotonic() + 10.0,
+            deadline_monotonic=self._host_open_deadline_monotonic,
         )
         reduced = reduce_plan_workflow_state(
             tuple(
@@ -998,6 +1092,7 @@ class HostSession:
         prior_messages: list,
         active_skill_names: frozenset[str],
         execution_surface_identity,
+        ingress_semantic_fingerprint: str,
     ) -> CapabilityResolveBasis:
         owner = CapabilityExposureOwnerFact(
             owner_kind="host_boundary",
@@ -1028,9 +1123,7 @@ class HostSession:
             permission_snapshot_id=permission_snapshot.snapshot_id,
             plan_active=self.plan_state.active,
             active_skill_names=tuple(sorted(active_skill_names)),
-            user_intent_fingerprint=sha256_fingerprint(
-                "host-user-intent:v1", user_input
-            ),
+            user_intent_fingerprint=ingress_semantic_fingerprint,
             prior_transcript_fingerprint=prior_fingerprint,
             mcp_installation_id=execution_surface_identity.mcp_installation_id,
             execution_surface_identity=execution_surface_identity,
@@ -1049,6 +1142,7 @@ class HostSession:
     def _freeze_new_run_boundary_inputs(
         self,
         *,
+        ingress_owner: HostIngressAttemptOwner,
         state: LoopState,
         identity: HostRunBoundaryIdentityFact,
         user_input: str,
@@ -1068,6 +1162,11 @@ class HostSession:
             source_through_sequence=transcript_source_through_sequence,
             source_event_count=transcript_source_event_count,
         )
+        host_run_ingress = self._build_host_run_ingress(
+            ingress_owner=ingress_owner,
+            identity=identity,
+            user_input=user_input,
+        )
         basis = self._capability_basis(
             identity=identity,
             permission_snapshot=permission_snapshot,
@@ -1075,6 +1174,13 @@ class HostSession:
             prior_messages=prior_messages,
             active_skill_names=active_skill_names,
             execution_surface_identity=frozen_surface.identity,
+            ingress_semantic_fingerprint=(
+                host_run_ingress.semantic_identity.ingress_semantic_fingerprint
+            ),
+        )
+        host_ingress_admission_proof = self._ingress_coordinator.admission_proof(
+            ingress_owner,
+            ingress_fact_fingerprint=host_run_ingress.fact_fingerprint,
         )
         state.permission_snapshot = permission_snapshot
         state.run_model_target = run_model_target
@@ -1086,9 +1192,15 @@ class HostSession:
         state.scratchpad["host_run_boundary_plan"] = self._plan_workflow_state_fact()
         state.scratchpad["capability_resolve_basis"] = basis
         state.scratchpad["frozen_capability_execution_surface"] = frozen_surface
+        state.scratchpad["host_run_ingress"] = host_run_ingress
+        state.scratchpad["host_ingress_admission_proof"] = host_ingress_admission_proof
         state.scratchpad["current_user_message_fact"] = CurrentUserMessageFact(
             message_id=f"user-message:{state.run_id}",
-            source_kind="host_user_input",
+            source_kind=(
+                "host_runtime_request"
+                if isinstance(host_run_ingress, RuntimeRequestRunIngressFact)
+                else "host_user_input"
+            ),
             text=user_input,
             observed_at_utc=identity.observed_at_utc,
             content_sha256=text_sha256(user_input),
@@ -1103,6 +1215,219 @@ class HostSession:
             mcp_installation_id=(frozen_surface.identity.mcp_installation_id),
             capability_basis=basis.fact,
             degraded_reason_codes=(),
+        )
+
+    def _build_host_run_ingress(
+        self,
+        *,
+        ingress_owner: HostIngressAttemptOwner,
+        identity: HostRunBoundaryIdentityFact,
+        user_input: str,
+    ) -> HumanRunIngressFact | RuntimeRequestRunIngressFact:
+        if ingress_owner.kind == "runtime":
+            return self._build_runtime_run_ingress(
+                ingress_owner=ingress_owner,
+                identity=identity,
+                request_text=user_input,
+            )
+        return self._build_human_run_ingress(
+            ingress_owner=ingress_owner,
+            identity=identity,
+            user_input=user_input,
+        )
+
+    def _build_human_run_ingress(
+        self,
+        *,
+        ingress_owner: HostIngressAttemptOwner,
+        identity: HostRunBoundaryIdentityFact,
+        user_input: str,
+    ) -> HumanRunIngressFact:
+        accepted_ordinal = ingress_owner.accepted_ingress_ordinal
+        if accepted_ordinal is None or ingress_owner.owner_state != "preparing":
+            raise RuntimeError("human ingress has not been admitted for preparation")
+        encoded = encode_human_input(
+            user_input,
+            causal_occurrence_semantic_fingerprint=context_fingerprint(
+                "host-human-ingress-occurrence:v1",
+                {
+                    "ingress_id": ingress_owner.ingress_id,
+                    "runtime_session_id": self.runtime_session_id,
+                    "run_id": identity.run_id,
+                },
+            ),
+        )
+        human = encoded.semantic_fact
+        selected = self.wiring.runtime_wiring.runtime_session.terminal_notification_store.pending_notifications(
+            include_unmonitored_completions=True,
+            maximum_items=8,
+        )
+        ingress_owner.selected_notifications = selected
+        ingress_owner.selected_notification_head_fingerprints = tuple(
+            item.process_head_fingerprint for item in selected
+        )
+        attachments = tuple(item.attachment for item in selected)
+        semantic_fingerprints = (
+            human.semantic_fingerprint,
+            *(
+                item.observation_wire_semantic.wire_semantic_fingerprint
+                for item in attachments
+            ),
+        )
+        placements = tuple(
+            build_frozen_fact(
+                HostIngressItemPlacementFact,
+                schema_version="host_ingress_item_placement.v1",
+                item_kind="human_input" if index == 0 else "runtime_notification",
+                item_semantic_fingerprint=fingerprint,
+                accepted_ingress_ordinal=accepted_ordinal,
+                item_ordinal=index,
+            )
+            for index, fingerprint in enumerate(semantic_fingerprints)
+        )
+        semantic = build_frozen_fact(
+            HostRunIngressSemanticFact,
+            schema_version="host_run_ingress_semantic.v1",
+            ordered_current_input_semantic_fingerprints=semantic_fingerprints,
+        )
+        attribution = build_frozen_fact(
+            HostRunIngressAttributionFact,
+            schema_version="host_run_ingress_attribution.v1",
+            ingress_id=ingress_owner.ingress_id,
+            host_session_id=self.host_session_id,
+            conversation_id=self.conversation_id,
+            observed_at_utc=identity.observed_at_utc,
+            ingress_semantic_fingerprint=semantic.ingress_semantic_fingerprint,
+            ordered_item_placements=placements,
+        )
+        return build_frozen_fact(
+            HumanRunIngressFact,
+            schema_version="human_run_ingress.v1",
+            semantic_identity=semantic,
+            attribution=attribution,
+            human_message=human,
+            attached_runtime_notifications=attachments,
+        )
+
+    def _build_runtime_run_ingress(
+        self,
+        *,
+        ingress_owner: HostIngressAttemptOwner,
+        identity: HostRunBoundaryIdentityFact,
+        request_text: str,
+    ) -> RuntimeRequestRunIngressFact:
+        accepted_ordinal = ingress_owner.accepted_ingress_ordinal
+        if accepted_ordinal is None or ingress_owner.owner_state != "preparing":
+            raise RuntimeError("runtime ingress has not been admitted for preparation")
+        selected = tuple(ingress_owner.selected_notifications)
+        if not selected and ingress_owner.selection_wake_chain_id is not None:
+            chain_snapshot = self.wiring.runtime_wiring.runtime_session.terminal_notification_store.autonomy_chain_snapshot(
+                ingress_owner.selection_wake_chain_id
+            )
+            policy = chain_snapshot.attribution.resolved_policy
+            selected = self.wiring.runtime_wiring.runtime_session.terminal_notification_store.pending_notifications(
+                include_unmonitored_completions=False,
+                maximum_items=policy.maximum_notifications_per_autonomous_ingress,
+                wake_chain_id=ingress_owner.selection_wake_chain_id,
+                include_automatic_delivery_deferred=False,
+            )
+            if not selected:
+                raise HostIngressAdmissionStale(
+                    "runtime ingress notification selection is no longer pending"
+                )
+            ingress_owner.selected_notifications = selected
+            ingress_owner.selected_notification_head_fingerprints = tuple(
+                item.process_head_fingerprint for item in selected
+            )
+            ingress_owner.expected_autonomy_chain_state_fingerprint = (
+                chain_snapshot.state.state_fingerprint
+            )
+            ingress_owner.proposed_automatic_delivery_ordinal = (
+                chain_snapshot.state.last_automatic_delivery_ordinal + 1
+            )
+        if not selected:
+            raise RuntimeError("runtime ingress lost its notification owner")
+        attachments = tuple(item.attachment for item in selected)
+        chains = {item.wake_chain_id for item in attachments}
+        if len(chains) != 1 or None in chains:
+            raise RuntimeError("autonomous runtime ingress crosses wake chains")
+        wake_chain_id = next(iter(chains))
+        encoded = encode_runtime_request(
+            request_text,
+            request_kind="terminal_process_observation",
+            business_occurrence_semantic_fingerprint=context_fingerprint(
+                "host-terminal-monitor-runtime-request-occurrence:v1",
+                tuple(item.attachment_fingerprint for item in attachments),
+            ),
+            lifecycle_class="current_run_transcript",
+        )
+        runtime_request = encoded.semantic_fact
+        ordinal = ingress_owner.proposed_automatic_delivery_ordinal
+        if ordinal is None:
+            raise RuntimeError("runtime ingress lacks automatic delivery ordinal")
+        chain_snapshot = self.wiring.runtime_wiring.runtime_session.terminal_notification_store.autonomy_chain_snapshot(
+            wake_chain_id
+        )
+        if (
+            ingress_owner.expected_autonomy_chain_state_fingerprint
+            != chain_snapshot.state.state_fingerprint
+        ):
+            raise RuntimeError("runtime ingress autonomy chain state became stale")
+        chain_policy_fingerprint = (
+            chain_snapshot.attribution.resolved_policy.policy_fingerprint
+        )
+        autonomy_delivery = build_frozen_fact(
+            TerminalAutonomousDeliveryFact,
+            schema_version="terminal_autonomous_delivery.v1",
+            wake_chain_id=wake_chain_id,
+            ordered_source_attachment_fingerprints=tuple(
+                item.attachment_fingerprint for item in attachments
+            ),
+            delivery_kind="autonomous_run_start",
+            automatic_delivery_ordinal=ordinal,
+            chain_policy_fingerprint=chain_policy_fingerprint,
+        )
+        semantic_fingerprints = (
+            runtime_request.semantic_fingerprint,
+            *(
+                item.observation_wire_semantic.wire_semantic_fingerprint
+                for item in attachments
+            ),
+        )
+        placements = tuple(
+            build_frozen_fact(
+                HostIngressItemPlacementFact,
+                schema_version="host_ingress_item_placement.v1",
+                item_kind="runtime_request" if index == 0 else "runtime_notification",
+                item_semantic_fingerprint=fingerprint,
+                accepted_ingress_ordinal=accepted_ordinal,
+                item_ordinal=index,
+            )
+            for index, fingerprint in enumerate(semantic_fingerprints)
+        )
+        semantic = build_frozen_fact(
+            HostRunIngressSemanticFact,
+            schema_version="host_run_ingress_semantic.v1",
+            ordered_current_input_semantic_fingerprints=semantic_fingerprints,
+        )
+        attribution = build_frozen_fact(
+            HostRunIngressAttributionFact,
+            schema_version="host_run_ingress_attribution.v1",
+            ingress_id=ingress_owner.ingress_id,
+            host_session_id=self.host_session_id,
+            conversation_id=self.conversation_id,
+            observed_at_utc=identity.observed_at_utc,
+            ingress_semantic_fingerprint=semantic.ingress_semantic_fingerprint,
+            ordered_item_placements=placements,
+        )
+        return build_frozen_fact(
+            RuntimeRequestRunIngressFact,
+            schema_version="runtime_request_run_ingress.v1",
+            semantic_identity=semantic,
+            attribution=attribution,
+            runtime_request=runtime_request,
+            source_notifications=attachments,
+            autonomy_delivery=autonomy_delivery,
         )
 
     async def _commit_new_run_entry(
@@ -1125,6 +1450,8 @@ class HostSession:
             subagent_run_entry=None,
             long_horizon=prepared.long_horizon,
             child_rollout_subaccount=None,
+            host_run_ingress=prepared.host_run_ingress,
+            host_ingress_admission_proof=(prepared.host_ingress_admission_proof),
             prior_messages=list(prepared.owned_transcript_messages),
         )
         runtime_session = self.wiring.runtime_wiring.runtime_session
@@ -1148,8 +1475,13 @@ class HostSession:
             **event_context.event_fields(),
             account=account,
         )
+        notification_candidates = self._run_start_notification_candidates(
+            ingress_owner=prepared.ingress_owner,
+            run_start=draft.run_start_event,
+        )
         candidates = (
             draft.run_start_event,
+            *notification_candidates,
             window_open,
             account_open,
             *pending_audits,
@@ -1196,6 +1528,10 @@ class HostSession:
                 confirmed,
                 publication_status="failed_after_commit",
             )
+            await self._ingress_coordinator.mark_committed(
+                prepared.ingress_owner,
+                run_start_event_id=committed.run_start_event.id,
+            )
             await self._adopt_committed_host_run(
                 state=state,
                 committed=committed,
@@ -1235,12 +1571,656 @@ class HostSession:
             stored,
             publication_status="completed",
         )
+        await self._ingress_coordinator.mark_committed(
+            prepared.ingress_owner,
+            run_start_event_id=committed.run_start_event.id,
+        )
         await self._adopt_committed_host_run(
             state=state,
             committed=committed,
             prepared=prepared,
         )
         return draft, committed, stored
+
+    def _run_start_notification_candidates(
+        self,
+        *,
+        ingress_owner: HostIngressAttemptOwner,
+        run_start: RunStartEvent,
+    ) -> tuple[AgentEvent, ...]:
+        selected = tuple(ingress_owner.selected_notifications)
+        if not selected:
+            return ()
+        source_events = tuple(item.source_event for item in selected)
+        source_references = tuple(
+            sorted(
+                (
+                    event_reference_from_stored(
+                        event,
+                        runtime_session_id=self.runtime_session_id,
+                    )
+                    for event in source_events
+                ),
+                key=lambda item: (item.sequence, item.event_id),
+            )
+        )
+        outcome = (
+            "autonomous_dispatched"
+            if ingress_owner.kind == "runtime"
+            else "merged_into_human_run"
+        )
+        disposition = TerminalProcessObservationDeliveryDispositionEvent(
+            id=context_fingerprint(
+                "terminal-notification-run-start-disposition-id:v1",
+                (
+                    run_start.id,
+                    outcome,
+                    tuple(item.event_id for item in source_references),
+                ),
+            ).replace("sha256:", "terminal_notification_disposition:"),
+            run_id=run_start.run_id,
+            turn_id=run_start.turn_id,
+            reply_id=run_start.reply_id,
+            observation_source_references=source_references,
+            outcome=outcome,
+            run_start_event_identity=stable_event_identity(
+                run_start,
+                runtime_session_id=self.runtime_session_id,
+            ),
+        )
+        release_ids = tuple(
+            sorted(
+                {
+                    f"terminal_completion_head:{_notification_process_id(item.source_event)}"
+                    for item in selected
+                    if _notification_is_terminal(item.source_event)
+                }
+            )
+        )
+        releases = (
+            self.wiring.runtime_wiring.runtime_session.terminal_notification_account_coordinator.freeze_released_events(
+                reservation_ids=release_ids,
+                cause_events=(disposition,),
+            )
+            if release_ids
+            else ()
+        )
+        return disposition, *releases
+
+    def _on_terminal_notification_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        delivered_ids = {
+            reference.event_id
+            for event in events
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+            and event.outcome == "active_run_safe_point"
+            for reference in event.observation_source_references
+        }
+        lease = self._active_run_monitor_safe_point_lease
+        if lease is not None and delivered_ids == {
+            event.id for event in lease.source_events
+        }:
+            self._active_run_monitor_safe_point_lease = None
+        if not any(
+            isinstance(item, TerminalProcessMonitorObservationCommittedEvent)
+            for item in events
+        ):
+            return
+        loop = self._host_event_loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._ensure_terminal_notification_dispatch)
+
+    async def recover_terminal_monitor_owners_before_open(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Settle restart-owned monitor facts before publishing this HostSession."""
+
+        self._host_event_loop = asyncio.get_running_loop()
+        if deadline_monotonic != self._host_open_deadline_monotonic:
+            raise ValueError("terminal recovery deadline diverged from Host open")
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError(
+                "Host open deadline expired before terminal monitor recovery"
+            )
+        await asyncio.to_thread(
+            self.wiring.runtime_wiring.runtime_session.terminal_monitor_coordinator.recover_after_restart,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def activate_terminal_notification_dispatch_after_open(self) -> None:
+        """Enable autonomous ingress only after the HostSession is published."""
+
+        self._host_event_loop = asyncio.get_running_loop()
+        self._terminal_notification_dispatch_enabled = True
+        store = self.wiring.runtime_wiring.runtime_session.terminal_notification_store
+        if store.pending_notifications(
+            include_unmonitored_completions=False,
+            maximum_items=8,
+            include_automatic_delivery_deferred=False,
+        ):
+            self._ensure_terminal_notification_dispatch()
+
+    def _ensure_terminal_notification_dispatch(self) -> None:
+        if (
+            self._lifecycle is not HostSessionLifecycle.OPEN
+            or not self._terminal_notification_dispatch_enabled
+        ):
+            return
+        task = self._terminal_notification_dispatch_task
+        if task is not None and not task.done():
+            return
+        self._terminal_notification_dispatch_task = asyncio.create_task(
+            self._dispatch_terminal_notifications(),
+            name=f"terminal-monitor-dispatch:{self.host_session_id}",
+        )
+
+    async def _dispatch_terminal_notifications(self) -> None:
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        store = runtime_session.terminal_notification_store
+        try:
+            while self._lifecycle is HostSessionLifecycle.OPEN:
+                ingress_lifecycle = (
+                    self._ingress_coordinator.state_fact().lifecycle_state
+                )
+                if ingress_lifecycle in {
+                    "preparing",
+                    "active",
+                }:
+                    # The active Agent loop owns the PRE_MODEL_STEP opportunity.
+                    # Keep the dispatcher alive so a run that terminates without
+                    # another sampling immediately falls back to Host ingress.
+                    await asyncio.sleep(0.05)
+                    continue
+                pending = store.pending_notifications(
+                    include_unmonitored_completions=False,
+                    maximum_items=8,
+                    include_automatic_delivery_deferred=False,
+                )
+                if not pending:
+                    return
+                wake_chain_id = pending[0].wake_chain_id
+                if wake_chain_id is None:
+                    return
+                chain = store.autonomy_chain_snapshot(wake_chain_id)
+                policy = chain.attribution.resolved_policy
+                selected = tuple(
+                    item for item in pending if item.wake_chain_id == wake_chain_id
+                )[: policy.maximum_notifications_per_autonomous_ingress]
+                if ingress_lifecycle == "waiting_user":
+                    await self._defer_terminal_notifications(
+                        selected,
+                        reason="host_waiting_user",
+                    )
+                    return
+                state = chain.state
+                if not self._terminal_monitor_autonomy_allowed():
+                    await self._defer_terminal_notifications(
+                        selected,
+                        reason="autonomy_permission_disabled",
+                    )
+                    continue
+                if (
+                    state.last_automatic_delivery_ordinal
+                    >= policy.maximum_automatic_deliveries
+                ):
+                    await self._defer_terminal_notifications(
+                        selected,
+                        reason="wake_budget_exhausted",
+                    )
+                    continue
+                if state.last_automatic_delivery_at_utc is not None:
+                    last = datetime.fromisoformat(
+                        state.last_automatic_delivery_at_utc.replace("Z", "+00:00")
+                    )
+                    remaining = (
+                        policy.minimum_automatic_delivery_interval_seconds
+                        - (datetime.now(timezone.utc) - last).total_seconds()
+                    )
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                        continue
+                source_ids = tuple(item.source_event.id for item in selected)
+                ingress_id = context_fingerprint(
+                    "terminal-monitor-autonomous-ingress-id:v1",
+                    (wake_chain_id, state.state_revision, source_ids),
+                ).replace("sha256:", "host_ingress:")
+                request_text = (
+                    "Review the attached terminal process monitor observations and "
+                    "continue the current task only when action is warranted."
+                )
+                await self._ingress_coordinator.submit(
+                    kind="runtime",
+                    payload=request_text,
+                    ingress_id=ingress_id,
+                    selected_notification_head_fingerprints=tuple(
+                        item.process_head_fingerprint for item in selected
+                    ),
+                    selected_notifications=selected,
+                    expected_autonomy_chain_state_fingerprint=(state.state_fingerprint),
+                    proposed_automatic_delivery_ordinal=(
+                        state.last_automatic_delivery_ordinal + 1
+                    ),
+                    selection_wake_chain_id=wake_chain_id,
+                    runner=lambda owner: self._run_human_ingress(
+                        owner,
+                        user_input=request_text,
+                        active_skill_names=frozenset(),
+                    ),
+                )
+        except (HostIngressClosedError, asyncio.CancelledError):
+            return
+        except Exception as exc:
+            self._terminal_notification_dispatch_error = f"{type(exc).__name__}: {exc}"
+            if (
+                self._lifecycle is HostSessionLifecycle.OPEN
+                and not runtime_session.reconciliation_required
+            ):
+                await asyncio.sleep(0.2)
+                self._terminal_notification_dispatch_task = None
+                self._ensure_terminal_notification_dispatch()
+
+    async def _borrow_active_run_monitor_safe_point(
+        self,
+        state: LoopState,
+        next_model_call_index: int,
+    ) -> ActiveRunMonitorSafePointLease | None:
+        """Borrow one confirmed notification set before context preparation."""
+
+        if (
+            next_model_call_index < 2
+            or self._lifecycle is not HostSessionLifecycle.OPEN
+        ):
+            return None
+        if not self._terminal_monitor_autonomy_allowed():
+            return None
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        with (
+            self._ingress_coordinator.authority_guard(),
+            runtime_session.write_coordinator.lock,
+        ):
+            if (
+                self._active_state is not state
+                or self.active_run_id != state.run_id
+                or not self._ingress_coordinator.can_borrow_active_run_notifications()
+                or state.pending_interaction_kind is not None
+                or bool(state.pending_tool_calls)
+            ):
+                return None
+            existing = self._active_run_monitor_safe_point_lease
+            if existing is not None:
+                if (
+                    existing.run_id == state.run_id
+                    and existing.next_model_call_index == next_model_call_index
+                ):
+                    return existing
+                raise HostIngressAdmissionStale(
+                    "another active-run monitor safe point still owns notifications"
+                )
+            run_owner = self._run_execution_owners.get(state.run_id)
+            segment = run_owner.active_segment if run_owner is not None else None
+            if (
+                run_owner is None
+                or run_owner.terminal_state != "open"
+                or run_owner.termination_intent is not None
+                or segment is None
+                or segment.segment_state != "active"
+            ):
+                return None
+            selected_all = (
+                runtime_session.terminal_notification_store.pending_notifications(
+                    include_unmonitored_completions=False,
+                    maximum_items=8,
+                    include_automatic_delivery_deferred=False,
+                )
+            )
+            if not selected_all:
+                return None
+            wake_chain_id = selected_all[0].wake_chain_id
+            if wake_chain_id is None:
+                return None
+            chain = runtime_session.terminal_notification_store.autonomy_chain_snapshot(
+                wake_chain_id
+            )
+            policy = chain.attribution.resolved_policy
+            selected = tuple(
+                item for item in selected_all if item.wake_chain_id == wake_chain_id
+            )[: policy.maximum_notifications_per_autonomous_ingress]
+            if not selected:
+                return None
+            if (
+                chain.state.last_automatic_delivery_ordinal
+                >= policy.maximum_automatic_deliveries
+            ):
+                return None
+            if chain.state.last_automatic_delivery_at_utc is not None:
+                previous = datetime.fromisoformat(
+                    chain.state.last_automatic_delivery_at_utc.replace("Z", "+00:00")
+                )
+                if (
+                    datetime.now(timezone.utc) - previous
+                ).total_seconds() < policy.minimum_automatic_delivery_interval_seconds:
+                    return None
+            previous_index = next_model_call_index - 1
+            disposition_event_id = state.scratchpad.get(
+                "latest_model_control_disposition_event_id"
+            )
+            disposition_index = state.scratchpad.get(
+                "latest_model_control_disposition_model_call_index"
+            )
+            disposition = (
+                runtime_session.event_log.get_by_id(disposition_event_id)
+                if isinstance(disposition_event_id, str)
+                else None
+            )
+            if (
+                not isinstance(disposition, ModelCallControlDispositionResolvedEvent)
+                or disposition_index != previous_index
+                or disposition.model_call_index != previous_index
+                or disposition.run_id != state.run_id
+                or disposition.disposition is not ModelCallControlDisposition.ACCEPTED
+            ):
+                return None
+            previous_end = runtime_session.event_log.get_by_id(
+                disposition.model_call_end_event_id
+            )
+            working_set = state.run_working_set
+            if working_set is None:
+                return None
+            run_start_id = working_set.run_start_event_id
+            run_start = runtime_session.event_log.get_by_id(run_start_id)
+            if (
+                not isinstance(previous_end, ModelCallEndEvent)
+                or not isinstance(run_start, RunStartEvent)
+                or previous_end.outcome != "completed"
+            ):
+                return None
+            generation = runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+                call_lane="main_agent"
+            )
+            if generation is None or generation.core_state is None:
+                return None
+            host_state = self._ingress_coordinator.state_fact()
+            notification_state = (
+                runtime_session.terminal_notification_store.projection_snapshot()
+            )
+            lease_id = context_fingerprint(
+                "active-run-monitor-safe-point-lease:v1",
+                (
+                    state.run_id,
+                    next_model_call_index,
+                    tuple(item.source_event.id for item in selected),
+                    host_state.state_fingerprint,
+                    notification_state.state_fingerprint,
+                    chain.state.state_fingerprint,
+                ),
+            ).replace("sha256:", "active_monitor_lease:")
+            lease = ActiveRunMonitorSafePointLease(
+                lease_id=lease_id,
+                runtime_session_id=self.runtime_session_id,
+                run_id=state.run_id,
+                next_model_call_index=next_model_call_index,
+                source_events=tuple(item.source_event for item in selected),
+                attachments=tuple(item.attachment for item in selected),
+                selected_notification_head_fingerprints=tuple(
+                    item.process_head_fingerprint for item in selected
+                ),
+                notification_state_fingerprint=notification_state.state_fingerprint,
+                wake_chain_id=wake_chain_id,
+                expected_autonomy_chain_state_fingerprint=(
+                    chain.state.state_fingerprint
+                ),
+                proposed_automatic_delivery_ordinal=(
+                    chain.state.last_automatic_delivery_ordinal + 1
+                ),
+                chain_policy_fingerprint=policy.policy_fingerprint,
+                host_state_generation=host_state.state_generation,
+                permission_policy_revision=host_state.permission_policy_revision,
+                permission_policy_fingerprint=(
+                    host_state.permission_policy_fingerprint
+                ),
+                close_intent_revision=host_state.close_intent_revision,
+                stop_intent_revision=self._stop_intent_revision,
+                termination_intent_revision=self._termination_intent_revision,
+                active_segment_id=segment.segment_id,
+                active_segment_generation=segment.segment_generation,
+                llm_lifecycle_generation=(
+                    runtime_session.model_stream_execution_registry.generation + 1
+                ),
+                run_start_event_reference=event_reference_from_stored(
+                    run_start, runtime_session_id=self.runtime_session_id
+                ),
+                previous_model_call_end_event_reference=event_reference_from_stored(
+                    previous_end, runtime_session_id=self.runtime_session_id
+                ),
+                prior_model_control_disposition_reference=event_reference_from_stored(
+                    disposition, runtime_session_id=self.runtime_session_id
+                ),
+                pending_interaction_frontier_fingerprint=context_fingerprint(
+                    "active-run-pending-interaction-frontier:v1", ()
+                ),
+                open_tool_pair_frontier_fingerprint=context_fingerprint(
+                    "active-run-open-tool-pair-frontier:v1", ()
+                ),
+            )
+            self._active_run_monitor_safe_point_lease = lease
+            return lease
+
+    @contextmanager
+    def _active_run_monitor_safe_point_commit_guard(
+        self,
+        **_kwargs,
+    ):
+        """Keep permission/close authority stable through ModelStart commit."""
+
+        with self._ingress_coordinator.authority_guard():
+            yield
+
+    def _terminal_monitor_autonomy_allowed(self) -> bool:
+        policy = self.current_permission_policy()
+        return (
+            policy.profile is not PermissionProfile.READ_ONLY
+            and policy.terminal is not TerminalAccess.OFF
+        )
+
+    def _release_active_run_monitor_safe_point(
+        self, lease: ActiveRunMonitorSafePointLease
+    ) -> None:
+        if self._active_run_monitor_safe_point_lease == lease:
+            self._active_run_monitor_safe_point_lease = None
+
+    def _validate_active_run_monitor_safe_point(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard,
+        state: LoopState,
+    ) -> None:
+        """Revalidate the borrowed authority under RuntimeSession's writer lock."""
+
+        lease = self._active_run_monitor_safe_point_lease
+        if lease is None or lease.run_id != state.run_id:
+            raise HostIngressAdmissionStale(
+                "active-run monitor safe-point lease is unavailable"
+            )
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        host_state = self._ingress_coordinator.state_fact()
+        run_owner = self._run_execution_owners.get(state.run_id)
+        segment = run_owner.active_segment if run_owner is not None else None
+        if (
+            self._lifecycle is not HostSessionLifecycle.OPEN
+            or self._active_state is not state
+            or self.active_run_id != state.run_id
+            or not self._ingress_coordinator.can_borrow_active_run_notifications()
+            or state.pending_interaction_kind is not None
+            or bool(state.pending_tool_calls)
+            or run_owner is None
+            or run_owner.terminal_state != "open"
+            or run_owner.termination_intent is not None
+            or segment is None
+            or segment.segment_id != lease.active_segment_id
+            or segment.segment_generation != lease.active_segment_generation
+            or self._stop_intent_revision != lease.stop_intent_revision
+            or self._termination_intent_revision != lease.termination_intent_revision
+            or host_state.state_generation != lease.host_state_generation
+            or host_state.permission_policy_revision != lease.permission_policy_revision
+            or host_state.permission_policy_fingerprint
+            != lease.permission_policy_fingerprint
+            or host_state.close_intent_revision != lease.close_intent_revision
+            or runtime_session.model_stream_execution_registry.generation
+            != lease.llm_lifecycle_generation
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run monitor safe-point host authority became stale"
+            )
+        notification_state = (
+            runtime_session.terminal_notification_store.projection_snapshot()
+        )
+        chain = runtime_session.terminal_notification_store.autonomy_chain_snapshot(
+            lease.wake_chain_id
+        )
+        current = runtime_session.terminal_notification_store.pending_notifications(
+            include_unmonitored_completions=False,
+            maximum_items=8,
+            wake_chain_id=lease.wake_chain_id,
+            include_automatic_delivery_deferred=False,
+        )
+        source_ids = tuple(event.id for event in lease.source_events)
+        current_by_id = {item.source_event.id: item for item in current}
+        current_selected = tuple(current_by_id.get(item) for item in source_ids)
+        if (
+            notification_state.state_fingerprint != lease.notification_state_fingerprint
+            or any(item is None for item in current_selected)
+            or tuple(
+                item.process_head_fingerprint
+                for item in current_selected
+                if item is not None
+            )
+            != lease.selected_notification_head_fingerprints
+            or chain.state.state_fingerprint
+            != lease.expected_autonomy_chain_state_fingerprint
+            or chain.state.last_automatic_delivery_ordinal + 1
+            != lease.proposed_automatic_delivery_ordinal
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run monitor notification authority became stale"
+            )
+        if (
+            guard.runtime_session_id != lease.runtime_session_id
+            or guard.active_segment_id != lease.active_segment_id
+            or guard.active_segment_generation != lease.active_segment_generation
+            or guard.expected_host_state_generation != lease.host_state_generation
+            or guard.expected_next_model_call_index != lease.next_model_call_index
+            or guard.expected_llm_lifecycle_generation != lease.llm_lifecycle_generation
+            or guard.expected_termination_intent_revision
+            != lease.termination_intent_revision
+            or guard.expected_stop_intent_revision != lease.stop_intent_revision
+            or guard.expected_close_intent_revision != lease.close_intent_revision
+            or guard.expected_permission_policy_revision
+            != lease.permission_policy_revision
+            or guard.expected_permission_policy_fingerprint
+            != lease.permission_policy_fingerprint
+            or guard.expected_notification_state_fingerprint
+            != lease.notification_state_fingerprint
+            or guard.expected_selected_notification_head_fingerprints
+            != lease.selected_notification_head_fingerprints
+            or guard.expected_autonomy_chain_state_fingerprint
+            != lease.expected_autonomy_chain_state_fingerprint
+            or guard.run_start_event_reference != lease.run_start_event_reference
+            or guard.previous_model_call_end_event_reference
+            != lease.previous_model_call_end_event_reference
+            or guard.prior_model_control_disposition_reference
+            != lease.prior_model_control_disposition_reference
+            or guard.expected_pending_interaction_frontier_fingerprint
+            != lease.pending_interaction_frontier_fingerprint
+            or guard.expected_open_tool_pair_frontier_fingerprint
+            != lease.open_tool_pair_frontier_fingerprint
+            or start_event.model_call_index != lease.next_model_call_index
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run monitor safe-point commit guard drifted"
+            )
+        appends = tuple(
+            event
+            for event in candidate_events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        )
+        if (
+            len(appends) != 1
+            or appends[0].prepared_provider_input_candidate_fingerprint
+            != guard.prepared_provider_input_append_fingerprint
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run monitor prepared ProviderInput append drifted"
+            )
+        disposition = tuple(
+            event
+            for event in candidate_events
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+            and event.outcome == "active_run_safe_point"
+        )
+        expected_refs = tuple(
+            event_reference_from_stored(
+                event, runtime_session_id=self.runtime_session_id
+            )
+            for event in lease.source_events
+        )
+        if (
+            len(disposition) != 1
+            or disposition[0].observation_source_references != expected_refs
+            or disposition[0].model_call_start_event_identity
+            != stable_event_identity(
+                start_event, runtime_session_id=self.runtime_session_id
+            )
+            or disposition[0].autonomy_delivery
+            != start_event.active_run_monitor_delivery.autonomy_delivery
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run monitor disposition/ModelStart join failed"
+            )
+
+    async def _defer_terminal_notifications(
+        self,
+        selected,
+        *,
+        reason: Literal[
+            "wake_budget_exhausted",
+            "autonomy_permission_disabled",
+            "host_waiting_user",
+        ],
+    ) -> None:
+        if not selected:
+            return
+        source_events = tuple(item.source_event for item in selected)
+        source_references = tuple(
+            sorted(
+                (
+                    event_reference_from_stored(
+                        event,
+                        runtime_session_id=self.runtime_session_id,
+                    )
+                    for event in source_events
+                ),
+                key=lambda item: (item.sequence, item.event_id),
+            )
+        )
+        first = source_events[0]
+        candidate = TerminalProcessObservationDeliveryDeferredEvent(
+            id=context_fingerprint(
+                "terminal-notification-delivery-deferred-id:v1",
+                (reason, tuple(item.event_id for item in source_references)),
+            ).replace("sha256:", "terminal_notification_deferred:"),
+            run_id=first.run_id,
+            turn_id=first.turn_id,
+            reply_id=first.reply_id,
+            observation_source_references=source_references,
+            reason=reason,
+        )
+        await self.wiring.runtime_wiring.runtime_session.emit(candidate)
 
     def _committed_host_entry_from_stored(
         self,
@@ -1366,14 +2346,21 @@ class HostSession:
                         capability_resolve_basis=prepared.capability_basis,
                         frozen_execution_surface=prepared.frozen_execution_surface,
                     )
-                await self.wiring.agent_runtime.fail_committed_run(
-                    state,
-                    stop_reason=RunStopReason.RUNTIME_EXECUTION_ERROR,
-                    error_message=(
-                        "committed RunStart owner installation failed: "
-                        f"{type(ownership_error).__name__}"
-                    ),
-                )
+                stop_request = state.stop_request
+                if stop_request is not None:
+                    await self.wiring.agent_runtime.abort_run(
+                        state,
+                        reason=stop_request.reason,
+                    )
+                else:
+                    await self.wiring.agent_runtime.fail_committed_run(
+                        state,
+                        stop_reason=RunStopReason.RUNTIME_EXECUTION_ERROR,
+                        error_message=(
+                            "committed RunStart owner installation failed: "
+                            f"{type(ownership_error).__name__}"
+                        ),
+                    )
             except BaseException:
                 self.wiring.runtime_wiring.runtime_session.latch_event_commit_outcome_unknown()
                 raise
@@ -1411,6 +2398,7 @@ class HostSession:
     async def _prepare_and_commit_new_run_boundary(
         self,
         *,
+        ingress_owner: HostIngressAttemptOwner,
         user_input: str,
         active_skill_names: frozenset[str],
         state: LoopState,
@@ -1434,6 +2422,12 @@ class HostSession:
         run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
         permission_snapshot = self._resolve_new_run_permission_snapshot(
             run_id=state.run_id
+        )
+        await self._ingress_coordinator.update_permission_policy(
+            context_fingerprint(
+                "host-ingress-permission-snapshot:v1",
+                permission_snapshot.to_event_fields(),
+            )
         )
         self._set_boundary_phase(HostRunBoundaryPhase.MCP_REQUIRED_WAIT)
         await self._apply_mcp_safe_point(trigger="config_change")
@@ -1471,6 +2465,7 @@ class HostSession:
         prior_messages.extend(self._plan_runtime_messages())
         self._set_boundary_phase(HostRunBoundaryPhase.FINAL_FREEZE)
         self._freeze_new_run_boundary_inputs(
+            ingress_owner=ingress_owner,
             state=state,
             identity=identity,
             user_input=user_input,
@@ -1537,6 +2532,11 @@ class HostSession:
             transcript_fact=transcript_fact,
             capability_basis=capability_basis,
             current_user_message=state.scratchpad["current_user_message_fact"],
+            host_run_ingress=state.scratchpad["host_run_ingress"],
+            host_ingress_admission_proof=(
+                state.scratchpad["host_ingress_admission_proof"]
+            ),
+            ingress_owner=ingress_owner,
             run_start_event_id=run_start_event_id,
             terminal_run_end_event_id=state.scratchpad["terminal_run_end_event_id"],
             new_run_boundary=state.scratchpad["new_run_boundary_fact"],
@@ -1566,19 +2566,54 @@ class HostSession:
         *,
         active_skill_names: frozenset[str] | None = None,
     ) -> AgentRunResult:
+        self._host_event_loop = asyncio.get_running_loop()
+        self._terminal_notification_dispatch_enabled = True
         self._raise_if_not_open("starting a new turn")
+        self._raise_if_pending_interaction("starting a new turn")
+        ingress_id = f"host_ingress:{uuid4().hex}"
+        try:
+            return await self._ingress_coordinator.submit(
+                kind="human",
+                payload=user_input,
+                ingress_id=ingress_id,
+                reject_if_busy=True,
+                runner=lambda owner: self._run_human_ingress(
+                    owner,
+                    user_input=user_input,
+                    active_skill_names=active_skill_names or frozenset(),
+                ),
+            )
+        except HostIngressCapacityError as exc:
+            raise HostSessionBusyError(
+                "host session already has an active run"
+            ) from exc
+
+    async def _run_human_ingress(
+        self,
+        ingress_owner: HostIngressAttemptOwner,
+        *,
+        user_input: str,
+        active_skill_names: frozenset[str],
+    ) -> AgentRunResult:
+        self._raise_if_not_open("starting an admitted turn")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         state = self.wiring.agent_runtime.new_state()
-        identity = self._new_run_boundary_identity(state)
+        identity = self._new_run_boundary_identity(
+            state,
+            kind=(
+                "pre_runtime_request" if ingress_owner.kind == "runtime" else "pre_run"
+            ),
+        )
         boundary_input = NewRunBoundaryInput(
             identity=identity,
             user_input=user_input,
             active_skill_names=active_skill_names or frozenset(),
             host_session_id=self.host_session_id,
             conversation_id=self.conversation_id,
+            ingress_owner=ingress_owner,
         )
         task = self._create_owned_boundary_task(
             lambda: self._run_turn_pipeline(
@@ -1590,7 +2625,14 @@ class HostSession:
         )
         try:
             try:
-                return await asyncio.shield(task)
+                result = await asyncio.shield(task)
+                if self.pending_interaction is not None:
+                    await self._ingress_coordinator.mark_waiting_user(
+                        resume_match_key=_pending_interaction_match_key(
+                            self.pending_interaction
+                        )
+                    )
+                return result
             except asyncio.CancelledError:
                 if (
                     not task.cancelled()
@@ -1621,6 +2663,7 @@ class HostSession:
                             committed,
                             _stored,
                         ) = await self._prepare_and_commit_new_run_boundary(
+                            ingress_owner=boundary_input.ingress_owner,
                             user_input=boundary_input.user_input,
                             active_skill_names=boundary_input.active_skill_names,
                             state=state,
@@ -1628,8 +2671,7 @@ class HostSession:
                         )
                     except BaseException as exc:
                         if (
-                            attempt_index + 1
-                            >= _MAX_RUN_SEED_REFREEZE_ATTEMPTS
+                            attempt_index + 1 >= _MAX_RUN_SEED_REFREEZE_ATTEMPTS
                             or not _caused_by(exc, RunSeedSourceStale)
                         ):
                             raise
@@ -1677,28 +2719,91 @@ class HostSession:
         *,
         active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        self._host_event_loop = asyncio.get_running_loop()
         self._raise_if_not_open("starting a new turn")
+        self._raise_if_pending_interaction("starting a new turn")
+        observer = _StreamObserver()
+        ingress_id = f"host_ingress:{uuid4().hex}"
+        state = self.wiring.agent_runtime.new_state()
+        identity = self._new_run_boundary_identity(state)
+
+        async def _submit() -> None:
+            try:
+                await self._ingress_coordinator.submit(
+                    kind="human",
+                    payload=user_input,
+                    ingress_id=ingress_id,
+                    reject_if_busy=True,
+                    runner=lambda owner: self._run_human_stream_ingress(
+                        owner,
+                        observer=observer,
+                        user_input=user_input,
+                        active_skill_names=active_skill_names or frozenset(),
+                        state=state,
+                        identity=identity,
+                    ),
+                )
+            except HostIngressCapacityError as exc:
+                raise HostSessionBusyError(
+                    "host session already has an active run"
+                ) from exc
+
+        task = self._create_owned_boundary_task(
+            _submit,
+            preparing_state=state,
+            preparing_identity=identity,
+            observer=observer,
+        )
+        return _OwnedBoundaryStreamObserver(
+            self._observe_owned_boundary_stream(observer=observer, task=task),
+            observer,
+        )
+
+    async def _run_human_stream_ingress(
+        self,
+        ingress_owner: HostIngressAttemptOwner,
+        *,
+        observer: _StreamObserver,
+        user_input: str,
+        active_skill_names: frozenset[str],
+        state: LoopState,
+        identity: HostRunBoundaryIdentityFact,
+    ) -> None:
+        execution_task = asyncio.current_task()
+        if execution_task is None:
+            raise RuntimeError("stream ingress requires an asyncio task owner")
+        self._boundary_execution_task = execution_task
+        self._raise_if_not_open("starting an admitted stream turn")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("starting a new turn")
-        self._raise_if_active_run()
-        state = self.wiring.agent_runtime.new_state()
-        identity = self._new_run_boundary_identity(state)
+        task = self._active_task
+        if (
+            self._run_lock.locked()
+            or self.active_run_id is not None
+            or (task is not None and not task.done())
+        ):
+            raise HostSessionBusyError("host session already has an active run")
         boundary_input = NewRunBoundaryInput(
             identity=identity,
             user_input=user_input,
             active_skill_names=active_skill_names or frozenset(),
             host_session_id=self.host_session_id,
             conversation_id=self.conversation_id,
+            ingress_owner=ingress_owner,
         )
-        return self._start_owned_boundary_stream(
-            lambda: self._stream_turn_pipeline(
-                boundary_input,
-                state=state,
-            ),
-            preparing_state=state,
-            preparing_identity=identity,
-        )
+
+        async for event in self._stream_turn_pipeline(
+            boundary_input,
+            state=state,
+        ):
+            await observer.emit(event)
+        if self.pending_interaction is not None:
+            await self._ingress_coordinator.mark_waiting_user(
+                resume_match_key=_pending_interaction_match_key(
+                    self.pending_interaction
+                )
+            )
 
     async def _stream_turn_pipeline(
         self,
@@ -1713,6 +2818,7 @@ class HostSession:
                     committed,
                     stored,
                 ) = await self._prepare_and_commit_new_run_boundary(
+                    ingress_owner=boundary_input.ingress_owner,
                     user_input=boundary_input.user_input,
                     active_skill_names=boundary_input.active_skill_names,
                     state=state,
@@ -1823,19 +2929,50 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
+        return await self._ingress_coordinator.submit(
+            kind="resume",
+            payload=resolution,
+            ingress_id=f"host_ingress_resume:{uuid4().hex}",
+            resume_match_key=resolution.approval_id,
+            runner=lambda owner: self._run_resume_ingress(
+                owner,
+                pending=pending,
+                interaction_id=resolution.approval_id,
+                interaction_kind="approval",
+                resolution=resolution,
+                router=lambda state: self.wiring.agent_runtime.resume_after_approval(
+                    state, resolution
+                ),
+            ),
+        )
+
+    async def _run_resume_ingress(
+        self,
+        _ingress_owner: HostIngressAttemptOwner,
+        *,
+        pending: PendingInteraction,
+        interaction_id: str,
+        interaction_kind: Literal["approval", "plan", "mcp_input_required"],
+        resolution: object,
+        router: Callable[[LoopState], Awaitable[AgentRunResult]],
+        prepare_plan_state: bool = False,
+        recover_pending_on_publication_failure: bool = False,
+    ) -> AgentRunResult:
         state = self._require_suspended_state(pending)
         boundary_input = self._new_interaction_boundary_input(
             state,
-            interaction_id=resolution.approval_id,
-            interaction_kind="approval",
+            interaction_id=interaction_id,
+            interaction_kind=interaction_kind,
             resolution=resolution,
         )
         task = self._create_owned_boundary_task(
             lambda: self._resolve_interaction_pipeline(
                 pending=pending,
                 boundary_input=boundary_input,
-                router=lambda state: self.wiring.agent_runtime.resume_after_approval(
-                    state, resolution
+                router=router,
+                prepare_plan_state=prepare_plan_state,
+                recover_pending_on_publication_failure=(
+                    recover_pending_on_publication_failure
                 ),
             ),
             preparing_state=state,
@@ -1867,10 +3004,13 @@ class HostSession:
             if prepare_plan_state:
                 self._prepare_state_for_plan(state)
             try:
-                return await self._run_owned(state, lambda: router(state))
+                result = await self._run_owned(state, lambda: router(state))
+                await self._sync_ingress_waiting_state()
+                return result
             except EventPublicationAfterCommitError:
                 if recover_pending_on_publication_failure:
                     self._capture_pending_interaction(state)
+                    await self._sync_ingress_waiting_state()
                 raise
 
     def stream_approval_resolution(
@@ -1889,15 +3029,50 @@ class HostSession:
             interaction_kind="approval",
             resolution=resolution,
         )
-        return self._start_owned_boundary_stream(
-            lambda: self._stream_approval_resolution_pipeline(
-                pending=pending,
-                resolution=resolution,
-                boundary_input=boundary_input,
-            ),
+        observer = _StreamObserver()
+
+        async def _submit() -> None:
+            await self._ingress_coordinator.submit(
+                kind="resume",
+                payload=resolution,
+                ingress_id=f"host_ingress_resume:{uuid4().hex}",
+                resume_match_key=resolution.approval_id,
+                runner=lambda owner: self._run_stream_resume_ingress(
+                    owner,
+                    observer=observer,
+                    pipeline=self._stream_approval_resolution_pipeline(
+                        pending=pending,
+                        resolution=resolution,
+                        boundary_input=boundary_input,
+                    ),
+                ),
+            )
+
+        task = self._create_owned_boundary_task(
+            _submit,
             preparing_state=state,
             preparing_identity=boundary_input.identity,
+            observer=observer,
         )
+        return _OwnedBoundaryStreamObserver(
+            self._observe_owned_boundary_stream(observer=observer, task=task),
+            observer,
+        )
+
+    async def _run_stream_resume_ingress(
+        self,
+        _ingress_owner: HostIngressAttemptOwner,
+        *,
+        observer: _StreamObserver,
+        pipeline: AsyncIterator[AgentEvent],
+    ) -> None:
+        execution_task = asyncio.current_task()
+        if execution_task is None:
+            raise RuntimeError("stream resume requires an asyncio task owner")
+        self._boundary_execution_task = execution_task
+        async for event in pipeline:
+            await observer.emit(event)
+        await self._sync_ingress_waiting_state()
 
     async def _stream_approval_resolution_pipeline(
         self,
@@ -1941,17 +3116,17 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
-        state = self._require_suspended_state(pending)
-        boundary_input = self._new_interaction_boundary_input(
-            state,
-            interaction_id=resolution.interaction_id,
-            interaction_kind="plan",
-            resolution=resolution,
-        )
-        task = self._create_owned_boundary_task(
-            lambda: self._resolve_interaction_pipeline(
+        return await self._ingress_coordinator.submit(
+            kind="resume",
+            payload=resolution,
+            ingress_id=f"host_ingress_resume:{uuid4().hex}",
+            resume_match_key=resolution.interaction_id,
+            runner=lambda owner: self._run_resume_ingress(
+                owner,
                 pending=pending,
-                boundary_input=boundary_input,
+                interaction_id=resolution.interaction_id,
+                interaction_kind="plan",
+                resolution=resolution,
                 router=lambda state: (
                     self.wiring.agent_runtime.resume_after_plan_interaction(
                         state, resolution
@@ -1959,10 +3134,7 @@ class HostSession:
                 ),
                 prepare_plan_state=True,
             ),
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
         )
-        return await asyncio.shield(task)
 
     async def resolve_mcp_input_required(
         self,
@@ -1973,17 +3145,17 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_mcp_input_required(resolution.interaction_id)
         self._raise_if_active_run()
-        state = self._require_suspended_state(pending)
-        boundary_input = self._new_interaction_boundary_input(
-            state,
-            interaction_id=resolution.interaction_id,
-            interaction_kind="mcp_input_required",
-            resolution=resolution,
-        )
-        task = self._create_owned_boundary_task(
-            lambda: self._resolve_interaction_pipeline(
+        return await self._ingress_coordinator.submit(
+            kind="resume",
+            payload=resolution,
+            ingress_id=f"host_ingress_resume:{uuid4().hex}",
+            resume_match_key=resolution.interaction_id,
+            runner=lambda owner: self._run_resume_ingress(
+                owner,
                 pending=pending,
-                boundary_input=boundary_input,
+                interaction_id=resolution.interaction_id,
+                interaction_kind="mcp_input_required",
+                resolution=resolution,
                 router=lambda state: (
                     self.wiring.agent_runtime.resume_after_mcp_input_required(
                         state, resolution
@@ -1991,10 +3163,7 @@ class HostSession:
                 ),
                 recover_pending_on_publication_failure=True,
             ),
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
         )
-        return await asyncio.shield(task)
 
     async def exit_plan_workflow(
         self,
@@ -2030,17 +3199,20 @@ class HostSession:
                     "user_feedback": user_feedback,
                 },
             )
-            task = self._create_owned_boundary_task(
-                lambda: self._exit_pending_plan_workflow_pipeline(
+            await self._ingress_coordinator.submit(
+                kind="resume",
+                payload=boundary_input.resolution,
+                ingress_id=f"host_ingress_resume:{uuid4().hex}",
+                resume_match_key=pending.interaction_id,
+                runner=lambda owner: self._run_exit_plan_resume_ingress(
+                    owner,
                     pending=pending,
                     source=source,
                     user_feedback=user_feedback,
                     boundary_input=boundary_input,
+                    state=state,
                 ),
-                preparing_state=state,
-                preparing_identity=boundary_input.identity,
             )
-            await asyncio.shield(task)
             return
 
         async with self._run_lock:
@@ -2116,6 +3288,29 @@ class HostSession:
             self.suspended_run_id = None
             self.pending_interaction = None
             self._finish_active_run()
+            await self._ingress_coordinator.clear_waiting_user()
+
+    async def _run_exit_plan_resume_ingress(
+        self,
+        _ingress_owner: HostIngressAttemptOwner,
+        *,
+        pending: PendingPlanInteraction,
+        source: str,
+        user_feedback: str,
+        boundary_input: InteractionResumeBoundaryInput,
+        state: LoopState,
+    ) -> None:
+        task = self._create_owned_boundary_task(
+            lambda: self._exit_pending_plan_workflow_pipeline(
+                pending=pending,
+                source=source,
+                user_feedback=user_feedback,
+                boundary_input=boundary_input,
+            ),
+            preparing_state=state,
+            preparing_identity=boundary_input.identity,
+        )
+        await asyncio.shield(task)
 
     def stream_plan_interaction_resolution(
         self,
@@ -2133,14 +3328,34 @@ class HostSession:
             interaction_kind="plan",
             resolution=resolution,
         )
-        return self._start_owned_boundary_stream(
-            lambda: self._stream_plan_interaction_resolution_pipeline(
-                pending=pending,
-                resolution=resolution,
-                boundary_input=boundary_input,
-            ),
+        observer = _StreamObserver()
+
+        async def _submit() -> None:
+            await self._ingress_coordinator.submit(
+                kind="resume",
+                payload=resolution,
+                ingress_id=f"host_ingress_resume:{uuid4().hex}",
+                resume_match_key=resolution.interaction_id,
+                runner=lambda owner: self._run_stream_resume_ingress(
+                    owner,
+                    observer=observer,
+                    pipeline=self._stream_plan_interaction_resolution_pipeline(
+                        pending=pending,
+                        resolution=resolution,
+                        boundary_input=boundary_input,
+                    ),
+                ),
+            )
+
+        task = self._create_owned_boundary_task(
+            _submit,
             preparing_state=state,
             preparing_identity=boundary_input.identity,
+            observer=observer,
+        )
+        return _OwnedBoundaryStreamObserver(
+            self._observe_owned_boundary_stream(observer=observer, task=task),
+            observer,
         )
 
     async def _stream_plan_interaction_resolution_pipeline(
@@ -2185,6 +3400,8 @@ class HostSession:
     ) -> AgentRunResult | HostBoundaryStopResult | None:
         self._raise_if_not_open("stopping the current turn")
         async with self._stop_lock:
+            with self.wiring.runtime_wiring.runtime_session.write_coordinator.lock:
+                self._stop_intent_revision += 1
             task = self._active_task
             state = self._active_state
             boundary_task = self._boundary_task
@@ -2201,10 +3418,22 @@ class HostSession:
                 if preparing_state is not None:
                     preparing_state.stop_request = StopRequest(reason=reason)
                     self.stopping_run_id = preparing_state.run_id
-                    self._boundary_stop_requested_run_ids.add(
-                        preparing_state.run_id
+                    self._boundary_stop_requested_run_ids.add(preparing_state.run_id)
+                commit_started = boundary_attempt is not None and (
+                    boundary_attempt.phase
+                    in {
+                        HostRunBoundaryPhase.DURABLE_COMMIT,
+                        HostRunBoundaryPhase.ACTIVATION,
+                        HostRunBoundaryPhase.POST_COMMIT_INITIALIZATION,
+                    }
+                )
+                cancelled_owner = False
+                if not commit_started:
+                    cancelled_owner = (
+                        await self._ingress_coordinator.cancel_active_preparation()
                     )
-                boundary_task.cancel()
+                if not commit_started and not cancelled_owner:
+                    boundary_task.cancel()
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(boundary_task), timeout=timeout
@@ -2296,6 +3525,7 @@ class HostSession:
                         self._capture_pending_interaction(result.state)
                         if result.state.finalized:
                             self._retire_confirmed_run_owner(state.run_id)
+                            await self._ingress_coordinator.clear_waiting_user()
                         return result
                     finally:
                         self.active_run_id = None
@@ -2358,24 +3588,27 @@ class HostSession:
         state: LoopState,
         reason: AbortKind,
     ) -> RunTerminationIntent | None:
-        owner = self._run_execution_owners.get(state.run_id)
-        if owner is None:
-            return None
-        segment = owner.active_segment
-        intent = RunTerminationIntent(
-            intent_id=f"run_termination_intent:{uuid4().hex}",
-            kind=reason.value,  # type: ignore[arg-type]
-            requested_at_utc=utc_now(),
-            requester_id=self.host_session_id,
-            target_segment_id=segment.segment_id if segment is not None else None,
-            target_segment_generation=(
-                segment.segment_generation if segment is not None else None
-            ),
-        )
-        _status, installed = self._run_execution_owners.install_termination_intent(
-            state.run_id,
-            intent,
-        )
+        with self.wiring.runtime_wiring.runtime_session.write_coordinator.lock:
+            owner = self._run_execution_owners.get(state.run_id)
+            if owner is None:
+                return None
+            segment = owner.active_segment
+            intent = RunTerminationIntent(
+                intent_id=f"run_termination_intent:{uuid4().hex}",
+                kind=reason.value,  # type: ignore[arg-type]
+                requested_at_utc=utc_now(),
+                requester_id=self.host_session_id,
+                target_segment_id=(segment.segment_id if segment is not None else None),
+                target_segment_generation=(
+                    segment.segment_generation if segment is not None else None
+                ),
+            )
+            status, installed = self._run_execution_owners.install_termination_intent(
+                state.run_id,
+                intent,
+            )
+            if status == "installed":
+                self._termination_intent_revision += 1
         working_set = state.run_working_set
         control_owner = (
             working_set.model_call_control_owner if working_set is not None else None
@@ -2429,6 +3662,22 @@ class HostSession:
 
     def replay_events(self, *, after_sequence: int | None = None) -> list[AgentEvent]:
         return self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
+
+    def subscribe_terminal_monitor_events(
+        self,
+        *,
+        reconnect_cursor=None,
+        after_projection_revision: int | None = None,
+    ) -> TerminalMonitorUISubscription:
+        """Subscribe to UI-only terminal events without changing model delivery."""
+
+        channel = (
+            self.wiring.runtime_wiring.runtime_session.terminal_monitor_event_channel
+        )
+        return channel.subscribe(
+            reconnect_cursor=reconnect_cursor,
+            after_projection_revision=after_projection_revision,
+        )
 
     def add_compaction_listener(self, listener: Callable[[AgentEvent], None]) -> None:
         """Register a best-effort observer for terminal context compaction events."""
@@ -2497,6 +3746,10 @@ class HostSession:
         self._preparing_identity = None
         self.stopping_run_id = None
         self.suspended_run_id = None
+        self.wiring.runtime_wiring.runtime_session.bind_terminal_notification_listener(
+            None
+        )
+        self.wiring.runtime_wiring.runtime_session.terminal_monitor_event_channel.close()
         self.wiring.agent_runtime.close()
 
     async def aclose(
@@ -2515,6 +3768,11 @@ class HostSession:
             return
         self.begin_close()
         runtime_session = self.wiring.runtime_wiring.runtime_session
+        await self._ingress_coordinator.begin_close()
+        dispatch_task = self._terminal_notification_dispatch_task
+        if dispatch_task is not None and not dispatch_task.done():
+            dispatch_task.cancel()
+            await asyncio.gather(dispatch_task, return_exceptions=True)
         await self.drain_active_run(
             reason=reason, timeout_seconds=drain_timeout_seconds
         )
@@ -2525,6 +3783,24 @@ class HostSession:
         await runtime_session.tool_execution_terminal_registry.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
+        await asyncio.to_thread(
+            runtime_session.terminal_monitor_coordinator.stop_admission_and_drain_workers,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_sessions.kill_owned,
+            self.host_session_id,
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_sessions.drain_pending_completions,
+            self.host_session_id,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_monitor_coordinator.terminate_all_for_session_close,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await self._close_terminal_notification_owners()
         await runtime_session.transcript_projection_checkpoint_service.request_close_cancellation()
         governance_engine = self.wiring.runtime_wiring.memory_governance_engine
         if governance_engine is not None:
@@ -2583,7 +3859,70 @@ class HostSession:
         runtime_session.require_mutation_allowed()
         if self.mcp_supervisor is not None:
             await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
+        await self._ingress_coordinator.finish_close()
         self.close()
+
+    async def _close_terminal_notification_owners(self) -> None:
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        store = runtime_session.terminal_notification_store
+        pending = store.pending_notifications(
+            include_unmonitored_completions=True,
+            maximum_items=8,
+        )
+        candidates: list[AgentEvent] = []
+        disposition = None
+        if pending:
+            source_events = tuple(item.source_event for item in pending)
+            references = tuple(
+                sorted(
+                    (
+                        event_reference_from_stored(
+                            event,
+                            runtime_session_id=self.runtime_session_id,
+                        )
+                        for event in source_events
+                    ),
+                    key=lambda item: (item.sequence, item.event_id),
+                )
+            )
+            first = source_events[0]
+            disposition = TerminalProcessObservationDeliveryDispositionEvent(
+                id=context_fingerprint(
+                    "terminal-notification-session-close-disposition-id:v1",
+                    tuple(item.event_id for item in references),
+                ).replace("sha256:", "terminal_notification_disposition:"),
+                run_id=first.run_id,
+                turn_id=first.turn_id,
+                reply_id=first.reply_id,
+                observation_source_references=references,
+                outcome="session_closed",
+            )
+            candidates.append(disposition)
+        account = store.account_snapshot()
+        release_ids = tuple(
+            item.reservation_id for item in account.active_completion_reservations
+        )
+        if release_ids:
+            causes: tuple[AgentEvent, ...]
+            if disposition is not None:
+                causes = (disposition,)
+            else:
+                completion_events = store.completion_events_for_reservations(
+                    release_ids
+                )
+                if not completion_events:
+                    raise RuntimeError(
+                        "terminal completion reservations lack close authority"
+                    )
+                causes = completion_events
+            candidates.extend(
+                runtime_session.terminal_notification_account_coordinator.freeze_released_events(
+                    reservation_ids=release_ids,
+                    cause_events=causes,
+                )
+            )
+        if candidates:
+            await runtime_session.emit_many(tuple(candidates))
 
     async def drain_active_run(
         self,
@@ -2639,7 +3978,22 @@ class HostSession:
             ):
                 preparing_state.stop_request = StopRequest(reason=reason)
                 self.stopping_run_id = preparing_state.run_id
-            boundary_task.cancel()
+            boundary_attempt = self._boundary_attempt
+            commit_started = boundary_attempt is not None and (
+                boundary_attempt.phase
+                in {
+                    HostRunBoundaryPhase.DURABLE_COMMIT,
+                    HostRunBoundaryPhase.ACTIVATION,
+                    HostRunBoundaryPhase.POST_COMMIT_INITIALIZATION,
+                }
+            )
+            cancelled_owner = False
+            if not commit_started:
+                cancelled_owner = (
+                    await self._ingress_coordinator.cancel_active_preparation()
+                )
+            if not commit_started and not cancelled_owner:
+                boundary_task.cancel()
             try:
                 await asyncio.wait_for(
                     asyncio.shield(boundary_task), timeout=timeout_seconds
@@ -2995,15 +4349,17 @@ class HostSession:
             observer_state = "backpressured"
         else:
             observer_state = "attached"
-        compaction_snapshot = self.wiring.runtime_wiring.event_log.read_raw_events_by_types(
-            (
-                EventType.CONTEXT_COMPACTION_STARTED.value,
-                EventType.CONTEXT_COMPACTION_COMPLETED.value,
-                EventType.CONTEXT_COMPACTION_FAILED.value,
-            ),
-            max_events=4_096,
-            max_payload_bytes=8 * 1024 * 1024,
-            deadline_monotonic=time.monotonic() + 5.0,
+        compaction_snapshot = (
+            self.wiring.runtime_wiring.event_log.read_raw_events_by_types(
+                (
+                    EventType.CONTEXT_COMPACTION_STARTED.value,
+                    EventType.CONTEXT_COMPACTION_COMPLETED.value,
+                    EventType.CONTEXT_COMPACTION_FAILED.value,
+                ),
+                max_events=4_096,
+                max_payload_bytes=8 * 1024 * 1024,
+                deadline_monotonic=time.monotonic() + 5.0,
+            )
         )
         compaction_events = tuple(
             raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
@@ -3110,9 +4466,7 @@ class HostSession:
         if attempt is None:
             return
         sequences = tuple(
-            event.sequence
-            for event in committed_events
-            if event.sequence is not None
+            event.sequence for event in committed_events if event.sequence is not None
         )
         attempt.commit_confirmation = BoundaryBatchConfirmation(
             status=status,
@@ -3294,6 +4648,7 @@ class HostSession:
                         self._finish_boundary_attempt_safely(attempt)
                         self._boundary_attempt = None
                     self._boundary_task = None
+                    self._boundary_execution_task = None
                     self._boundary_observer = None
                     self._preparing_state = None
                     self._preparing_identity = None
@@ -3305,6 +4660,7 @@ class HostSession:
             coroutine.close()
             raise
         self._boundary_task = task
+        self._boundary_execution_task = task
         attempt = HostRunBoundaryAttempt(
             boundary_id=preparing_identity.boundary_id,
             kind=preparing_identity.kind,
@@ -3983,7 +5339,7 @@ class HostSession:
         make_stream: Callable[[], AsyncIterator[AgentEvent]],
     ) -> AsyncIterator[AgentEvent]:
         boundary_task = asyncio.current_task()
-        if boundary_task is None or boundary_task is not self._boundary_task:
+        if boundary_task is None or boundary_task is not self._boundary_execution_task:
             raise RuntimeError("stream execution must run in the Host boundary driver")
         queue: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=1)
 
@@ -4146,6 +5502,7 @@ class HostSession:
         self.active_run_id = None
         self.stopping_run_id = None
         self.last_active_at = time.monotonic()
+        self._ensure_terminal_notification_dispatch()
 
     def _retire_confirmed_run_owner(self, run_id: str) -> None:
         owner = self._run_execution_owners.get(run_id)
@@ -4293,6 +5650,15 @@ class HostSession:
         self._suspended_state = None
         self.suspended_run_id = None
         state.scratchpad.pop("suspended_state_token", None)
+
+    async def _sync_ingress_waiting_state(self) -> None:
+        pending = self.pending_interaction
+        if pending is None:
+            await self._ingress_coordinator.clear_waiting_user()
+            return
+        await self._ingress_coordinator.mark_waiting_user(
+            resume_match_key=_pending_interaction_match_key(pending)
+        )
 
     def _notify_governance(self) -> None:
         coordinator = self.wiring.runtime_wiring.governance_coordinator
@@ -4563,12 +5929,46 @@ class HostSession:
             raise HostSessionBusyError("host session already has an active run")
 
 
+def _notification_process_id(
+    event: TerminalProcessCompletedEvent
+    | TerminalProcessMonitorObservationCommittedEvent,
+) -> str:
+    if isinstance(event, TerminalProcessCompletedEvent):
+        cursor = event.completion_semantic.terminal_output_cursor
+    else:
+        output = event.observation.output_authority
+        cursor = getattr(output, "end_cursor", None) or getattr(
+            output, "terminal_cursor", None
+        )
+        if cursor is None:
+            raise RuntimeError("terminal monitor observation lacks an output cursor")
+    return cursor.stream_identity.process_id
+
+
+def _notification_is_terminal(
+    event: TerminalProcessCompletedEvent
+    | TerminalProcessMonitorObservationCommittedEvent,
+) -> bool:
+    return isinstance(event, TerminalProcessCompletedEvent) or (
+        event.observation.observation_kind == "process_completed"
+    )
+
+
 def _clear_current_task_cancellation() -> None:
     task = asyncio.current_task()
     if task is None or not hasattr(task, "uncancel"):
         return
     while task.cancelling():
         task.uncancel()
+
+
+def _pending_interaction_match_key(pending: PendingInteraction) -> str:
+    approval_id = getattr(pending, "approval_id", None)
+    interaction_id = getattr(pending, "interaction_id", None)
+    value = approval_id if isinstance(approval_id, str) else interaction_id
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("pending Host interaction lacks a stable resume identity")
+    return value
 
 
 def _model_stream_cancel_reason(
