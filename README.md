@@ -286,6 +286,19 @@ uv run pulsara config-check --env-file .env
 uv run pulsara host repl --env-file .env --workspace .
 ```
 
+The bundled Docker PostgreSQL installs pgvector during first-time database
+initialization. For an existing or externally managed database, a PostgreSQL
+administrator must install it once in the exact database named by
+`PULSARA_POSTGRES_DSN`:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Keep `PULSARA_POSTGRES_DSN` bound to the normal application role. Pulsara's
+runtime schema initialization verifies that pgvector exists but never requests
+extension-install privileges.
+
 Inside the REPL:
 
 ```text

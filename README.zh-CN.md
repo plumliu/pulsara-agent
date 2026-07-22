@@ -240,6 +240,15 @@ uv run pulsara config-check --env-file .env
 uv run pulsara host repl --env-file .env --workspace .
 ```
 
+仓库自带的 Docker PostgreSQL 会在数据库首次初始化时安装 pgvector。对于既有数据库或外部托管数据库，PostgreSQL 管理员必须在
+`PULSARA_POSTGRES_DSN` 指向的同一个数据库中执行一次：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+`PULSARA_POSTGRES_DSN` 应继续使用普通应用角色。Pulsara 的运行时 schema 初始化只验证 pgvector 已存在，不会请求安装扩展所需的管理员权限。
+
 在 REPL 中：
 
 ```text

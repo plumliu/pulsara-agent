@@ -164,7 +164,10 @@ Projection refresh 规则：
 
 ## 7. Memory substrate schema
 
-`MEMORY_SUBSTRATE_SCHEMA_SQL` 是 memory/canonical graph substrate 的 PostgreSQL schema truth。
+Memory substrate 的 PostgreSQL 初始化分成两个权限边界：
+
+- `MEMORY_SUBSTRATE_BOOTSTRAP_SQL` 是 deployment/admin owner，只安装 pgvector；
+- `MEMORY_SUBSTRATE_SCHEMA_SQL` 是普通应用角色 owner，只验证 prerequisite 并创建/升级 Pulsara 自有 function、table 与 index。
 
 它必须包含：
 
@@ -177,7 +180,7 @@ Projection refresh 规则：
 - `recall_traces`
 - `recall_usages`
 
-`CREATE EXTENSION IF NOT EXISTS vector` 是 schema bootstrap 的一部分；pgvector 不得只存在于外部手工步骤。
+`CREATE EXTENSION IF NOT EXISTS vector` 必须只存在于 versioned bootstrap SQL 与部署初始化 artifact 中。Host、repository、worker 和普通 schema ensure 路径不得执行它，也不得要求 `PULSARA_POSTGRES_DSN` 角色拥有 `CREATE EXTENSION` 权限。Bundled Docker 在 fresh database init 时执行 bootstrap；existing/managed PostgreSQL 由管理员在目标 database 一次性执行同一声明式 SQL。Runtime schema 在 extension 缺失时必须以稳定 prerequisite error fail closed，不能退化为无向量表的半初始化状态。
 
 `memory_vector_index` primary key 必须包含：
 
@@ -250,6 +253,6 @@ InMemory graph store 只允许测试/兼容使用。
 - `find_by_type` 返回 defensive copies。
 - PostgresGraphStore 写 canonical memory 后 `graph_documents` 与 `memory_nodes` 同步。
 - `set_status` 同步 JSON-LD payload 与 projection。
-- memory schema 包含 required tables 与 pgvector extension。
+- memory bootstrap 声明 pgvector extension，runtime schema 包含 prerequisite guard 与 required tables，且生产 runtime 不引用 privileged bootstrap SQL。
 - Oxigraph materializer 能 round-trip JSON-LD document。
 - Oxigraph unavailable/failure 通过 outbox failed status 暴露，而不是悄悄吞掉。
