@@ -16,9 +16,32 @@ MEMORY_SUBSTRATE_TABLES = (
 )
 
 
-MEMORY_SUBSTRATE_SCHEMA_SQL = """
-CREATE EXTENSION IF NOT EXISTS vector;
+MEMORY_SUBSTRATE_BOOTSTRAP_SQL = "CREATE EXTENSION IF NOT EXISTS vector;"
 
+
+MEMORY_SUBSTRATE_EXTENSION_REQUIREMENT_SQL = """
+DO $pulsara$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'vector'
+    ) THEN
+        RAISE EXCEPTION
+            'Pulsara memory storage requires pgvector in database %',
+            current_database()
+            USING ERRCODE = '55000',
+                  HINT = 'Have a PostgreSQL administrator install extension "vector" before starting Pulsara.';
+    END IF;
+END
+$pulsara$;
+""".strip()
+
+
+MEMORY_SUBSTRATE_SCHEMA_SQL = (
+    MEMORY_SUBSTRATE_EXTENSION_REQUIREMENT_SQL
+    + "\n\n"
+    + """
 CREATE OR REPLACE FUNCTION pulsara_jsonb_text_array(value JSONB)
 RETURNS JSONB
 LANGUAGE SQL
@@ -250,3 +273,4 @@ CREATE TABLE IF NOT EXISTS recall_usages (
 CREATE INDEX IF NOT EXISTS idx_recall_usages_mem
     ON recall_usages(graph_id, memory_id);
 """.strip()
+)
