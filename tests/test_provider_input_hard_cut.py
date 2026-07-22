@@ -98,6 +98,9 @@ class _BudgetPressureMemoryInstruction(NoopMemoryHooks):
         return "PROVIDER_SOURCE_MUST_BE_OMITTED_" * 800
 
 
+_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS = 9_344
+
+
 class _StableMemoryProjection(NoopMemoryHooks):
     async def project(self, state, *, token_budget: int):
         del state, token_budget
@@ -580,8 +583,8 @@ def test_compiler_omission_is_final_provider_payload_truth(
     registry = LLMTransportRegistry()
     registry.register(transport)
     limits = test_model_limits(
-        total_context_tokens=8_192,
-        max_input_tokens=8_192,
+        total_context_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
+        max_input_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
         max_output_tokens=512,
         default_output_tokens=512,
         input_safety_margin_tokens=512,
@@ -1263,8 +1266,8 @@ def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -
 
 def test_budget_omitted_changed_memory_uses_typed_rollover(tmp_path) -> None:
     limits = test_model_limits(
-        total_context_tokens=8_192,
-        max_input_tokens=8_192,
+        total_context_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
+        max_input_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
         max_output_tokens=512,
         default_output_tokens=512,
         input_safety_margin_tokens=512,
@@ -1328,8 +1331,8 @@ def test_budget_omitted_changed_memory_uses_typed_rollover(tmp_path) -> None:
 
 def test_budget_omitted_new_memory_does_not_create_a_phantom_rollover(tmp_path) -> None:
     limits = test_model_limits(
-        total_context_tokens=8_192,
-        max_input_tokens=8_192,
+        total_context_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
+        max_input_tokens=_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS,
         max_output_tokens=512,
         default_output_tokens=512,
         input_safety_margin_tokens=512,

@@ -70,6 +70,7 @@ from pulsara_agent.llm.execution import (
 )
 from pulsara_agent.llm.lifecycle import (
     ModelLifecycleStartCommitBundle,
+    build_active_run_monitor_start_companions,
     validate_model_lifecycle_start_bundle,
 )
 from pulsara_agent.llm.materialize import (
@@ -348,9 +349,23 @@ class LLMRuntime:
                     start_bundle.governance_input_attribution
                 ),
                 provider_input_reference=provider_input_start.committed_reference,
+                active_run_monitor_delivery=(
+                    start_bundle.active_run_monitor_delivery
+                ),
+            )
+            active_run_monitor_companions = (
+                build_active_run_monitor_start_companions(
+                    bundle=start_bundle,
+                    start_event=start_event,
+                    runtime_session=runtime_session,
+                )
             )
             start_batch = (
                 *start_bundle.companion_candidates,
+                *(
+                    freeze_event_write_candidate(event)
+                    for event in active_run_monitor_companions
+                ),
                 freeze_event_write_candidate(start_event),
             )
             try:

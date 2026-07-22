@@ -12,6 +12,8 @@ from pulsara_agent.llm.user_carrier import (
     encode_human_input,
     encode_runtime_observation,
     encode_runtime_request,
+    canonical_runtime_observation_wire_from_semantic,
+    decode_runtime_observation_wire_semantic,
     provider_user_carrier_binding,
     rebind_provider_user_carrier_semantic,
 )
@@ -226,6 +228,36 @@ class LLMMessage:
             lifecycle_class=lifecycle_class,
             authority_class=authority_class,
             causal_occurrence_semantic_fingerprint=occurrence,
+        )
+        return cls.from_provider_user_carrier(
+            role=MessageRole.RUNTIME_OBSERVATION,
+            carrier=carrier,
+        )
+
+    @classmethod
+    def runtime_observation_from_wire(
+        cls,
+        text: str,
+        *,
+        causal_occurrence_semantic_fingerprint: str,
+    ) -> "LLMMessage":
+        semantic = decode_runtime_observation_wire_semantic(
+            text,
+            causal_occurrence_semantic_fingerprint=(
+                causal_occurrence_semantic_fingerprint
+            ),
+        )
+        canonical = canonical_runtime_observation_wire_from_semantic(semantic)
+        carrier = EncodedProviderUserCarrier(
+            carrier_kind="runtime_observation",
+            canonical_text=canonical,
+            canonical_utf8_sha256=semantic.canonical_wire_utf8_sha256,
+            canonical_utf8_bytes=semantic.canonical_wire_utf8_bytes,
+            semantic_fingerprint=semantic.wire_semantic_fingerprint,
+            semantic_fact=semantic,
+            occurrence_semantic_fingerprint=(
+                causal_occurrence_semantic_fingerprint
+            ),
         )
         return cls.from_provider_user_carrier(
             role=MessageRole.RUNTIME_OBSERVATION,

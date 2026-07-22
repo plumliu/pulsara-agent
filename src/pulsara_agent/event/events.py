@@ -150,6 +150,30 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalProjectionReferenceFact,
     ToolResultTerminalProjectionEndReferenceFact,
 )
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalAutonomousDeliveryFact,
+    TerminalNotificationAccountTransitionFact,
+    TerminalNotificationReservationAccountStateFact,
+    TerminalProcessObservationReceiptFact,
+    TerminalProcessCompletionSemanticFact,
+    TerminalOutputCursorFact,
+    TerminalOutputRecoveryReferenceFact,
+    TerminalOutputStreamIdentityFact,
+    TerminalOutputDeltaAttributionFact,
+    TerminalOutputDeltaSemanticFact,
+    TerminalProcessMonitorObservationSemanticFact,
+    TerminalProcessMonitorCancellationSemanticFact,
+    TerminalProcessMonitorRegistrationAttributionFact,
+    TerminalProcessMonitorRegistrationSemanticFact,
+    TerminalProcessMonitorStateTransitionFact,
+    TerminalProcessMonitorTerminationSemanticFact,
+    TerminalProcessLifecycleOutcomeFact,
+)
+from pulsara_agent.primitives.host_ingress import (
+    HostActiveRunMonitorDeliveryFact,
+    HostIngressAdmissionProofFact,
+    HostRunIngressFact,
+)
 from pulsara_agent.primitives.frozen import StableEventIdentityFact
 from pulsara_agent.primitives.governance_evidence import (
     CompactionCandidateAttributionFact,
@@ -326,6 +350,26 @@ class EventType(StrEnum):
     REQUIRE_EXTERNAL_EXECUTION = "REQUIRE_EXTERNAL_EXECUTION"
     EXTERNAL_EXECUTION_RESULT = "EXTERNAL_EXECUTION_RESULT"
     TERMINAL_PROCESS_COMPLETED = "TERMINAL_PROCESS_COMPLETED"
+    TERMINAL_PROCESS_MONITOR_REGISTERED = "TERMINAL_PROCESS_MONITOR_REGISTERED"
+    TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED = (
+        "TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED"
+    )
+    TERMINAL_PROCESS_MONITOR_TERMINATED = "TERMINAL_PROCESS_MONITOR_TERMINATED"
+    TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED = (
+        "TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED"
+    )
+    TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION = (
+        "TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION"
+    )
+    TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED = (
+        "TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED"
+    )
+    TERMINAL_NOTIFICATION_RESERVATION_CREATED = (
+        "TERMINAL_NOTIFICATION_RESERVATION_CREATED"
+    )
+    TERMINAL_NOTIFICATION_RESERVATION_RELEASED = (
+        "TERMINAL_NOTIFICATION_RESERVATION_RELEASED"
+    )
     PLAN_MODE_ENTERED = "PLAN_MODE_ENTERED"
     PLAN_QUESTION_ASKED = "PLAN_QUESTION_ASKED"
     PLAN_QUESTION_ANSWERED = "PLAN_QUESTION_ANSWERED"
@@ -443,6 +487,8 @@ class RunStartEvent(EventBase):
     mcp_installation_owner_runtime_session_id: str
     run_entry_kind: RunEntryKind
     current_user_message: CurrentUserMessageFact
+    host_run_ingress: HostRunIngressFact | None
+    host_ingress_admission_proof: HostIngressAdmissionProofFact | None
     run_transcript_seed_semantic: RunTranscriptSeedSemanticFact
     run_transcript_seed_reference: RunTranscriptSeedReferenceFact
     terminal_run_end_event_id: str = Field(min_length=1)
@@ -501,6 +547,13 @@ class RunStartEvent(EventBase):
                 raise ValueError("host RunStart cannot carry child rollout subaccount")
             if self.new_run_boundary is None or self.subagent_run_entry is not None:
                 raise ValueError("host RunStart requires only new_run_boundary")
+            if (
+                self.host_run_ingress is None
+                or self.host_ingress_admission_proof is None
+                or self.host_ingress_admission_proof.ingress_fact_fingerprint
+                != self.host_run_ingress.fact_fingerprint
+            ):
+                raise ValueError("host RunStart requires exact typed ingress authority")
             boundary = self.new_run_boundary
             identity = boundary.identity
             if (
@@ -514,6 +567,7 @@ class RunStartEvent(EventBase):
             validate_host_current_user_attribution(
                 boundary=identity,
                 current_user=self.current_user_message,
+                ingress=self.host_run_ingress,
             )
             if (
                 boundary.model_target_fingerprint
@@ -522,7 +576,12 @@ class RunStartEvent(EventBase):
                 or boundary.mcp_installation_id != self.mcp_installation_id
             ):
                 raise ValueError("host RunStart contract identity mismatch")
-        elif self.subagent_run_entry is None or self.new_run_boundary is not None:
+        elif (
+            self.subagent_run_entry is None
+            or self.new_run_boundary is not None
+            or self.host_run_ingress is not None
+            or self.host_ingress_admission_proof is not None
+        ):
             raise ValueError("child RunStart requires only subagent_run_entry")
         else:
             entry = self.subagent_run_entry
@@ -1075,6 +1134,7 @@ class ModelCallStartEvent(EventBase):
     recovery_plan: ModelStreamRecoveryPlanFact
     provider_input_reference: CommittedProviderInputReferenceFact
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None
+    active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None
 
     @model_validator(mode="after")
     def _validate_call_context(self) -> "ModelCallStartEvent":
@@ -1114,6 +1174,14 @@ class ModelCallStartEvent(EventBase):
                 != self.resolved_call.target.target_fingerprint
             ):
                 raise ValueError("governance model Start attribution drifted")
+        if self.active_run_monitor_delivery is not None and (
+            self.resolved_call.context_mode != "compiled"
+            or self.model_call_index is None
+            or self.model_call_index < 2
+        ):
+            raise ValueError(
+                "active-run monitor delivery requires a follow-up compiled model call"
+            )
         return self
 
 
@@ -2161,6 +2229,15 @@ class ToolResultEndEvent(EventBase):
     essential_result: ToolResultEssentialFact | None = None
     terminal_payload_timing: TerminalPayloadTimingFact | None = None
     rollup_semantics: ToolResultRollupSemanticsFact | None
+    terminal_process_observation_receipt: (
+        TerminalProcessObservationReceiptFact | None
+    ) = None
+    terminal_process_monitor_registration: (
+        TerminalProcessMonitorRegistrationSemanticFact | None
+    ) = None
+    terminal_process_monitor_cancellation: (
+        TerminalProcessMonitorCancellationSemanticFact | None
+    ) = None
     terminal_projection: ToolResultTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
@@ -2186,6 +2263,39 @@ class ToolResultEndEvent(EventBase):
             or semantic_join.result_state.value != self.state.value
         ):
             raise ValueError("ToolResultEnd terminal projection mismatch")
+        receipt = self.terminal_process_observation_receipt
+        if receipt is not None and receipt.origin_tool_call_id != self.tool_call_id:
+            raise ValueError("ToolResultEnd terminal process receipt mismatch")
+        registration = self.terminal_process_monitor_registration
+        semantic_registration = getattr(
+            self.terminal_projection.projection_reference.semantic_join,
+            "terminal_process_monitor_registration_semantic_fingerprint",
+            None,
+        )
+        if (registration is None) != (semantic_registration is None):
+            raise ValueError("ToolResultEnd terminal monitor registration matrix mismatch")
+        if registration is not None and (
+            registration.registration_semantic_fingerprint != semantic_registration
+        ):
+            raise ValueError("ToolResultEnd terminal monitor registration drifted")
+        cancellation = self.terminal_process_monitor_cancellation
+        semantic_cancellation = getattr(
+            self.terminal_projection.projection_reference.semantic_join,
+            "terminal_process_monitor_cancellation_semantic_fingerprint",
+            None,
+        )
+        if (cancellation is None) != (semantic_cancellation is None):
+            raise ValueError("ToolResultEnd terminal monitor cancellation matrix mismatch")
+        if cancellation is not None and (
+            cancellation.cancellation_semantic_fingerprint != semantic_cancellation
+            or cancellation.cancel_intent.origin_cancel_tool_call_id
+            != self.tool_call_id
+        ):
+            raise ValueError("ToolResultEnd terminal monitor cancellation drifted")
+        if registration is not None and cancellation is not None:
+            raise ValueError(
+                "ToolResultEnd monitor registration/cancellation are mutually exclusive"
+            )
         return self
 
 
@@ -2302,20 +2412,373 @@ class TerminalProcessCompletedEvent(EventBase):
     type: Literal[EventType.TERMINAL_PROCESS_COMPLETED] = (
         EventType.TERMINAL_PROCESS_COMPLETED
     )
-    process_id: str
-    terminal_session_id: str
+    schema_version: Literal["terminal_process_completed.v2"] = (
+        "terminal_process_completed.v2"
+    )
+    completion_semantic: TerminalProcessCompletionSemanticFact
+    terminal_session_id: str = Field(min_length=1)
     command: str
-    status: str
-    exit_code: int
     cwd: str
-    timed_out: bool = False
-    duration_seconds: float
+    duration_seconds: float = Field(ge=0)
     output_preview: str = ""
     output_truncated: bool = False
     backend_type: str = "local"
     io_mode: str = "pipe"
     tool_call_id: str | None = None
-    completion_reason: str | None = None
+    output_recovery_reference: TerminalOutputRecoveryReferenceFact
+    owner_host_session_id: str | None = None
+    owner_conversation_id: str | None = None
+    origin_runtime_session_id: str = Field(min_length=1)
+    origin_run_entry_kind: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _typed_terminal_authority(self) -> "TerminalProcessCompletedEvent":
+        stream = self.completion_semantic.terminal_output_cursor.stream_identity
+        if self.output_recovery_reference.spool_writer_state.stream_identity != stream:
+            raise ValueError("terminal completion output stream identity mismatch")
+        if self.owner_host_session_id is not None and self.origin_run_entry_kind != "host_main_run":
+            raise ValueError("host-owned terminal completion requires Host main origin")
+        return self
+
+    @property
+    def process_id(self) -> str:
+        return self.completion_semantic.terminal_output_cursor.stream_identity.process_id
+
+    @property
+    def output_stream_identity(self) -> TerminalOutputStreamIdentityFact:
+        return self.completion_semantic.terminal_output_cursor.stream_identity
+
+    @property
+    def terminal_output_cursor(self) -> TerminalOutputCursorFact:
+        return self.completion_semantic.terminal_output_cursor
+
+    @property
+    def lifecycle_outcome(self) -> TerminalProcessLifecycleOutcomeFact:
+        return self.completion_semantic.outcome
+
+    @property
+    def status(self) -> str:
+        return self.completion_semantic.outcome.status
+
+    @property
+    def exit_code(self) -> int:
+        return self.completion_semantic.outcome.exit_code
+
+    @property
+    def timed_out(self) -> bool:
+        return self.completion_semantic.outcome.status == "timeout"
+
+    @property
+    def completion_reason(self) -> str | None:
+        return self.completion_semantic.outcome.kill_reason
+
+
+class TerminalProcessMonitorRegisteredEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_MONITOR_REGISTERED] = (
+        EventType.TERMINAL_PROCESS_MONITOR_REGISTERED
+    )
+    schema_version: Literal["terminal_process_monitor_registered.v1"] = (
+        "terminal_process_monitor_registered.v1"
+    )
+    registration_semantic: TerminalProcessMonitorRegistrationSemanticFact
+    registration_attribution: TerminalProcessMonitorRegistrationAttributionFact
+    resulting_monitor_core_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    tool_result_end_event_id: str = Field(min_length=1)
+    notification_reservation_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _registration(self) -> "TerminalProcessMonitorRegisteredEvent":
+        if (
+            self.registration_semantic.initial_baseline_cursor.stream_identity.process_id
+            == ""
+        ):
+            raise ValueError("terminal monitor registration process identity is empty")
+        return self
+
+
+class TerminalProcessMonitorObservationCommittedEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED] = (
+        EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED
+    )
+    schema_version: Literal[
+        "terminal_process_monitor_observation_committed.v1"
+    ] = "terminal_process_monitor_observation_committed.v1"
+    registration_event_reference: ContextEventReferenceFact
+    observation: TerminalProcessMonitorObservationSemanticFact
+    monitor_state_transition: TerminalProcessMonitorStateTransitionFact
+    output_delta_attribution: TerminalOutputDeltaAttributionFact | None
+    completion_event_reference: ContextEventReferenceFact | None
+    owner_host_session_id: str = Field(min_length=1)
+    wake_chain_id: str = Field(min_length=1)
+    observed_at_utc: str
+    physical_reservation_id: str = Field(min_length=1)
+    physical_reservation_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @field_validator("observed_at_utc")
+    @classmethod
+    def _observed_at(cls, value: str) -> str:
+        return canonical_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def _observation_matrix(self) -> "TerminalProcessMonitorObservationCommittedEvent":
+        if (
+            self.monitor_state_transition.observation_ordinal
+            != self.observation.observation_ordinal
+        ):
+            raise ValueError("terminal monitor observation ordinal mismatch")
+        output = self.observation.output_authority
+        available = isinstance(output, TerminalOutputDeltaSemanticFact)
+        if available != (self.output_delta_attribution is not None):
+            raise ValueError("terminal monitor output attribution matrix mismatch")
+        if self.output_delta_attribution is not None and (
+            self.output_delta_attribution.delta_semantic_fingerprint
+            != output.delta_semantic_fingerprint
+        ):
+            raise ValueError("terminal monitor output attribution fingerprint mismatch")
+        completion = self.observation.observation_kind == "process_completed"
+        if completion != (self.completion_event_reference is not None):
+            raise ValueError("terminal monitor completion reference matrix mismatch")
+        return self
+
+
+class TerminalProcessMonitorTerminatedEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_MONITOR_TERMINATED] = (
+        EventType.TERMINAL_PROCESS_MONITOR_TERMINATED
+    )
+    schema_version: Literal["terminal_process_monitor_terminated.v1"] = (
+        "terminal_process_monitor_terminated.v1"
+    )
+    registration_event_reference: ContextEventReferenceFact
+    termination_semantic: TerminalProcessMonitorTerminationSemanticFact
+    monitor_state_transition: TerminalProcessMonitorStateTransitionFact
+    notification_reservation_id: str = Field(min_length=1)
+    cause_event_references: tuple[ContextEventReferenceFact, ...]
+    terminated_at_utc: str
+
+    @field_validator("terminated_at_utc")
+    @classmethod
+    def _terminated_at(cls, value: str) -> str:
+        return canonical_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def _causes(self) -> "TerminalProcessMonitorTerminatedEvent":
+        identities = tuple(
+            (item.runtime_session_id, item.sequence, item.event_id)
+            for item in self.cause_event_references
+        )
+        if not identities or identities != tuple(sorted(set(identities))):
+            raise ValueError("terminal monitor termination causes are invalid")
+        if self.monitor_state_transition.observation_ordinal is not None:
+            raise ValueError("terminal monitor termination cannot advance observation ordinal")
+        return self
+
+
+class TerminalProcessMonitorReceiptAppliedEvent(EventBase):
+    """Durable cursor advancement caused by one exact terminal ToolResult."""
+
+    type: Literal[EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED] = (
+        EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED
+    )
+    schema_version: Literal["terminal_process_monitor_receipt_applied.v1"] = (
+        "terminal_process_monitor_receipt_applied.v1"
+    )
+    registration_event_reference: ContextEventReferenceFact
+    tool_result_end_event_identity: StableEventIdentityFact
+    receipt_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_end_cursor: TerminalOutputCursorFact
+    pending_observation_event_reference: ContextEventReferenceFact | None
+    monitor_state_transition: TerminalProcessMonitorStateTransitionFact
+
+    @model_validator(mode="after")
+    def _receipt_transition(self) -> "TerminalProcessMonitorReceiptAppliedEvent":
+        if self.monitor_state_transition.observation_ordinal is not None:
+            raise ValueError("terminal receipt cannot advance monitor observation ordinal")
+        if (
+            self.registration_event_reference.runtime_session_id
+            != self.tool_result_end_event_identity.runtime_session_id
+        ):
+            raise ValueError("terminal receipt application crosses runtime ledgers")
+        if (
+            self.pending_observation_event_reference is not None
+            and self.pending_observation_event_reference.runtime_session_id
+            != self.registration_event_reference.runtime_session_id
+        ):
+            raise ValueError("terminal receipt pending observation crosses runtime ledgers")
+        return self
+
+
+class TerminalProcessObservationDeliveryDispositionEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION] = (
+        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION
+    )
+    schema_version: Literal[
+        "terminal_process_observation_delivery_disposition.v1"
+    ] = "terminal_process_observation_delivery_disposition.v1"
+    observation_source_references: tuple[ContextEventReferenceFact, ...]
+    outcome: Literal[
+        "autonomous_dispatched",
+        "merged_into_human_run",
+        "active_run_safe_point",
+        "explicitly_observed",
+        "superseded_by_terminal_observation",
+        "monitor_cancelled",
+        "session_closed",
+    ]
+    run_start_event_identity: StableEventIdentityFact | None = None
+    model_call_start_event_identity: StableEventIdentityFact | None = None
+    tool_result_end_event_identity: StableEventIdentityFact | None = None
+    autonomy_delivery: TerminalAutonomousDeliveryFact | None = None
+
+    @model_validator(mode="after")
+    def _references(self) -> "TerminalProcessObservationDeliveryDispositionEvent":
+        refs = self.observation_source_references
+        identities = tuple((item.sequence, item.event_id) for item in refs)
+        if not refs or identities != tuple(sorted(set(identities))):
+            raise ValueError("terminal delivery sources are invalid")
+        run = self.run_start_event_identity is not None
+        model = self.model_call_start_event_identity is not None
+        tool = self.tool_result_end_event_identity is not None
+        valid = (
+            self.outcome in {"autonomous_dispatched", "merged_into_human_run"}
+            and run
+            and not model
+            and not tool
+            or self.outcome == "active_run_safe_point"
+            and model
+            and not run
+            and not tool
+            or self.outcome == "explicitly_observed"
+            and tool
+            and not run
+            and not model
+            or self.outcome
+            in {
+                "superseded_by_terminal_observation",
+                "monitor_cancelled",
+                "session_closed",
+            }
+            and not run
+            and not model
+            and not tool
+        )
+        if not valid:
+            raise ValueError("terminal delivery disposition reference matrix mismatch")
+        if (self.outcome == "active_run_safe_point") != (
+            self.autonomy_delivery is not None
+        ):
+            raise ValueError(
+                "active-run disposition autonomy delivery matrix mismatch"
+            )
+        return self
+
+
+class TerminalProcessObservationDeliveryDeferredEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED] = (
+        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED
+    )
+    schema_version: Literal[
+        "terminal_process_observation_delivery_deferred.v1"
+    ] = "terminal_process_observation_delivery_deferred.v1"
+    observation_source_references: tuple[ContextEventReferenceFact, ...]
+    reason: Literal[
+        "wake_budget_exhausted",
+        "autonomy_permission_disabled",
+        "host_waiting_user",
+    ]
+
+    @model_validator(mode="after")
+    def _sources(self) -> "TerminalProcessObservationDeliveryDeferredEvent":
+        identities = tuple(
+            (item.sequence, item.event_id)
+            for item in self.observation_source_references
+        )
+        if not identities or identities != tuple(sorted(set(identities))):
+            raise ValueError("terminal deferred delivery sources are invalid")
+        return self
+
+
+class TerminalNotificationReservationCreatedEvent(EventBase):
+    type: Literal[EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED] = (
+        EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED
+    )
+    schema_version: Literal["terminal_notification_reservation_created.v1"] = (
+        "terminal_notification_reservation_created.v1"
+    )
+    source_state: TerminalNotificationReservationAccountStateFact
+    resulting_state: TerminalNotificationReservationAccountStateFact
+    transition: TerminalNotificationAccountTransitionFact
+
+    @model_validator(mode="after")
+    def _created(self) -> "TerminalNotificationReservationCreatedEvent":
+        _validate_notification_account_transition_event(
+            source=self.source_state,
+            resulting=self.resulting_state,
+            transition=self.transition,
+            created=True,
+        )
+        return self
+
+
+class TerminalNotificationReservationReleasedEvent(EventBase):
+    type: Literal[EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED] = (
+        EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED
+    )
+    schema_version: Literal["terminal_notification_reservation_released.v1"] = (
+        "terminal_notification_reservation_released.v1"
+    )
+    source_state: TerminalNotificationReservationAccountStateFact
+    resulting_state: TerminalNotificationReservationAccountStateFact
+    transition: TerminalNotificationAccountTransitionFact
+
+    @model_validator(mode="after")
+    def _released(self) -> "TerminalNotificationReservationReleasedEvent":
+        _validate_notification_account_transition_event(
+            source=self.source_state,
+            resulting=self.resulting_state,
+            transition=self.transition,
+            created=False,
+        )
+        return self
+
+
+def _validate_notification_account_transition_event(
+    *,
+    source: TerminalNotificationReservationAccountStateFact,
+    resulting: TerminalNotificationReservationAccountStateFact,
+    transition: TerminalNotificationAccountTransitionFact,
+    created: bool,
+) -> None:
+    if (
+        source.ledger_runtime_session_id != resulting.ledger_runtime_session_id
+        or source.account_revision != transition.source_revision
+        or resulting.account_revision != transition.result_revision
+        or source.state_fingerprint != transition.before_state_fingerprint
+        or resulting.state_fingerprint != transition.after_state_fingerprint
+    ):
+        raise ValueError("terminal notification account transition join mismatch")
+    before = {
+        item.reservation_id
+        for item in (
+            *source.active_completion_reservations,
+            *source.active_monitor_reservations,
+        )
+    }
+    after = {
+        item.reservation_id
+        for item in (
+            *resulting.active_completion_reservations,
+            *resulting.active_monitor_reservations,
+        )
+    }
+    reservation_id = transition.reservation.reservation_id
+    if created != (reservation_id in after and reservation_id not in before):
+        raise ValueError("terminal notification account transition direction mismatch")
+    if not created and not (reservation_id in before and reservation_id not in after):
+        raise ValueError("terminal notification account release direction mismatch")
 
 
 class PlanModeEnteredEvent(EventBase):
@@ -4137,6 +4600,14 @@ AgentEvent: TypeAlias = (
     | RequireExternalExecutionEvent
     | ExternalExecutionResultEvent
     | TerminalProcessCompletedEvent
+    | TerminalProcessMonitorRegisteredEvent
+    | TerminalProcessMonitorObservationCommittedEvent
+    | TerminalProcessMonitorTerminatedEvent
+    | TerminalProcessMonitorReceiptAppliedEvent
+    | TerminalProcessObservationDeliveryDispositionEvent
+    | TerminalProcessObservationDeliveryDeferredEvent
+    | TerminalNotificationReservationCreatedEvent
+    | TerminalNotificationReservationReleasedEvent
     | PlanModeEnteredEvent
     | PlanQuestionAskedEvent
     | PlanQuestionAnsweredEvent

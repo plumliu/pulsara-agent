@@ -21,6 +21,7 @@ from pulsara_agent.llm.user_carrier import (
     ROOT_USER_CARRIER_INTERPRETATION,
     ROOT_USER_CARRIER_INTERPRETATION_FINGERPRINT,
     compose_provider_root_policy,
+    canonical_runtime_observation_wire_from_semantic,
     decode_runtime_observation_wire_semantic,
     encode_one_shot_runtime_clock,
     replace_runtime_observation_predecessor,
@@ -98,6 +99,7 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeObservationCausalPlacementSemanticFact,
     RuntimeObservationSourceAttributionFact,
     RuntimeObservationWireSemanticFact,
+    TerminalMonitorRuntimeObservationPayloadFact,
 )
 from pulsara_agent.runtime.context_input.sources.lifecycle import (
     context_source_lifecycle_entry,
@@ -105,6 +107,7 @@ from pulsara_agent.runtime.context_input.sources.lifecycle import (
     default_provider_user_carrier_protocol,
     runtime_observation_kind_contract,
     runtime_observation_context_source_producer,
+    runtime_observation_derived_producer,
 )
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.context_engine.types import CompiledContext
@@ -1230,6 +1233,22 @@ def plan_provider_input_append(
         frame_placement=frame_placement,
         runtime_session_id=runtime_session_id,
         run_id=event_context.run_id,
+    )
+    monitor_units, monitor_runtime_observations = (
+        _prepared_terminal_monitor_observation_units(
+            compiled_context=compiled_context,
+            previous_unit_count=len(previous_units),
+            append_unit_count=len(append_units),
+            authority_horizons=horizons,
+            required_replay_bindings=current_replay_bindings,
+            runtime_session_id=runtime_session_id,
+            run_id=event_context.run_id,
+        )
+    )
+    append_units = (*append_units, *monitor_units)
+    new_runtime_observation_units = (
+        *new_runtime_observation_units,
+        *monitor_runtime_observations,
     )
     runtime_observation_units = (
         *retained_rollover_observations,
@@ -3401,6 +3420,130 @@ def _prepared_runtime_observation_units(
             )
         )
     return tuple(result)
+
+
+def _prepared_terminal_monitor_observation_units(
+    *,
+    compiled_context: CompiledContext,
+    previous_unit_count: int,
+    append_unit_count: int,
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...],
+    required_replay_bindings: tuple[ProviderInputReplayBindingIdentityFact, ...],
+    runtime_session_id: str,
+    run_id: str,
+) -> tuple[
+    tuple[ProviderInputUnitMaterializationFact, ...],
+    tuple[PreparedRuntimeObservationProviderUnitFact, ...],
+]:
+    attachments = compiled_context.active_run_monitor_attachments
+    if not attachments:
+        return (), ()
+    projection = compiled_context.prepared_ordered_transcript_projection
+    if projection is None:
+        raise ValueError("terminal monitor observation lacks transcript projection")
+    predecessor = (
+        projection.projection.ordered_units[-1].causal_placement.node_identity
+        if projection.projection.ordered_units
+        else None
+    )
+    producer = runtime_observation_derived_producer(
+        observation_kind="terminal_process_monitor_observation",
+        producer_kind="terminal_monitor",
+    )
+    protection_scope = _run_protection_scope_semantic_id(
+        runtime_session_id=runtime_session_id,
+        run_id=run_id,
+    )
+    units: list[ProviderInputUnitMaterializationFact] = []
+    observations: list[PreparedRuntimeObservationProviderUnitFact] = []
+    for order, attachment in enumerate(attachments):
+        semantic = attachment.observation_wire_semantic
+        payload = semantic.payload
+        if not isinstance(payload, TerminalMonitorRuntimeObservationPayloadFact):
+            raise ValueError(
+                "terminal monitor attachment has the wrong observation payload"
+            )
+        occurrence = context_fingerprint(
+            "terminal-monitor-notification-occurrence:v1",
+            payload.source_semantic_fingerprint,
+        )
+        wire = canonical_runtime_observation_wire_from_semantic(semantic)
+        message = LLMMessage.runtime_observation_from_wire(
+            wire,
+            causal_occurrence_semantic_fingerprint=occurrence,
+        )
+        unit = freeze_message_unit(
+            message,
+            unit_kind="terminal_monitor_observation",
+            owner_semantic_fingerprint=attachment.attachment_fingerprint,
+            source_event_refs=attachment.source_event_references,
+            source_artifact_refs=(),
+            authority_horizons=_horizons_for_refs(
+                attachment.source_event_references,
+                authority_horizons,
+            ),
+            estimated_tokens=0,
+            required_replay_bindings=required_replay_bindings,
+        )
+        fragment = unit.canonical_provider_fragment
+        placement = build_frozen_fact(
+            RuntimeObservationCausalPlacementSemanticFact,
+            schema_version="runtime_observation_causal_placement_semantic.v1",
+            causal_scope_kind="run",
+            causal_scope_semantic_id=protection_scope,
+            placement_phase="before_model_call",
+            stable_predecessor_transcript_node=predecessor,
+            source_occurrence_semantic_fingerprint=occurrence,
+            intra_boundary_order=append_unit_count + order,
+            placement_contract_fingerprint=context_fingerprint(
+                "terminal-monitor-safe-point-placement-contract:v1",
+                "append-after-current-provider-projection",
+            ),
+        )
+        attribution = build_frozen_fact(
+            RuntimeObservationSourceAttributionFact,
+            schema_version="runtime_observation_source_attribution.v3",
+            observation_semantic_fingerprint=semantic.wire_semantic_fingerprint,
+            producer=producer,
+            transition_kind=None,
+            protection_scope_kind="run",
+            protection_scope_semantic_id=protection_scope,
+            owning_run_protection_scope_semantic_id=protection_scope,
+            source_event_references=attachment.source_event_references,
+            source_artifact_references=(),
+            authority_horizons=(),
+        )
+        unit_causal = context_fingerprint(
+            "runtime-observation-provider-unit-causal:v1",
+            (
+                semantic.wire_semantic_fingerprint,
+                placement.placement_semantic_fingerprint,
+                fragment.semantic_fingerprint,
+                unit.attribution.semantic.semantic_fingerprint,
+            ),
+        )
+        units.append(unit)
+        observations.append(
+            build_frozen_fact(
+                PreparedRuntimeObservationProviderUnitFact,
+                schema_version="prepared_runtime_observation_provider_unit.v1",
+                wire_semantic=semantic,
+                causal_placement=placement,
+                source_attribution=attribution,
+                source_id=None,
+                source_candidate_key=None,
+                source_payload_semantic_fingerprint=None,
+                owner_semantic_fingerprint=attachment.attachment_fingerprint,
+                provider_fragment_semantic_fingerprint=fragment.semantic_fingerprint,
+                provider_unit_semantic_fingerprint=(
+                    unit.attribution.semantic.semantic_fingerprint
+                ),
+                unit_causal_semantic_fingerprint=unit_causal,
+            )
+        )
+    if previous_unit_count + append_unit_count + len(units) < 1:
+        raise AssertionError("terminal monitor append placement is invalid")
+    return tuple(units), tuple(observations)
 
 
 def _one_shot_runtime_clock_unit(

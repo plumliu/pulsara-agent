@@ -14,7 +14,11 @@ from pulsara_agent.tools.builtins.memory import (
     RememberObservationTool,
     RememberPreferenceTool,
 )
-from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
+from pulsara_agent.tools.builtins.plan import (
+    AskPlanQuestionTool,
+    EnterPlanTool,
+    ExitPlanTool,
+)
 from pulsara_agent.tools.builtins.registry import build_core_tool_registry
 from pulsara_agent.tools.builtins.subagent import (
     CreateAgentTasksTool,
@@ -28,6 +32,7 @@ from pulsara_agent.tools.builtins.subagent import (
     WaitAgentTasksTool,
 )
 from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal_monitor import TerminalMonitorTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 
@@ -52,6 +57,7 @@ __all__ = [
     "StopAgentTool",
     "StopAgentTaskTool",
     "TerminalProcessTool",
+    "TerminalMonitorTool",
     "TerminalTool",
     "TodoTool",
     "WaitAgentTool",

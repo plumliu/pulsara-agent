@@ -282,8 +282,10 @@ class NewRunBoundaryFact(BaseModel):
 
     @model_validator(mode="after")
     def _validate_boundary(self) -> "NewRunBoundaryFact":
-        if self.identity.kind.value != "pre_run":
-            raise ValueError("new run boundary requires PRE_RUN identity")
+        if self.identity.kind.value not in {"pre_run", "pre_runtime_request"}:
+            raise ValueError(
+                "new run boundary requires PRE_RUN or PRE_RUNTIME_REQUEST identity"
+            )
         if self.degraded_reason_codes != tuple(
             sorted(set(self.degraded_reason_codes))
         ):

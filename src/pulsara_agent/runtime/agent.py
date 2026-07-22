@@ -72,6 +72,10 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     ToolResultEndEvent,
+    TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessMonitorRegisteredEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
     ToolResultDataDeltaEvent,
     ToolExecutionSuspendedEvent,
     ToolResultStartEvent,
@@ -82,6 +86,7 @@ from pulsara_agent.event.events import utc_now
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.control import (
     ModelCallControlResolutionError,
@@ -283,6 +288,7 @@ from pulsara_agent.runtime.run_entry import (
     RunWorkingSet,
 )
 from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
+from pulsara_agent.runtime.long_horizon.store import advance_rollout_state
 from pulsara_agent.runtime.long_horizon.coordinator import (
     allowed_action_classes_for_phase,
     build_rollout_phase_transition_event,
@@ -333,6 +339,7 @@ from pulsara_agent.runtime.long_horizon.run_contract import (
     prepare_child_long_horizon_run,
     prepare_child_rollout_reservation,
 )
+from pulsara_agent.runtime.long_horizon.store import LongHorizonReducerApplyError
 from pulsara_agent.runtime.state import (
     LoopBudget,
     LoopState,
@@ -404,7 +411,9 @@ async def _await_sync_tool_thread(
 
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
 _SUBAGENT_RESULTS_SECTION_ID = "subagent:results"
-_TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
+_TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset(
+    {"terminal", "terminal_process", "terminal_monitor"}
+)
 _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
     {
         "capability_descriptor_missing",
@@ -2062,6 +2071,9 @@ class AgentRuntime:
             permission_snapshot_id=snapshot.snapshot_id,
             permission_mode=snapshot.permission_mode.value,
             permission_policy=dict(snapshot.permission_policy),
+            run_entry_kind=(
+                "subagent_child" if self._is_subagent_child else "host_main_run"
+            ),
         )
 
     def _tool_permission_kwargs(self, state: LoopState) -> dict[str, object]:
@@ -2948,7 +2960,19 @@ class AgentRuntime:
                 state=binding.parent_state,
                 plan=plan,
             )
-            stored = await self.runtime_session.emit(candidate, state=state)
+            try:
+                stored = await self.runtime_session.emit(candidate, state=state)
+            except LongHorizonReducerApplyError:
+                # Terminal monitor/completion writers can advance the canonical
+                # ledger between rollout planning and this queued commit.  A
+                # stale candidate was not appended, so rebuild it from the new
+                # reducer head; a same-head failure is a real contract fault.
+                if (
+                    self.runtime_session.long_horizon_state_store.through_sequence
+                    > candidate.source_through_sequence
+                ):
+                    continue
+                raise
             return stored, None
         return None, "rollout_admission_reconciliation_blocked"
 
@@ -3088,6 +3112,12 @@ class AgentRuntime:
                 resolved_call=resolved_call,
             ):
                 yield event
+            active_run_monitor_lease = (
+                await self.runtime_session.borrow_active_run_monitor_safe_point(
+                    state=state,
+                    next_model_call_index=model_call_index,
+                )
+            )
             memory_prompt = getattr(
                 self.memory_hooks, "memory_context_prompt", lambda: None
             )()
@@ -3362,11 +3392,8 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.CANDIDATE_INVALID
                     )
-                    historical_provider_source_heads = (
-                        self.runtime_session.provider_input_generation_coordinator
-                        .committed_source_heads_for_compiled_call(
-                            prepared_context_input=prepared_context_input
-                        )
+                    historical_provider_source_heads = self.runtime_session.provider_input_generation_coordinator.committed_source_heads_for_compiled_call(
+                        prepared_context_input=prepared_context_input
                     )
                     draft_compiled_context = compile_context_from_facts(
                         facts=prepared_context_input.invocation,
@@ -3560,6 +3587,13 @@ class AgentRuntime:
                             historical_provider_source_heads
                         ),
                     )
+                    if active_run_monitor_lease is not None:
+                        final_compiled_context = replace(
+                            final_compiled_context,
+                            active_run_monitor_attachments=(
+                                active_run_monitor_lease.attachments
+                            ),
+                        )
                     if (
                         provider_neutral_payload_fingerprint(
                             draft_compiled_context.llm_context
@@ -4059,6 +4093,10 @@ class AgentRuntime:
                     )
                     break
             if compiled_context is None:
+                if active_run_monitor_lease is not None:
+                    self.runtime_session.release_active_run_monitor_safe_point(
+                        active_run_monitor_lease
+                    )
                 if provider_input_start_bundle is not None:
                     await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                         provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
@@ -4083,6 +4121,10 @@ class AgentRuntime:
                 actual_provider_estimate.total_input_tokens
                 > resolved_call.target.context_budget.input_budget_tokens
             ):
+                if active_run_monitor_lease is not None:
+                    self.runtime_session.release_active_run_monitor_safe_point(
+                        active_run_monitor_lease
+                    )
                 await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                     reason="resolved_target_invalidated_before_start",
@@ -4223,11 +4265,31 @@ class AgentRuntime:
 
             reply_had_run_error = False
             accepted_control_permit = None
+            active_run_monitor_replan_required = False
             try:
                 run_activation = (
                     state.run_working_set.run_execution_activation
                     if state.run_working_set is not None
                     else None
+                )
+                active_run_monitor_delivery = (
+                    _build_active_run_monitor_delivery(
+                        lease=active_run_monitor_lease,
+                        provider_input_start_bundle=provider_input_start_bundle,
+                    )
+                    if active_run_monitor_lease is not None
+                    else None
+                )
+                active_run_monitor_source_references = (
+                    tuple(
+                        event_reference_from_stored(
+                            event,
+                            runtime_session_id=self.runtime_session.runtime_session_id,
+                        )
+                        for event in active_run_monitor_lease.source_events
+                    )
+                    if active_run_monitor_lease is not None
+                    else ()
                 )
                 start_bundle = prepare_model_lifecycle_start_bundle(
                     call=resolved_call,
@@ -4237,6 +4299,10 @@ class AgentRuntime:
                     lifecycle_kind="main_assistant_reply",
                     run_execution_activation=run_activation,
                     provider_input_start_bundle=provider_input_start_bundle,
+                    active_run_monitor_delivery=active_run_monitor_delivery,
+                    active_run_monitor_source_event_references=(
+                        active_run_monitor_source_references
+                    ),
                 )
                 model_stream_handle = self.llm_runtime.start_stream(
                     call=resolved_call,
@@ -4319,6 +4385,12 @@ class AgentRuntime:
                             runtime_session=self.runtime_session,
                             state=state,
                         )
+                        state.scratchpad[
+                            "latest_model_control_disposition_event_id"
+                        ] = control_resolution.disposition_event.id
+                        state.scratchpad[
+                            "latest_model_control_disposition_model_call_index"
+                        ] = model_call_index
                         yield control_resolution.disposition_event
                         accepted_control_permit = control_resolution.accepted_permit
                         if accepted_control_permit is None:
@@ -4377,17 +4449,26 @@ class AgentRuntime:
                 # cross that unresolved control fact, so fail closed here.
                 raise
             except Exception as exc:
-                event = await self.runtime_session.emit(
-                    RunErrorEvent(
-                        **self._event_context(state).event_fields(),
-                        message=f"{type(exc).__name__}: {exc}",
-                        code=str(getattr(exc, "reason_code", "model_stream_error")),
-                    ),
-                    state=state,
-                )
-                reply_had_run_error = True
-                yield event
+                from pulsara_agent.host.ingress import HostIngressAdmissionStale
+
+                if isinstance(exc, HostIngressAdmissionStale):
+                    active_run_monitor_replan_required = True
+                else:
+                    event = await self.runtime_session.emit(
+                        RunErrorEvent(
+                            **self._event_context(state).event_fields(),
+                            message=f"{type(exc).__name__}: {exc}",
+                            code=str(getattr(exc, "reason_code", "model_stream_error")),
+                        ),
+                        state=state,
+                    )
+                    reply_had_run_error = True
+                    yield event
             finally:
+                if active_run_monitor_lease is not None:
+                    self.runtime_session.release_active_run_monitor_safe_point(
+                        active_run_monitor_lease
+                    )
                 await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                     reason=(
@@ -4396,6 +4477,9 @@ class AgentRuntime:
                         else "caller_cancelled_before_start"
                     ),
                 )
+
+            if active_run_monitor_replan_required:
+                continue
 
             if self._apply_stop_request(state):
                 break
@@ -5403,9 +5487,13 @@ class AgentRuntime:
                         for item in rollout_state.active_reservations
                     )
                 )
+            rollout_state_at_source = advance_rollout_state(
+                rollout_state,
+                source_through_sequence,
+            )
             _, state_before_close = apply_rollout_event(
                 account=rollout_account,
-                state=rollout_state,
+                state=rollout_state_at_source,
                 event=window_close.model_copy(
                     update={"sequence": source_through_sequence + 1}
                 ),
@@ -7164,17 +7252,82 @@ class AgentRuntime:
         *,
         terminal_event: ToolResultEndCandidate,
         reservation: RolloutReservationFact,
+        prepared_monitor_registration=None,
+        prepared_notification_reservation=None,
+        prepared_monitor_cancellation=None,
     ) -> tuple[AgentEvent, ...]:
+        await self.runtime_session.terminal_monitor_coordinator.ensure_terminal_receipt_observation(
+            terminal_event.terminal_process_observation_receipt
+        )
         settlement = self._tool_rollout_settlement_event(
             state,
             terminal_event=terminal_event,
             reservation=reservation,
         )
-        candidates = (
+        registration_events = (
+            ()
+            if prepared_monitor_registration is None
+            else (prepared_monitor_registration.registered_event,)
+        )
+        source_candidates = (
+            *(
+                ()
+                if prepared_monitor_cancellation is None
+                else prepared_monitor_cancellation.stable_candidates
+            ),
+            terminal_event,
+            *registration_events,
+            settlement,
+        )
+        prepared_candidates = (
             await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                (terminal_event, settlement)
+                source_candidates
             )
         )
+        committed_terminal = next(
+            item
+            for item in prepared_candidates
+            if isinstance(item, ToolResultEndEvent) and item.id == terminal_event.id
+        )
+        receipt_candidates = self._tool_receipt_notification_candidates(
+            tool_result_end=committed_terminal,
+        )
+        candidates = tuple(
+            item
+            for candidate in prepared_candidates
+            for item in (
+                (*receipt_candidates, candidate)
+                if candidate.id == settlement.id
+                else (candidate,)
+            )
+        )
+        if prepared_notification_reservation is not None:
+            committed_registration = next(
+                (
+                    item
+                    for item in candidates
+                    if isinstance(item, TerminalProcessMonitorRegisteredEvent)
+                ),
+                None,
+            )
+            notification_event = self.runtime_session.terminal_notification_account_coordinator.freeze_created_event(
+                prepared=prepared_notification_reservation,
+                cause_events=tuple(
+                    item
+                    for item in (committed_terminal, committed_registration)
+                    if item is not None
+                ),
+                registration_event=committed_registration,
+            )
+            candidates = tuple(
+                item
+                for candidate in candidates
+                for item in (
+                    (notification_event, candidate)
+                    if candidate.id == settlement.id
+                    else (candidate,)
+                )
+            )
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         terminal_registry.freeze_terminal(
             run_id=state.run_id,
@@ -7217,6 +7370,71 @@ class AgentRuntime:
             reservation=reservation,
         )
         return result.committed_events
+
+    def _tool_receipt_notification_candidates(
+        self,
+        *,
+        tool_result_end: ToolResultEndEvent,
+    ) -> tuple[AgentEvent, ...]:
+        receipt_applications = self.runtime_session.terminal_monitor_coordinator.prepare_receipt_applications(
+            tool_result_end
+        )
+        dominated = self.runtime_session.terminal_notification_store.receipt_dominated_notifications(
+            tool_result_end
+        )
+        if not dominated:
+            return receipt_applications
+        source_references = tuple(
+            sorted(
+                (
+                    event_reference_from_stored(
+                        item.source_event,
+                        runtime_session_id=self.runtime_session.runtime_session_id,
+                    )
+                    for item in dominated
+                ),
+                key=lambda item: (item.sequence, item.event_id),
+            )
+        )
+        disposition = TerminalProcessObservationDeliveryDispositionEvent(
+            id=context_fingerprint(
+                "terminal-notification-tool-receipt-disposition-id:v1",
+                (
+                    tool_result_end.id,
+                    tuple(item.event_id for item in source_references),
+                ),
+            ).replace("sha256:", "terminal_notification_disposition:"),
+            run_id=tool_result_end.run_id,
+            turn_id=tool_result_end.turn_id,
+            reply_id=tool_result_end.reply_id,
+            observation_source_references=source_references,
+            outcome="explicitly_observed",
+            tool_result_end_event_identity=stable_event_identity(
+                tool_result_end,
+                runtime_session_id=self.runtime_session.runtime_session_id,
+            ),
+        )
+        terminal_process_ids = tuple(
+            sorted(
+                {
+                    _terminal_notification_process_id(item.source_event)
+                    for item in dominated
+                    if _terminal_notification_is_terminal(item.source_event)
+                }
+            )
+        )
+        releases = (
+            self.runtime_session.terminal_notification_account_coordinator.freeze_released_events(
+                reservation_ids=tuple(
+                    f"terminal_completion_head:{process_id}"
+                    for process_id in terminal_process_ids
+                ),
+                cause_events=(disposition,),
+            )
+            if terminal_process_ids
+            else ()
+        )
+        return *receipt_applications, disposition, *releases
 
     async def _stream_tool_batch_events(
         self,
@@ -7282,6 +7500,11 @@ class AgentRuntime:
                         model_call_index=_optional_scratchpad_int(
                             state, "current_model_call_index"
                         ),
+                        run_entry_kind=(
+                            "subagent_child"
+                            if self._is_subagent_child
+                            else "host_main_run"
+                        ),
                         **self._tool_permission_kwargs(state),
                     )
                 finally:
@@ -7298,6 +7521,9 @@ class AgentRuntime:
                     context_id=_optional_scratchpad_str(state, "current_context_id"),
                     model_call_index=_optional_scratchpad_int(
                         state, "current_model_call_index"
+                    ),
+                    run_entry_kind=(
+                        "subagent_child" if self._is_subagent_child else "host_main_run"
                     ),
                     **self._tool_permission_kwargs(state),
                 ),
@@ -7363,6 +7589,15 @@ class AgentRuntime:
                             state,
                             terminal_event=terminal_event,
                             reservation=reservation,
+                            prepared_monitor_registration=(
+                                prepared_terminal.prepared_terminal_monitor_registration
+                            ),
+                            prepared_notification_reservation=(
+                                prepared_terminal.prepared_terminal_notification_reservation
+                            ),
+                            prepared_monitor_cancellation=(
+                                prepared_terminal.prepared_terminal_monitor_cancellation
+                            ),
                         )
                         settlement = next(
                             event
@@ -7422,6 +7657,15 @@ class AgentRuntime:
                             prepared=prepared_terminal,
                         ),
                         reservation=reservation,
+                        prepared_monitor_registration=(
+                            prepared_terminal.prepared_terminal_monitor_registration
+                        ),
+                        prepared_notification_reservation=(
+                            prepared_terminal.prepared_terminal_notification_reservation
+                        ),
+                        prepared_monitor_cancellation=(
+                            prepared_terminal.prepared_terminal_monitor_cancellation
+                        ),
                     )
 
     async def _suspend_tool_execution(
@@ -7588,6 +7832,17 @@ def _next_model_call_index(state: LoopState) -> int:
     value += 1
     state.scratchpad["model_call_index"] = value
     return value
+
+
+def _build_active_run_monitor_delivery(*, lease, provider_input_start_bundle):
+    # Lazy import keeps runtime.agent independent from host package import-time
+    # initialization while preserving Host ownership of the admission contract.
+    from pulsara_agent.host.ingress import build_active_run_monitor_delivery
+
+    return build_active_run_monitor_delivery(
+        lease=lease,
+        provider_input_start_bundle=provider_input_start_bundle,
+    )
 
 
 def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
@@ -8305,4 +8560,29 @@ def _sanitize_artifact_part(value: str) -> str:
     return (
         "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
         or "unknown"
+    )
+
+
+def _terminal_notification_process_id(
+    event: TerminalProcessCompletedEvent
+    | TerminalProcessMonitorObservationCommittedEvent,
+) -> str:
+    if isinstance(event, TerminalProcessCompletedEvent):
+        cursor = event.completion_semantic.terminal_output_cursor
+    else:
+        output = event.observation.output_authority
+        cursor = getattr(output, "end_cursor", None) or getattr(
+            output, "terminal_cursor", None
+        )
+        if cursor is None:
+            raise RuntimeError("terminal notification lacks an output cursor")
+    return cursor.stream_identity.process_id
+
+
+def _terminal_notification_is_terminal(
+    event: TerminalProcessCompletedEvent
+    | TerminalProcessMonitorObservationCommittedEvent,
+) -> bool:
+    return isinstance(event, TerminalProcessCompletedEvent) or (
+        event.observation.observation_kind == "process_completed"
     )

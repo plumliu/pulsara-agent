@@ -94,12 +94,15 @@ class EffectivePermissionPolicy:
                 "read_file_scope": "host_local_text",
                 "search_files_scope": "host_local_text_guarded_broad_roots",
                 "write_file_scope": "workspace_only",
-                "terminal": "host_shell" if self.terminal is not TerminalAccess.OFF else "off",
+                "terminal": "host_shell"
+                if self.terminal is not TerminalAccess.OFF
+                else "off",
             },
         }
 
 
 TERMINAL_PROCESS_READ_ONLY_ACTIONS = frozenset({"list", "log", "poll", "wait"})
+TERMINAL_MONITOR_READ_ONLY_ACTIONS = frozenset({"list"})
 
 # read-only profile allowlist (PERMISSION_POLICY_CONTRACT §3): only tools that
 # cause no user-workspace write / terminal / durable-memory write side effect.
@@ -215,7 +218,9 @@ def resolve_permission_policy(
     return resolved
 
 
-def is_tool_allowed_by_policy(tool_name: str, policy: EffectivePermissionPolicy) -> bool:
+def is_tool_allowed_by_policy(
+    tool_name: str, policy: EffectivePermissionPolicy
+) -> bool:
     # read-only is fail-closed: allow ONLY tools with no external side effect.
     # Anything not in the allowlist (write/terminal/remember_*/future tools) is
     # denied, closing PERMISSION_POLICY_CONTRACT §3 literally.
@@ -264,7 +269,11 @@ class PolicyPermissionGate:
         # Accept a live PermissionState holder (so mode switches are picked up
         # next turn) or a bare policy (wrapped into a fresh holder for callers
         # and tests that pass a static policy).
-        self._state = policy if isinstance(policy, PermissionState) else PermissionState.from_policy(policy)
+        self._state = (
+            policy
+            if isinstance(policy, PermissionState)
+            else PermissionState.from_policy(policy)
+        )
         self.inner = inner
 
     @property
@@ -280,7 +289,9 @@ class PolicyPermissionGate:
     ) -> PermissionDecision:
         for call in calls:
             decision = (
-                self._evaluate_capability_call(call, exposure, classifier or DefaultCapabilityCallClassifier())
+                self._evaluate_capability_call(
+                    call, exposure, classifier or DefaultCapabilityCallClassifier()
+                )
                 if exposure is not None
                 else self._evaluate_call(call)
             )
@@ -302,7 +313,9 @@ class PolicyPermissionGate:
         it to build per-call gate facts before the single batch-level custom
         permission gate invocation.
         """
-        return self._evaluate_capability_call(call, exposure, classifier or DefaultCapabilityCallClassifier())
+        return self._evaluate_capability_call(
+            call, exposure, classifier or DefaultCapabilityCallClassifier()
+        )
 
     def _evaluate_capability_call(
         self,
@@ -314,7 +327,10 @@ class PolicyPermissionGate:
         if exposure_decision is not None:
             return exposure_decision
         descriptor = exposure.descriptors_by_name[call.name]
-        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS:
+        if (
+            call.name in SUBAGENT_SYSTEM_TOOL_NAMES
+            and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS
+        ):
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
                 reason="subagent_requires_bypass_mode",
@@ -335,7 +351,9 @@ class PolicyPermissionGate:
                 )
         if call.name == "terminal_process":
             terminal_input = _terminal_process_input(call)
-            if terminal_input is not None and is_hardline_terminal_command(terminal_input):
+            if terminal_input is not None and is_hardline_terminal_command(
+                terminal_input
+            ):
                 return PermissionDecision(
                     kind=PermissionDecisionKind.DENY,
                     reason="terminal process input blocked by hardline permission policy",
@@ -348,19 +366,31 @@ class PolicyPermissionGate:
                 )
         classification = classifier.classify(call, descriptor)
         if self.policy.profile is PermissionProfile.READ_ONLY:
-            if not descriptor.is_read_only or call.name not in READ_ONLY_ALLOWED_TOOL_NAMES:
+            if (
+                not descriptor.is_read_only
+                or call.name not in READ_ONLY_ALLOWED_TOOL_NAMES
+            ):
                 return PermissionDecision(
                     kind=PermissionDecisionKind.DENY,
                     reason=f"tool '{call.name}' is not allowed by permission policy",
                 )
-        elif self.policy.terminal is TerminalAccess.OFF and call.name in TERMINAL_TOOL_NAMES:
+        elif (
+            self.policy.terminal is TerminalAccess.OFF
+            and call.name in TERMINAL_TOOL_NAMES
+        ):
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
                 reason=f"tool '{call.name}' is not allowed by permission policy",
             )
 
-        if classification.effective_permission_category == "terminal_process_observe":
-            if self.policy.profile is not PermissionProfile.READ_ONLY and self.policy.terminal is not TerminalAccess.OFF:
+        if classification.effective_permission_category in {
+            "terminal_process_observe",
+            "terminal_monitor_observe",
+        }:
+            if (
+                self.policy.profile is not PermissionProfile.READ_ONLY
+                and self.policy.terminal is not TerminalAccess.OFF
+            ):
                 return PermissionDecision.allow()
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
@@ -375,13 +405,20 @@ class PolicyPermissionGate:
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="file write tool requires user confirmation by approval policy",
-                suggested_rules=[{"tool": call.name, "reason": "write_tool_on_request"}],
+                suggested_rules=[
+                    {"tool": call.name, "reason": "write_tool_on_request"}
+                ],
             )
-        if self.policy.approval is ApprovalPolicy.ON_REQUEST and classification.effective_is_destructive:
+        if (
+            self.policy.approval is ApprovalPolicy.ON_REQUEST
+            and classification.effective_is_destructive
+        ):
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="destructive tool requires user confirmation by approval policy",
-                suggested_rules=[{"tool": call.name, "reason": "destructive_tool_on_request"}],
+                suggested_rules=[
+                    {"tool": call.name, "reason": "destructive_tool_on_request"}
+                ],
             )
         return PermissionDecision.allow()
 
@@ -402,7 +439,9 @@ class PolicyPermissionGate:
                 )
         if call.name == "terminal_process":
             terminal_input = _terminal_process_input(call)
-            if terminal_input is not None and is_hardline_terminal_command(terminal_input):
+            if terminal_input is not None and is_hardline_terminal_command(
+                terminal_input
+            ):
                 return PermissionDecision(
                     kind=PermissionDecisionKind.DENY,
                     reason="terminal process input blocked by hardline permission policy",
@@ -413,7 +452,10 @@ class PolicyPermissionGate:
                         }
                     ],
                 )
-        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS:
+        if (
+            call.name in SUBAGENT_SYSTEM_TOOL_NAMES
+            and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS
+        ):
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
                 reason="subagent_requires_bypass_mode",
@@ -425,16 +467,29 @@ class PolicyPermissionGate:
             )
         if call.name in TERMINAL_TOOL_NAMES:
             return self._evaluate_terminal_call(call)
-        if self.policy.approval is ApprovalPolicy.ON_REQUEST and call.name in FILE_WRITE_TOOL_NAMES:
+        if (
+            self.policy.approval is ApprovalPolicy.ON_REQUEST
+            and call.name in FILE_WRITE_TOOL_NAMES
+        ):
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="file write tool requires user confirmation by approval policy",
-                suggested_rules=[{"tool": call.name, "reason": "write_tool_on_request"}],
+                suggested_rules=[
+                    {"tool": call.name, "reason": "write_tool_on_request"}
+                ],
             )
         return PermissionDecision.allow()
 
     def _evaluate_terminal_call(self, call: ToolCall) -> PermissionDecision:
-        if call.name == "terminal_process" and _terminal_process_action(call) in TERMINAL_PROCESS_READ_ONLY_ACTIONS:
+        if (
+            call.name == "terminal_process"
+            and _terminal_process_action(call) in TERMINAL_PROCESS_READ_ONLY_ACTIONS
+        ):
+            return PermissionDecision.allow()
+        if (
+            call.name == "terminal_monitor"
+            and _terminal_process_action(call) in TERMINAL_MONITOR_READ_ONLY_ACTIONS
+        ):
             return PermissionDecision.allow()
         if self.policy.terminal is TerminalAccess.ASK:
             return PermissionDecision(
@@ -448,7 +503,10 @@ class PolicyPermissionGate:
                 reason="terminal tool requires user confirmation by approval policy",
                 suggested_rules=[{"tool": call.name, "reason": "terminal_on_request"}],
             )
-        if call.name == "terminal" and self.policy.approval is ApprovalPolicy.RISKY_ONLY:
+        if (
+            call.name == "terminal"
+            and self.policy.approval is ApprovalPolicy.RISKY_ONLY
+        ):
             command = call.arguments.get("command")
             if isinstance(command, str) and is_risky_terminal_command(command):
                 reason = (
@@ -514,11 +572,16 @@ def _parse_enum(enum_type, value, *, option_name: str, default=None):
         return enum_type(normalized)
     except ValueError as exc:
         allowed = ", ".join(item.value for item in enum_type)
-        raise ValueError(f"Invalid {option_name}: {value!r} (expected one of: {allowed})") from exc
+        raise ValueError(
+            f"Invalid {option_name}: {value!r} (expected one of: {allowed})"
+        ) from exc
 
 
 def _validate_policy(policy: EffectivePermissionPolicy) -> None:
-    if policy.profile is PermissionProfile.READ_ONLY and policy.terminal is not TerminalAccess.OFF:
+    if (
+        policy.profile is PermissionProfile.READ_ONLY
+        and policy.terminal is not TerminalAccess.OFF
+    ):
         raise ValueError("read_only permission profile requires terminal_access=off")
 
 

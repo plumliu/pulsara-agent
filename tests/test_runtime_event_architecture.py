@@ -44,6 +44,33 @@ MEMORY_GOVERNANCE_DIR = (
 SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
 
 
+def test_terminal_monitor_hard_cut_has_no_watch_or_legacy_accumulator() -> None:
+    forbidden = (
+        "terminal_process.watch",
+        "wake_when",
+        "TerminalProcessWatch",
+        "OutputAccumulator",
+    )
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in forbidden:
+            if marker in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
+                )
+    assert violations == []
+
+    transcript_owners = (
+        SOURCE_ROOT / "runtime" / "authority_materialization" / "transcript_reducer.py",
+        SOURCE_ROOT / "runtime" / "transcript.py",
+    )
+    assert all(
+        "TerminalProcessCompletedEvent" not in path.read_text(encoding="utf-8")
+        for path in transcript_owners
+    )
+
+
 def test_runtime_observation_hard_cut_has_no_legacy_carrier_or_rebase() -> None:
     forbidden = (
         "<pulsara_context",

@@ -1,6 +1,9 @@
 import asyncio
 import json
 import shlex
+import socket
+import sys
+import urllib.request
 from collections.abc import Callable
 from typing import AsyncIterator
 
@@ -48,7 +51,12 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
+    TerminalNotificationReservationReleasedEvent,
     TerminalProcessCompletedEvent,
+    TerminalProcessMonitorObservationCommittedEvent,
+    TerminalProcessMonitorRegisteredEvent,
+    TerminalProcessMonitorTerminatedEvent,
+    TerminalProcessObservationDeliveryDispositionEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -349,8 +357,70 @@ async def _open_project_session(
     )
 
 
+def test_host_open_reuses_one_terminal_recovery_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from pulsara_agent.runtime.terminal.monitor import TerminalMonitorCoordinator
+
+    observed_deadlines: list[float] = []
+
+    def recover_after_restart(self, *, deadline_monotonic: float) -> None:
+        del self
+        observed_deadlines.append(deadline_monotonic)
+
+    monkeypatch.setattr(
+        TerminalMonitorCoordinator,
+        "recover_after_restart",
+        recover_after_restart,
+    )
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def run() -> tuple[float, tuple[float, ...]]:
+        session = await _open_project_session(core, tmp_path)
+        runtime_deadline = session.wiring.runtime_wiring.runtime_session.runtime_open_deadline_monotonic
+        await core.shutdown()
+        return runtime_deadline, tuple(observed_deadlines)
+
+    runtime_deadline, physical_recovery_deadlines = asyncio.run(run())
+
+    assert physical_recovery_deadlines == (runtime_deadline,)
+
+
 def _context_text(context: LLMContext) -> str:
     return "\n".join(part for message in context.messages for part in message.content)
+
+
+def _terminal_monitor_notification_payloads(
+    context: LLMContext,
+) -> tuple[dict[str, object], ...]:
+    payloads: list[dict[str, object]] = []
+    for message in context.messages:
+        for part in message.content:
+            try:
+                carrier = json.loads(part)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(carrier, dict):
+                continue
+            observation = carrier.get("pulsara_runtime_observation")
+            if not isinstance(observation, dict):
+                continue
+            if observation.get("kind") != "terminal_process_monitor_observation":
+                continue
+            typed_payload = observation.get("payload")
+            if not isinstance(typed_payload, dict):
+                continue
+            model_visible_content = typed_payload.get("model_visible_content")
+            if not isinstance(model_visible_content, str):
+                continue
+            try:
+                notification = json.loads(model_visible_content)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(notification, dict):
+                payloads.append(notification)
+    return tuple(payloads)
 
 
 def test_host_session_rejects_custom_policy_for_run_turn(tmp_path, monkeypatch) -> None:
@@ -1247,16 +1317,12 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
     assert messages[1].content[0].text == FAILURE_NOTE_TEXT
 
 
-def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_previous_run() -> (
-    None
-):
+def test_rebuild_prior_messages_does_not_project_terminal_completion_directly() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
+    from tests.support.terminal_monitor import terminal_process_completed_event
 
     first_ctx = EventContext(
         run_id="run:first", turn_id="turn:first", reply_id="reply:first"
-    )
-    second_ctx = EventContext(
-        run_id="run:second", turn_id="turn:second", reply_id="reply:second"
     )
     log = InMemoryEventLog()
     log.extend(
@@ -1278,8 +1344,8 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
                 status="finished",
                 stop_reason="final",
             ),
-            TerminalProcessCompletedEvent(
-                **first_ctx.event_fields(),
+            terminal_process_completed_event(
+                event_context=first_ctx,
                 process_id="proc_done",
                 terminal_session_id="default",
                 command="pytest -q",
@@ -1292,228 +1358,13 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
     )
 
     messages = rebuild_prior_messages(log)
-
-    assert messages[-1].role == "system"
-    assert "terminal background task update" in messages[-1].content[0].text
-    assert "proc_done" in messages[-1].content[0].text
-    assert "if still retained" in messages[-1].content[0].text.lower()
-
-    log.extend(
-        [
-            RunStartEvent(
-                **second_ctx.event_fields(),
-                **run_start_permission_fields(second_ctx.run_id, user_input="continue"),
-                user_input_chars=len("continue"),
-                metadata={"user_input": "continue"},
-            ),
-            *_accepted_text_reply_events(
-                second_ctx,
-                text=None,
-                block_id="text:second",
-            ),
-            RunEndEvent(
-                **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(),
-                status="finished",
-                stop_reason="final",
-            ),
-        ]
-    )
-    later_messages = rebuild_prior_messages(log)
-
     assert all(
-        not (
-            message.role == "system"
-            and "terminal background task update" in message.content[0].text
-        )
-        for message in later_messages
+        "terminal background task update" not in block.text
+        and "proc_done" not in block.text
+        for message in messages
+        for block in message.content
+        if hasattr(block, "text")
     )
-
-
-def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion_happened_during_later_turn() -> (
-    None
-):
-    from pulsara_agent.event_log import InMemoryEventLog
-
-    first_ctx = EventContext(
-        run_id="run:first", turn_id="turn:first", reply_id="reply:first"
-    )
-    second_ctx = EventContext(
-        run_id="run:second", turn_id="turn:second", reply_id="reply:second"
-    )
-    log = InMemoryEventLog()
-    log.extend(
-        [
-            RunStartEvent(
-                **first_ctx.event_fields(),
-                **run_start_permission_fields(
-                    first_ctx.run_id, user_input="start server"
-                ),
-                user_input_chars=len("start server"),
-                metadata={"user_input": "start server"},
-            ),
-            *_accepted_text_reply_events(
-                first_ctx,
-                text=None,
-                block_id="text:first",
-            ),
-            RunEndEvent(
-                **run_end_contract_fields(first_ctx.run_id, status="finished"),
-                **first_ctx.event_fields(),
-                status="finished",
-                stop_reason="final",
-            ),
-            RunStartEvent(
-                **second_ctx.event_fields(),
-                **run_start_permission_fields(
-                    second_ctx.run_id, user_input="do other work"
-                ),
-                user_input_chars=len("do other work"),
-                metadata={"user_input": "do other work"},
-            ),
-            TerminalProcessCompletedEvent(
-                **first_ctx.event_fields(),
-                process_id="proc_late",
-                terminal_session_id="default",
-                command="pytest -q",
-                status="error",
-                exit_code=1,
-                cwd="/workspace",
-                duration_seconds=2.0,
-            ),
-            *_accepted_text_reply_events(
-                second_ctx,
-                text=None,
-                block_id="text:second",
-            ),
-            RunEndEvent(
-                **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(),
-                status="finished",
-                stop_reason="final",
-            ),
-        ]
-    )
-
-    messages = rebuild_prior_messages(log)
-
-    assert messages[-1].role == "system"
-    assert "proc_late" in messages[-1].content[0].text
-    assert "exit code 1" in messages[-1].content[0].text
-
-
-def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_projection() -> (
-    None
-):
-    from pulsara_agent.event_log import InMemoryEventLog
-
-    ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
-    log = InMemoryEventLog()
-    log.extend(
-        [
-            RunStartEvent(
-                **ctx.event_fields(),
-                **run_start_permission_fields(
-                    ctx.run_id, user_input="start background"
-                ),
-                user_input_chars=len("start background"),
-                metadata={"user_input": "start background"},
-            ),
-            *_accepted_text_reply_events(
-                ctx,
-                text=None,
-                block_id="text:first",
-            ),
-            RunEndEvent(
-                **run_end_contract_fields(ctx.run_id, status="finished"),
-                **ctx.event_fields(),
-                status="finished",
-                stop_reason="final",
-            ),
-            TerminalProcessCompletedEvent(
-                **ctx.event_fields(),
-                process_id="proc_projection",
-                terminal_session_id="default",
-                command="printf SHOULD_NOT_SHOW_COMMAND",
-                status="success",
-                exit_code=0,
-                cwd="/workspace/SHOULD_NOT_SHOW_CWD",
-                duration_seconds=1.0,
-                output_preview="SHOULD_NOT_SHOW_OUTPUT_PREVIEW",
-                output_truncated=True,
-                completion_reason="user_tool_kill",
-            ),
-        ]
-    )
-
-    messages = rebuild_prior_messages(log)
-    note = messages[-1].content[0].text
-
-    assert "terminal background task update" in note
-    assert "proc_projection" in note
-    assert "status success" in note
-    assert "exit code 0" in note
-    assert "lifecycle-only" in note
-    assert "terminal_process log" in note
-    assert "SHOULD_NOT_SHOW_COMMAND" not in note
-    assert "SHOULD_NOT_SHOW_CWD" not in note
-    assert "SHOULD_NOT_SHOW_OUTPUT_PREVIEW" not in note
-    assert "user_tool_kill" not in note
-    assert "full output" in note
-
-
-def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processes() -> (
-    None
-):
-    from pulsara_agent.event_log import InMemoryEventLog
-
-    ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
-    log = InMemoryEventLog()
-    events = [
-        RunStartEvent(
-            **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id, user_input="start background"),
-            user_input_chars=len("start background"),
-            metadata={"user_input": "start background"},
-        ),
-        *_accepted_text_reply_events(
-            ctx,
-            text=None,
-            block_id="text:first",
-        ),
-        RunEndEvent(
-            **run_end_contract_fields(ctx.run_id, status="finished"),
-            **ctx.event_fields(),
-            status="finished",
-            stop_reason="final",
-        ),
-    ]
-    for index in range(4):
-        events.append(
-            TerminalProcessCompletedEvent(
-                **ctx.event_fields(),
-                process_id=f"proc_{index}",
-                terminal_session_id="default",
-                command=f"cmd_{index}",
-                status="success",
-                exit_code=0,
-                cwd="/workspace",
-                duration_seconds=1.0,
-                output_preview=f"output_{index}",
-            )
-        )
-    log.extend(events)
-
-    messages = rebuild_prior_messages(log)
-    note = messages[-1].content[0].text
-
-    assert "proc_0" in note
-    assert "proc_1" in note
-    assert "proc_2" in note
-    assert "proc_3" not in note
-    assert "1 more terminal task(s) completed" in note
-    assert "cmd_3" not in note
-    assert "output_3" not in note
 
 
 def test_host_session_injects_failed_turn_note_into_next_context(
@@ -1586,7 +1437,7 @@ def test_host_session_replay_events_after_sequence(tmp_path, monkeypatch) -> Non
     ]
 
 
-def test_host_session_terminal_completion_event_replays_and_appends_canonical_note(
+def test_host_session_terminal_completion_event_replays_and_projects_notification(
     tmp_path, monkeypatch
 ) -> None:
     transport = ScriptedTransport(
@@ -1652,13 +1503,907 @@ def test_host_session_terminal_completion_event_replays_and_appends_canonical_no
     assert len(seen_live) == 1
     assert replayed[0].process_id == seen_live[0].process_id
     assert replayed[0].output_preview == "BG_DONE"
-    assert "terminal background task update" in _context_text(second_context)
-    assert replayed[0].process_id in _context_text(second_context)
-    assert "terminal background task update" in _context_text(third_context)
-    assert _context_text(third_context).count("terminal background task update") == 1
+    second_notifications = _terminal_monitor_notification_payloads(second_context)
+    third_notifications = _terminal_monitor_notification_payloads(third_context)
+    assert second_notifications == (
+        {
+            "exit_code": 0,
+            "kill_reason": None,
+            "kind": "process_completed",
+            "output": "BG_DONE",
+            "output_truncated": False,
+            "process_id": replayed[0].process_id,
+            "process_status": "success",
+        },
+    )
+    assert third_notifications == second_notifications
     terminal_summary = session.summary()["terminal"]
     assert terminal_summary["finished_process_count"] == 1
     assert terminal_summary["processes"][0]["process_id"] == replayed[0].process_id
+
+
+def test_host_terminal_monitor_registration_completion_and_autonomous_delivery(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": "sleep 0.4 && printf MONITOR_DONE",
+                                "yield_time_ms": 0,
+                            }
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "monitor registered"},
+            {"text": "handled monitor completion"},
+        ],
+        on_context_captured=lambda index, _context: _bind_monitor_process_id(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start and monitor the background task")
+        deadline = asyncio.get_running_loop().time() + 15
+        while asyncio.get_running_loop().time() < deadline:
+            events = session.replay_events()
+            observations = tuple(
+                event
+                for event in events
+                if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+            )
+            dispositions = tuple(
+                event
+                for event in events
+                if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+                and event.outcome in {"autonomous_dispatched", "active_run_safe_point"}
+            )
+            if observations and dispositions and len(transport.contexts) >= 3:
+                break
+            await asyncio.sleep(0.02)
+        events = session.replay_events()
+        account = session.wiring.runtime_wiring.runtime_session.terminal_notification_store.account_snapshot()
+        projection = session.wiring.runtime_wiring.runtime_session.terminal_notification_store.projection_snapshot()
+        monitor_records = session.wiring.runtime_wiring.runtime_session.terminal_monitor_store.snapshots()
+        dispatch_error = session._terminal_notification_dispatch_error
+        context_count = len(transport.contexts)
+        await core.close_session(session.host_session_id)
+        return (
+            events,
+            account,
+            projection,
+            monitor_records,
+            dispatch_error,
+            context_count,
+            session.runtime_session_id,
+        )
+
+    (
+        events,
+        account,
+        projection,
+        monitor_records,
+        dispatch_error,
+        context_count,
+        runtime_session_id,
+    ) = asyncio.run(run())
+
+    registrations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorRegisteredEvent)
+    )
+    observations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+    )
+    assert len(registrations) == 1
+    assert [event.observation.observation_kind for event in observations] == [
+        "process_completed"
+    ]
+    assert any(
+        isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        and event.outcome in {"autonomous_dispatched", "active_run_safe_point"}
+        for event in events
+    ), (dispatch_error, context_count, tuple(event.type for event in events[-20:]))
+    assert len(transport.contexts) in {3, 4}
+    assert _terminal_monitor_notification_payloads(transport.contexts[-1])
+    assert account.active_monitor_reservations == ()
+    assert account.active_completion_reservations == ()
+    assert monitor_records == ()
+    released_kinds = {
+        event.transition.reservation.reservation_kind
+        for event in events
+        if isinstance(event, TerminalNotificationReservationReleasedEvent)
+    }
+    assert released_kinds == {"completion_process_head", "monitor_lifecycle"}
+
+    from pulsara_agent.runtime.terminal.notification import (
+        HostIngressNotificationProjectionStore,
+    )
+    from pulsara_agent.runtime.terminal.monitor import TerminalMonitorStore
+
+    restored = HostIngressNotificationProjectionStore(
+        tuple(events),
+        runtime_session_id=runtime_session_id,
+    )
+    assert restored.account_snapshot() == account
+    assert restored.projection_snapshot() == projection
+    restored_monitors = TerminalMonitorStore(
+        tuple(events),
+        runtime_session_id=runtime_session_id,
+    )
+    assert restored_monitors.snapshots() == monitor_records
+
+
+def _bind_monitor_process_id(*, index: int, transport, session) -> None:
+    if index != 2 or session is None:
+        return
+    manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+    processes = manager.list_processes(owner_host_session_id=session.host_session_id)
+    assert len(processes) == 1
+    transport.replies[0]["tool_calls"][0]["arguments"] = json.dumps(
+        {
+            "action": "register",
+            "process_id": processes[0].process_id,
+            "conditions": {"output": {"min_new_output_chars": 1, "quiet_period_ms": 0}},
+        }
+    )
+
+
+def _bind_kill_process_id(*, index: int, transport, session) -> None:
+    if index != 3 or session is None:
+        return
+    manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+    processes = manager.list_processes(owner_host_session_id=session.host_session_id)
+    assert len(processes) == 1
+    transport.replies[0]["tool_calls"][0]["arguments"] = json.dumps(
+        {"action": "kill", "process_id": processes[0].process_id}
+    )
+
+
+def test_host_terminal_process_kill_releases_completion_notification_slot(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg-kill",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 30", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
+            {"text": "background process started"},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:kill",
+                        "name": "terminal_process",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "background process killed"},
+        ],
+        on_context_captured=lambda index, _context: _bind_kill_process_id(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start a background process")
+        await session.run_turn("kill the background process")
+        runtime = session.wiring.runtime_wiring.runtime_session
+        events = session.replay_events()
+        account = runtime.terminal_notification_store.account_snapshot()
+        pending = runtime.terminal_notification_store.pending_notifications(
+            include_unmonitored_completions=True,
+            maximum_items=8,
+            include_automatic_delivery_deferred=True,
+        )
+        await core.close_session(session.host_session_id)
+        return events, account, pending
+
+    events, account, pending = asyncio.run(run())
+
+    completion = next(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessCompletedEvent)
+        and event.completion_reason == "user_tool_kill"
+    )
+    disposition = next(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        and event.outcome == "explicitly_observed"
+        and any(
+            reference.event_id == completion.id
+            for reference in event.observation_source_references
+        )
+    )
+    assert disposition.tool_result_end_event_identity is not None
+    assert account.active_completion_reservations == ()
+    assert pending == ()
+    assert any(
+        isinstance(event, TerminalNotificationReservationReleasedEvent)
+        and event.transition.reservation.reservation_id
+        == f"terminal_completion_head:{completion.process_id}"
+        for event in events
+    )
+
+
+def test_host_terminal_monitor_repeated_progress_without_reregistration(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg-repeated",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    "sleep 1; printf 'EPOCH_1\\n'; "
+                                    "sleep 6; printf 'EPOCH_2\\n'; "
+                                    "sleep 6; printf 'TRAINING_DONE\\n'"
+                                ),
+                                "yield_time_ms": 0,
+                            }
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor-repeated",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "monitor registered"},
+            {"text": "handled first progress"},
+            {"text": "handled second progress"},
+            {"text": "handled completion"},
+        ],
+        on_context_captured=lambda index, _context: _bind_monitor_process_id(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start the training process and monitor it")
+        deadline = asyncio.get_running_loop().time() + 30
+        while asyncio.get_running_loop().time() < deadline:
+            events = session.replay_events()
+            observations = tuple(
+                event
+                for event in events
+                if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+            )
+            delivered = tuple(
+                event
+                for event in events
+                if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+                and event.outcome in {"autonomous_dispatched", "active_run_safe_point"}
+            )
+            if len(observations) >= 3 and len(delivered) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        events = session.replay_events()
+        await core.close_session(session.host_session_id)
+        return events
+
+    events = asyncio.run(run())
+    registrations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorRegisteredEvent)
+    )
+    observations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+    )
+    assert len(registrations) == 1
+    assert [event.observation.observation_kind for event in observations] == [
+        "output_progress",
+        "output_progress",
+        "process_completed",
+    ]
+    assert [event.observation.observation_ordinal for event in observations] == [
+        1,
+        2,
+        3,
+    ]
+    outcomes_by_source = {
+        observation.id: tuple(
+            event.outcome
+            for event in events
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+            for reference in event.observation_source_references
+            if reference.event_id == observation.id
+        )
+        for observation in observations
+    }
+    assert any(
+        outcome
+        in {
+            "autonomous_dispatched",
+            "active_run_safe_point",
+        }
+        for outcome in outcomes_by_source[observations[0].id]
+    )
+    assert set(outcomes_by_source[observations[1].id]) <= {
+        "autonomous_dispatched",
+        "active_run_safe_point",
+        "superseded_by_terminal_observation",
+    }
+    assert any(
+        outcome
+        in {
+            "autonomous_dispatched",
+            "active_run_safe_point",
+        }
+        for outcome in outcomes_by_source[observations[2].id]
+    )
+    progress_two_outcomes = outcomes_by_source[observations[1].id]
+    if "superseded_by_terminal_observation" in progress_two_outcomes and not any(
+        outcome in {"autonomous_dispatched", "active_run_safe_point"}
+        for outcome in progress_two_outcomes
+    ):
+        pending_output = observations[1].observation.output_authority
+        final_output = observations[2].observation.output_authority
+        assert (
+            final_output.requested_start_cursor == pending_output.requested_start_cursor
+        )
+        assert final_output.end_cursor == pending_output.end_cursor
+        assert final_output.output_preview == pending_output.output_preview
+
+
+def test_host_terminal_monitor_ready_output_drives_real_health_check(
+    tmp_path, monkeypatch
+) -> None:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    ready_gate = tmp_path / "release-server-ready"
+    server_source = (
+        "import http.server,pathlib,time\n"
+        f"gate=pathlib.Path({str(ready_gate)!r})\n"
+        "while not gate.exists():\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(0.5)\n"
+        "class QuietHandler(http.server.SimpleHTTPRequestHandler):\n"
+        "    def log_message(self, format, *args):\n"
+        "        pass\n"
+        f"server=http.server.HTTPServer(('127.0.0.1',{port}),"
+        "QuietHandler)\n"
+        "print('SERVER_READY', flush=True)\n"
+        "server.handle_request()\n"
+    )
+    session_holder = {}
+
+    def bind_and_release(index, _context) -> None:
+        _bind_monitor_process_id(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        )
+        if index == 3:
+            ready_gate.touch()
+
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg-server",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    f"{shlex.quote(sys.executable)} -u -c "
+                                    f"{shlex.quote(server_source)}"
+                                ),
+                                "yield_time_ms": 0,
+                            }
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor-server",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "server monitor registered"},
+            {"text": "server readiness observed"},
+        ],
+        on_context_captured=bind_and_release,
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start the server, monitor readiness, then check health")
+        deadline = asyncio.get_running_loop().time() + 20
+        while asyncio.get_running_loop().time() < deadline:
+            events = session.replay_events()
+            readiness_observed = any(
+                isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+                and event.observation.observation_kind == "output_progress"
+                for event in events
+            )
+            boundary = session._boundary_task
+            active = session._active_task
+            if (
+                readiness_observed
+                and len(transport.contexts) >= 4
+                and (boundary is None or boundary.done())
+                and (active is None or active.done())
+            ):
+                break
+            await asyncio.sleep(0.05)
+        events = session.replay_events()
+        health_status = await asyncio.to_thread(
+            lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=2).status
+        )
+        await core.close_session(session.host_session_id)
+        return events, health_status
+
+    events, health_status = asyncio.run(run())
+    progress = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+        and event.observation.observation_kind == "output_progress"
+    )
+    assert progress
+    assert any(
+        "SERVER_READY" in event.observation.output_authority.output_preview
+        for event in progress
+    )
+    assert health_status == 200
+
+
+def test_host_terminal_monitor_uses_pre_model_safe_point_without_new_run(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    output_gate = tmp_path / "release-safe-point-output"
+    quoted_output_gate = shlex.quote(str(output_gate))
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg-safe-point",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    f"while [ ! -f {quoted_output_gate} ]; do "
+                                    "sleep 0.05; done; "
+                                    "printf 'SAFE_POINT_READY\\n'; sleep 60"
+                                ),
+                                "yield_time_ms": 0,
+                            }
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor-safe-point",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "monitor registered"},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:safe-point-delay",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": (f"touch {quoted_output_gate}; sleep 7")}
+                        ),
+                    }
+                ]
+            },
+            {"text": "handled the in-run monitor observation"},
+        ],
+        on_context_captured=lambda index, _context: _bind_monitor_process_id(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start and register the process monitor")
+        await session.run_turn("continue working while the monitor is active")
+        events = session.replay_events()
+        contexts = tuple(transport.contexts)
+        await core.close_session(session.host_session_id)
+        return events, contexts
+
+    events, contexts = asyncio.run(run())
+    run_starts = tuple(event for event in events if isinstance(event, RunStartEvent))
+    observations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+    )
+    progress_observations = tuple(
+        event
+        for event in observations
+        if event.observation.observation_kind == "output_progress"
+    )
+    dispositions = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        and event.outcome == "active_run_safe_point"
+    )
+    safe_point_starts = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.active_run_monitor_delivery is not None
+    )
+
+    assert len(run_starts) == 2
+    assert len(progress_observations) == 1
+    assert len(dispositions) == 1
+    assert dispositions[0].observation_source_references[0].event_id == (
+        progress_observations[0].id
+    )
+    assert len(safe_point_starts) == 1
+    assert (
+        dispositions[0].model_call_start_event_identity.event_id
+        == safe_point_starts[0].id
+    )
+    assert (
+        safe_point_starts[
+            0
+        ].active_run_monitor_delivery.autonomy_delivery.automatic_delivery_ordinal
+        == 1
+    )
+    assert len(contexts) == 5
+    assert _terminal_monitor_notification_payloads(contexts[-1])
+
+
+def _bind_two_monitor_process_ids(*, index: int, transport, session) -> None:
+    if index != 2 or session is None:
+        return
+    manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+    processes = sorted(
+        manager.list_processes(owner_host_session_id=session.host_session_id),
+        key=lambda item: item.process_id,
+    )
+    assert len(processes) == 2
+    monitor_calls = transport.replies[0]["tool_calls"]
+    assert len(monitor_calls) == 2
+    for call, process in zip(monitor_calls, processes, strict=True):
+        call["arguments"] = json.dumps(
+            {
+                "action": "register",
+                "process_id": process.process_id,
+                "conditions": {
+                    "output": {"min_new_output_chars": 1, "quiet_period_ms": 0}
+                },
+            }
+        )
+
+
+def test_host_terminal_monitor_safe_point_batches_same_chain_notifications(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    gates = (
+        tmp_path / "release-safe-point-output-a",
+        tmp_path / "release-safe-point-output-b",
+    )
+    quoted_gates = tuple(shlex.quote(str(item)) for item in gates)
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": f"call:bg-safe-point-{index}",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    f"while [ ! -f {gate} ]; do sleep 0.05; done; "
+                                    f"printf 'SAFE_POINT_{index}\\n'; sleep 60"
+                                ),
+                                "yield_time_ms": 0,
+                            }
+                        ),
+                    }
+                    for index, gate in enumerate(quoted_gates, start=1)
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor-safe-point-a",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    },
+                    {
+                        "id": "call:monitor-safe-point-b",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    },
+                ]
+            },
+            {"text": "both monitors registered"},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:release-safe-point-pair",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    f"touch {quoted_gates[0]} {quoted_gates[1]}; sleep 7"
+                                )
+                            }
+                        ),
+                    }
+                ]
+            },
+            {"text": "handled both monitor observations"},
+        ],
+        on_context_captured=lambda index, _context: _bind_two_monitor_process_ids(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("start two processes and monitor both")
+        await session.run_turn("continue while both monitors are active")
+        events = session.replay_events()
+        await core.close_session(session.host_session_id)
+        return events
+
+    events = asyncio.run(run())
+    progress = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+        and event.observation.observation_kind == "output_progress"
+    )
+    dispositions = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        and event.outcome == "active_run_safe_point"
+    )
+    starts = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.active_run_monitor_delivery is not None
+    )
+
+    assert (
+        len(tuple(event for event in events if isinstance(event, RunStartEvent))) == 2
+    )
+    assert len(progress) == 2
+    assert len(dispositions) == 1
+    assert {
+        item.event_id for item in dispositions[0].observation_source_references
+    } == {item.id for item in progress}
+    assert len(starts) == 1
+    delivery = starts[0].active_run_monitor_delivery
+    assert delivery is not None
+    assert delivery.autonomy_delivery.automatic_delivery_ordinal == 1
+    assert len(delivery.ordered_attachment_fingerprints) == 2
+    assert (
+        delivery.ordered_attachment_fingerprints
+        == delivery.autonomy_delivery.ordered_source_attachment_fingerprints
+    )
+
+
+def _bind_cancel_monitor_ids(*, index: int, transport, session) -> None:
+    if session is None:
+        return
+    if index == 2:
+        _bind_monitor_process_id(
+            index=index,
+            transport=transport,
+            session=session,
+        )
+    elif index == 4:
+        records = session.wiring.runtime_wiring.runtime_session.terminal_monitor_store.snapshots()
+        assert len(records) == 1
+        transport.replies[0]["tool_calls"][0]["arguments"] = json.dumps(
+            {
+                "action": "cancel",
+                "monitor_id": (
+                    records[0].registration_event.registration_semantic.monitor_id
+                ),
+            }
+        )
+
+
+def test_host_terminal_monitor_list_and_cancel_close_one_atomic_owner(
+    tmp_path, monkeypatch
+) -> None:
+    session_holder = {}
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg-cancel-monitor",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 20", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:monitor-for-cancel",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:list-monitors",
+                        "name": "terminal_monitor",
+                        "arguments": json.dumps({"action": "list"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:cancel-monitor",
+                        "name": "terminal_monitor",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "monitor cancellation confirmed"},
+        ],
+        on_context_captured=lambda index, _context: _bind_cancel_monitor_ids(
+            index=index,
+            transport=transport,
+            session=session_holder.get("session"),
+        ),
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
+        session_holder["session"] = session
+        await session.run_turn("register, inspect, and cancel a process monitor")
+        runtime_session = session.wiring.runtime_wiring.runtime_session
+        events = session.replay_events()
+        account = runtime_session.terminal_notification_store.account_snapshot()
+        await core.close_session(session.host_session_id)
+        return events, account
+
+    events, account = asyncio.run(run())
+    terminations = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalProcessMonitorTerminatedEvent)
+        and event.termination_semantic.terminal_reason == "explicit_cancel"
+    )
+    cancel_ends = tuple(
+        event
+        for event in events
+        if isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == "call:cancel-monitor"
+    )
+    monitor_releases = tuple(
+        event
+        for event in events
+        if isinstance(event, TerminalNotificationReservationReleasedEvent)
+        and event.transition.reservation.reservation_kind == "monitor_lifecycle"
+    )
+
+    assert len(terminations) == 1
+    assert len(cancel_ends) == 1
+    assert cancel_ends[0].terminal_process_monitor_cancellation is not None
+    assert (
+        cancel_ends[
+            0
+        ].terminal_process_monitor_cancellation.cancel_intent.monitor_termination_event_id
+        == terminations[0].id
+    )
+    assert len(monitor_releases) == 1
+    assert monitor_releases[0].transition.reservation.monitor_id == (
+        terminations[0].termination_semantic.monitor_id
+    )
+    assert account.active_monitor_reservations == ()
 
 
 def test_host_session_terminal_completion_during_later_turn_appears_in_following_context(
@@ -1727,9 +2472,18 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
     events, second_context, third_context = asyncio.run(run())
 
     assert len(events) == 1
-    assert "terminal background task update" not in _context_text(second_context)
-    assert "terminal background task update" in _context_text(third_context)
-    assert events[0].process_id in _context_text(third_context)
+    assert _terminal_monitor_notification_payloads(second_context) == ()
+    assert _terminal_monitor_notification_payloads(third_context) == (
+        {
+            "exit_code": 0,
+            "kill_reason": None,
+            "kind": "process_completed",
+            "output": "LATE_DONE",
+            "output_truncated": False,
+            "process_id": events[0].process_id,
+            "process_status": "success",
+        },
+    )
 
 
 def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_workspace(
@@ -3006,10 +3760,8 @@ def test_plan_terminal_snapshot_closes_prior_guidance_for_observation_rewrite(
     assert waiting.status.value == "waiting_user"
     assert resumed.status.value == "finished"
     runtime_session = session.wiring.runtime_wiring.runtime_session
-    snapshot = (
-        runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
-            call_lane="main_agent"
-        )
+    snapshot = runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+        call_lane="main_agent"
     )
     assert snapshot is not None
     assert snapshot.runtime_observation_lifecycle_state is not None
@@ -3121,9 +3873,7 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
         authority
         for prepared in prepared_snapshots
         for authority in prepared.invocation.fact.context_source_candidates
-        if authority.source_instance_id.endswith(
-            f":revision:{revise_event.id}"
-        )
+        if authority.source_instance_id.endswith(f":revision:{revise_event.id}")
     ]
     assert revision_authorities
     assert all(

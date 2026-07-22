@@ -44,6 +44,7 @@ from pulsara_agent.event_log.protocol import (
     RawEventSelectionBounds,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
+    RawRuntimeProjectionCheckpoint,
     RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
     RawTranscriptDomainPrefixFact,
@@ -76,6 +77,18 @@ from pulsara_agent.message.reducer import (
     MessageReducer,
     require_canonical_reply_control,
 )
+
+
+def _runtime_projection_prefix_payload(
+    prefix: RawTranscriptDomainPrefixFact,
+) -> dict[str, object]:
+    return {
+        "through_sequence": prefix.through_sequence,
+        "ledger_payload_bytes": prefix.ledger_payload_bytes,
+        "semantic_event_count": prefix.semantic_event_count,
+        "semantic_accumulator": prefix.semantic_accumulator,
+        "ledger_continuity_accumulator": prefix.ledger_continuity_accumulator,
+    }
 
 
 @dataclass(slots=True)
@@ -238,6 +251,189 @@ class PostgresEventLog:
         return LedgerMaterializationAccountStateFact.model_validate(
             row["state_payload"]
         )
+
+    def read_runtime_projection_checkpoint(
+        self,
+        projection_kind: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawRuntimeProjectionCheckpoint | None:
+        if not projection_kind:
+            raise ValueError("runtime projection kind is required")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select projection_kind, through_sequence,
+                           projection_schema_version, ledger_prefix,
+                           validation_base_through_sequence,
+                           validation_base_state_payload, state_payload,
+                           payload_fingerprint
+                    from runtime_projection_checkpoints
+                    where session_id = %s and projection_kind = %s
+                    """,
+                    (self.runtime_session_id, projection_kind),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        return RawRuntimeProjectionCheckpoint(
+            projection_kind=str(row["projection_kind"]),
+            through_sequence=int(row["through_sequence"]),
+            projection_schema_version=str(row["projection_schema_version"]),
+            ledger_prefix=RawTranscriptDomainPrefixFact(
+                **dict(row["ledger_prefix"])
+            ),
+            validation_base_through_sequence=int(
+                row["validation_base_through_sequence"]
+            ),
+            validation_base_state_payload=dict(
+                row["validation_base_state_payload"]
+            ),
+            state_payload=dict(row["state_payload"]),
+            payload_fingerprint=str(row["payload_fingerprint"]),
+        )
+
+    def write_runtime_projection_checkpoint(
+        self,
+        checkpoint: RawRuntimeProjectionCheckpoint,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        deadline = self._write_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                self._lock_session(cursor)
+                high_water = self._read_transcript_prefix(
+                    cursor,
+                    sequence=None,
+                ).through_sequence
+                if checkpoint.through_sequence > high_water:
+                    raise ValueError(
+                        "runtime projection checkpoint exceeds ledger high-water"
+                    )
+                committed_prefix = self._read_transcript_prefix(
+                    cursor,
+                    sequence=checkpoint.through_sequence,
+                )
+                if checkpoint.ledger_prefix != committed_prefix:
+                    raise ValueError(
+                        "runtime projection checkpoint ledger prefix is untrusted"
+                    )
+                cursor.execute(
+                    """
+                    select through_sequence, projection_schema_version,
+                           ledger_prefix, validation_base_through_sequence,
+                           validation_base_state_payload, state_payload,
+                           payload_fingerprint
+                    from runtime_projection_checkpoints
+                    where session_id = %s and projection_kind = %s
+                    for update
+                    """,
+                    (self.runtime_session_id, checkpoint.projection_kind),
+                )
+                existing = cursor.fetchone()
+                if (
+                    existing is not None
+                    and int(existing["through_sequence"]) > checkpoint.through_sequence
+                ):
+                    raise ValueError(
+                        "runtime projection checkpoint cannot move backwards"
+                    )
+                if existing is not None and int(
+                    existing["through_sequence"]
+                ) == checkpoint.through_sequence:
+                    expected_prefix_payload = _runtime_projection_prefix_payload(
+                        checkpoint.ledger_prefix
+                    )
+                    if (
+                        str(existing["projection_schema_version"])
+                        != checkpoint.projection_schema_version
+                        or dict(existing["ledger_prefix"])
+                        != expected_prefix_payload
+                        or int(existing["validation_base_through_sequence"])
+                        != checkpoint.validation_base_through_sequence
+                        or dict(existing["validation_base_state_payload"])
+                        != checkpoint.validation_base_state_payload
+                        or dict(existing["state_payload"])
+                        != checkpoint.state_payload
+                        or str(existing["payload_fingerprint"])
+                        != checkpoint.payload_fingerprint
+                    ):
+                        raise ValueError(
+                            "runtime projection checkpoint conflicts at one high-water"
+                        )
+                if (
+                    existing is not None
+                    and checkpoint.through_sequence
+                    > int(existing["through_sequence"])
+                    and (
+                        checkpoint.validation_base_through_sequence
+                        != int(existing["through_sequence"])
+                        or checkpoint.validation_base_state_payload
+                        != dict(existing["state_payload"])
+                        or checkpoint.projection_schema_version
+                        != str(existing["projection_schema_version"])
+                    )
+                ):
+                    raise ValueError(
+                        "runtime projection checkpoint validation base drifted"
+                    )
+                if (
+                    existing is None
+                    and checkpoint.validation_base_through_sequence != 0
+                ):
+                    raise ValueError(
+                        "initial runtime projection checkpoint must start at ledger genesis"
+                    )
+                cursor.execute(
+                    """
+                    insert into runtime_projection_checkpoints (
+                        session_id, projection_kind, through_sequence,
+                        projection_schema_version, ledger_prefix,
+                        validation_base_through_sequence,
+                        validation_base_state_payload, payload_fingerprint,
+                        state_payload, updated_at
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    on conflict (session_id, projection_kind) do update set
+                        through_sequence = excluded.through_sequence,
+                        projection_schema_version = excluded.projection_schema_version,
+                        ledger_prefix = excluded.ledger_prefix,
+                        validation_base_through_sequence =
+                            excluded.validation_base_through_sequence,
+                        validation_base_state_payload =
+                            excluded.validation_base_state_payload,
+                        payload_fingerprint = excluded.payload_fingerprint,
+                        state_payload = excluded.state_payload,
+                        updated_at = now()
+                    """,
+                    (
+                        self.runtime_session_id,
+                        checkpoint.projection_kind,
+                        checkpoint.through_sequence,
+                        checkpoint.projection_schema_version,
+                        Jsonb(
+                            _runtime_projection_prefix_payload(
+                                checkpoint.ledger_prefix
+                            )
+                        ),
+                        checkpoint.validation_base_through_sequence,
+                        Jsonb(checkpoint.validation_base_state_payload),
+                        checkpoint.payload_fingerprint,
+                        Jsonb(checkpoint.state_payload),
+                    ),
+                )
 
     def extend_with_materialization_state(
         self,

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from threading import Barrier
@@ -45,7 +46,6 @@ from pulsara_agent.event import (
     RunStartEvent,
     TextBlockSegmentEvent,
 )
-from pulsara_agent.event import TerminalProcessCompletedEvent
 from pulsara_agent.event_log import (
     EventIdConflict,
     EventLog,
@@ -53,6 +53,7 @@ from pulsara_agent.event_log import (
     PostgresEventLog,
     RawContextAuthorityBundleRequest,
     RawEventSelectionBounds,
+    RawRuntimeProjectionCheckpoint,
     dump_agent_event,
     load_agent_event,
 )
@@ -231,6 +232,82 @@ def test_event_log_assigns_sequences_and_filters_events(event_log: EventLog) -> 
     assert [event.sequence for event in event_log.iter(after_sequence=5)] == [6, 7]
 
 
+def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
+    event_log: EventLog,
+) -> None:
+    ctx = _ctx("contract:runtime-projection-checkpoint")
+    stored = event_log.extend(_reply_events(ctx))
+    ledger_prefix = event_log.read_raw_ledger_prefix(
+        through_sequence=stored[-1].sequence
+    )
+    checkpoint = RawRuntimeProjectionCheckpoint(
+        projection_kind="terminal_notification_projection.v1",
+        through_sequence=stored[-1].sequence or 0,
+        projection_schema_version="terminal_notification_projection_checkpoint.v1",
+        ledger_prefix=ledger_prefix,
+        validation_base_through_sequence=0,
+        validation_base_state_payload={"revision": 0, "active_refs": []},
+        state_payload={"revision": 1, "active_refs": []},
+        payload_fingerprint="sha256:" + "a" * 64,
+    )
+
+    event_log.write_runtime_projection_checkpoint(checkpoint)
+
+    assert (
+        event_log.read_runtime_projection_checkpoint(checkpoint.projection_kind)
+        == checkpoint
+    )
+    with pytest.raises(ValueError, match="conflicts at one high-water"):
+        event_log.write_runtime_projection_checkpoint(
+            RawRuntimeProjectionCheckpoint(
+                projection_kind=checkpoint.projection_kind,
+                through_sequence=checkpoint.through_sequence,
+                projection_schema_version=checkpoint.projection_schema_version,
+                ledger_prefix=checkpoint.ledger_prefix,
+                validation_base_through_sequence=(
+                    checkpoint.validation_base_through_sequence
+                ),
+                validation_base_state_payload=(
+                    checkpoint.validation_base_state_payload
+                ),
+                state_payload={"revision": 999},
+                payload_fingerprint="sha256:" + "c" * 64,
+            )
+        )
+    with pytest.raises(ValueError, match="ledger prefix is untrusted"):
+        event_log.write_runtime_projection_checkpoint(
+            RawRuntimeProjectionCheckpoint(
+                projection_kind="terminal_monitor_projection.v1",
+                through_sequence=checkpoint.through_sequence,
+                projection_schema_version="terminal_monitor_projection_checkpoint.v2",
+                ledger_prefix=replace(
+                    checkpoint.ledger_prefix,
+                    ledger_continuity_accumulator="sha256:" + "f" * 64,
+                ),
+                validation_base_through_sequence=0,
+                validation_base_state_payload={"through_sequence": 0},
+                state_payload={"through_sequence": checkpoint.through_sequence},
+                payload_fingerprint="sha256:" + "d" * 64,
+            )
+        )
+    with pytest.raises(ValueError, match="exceeds ledger high-water"):
+        event_log.write_runtime_projection_checkpoint(
+            RawRuntimeProjectionCheckpoint(
+                projection_kind=checkpoint.projection_kind,
+                through_sequence=checkpoint.through_sequence + 1,
+                projection_schema_version=checkpoint.projection_schema_version,
+                ledger_prefix=replace(
+                    checkpoint.ledger_prefix,
+                    through_sequence=checkpoint.through_sequence + 1,
+                ),
+                validation_base_through_sequence=0,
+                validation_base_state_payload=(
+                    checkpoint.validation_base_state_payload
+                ),
+                state_payload={"revision": 2},
+                payload_fingerprint="sha256:" + "b" * 64,
+            )
+        )
 def test_event_log_single_append_is_idempotent_by_exact_event_payload(
     event_log: EventLog,
 ) -> None:
@@ -682,10 +759,14 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
 def test_terminal_process_completed_event_round_trips_through_agent_event_serialization() -> (
     None
 ):
-    event = TerminalProcessCompletedEvent(
-        run_id="run:terminal",
-        turn_id="turn:terminal",
-        reply_id="reply:terminal",
+    from tests.support.terminal_monitor import terminal_process_completed_event
+
+    event = terminal_process_completed_event(
+        event_context=EventContext(
+            run_id="run:terminal",
+            turn_id="turn:terminal",
+            reply_id="reply:terminal",
+        ),
         process_id="proc_123",
         terminal_session_id="default",
         command="pytest -q",
@@ -695,7 +776,6 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
         duration_seconds=1.25,
         output_preview="ok",
         tool_call_id="call:terminal",
-        completion_reason="user_tool_kill",
     )
 
     assert load_agent_event(dump_agent_event(event)) == event

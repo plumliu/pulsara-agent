@@ -261,13 +261,22 @@ async def _seed_suspended_run_model_contract(
     identity = session._new_run_boundary_identity(state)
 
     async def prepare():
-        async with session._run_lock:
-            return await session._prepare_and_commit_new_run_boundary(
-                user_input="",
-                active_skill_names=frozenset(),
-                state=state,
-                identity=identity,
-            )
+        async def run_ingress(owner):
+            async with session._run_lock:
+                return await session._prepare_and_commit_new_run_boundary(
+                    ingress_owner=owner,
+                    user_input="",
+                    active_skill_names=frozenset(),
+                    state=state,
+                    identity=identity,
+                )
+
+        return await session._ingress_coordinator.submit(
+            kind="human",
+            payload="",
+            ingress_id=f"host_ingress:test:{state.run_id}",
+            runner=run_ingress,
+        )
 
     draft, _committed, _stored = await session._create_owned_boundary_task(
         prepare,

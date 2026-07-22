@@ -7,6 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalProcessObservationSemanticFact,
+)
+
 
 class TerminalBackendType(StrEnum):
     LOCAL = "local"
@@ -49,6 +54,8 @@ class TerminalResult:
     process_id: str | None = None
     full_output_text: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    observation_semantic: TerminalProcessObservationSemanticFact | None = None
+    completion_event_reference: ContextEventReferenceFact | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +102,8 @@ class TerminalProcessLog:
     output: str
     truncated: bool
     full_output_text: str | None = None
+    observation_semantic: TerminalProcessObservationSemanticFact | None = None
+    completion_event_reference: ContextEventReferenceFact | None = None
 
     def to_payload(self, *, include_owner: bool = False) -> dict[str, Any]:
         return {

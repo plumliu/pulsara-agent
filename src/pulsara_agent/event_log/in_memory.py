@@ -23,6 +23,7 @@ from pulsara_agent.event_log.protocol import (
     RawLedgerUsageSnapshot,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
+    RawRuntimeProjectionCheckpoint,
     RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
     RawTranscriptDomainPrefixFact,
@@ -74,10 +75,74 @@ class InMemoryEventLog:
     )
     _next_sequence: int = 1
     _materialization_account_state: LedgerMaterializationAccountStateFact | None = None
+    _runtime_projection_checkpoints: dict[str, RawRuntimeProjectionCheckpoint] = field(
+        default_factory=dict
+    )
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def ensure_runtime_session_owner(self) -> None:
         """In-memory ledgers have no external ownership foreign key."""
+
+    def read_runtime_projection_checkpoint(
+        self,
+        projection_kind: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawRuntimeProjectionCheckpoint | None:
+        del deadline_monotonic
+        with self._lock:
+            return self._runtime_projection_checkpoints.get(projection_kind)
+
+    def write_runtime_projection_checkpoint(
+        self,
+        checkpoint: RawRuntimeProjectionCheckpoint,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        del deadline_monotonic
+        with self._lock:
+            high_water = self._next_sequence - 1
+            if checkpoint.through_sequence > high_water:
+                raise ValueError("runtime projection checkpoint exceeds ledger high-water")
+            committed_prefix = self._transcript_prefixes[
+                checkpoint.through_sequence
+            ]
+            if checkpoint.ledger_prefix != committed_prefix:
+                raise ValueError(
+                    "runtime projection checkpoint ledger prefix is untrusted"
+                )
+            existing = self._runtime_projection_checkpoints.get(
+                checkpoint.projection_kind
+            )
+            if existing is not None:
+                if existing.through_sequence > checkpoint.through_sequence:
+                    raise ValueError("runtime projection checkpoint cannot move backwards")
+                if (
+                    existing.through_sequence == checkpoint.through_sequence
+                    and existing != checkpoint
+                ):
+                    raise ValueError(
+                        "runtime projection checkpoint conflicts at one high-water"
+                    )
+                if (
+                    checkpoint.through_sequence > existing.through_sequence
+                    and (
+                        checkpoint.validation_base_through_sequence
+                        != existing.through_sequence
+                        or checkpoint.validation_base_state_payload
+                        != existing.state_payload
+                        or checkpoint.projection_schema_version
+                        != existing.projection_schema_version
+                    )
+                ):
+                    raise ValueError(
+                        "runtime projection checkpoint validation base drifted"
+                    )
+            elif checkpoint.validation_base_through_sequence != 0:
+                raise ValueError(
+                    "initial runtime projection checkpoint must start at ledger genesis"
+                )
+            self._runtime_projection_checkpoints[checkpoint.projection_kind] = checkpoint
 
     def bind_runtime_session_id(self, runtime_session_id: str) -> None:
         """Bind the test-double ledger before its first durable write."""

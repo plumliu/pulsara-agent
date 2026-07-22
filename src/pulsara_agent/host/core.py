@@ -8,11 +8,19 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
-from pulsara_agent.host.identity import HostWorkspaceInput, ResolvedWorkspace, resolve_workspace
+from pulsara_agent.host.identity import (
+    HostWorkspaceInput,
+    ResolvedWorkspace,
+    resolve_workspace,
+)
 from pulsara_agent.host.registry import HostSessionRegistry, HostSessionSummary
-from pulsara_agent.host.resume import DanglingRunRepairResult, repair_dangling_runs_for_resume
+from pulsara_agent.host.resume import (
+    DanglingRunRepairResult,
+    repair_dangling_runs_for_resume,
+)
 from pulsara_agent.host.run_boundary import HostBoundaryStopResult
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.host.session_manifest import (
@@ -54,11 +62,17 @@ from pulsara_agent.runtime.long_horizon.feasibility import (
     require_production_rollout_budget_configuration,
 )
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
-from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources, build_retrieval_runtime_resources
+from pulsara_agent.retrieval.runtime import (
+    RetrievalRuntimeResources,
+    build_retrieval_runtime_resources,
+)
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
 from pulsara_agent.memory.canonical.vector_worker import MemoryVectorIndexWorker
 from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
 from pulsara_agent.settings import PulsaraSettings
+
+
+_HOST_OPEN_RECOVERY_TIMEOUT_SECONDS = 30.0
 
 
 class HostCoreLifecycle(StrEnum):
@@ -85,15 +99,33 @@ class HostCore:
         repr=False,
         default=None,
     )
-    _supervisors: dict[str, WorkspaceTerminalSupervisor] = field(default_factory=dict, init=False, repr=False)
-    _session_leases: dict[str, WorkspaceTerminalLease] = field(default_factory=dict, init=False, repr=False)
-    _supervisor_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _retrieval_resources: RetrievalRuntimeResources | None = field(default=None, init=False, repr=False)
-    _retrieval_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _governance_coordinator: MemoryGovernanceCoordinator | None = field(default=None, init=False, repr=False)
-    _lifecycle: HostCoreLifecycle = field(default=HostCoreLifecycle.OPEN, init=False, repr=False)
-    _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _shutdown_attempt: _HostShutdownAttempt | None = field(default=None, init=False, repr=False)
+    _supervisors: dict[str, WorkspaceTerminalSupervisor] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _session_leases: dict[str, WorkspaceTerminalLease] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _supervisor_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _retrieval_resources: RetrievalRuntimeResources | None = field(
+        default=None, init=False, repr=False
+    )
+    _retrieval_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _governance_coordinator: MemoryGovernanceCoordinator | None = field(
+        default=None, init=False, repr=False
+    )
+    _lifecycle: HostCoreLifecycle = field(
+        default=HostCoreLifecycle.OPEN, init=False, repr=False
+    )
+    _lifecycle_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _shutdown_attempt: _HostShutdownAttempt | None = field(
+        default=None, init=False, repr=False
+    )
     _failed_open_mcp_supervisors: dict[int, McpServerSupervisor] = field(
         default_factory=dict,
         init=False,
@@ -183,9 +215,7 @@ class HostCore:
             raise RuntimeError("resume_session requires durable HostCore wiring")
         self._raise_if_not_accepting("resume a session")
         guard = (
-            self.checkpoint_maintenance_authority.acquire_shared(
-                runtime_session_id
-            )
+            self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
             else nullcontext()
         )
@@ -253,7 +283,11 @@ class HostCore:
     ) -> list[ResumableSessionSummary]:
         if not self.durable:
             return []
-        workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root) if workspace_input is not None else None
+        workspace = (
+            resolve_workspace(workspace_input, scratch_root=self.scratch_root)
+            if workspace_input is not None
+            else None
+        )
         pending_runtime_ids = {
             runtime_session_id
             for _host_session_id, runtime_session_id in (
@@ -262,7 +296,9 @@ class HostCore:
         }
         summaries = self._manifest_store().list_resumable(
             workspace_root=workspace.workspace_root if workspace is not None else None,
-            memory_domain_id=workspace.memory_domain.memory_domain_id if workspace is not None else None,
+            memory_domain_id=workspace.memory_domain.memory_domain_id
+            if workspace is not None
+            else None,
             include_closed=include_closed,
             limit=limit + len(pending_runtime_ids),
         )
@@ -272,13 +308,15 @@ class HostCore:
             if summary.runtime_session_id not in pending_runtime_ids
         ][:limit]
 
-    async def repair_session_for_resume(self, runtime_session_id: str) -> DanglingRunRepairResult:
+    async def repair_session_for_resume(
+        self, runtime_session_id: str
+    ) -> DanglingRunRepairResult:
         if not self.durable:
-            raise RuntimeError("repair_session_for_resume requires durable HostCore wiring")
-        guard = (
-            self.checkpoint_maintenance_authority.acquire_shared(
-                runtime_session_id
+            raise RuntimeError(
+                "repair_session_for_resume requires durable HostCore wiring"
             )
+        guard = (
+            self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
             else nullcontext()
         )
@@ -334,8 +372,16 @@ class HostCore:
                     runtime_session_id=runtime_session_id,
                     workspace_root=str(workspace.workspace_root),
                 )
-            lease = await self._attach_supervisor(workspace, host_session_id, conversation_id)
+            lease = await self._attach_supervisor(
+                workspace, host_session_id, conversation_id
+            )
             mcp_supervisor, mcp_ticket = await self._build_mcp_supervisor(workspace)
+            retrieval_resources = (
+                await self._get_retrieval_resources() if self.durable else None
+            )
+            reopen_deadline_monotonic = (
+                monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
+            )
             wiring = build_agent_runtime_wiring(
                 self.settings,
                 workspace.workspace_root,
@@ -344,6 +390,7 @@ class HostCore:
                 options=options,
                 system_prompt=system_prompt,
                 runtime_session_id=runtime_session_id,
+                reopen_deadline_monotonic=reopen_deadline_monotonic,
                 memory_domain=workspace.memory_domain,
                 memory_reflection=memory_reflection,
                 terminal_binding=BorrowedWorkspaceTerminalRuntime(
@@ -354,8 +401,10 @@ class HostCore:
                     manager=lease.manager,
                 ),
                 permission_policy=permission_policy,
-                retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
-                governance_coordinator=self._governance_coordinator if self.durable else None,
+                retrieval_resources=retrieval_resources,
+                governance_coordinator=self._governance_coordinator
+                if self.durable
+                else None,
                 mcp_supervisor=mcp_supervisor,
             )
             wiring.agent_runtime.rollout_budget_feasibility_report = (
@@ -368,6 +417,10 @@ class HostCore:
                 wiring=wiring,
                 terminal_lease=lease,
                 mcp_supervisor=mcp_supervisor,
+                reopen_deadline_monotonic=reopen_deadline_monotonic,
+            )
+            await session.recover_terminal_monitor_owners_before_open(
+                deadline_monotonic=reopen_deadline_monotonic,
             )
             wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
             if mcp_ticket is not None:
@@ -397,6 +450,7 @@ class HostCore:
                         )
                     await self.registry.publish(reservation, session)
                     self._session_leases[host_session_id] = lease
+            session.activate_terminal_notification_dispatch_after_open()
             if (
                 self._governance_coordinator is not None
                 and wiring.runtime_wiring.memory_governance_engine is not None
@@ -455,28 +509,39 @@ class HostCore:
     async def find_by_conversation(self, conversation_id: str) -> HostSession | None:
         return await self.registry.find_by_conversation(conversation_id)
 
-    async def replay_events(self, host_session_id: str, *, after_sequence: int | None = None):
+    async def replay_events(
+        self, host_session_id: str, *, after_sequence: int | None = None
+    ):
         session = await self.get_session(host_session_id)
         return session.replay_events(after_sequence=after_sequence)
 
-    async def get_pending_approval(self, host_session_id: str) -> PendingApproval | None:
+    async def get_pending_approval(
+        self, host_session_id: str
+    ) -> PendingApproval | None:
         session = await self.get_session(host_session_id)
         return session.get_pending_approval()
 
-    async def get_pending_interaction(self, host_session_id: str) -> PendingInteraction | None:
+    async def get_pending_interaction(
+        self, host_session_id: str
+    ) -> PendingInteraction | None:
         session = await self.get_session(host_session_id)
         return session.get_pending_interaction()
 
     async def list_sessions(self) -> list[HostSessionSummary]:
         return await self.registry.list_sessions()
 
-    async def list_workspace_terminal_snapshots(self) -> list[WorkspaceTerminalSnapshot]:
+    async def list_workspace_terminal_snapshots(
+        self,
+    ) -> list[WorkspaceTerminalSnapshot]:
         async with self._supervisor_lock:
             supervisors = list(self._supervisors.values())
         return [supervisor.snapshot() for supervisor in supervisors]
 
     async def list_workspace_supervisors(self) -> list[dict[str, object]]:
-        return [snapshot.to_payload() for snapshot in await self.list_workspace_terminal_snapshots()]
+        return [
+            snapshot.to_payload()
+            for snapshot in await self.list_workspace_terminal_snapshots()
+        ]
 
     # -- Execution facades (gated: never start/continue a run while closing) --
 
@@ -542,7 +607,9 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return session.enter_plan(reason=reason)
 
-    async def stream_approval_resolution(self, host_session_id: str, resolution: ApprovalResolution):
+    async def stream_approval_resolution(
+        self, host_session_id: str, resolution: ApprovalResolution
+    ):
         self._raise_if_not_accepting("resolve an approval")
         session = await self.get_session(host_session_id)
         async for event in session.stream_approval_resolution(resolution):
@@ -571,7 +638,9 @@ class HostCore:
     async def detach_session(self, host_session_id: str) -> None:
         await self.close_session(host_session_id, close_conversation=False)
 
-    async def close_session(self, host_session_id: str, *, close_conversation: bool = False) -> None:
+    async def close_session(
+        self, host_session_id: str, *, close_conversation: bool = False
+    ) -> None:
         """Sole session-close coordinator. Concurrent callers await one close."""
         claim = await self.registry.claim_close(
             host_session_id,
@@ -715,7 +784,9 @@ class HostCore:
         errors: list[BaseException] = []
         blocked_by_close_work = False
         try:
-            pending_manifest_closes = await self.registry.list_manifest_close_tombstones()
+            pending_manifest_closes = (
+                await self.registry.list_manifest_close_tombstones()
+            )
             for host_session_id, _runtime_session_id in pending_manifest_closes:
                 try:
                     await self.close_session(
@@ -812,9 +883,13 @@ class HostCore:
     async def _get_retrieval_resources(self) -> RetrievalRuntimeResources:
         async with self._retrieval_lock:
             if self._lifecycle is not HostCoreLifecycle.OPEN:
-                raise RuntimeError("HostCore is closing; cannot start retrieval resources")
+                raise RuntimeError(
+                    "HostCore is closing; cannot start retrieval resources"
+                )
             if self._retrieval_resources is None:
-                self._retrieval_resources = build_retrieval_runtime_resources(self.settings.retrieval)
+                self._retrieval_resources = build_retrieval_runtime_resources(
+                    self.settings.retrieval
+                )
                 self._governance_coordinator = MemoryGovernanceCoordinator()
                 self._retrieval_resources.attach_worker(self._governance_coordinator)
                 if self._retrieval_resources.embedding is not None:
@@ -864,10 +939,7 @@ class HostCore:
         thread off the lock, then prune the supervisor if it is empty and open."""
         async with self._supervisor_lock:
             supervisor = self._supervisors.get(lease.workspace_key)
-            current = (
-                supervisor is not None
-                and supervisor.is_current_lease(lease)
-            )
+            current = supervisor is not None and supervisor.is_current_lease(lease)
         if not current:
             return
         # Durable completion drain must succeed before dropping the supervisor

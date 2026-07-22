@@ -39,6 +39,10 @@ from pulsara_agent.primitives.run_entry import (
     HostRunBoundaryKind,
     canonical_utc_timestamp,
 )
+from pulsara_agent.primitives.host_ingress import (
+    HostIngressAdmissionProofFact,
+    HostRunIngressFact,
+)
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 from pulsara_agent.runtime.execution_handles import (
@@ -68,6 +72,7 @@ class NewRunBoundaryInput:
     active_skill_names: frozenset[str]
     host_session_id: str
     conversation_id: str
+    ingress_owner: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +135,9 @@ class PreparedNewRunBoundary:
     transcript_fact: BoundaryTranscriptSnapshotFact
     capability_basis: CapabilityResolveBasis
     current_user_message: CurrentUserMessageFact
+    host_run_ingress: HostRunIngressFact
+    host_ingress_admission_proof: HostIngressAdmissionProofFact
+    ingress_owner: Any
     run_start_event_id: str
     terminal_run_end_event_id: str
     new_run_boundary: NewRunBoundaryFact

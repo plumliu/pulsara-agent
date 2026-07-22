@@ -11,12 +11,24 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from threading import RLock, Thread, Timer
 from typing import Callable, Mapping
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, EventContext, TerminalProcessCompletedEvent
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.terminal_observation import (
+    BoundedPreviewTerminalObservationCoverageFact,
+    InlineTerminalObservationCoverageFact,
+    TerminalProcessObservationSemanticFact,
+    TerminalProcessCompletionSemanticFact,
+    TerminalOutputDeltaSemanticFact,
+    build_running_terminal_process_state,
+    build_terminal_lifecycle_outcome,
+)
 from pulsara_agent.runtime.terminal.env import build_default_subprocess_env
 from pulsara_agent.runtime.terminal.models import (
     TerminalBackendType,
@@ -26,7 +38,7 @@ from pulsara_agent.runtime.terminal.models import (
     TerminalResult,
     TerminalStatus,
 )
-from pulsara_agent.runtime.terminal.output import OutputAccumulator
+from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal
 from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_terminal_shell
 
 
@@ -87,7 +99,7 @@ class TerminalProcessState:
     exit_code: int | None = None
     timed_out: bool = False
     stdin_closed: bool = False
-    output: OutputAccumulator = field(default_factory=OutputAccumulator)
+    output: SanitizedOutputJournal = field(default_factory=SanitizedOutputJournal)
     output_callback: Callable[[str], None] | None = field(default=None, repr=False)
     shell: TerminalShellConfig = field(default_factory=detect_terminal_shell)
     owner_host_session_id: str | None = None
@@ -96,6 +108,8 @@ class TerminalProcessState:
     origin_turn_id: str | None = None
     origin_reply_id: str | None = None
     origin_tool_call_id: str | None = None
+    origin_runtime_session_id: str | None = None
+    origin_run_entry_kind: str | None = None
     completion_record_state: TerminalCompletionRecordState = (
         TerminalCompletionRecordState.PENDING
     )
@@ -104,9 +118,14 @@ class TerminalProcessState:
         default=None,
         repr=False,
     )
+    completion_recorded_event: TerminalProcessCompletedEvent | None = field(
+        default=None,
+        repr=False,
+    )
     completion_record_attempts: int = 0
     completion_retry_timer: Timer | None = field(default=None, repr=False)
-    completion_suppressed: bool = False
+    completion_notification_reservation_required: bool = False
+    completion_notification_reservation_confirmed: bool = False
     completion_reason: TerminalKillReason | None = None
     record_event: Callable[[AgentEvent], AgentEvent] | None = field(default=None, repr=False)
     reader_thread: Thread | None = None
@@ -165,7 +184,10 @@ class ProcessRegistry:
         owner_conversation_id: str | None = None,
         origin_event_context: EventContext | None = None,
         origin_tool_call_id: str | None = None,
+        origin_runtime_session_id: str | None = None,
+        origin_run_entry_kind: str | None = None,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        require_completion_notification_reservation: bool = False,
     ) -> tuple[TerminalProcessState, bool]:
         with self._lock:
             self._require_accepting_locked(owner_host_session_id)
@@ -187,7 +209,12 @@ class ProcessRegistry:
             owner_conversation_id=owner_conversation_id,
             origin_event_context=origin_event_context,
             origin_tool_call_id=origin_tool_call_id,
+            origin_runtime_session_id=origin_runtime_session_id,
+            origin_run_entry_kind=origin_run_entry_kind,
             record_event=record_event,
+            require_completion_notification_reservation=(
+                require_completion_notification_reservation
+            ),
         )
         if max_lifetime_seconds is not None:
             state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
@@ -241,6 +268,32 @@ class ProcessRegistry:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         _maybe_record_completion_event(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
+
+    def monitorable_process(
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str,
+        origin_runtime_session_id: str,
+    ) -> TerminalProcessState:
+        """Return a process-local handle after enforcing monitor V1 ownership."""
+
+        state = self._get(
+            process_id,
+            owner_host_session_id=owner_host_session_id,
+        )
+        with state.lock:
+            if state.origin_run_entry_kind != "host_main_run":
+                raise ValueError(
+                    "terminal_monitor_child_origin_process_unsupported"
+                )
+            if state.origin_runtime_session_id != origin_runtime_session_id:
+                raise ValueError(
+                    "terminal_monitor_cross_ledger_process_unsupported"
+                )
+            if not state.yielded:
+                raise ValueError("terminal_monitor_process_was_not_yielded")
+        return state
 
     def wait(
         self,
@@ -556,7 +609,10 @@ def spawn_local_process(
     owner_conversation_id: str | None = None,
     origin_event_context: EventContext | None = None,
     origin_tool_call_id: str | None = None,
+    origin_runtime_session_id: str | None = None,
+    origin_run_entry_kind: str | None = None,
     record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+    require_completion_notification_reservation: bool = False,
 ) -> TerminalProcessState:
     process_id = f"proc_{uuid4().hex}"
     shell = shell or detect_terminal_shell()
@@ -610,8 +666,13 @@ def spawn_local_process(
         origin_turn_id=origin_event_context.turn_id if origin_event_context is not None else None,
         origin_reply_id=origin_event_context.reply_id if origin_event_context is not None else None,
         origin_tool_call_id=origin_tool_call_id,
+        origin_runtime_session_id=origin_runtime_session_id,
+        origin_run_entry_kind=origin_run_entry_kind,
         record_event=record_event,
-        output=OutputAccumulator(),
+        completion_notification_reservation_required=(
+            require_completion_notification_reservation
+        ),
+        output=SanitizedOutputJournal(process_id=process_id),
     )
     reader = Thread(target=_reader_loop, args=(state,), daemon=True, name=f"pulsara-terminal-{state.process_id}")
     state.reader_thread = reader
@@ -730,8 +791,11 @@ def snapshot_process(
         result_cwd = cwd or state.cwd
         duration_seconds = _duration_seconds_locked(state)
         stdin_closed = state.stdin_closed
-    processed = state.output.snapshot(max_chars=max_output_chars or state.max_output_chars)
+    maximum = max_output_chars or state.max_output_chars
+    processed = state.output.snapshot(max_chars=maximum)
     full_output_text = state.output.full_text()
+    observation_semantic = _observation_semantic(state, max_output_chars=maximum)
+    completion_reference = _completion_event_reference(state)
     return TerminalResult(
         status=status,
         output=processed.text,
@@ -754,6 +818,54 @@ def snapshot_process(
             "owner_host_session_id": state.owner_host_session_id,
             "owner_conversation_id": state.owner_conversation_id,
         },
+        observation_semantic=observation_semantic,
+        completion_event_reference=completion_reference,
+    )
+
+
+def snapshot_process_for_monitor_registration(
+    state: TerminalProcessState,
+    *,
+    max_output_chars: int,
+) -> TerminalResult:
+    """Freeze the registration baseline and returned output in one journal read."""
+
+    delta, _attribution = state.output.snapshot_since(
+        state.output.initial_cursor,
+        max_chars=max_output_chars,
+    )
+    observation_semantic = _observation_semantic_from_delta(state, delta=delta)
+    with state.lock:
+        status = state.status
+        exit_code = state.exit_code
+        timed_out = state.timed_out
+        process_id = state.process_id if state.yielded else None
+        duration_seconds = _duration_seconds_locked(state)
+        stdin_closed = state.stdin_closed
+    return TerminalResult(
+        status=status,
+        output=delta.output_preview,
+        exit_code=exit_code if exit_code is not None else -1,
+        cwd=str(state.cwd),
+        timed_out=timed_out,
+        truncated=delta.truncated,
+        process_id=process_id,
+        full_output_text=None if delta.truncated else delta.output_preview,
+        metadata={
+            "command": state.command,
+            "backend_type": state.backend_type.value,
+            "io_mode": state.io_mode.value,
+            "process_id": process_id,
+            "terminal_session_id": state.terminal_session_id,
+            "duration_seconds": duration_seconds,
+            "stdin_closed": stdin_closed,
+            "shell": state.shell.to_metadata(),
+            "env": dict(state.env_diagnostics),
+            "owner_host_session_id": state.owner_host_session_id,
+            "owner_conversation_id": state.owner_conversation_id,
+        },
+        observation_semantic=observation_semantic,
+        completion_event_reference=_completion_event_reference(state),
     )
 
 
@@ -786,6 +898,101 @@ def process_log(state: TerminalProcessState, *, max_output_chars: int) -> Termin
         output=processed.text,
         truncated=processed.truncated,
         full_output_text=state.output.full_text(),
+        observation_semantic=_observation_semantic(
+            state, max_output_chars=max_output_chars
+        ),
+        completion_event_reference=_completion_event_reference(state),
+    )
+
+
+def _observation_semantic(
+    state: TerminalProcessState,
+    *,
+    max_output_chars: int,
+) -> TerminalProcessObservationSemanticFact:
+    delta, _attribution = state.output.snapshot_since(
+        state.output.initial_cursor,
+        max_chars=max_output_chars,
+    )
+    return _observation_semantic_from_delta(state, delta=delta)
+
+
+def _observation_semantic_from_delta(
+    state: TerminalProcessState,
+    *,
+    delta: TerminalOutputDeltaSemanticFact,
+) -> TerminalProcessObservationSemanticFact:
+    if delta.truncated:
+        coverage = build_frozen_fact(
+            BoundedPreviewTerminalObservationCoverageFact,
+            schema_version="bounded_preview_terminal_observation_coverage.v1",
+            output_delta_semantic_fingerprint=delta.delta_semantic_fingerprint,
+            visible_content_sha256=(
+                f"sha256:{sha256(delta.output_preview.encode('utf-8')).hexdigest()}"
+            ),
+        )
+    else:
+        coverage = build_frozen_fact(
+            InlineTerminalObservationCoverageFact,
+            schema_version="inline_terminal_observation_coverage.v1",
+            covered_start_cursor=delta.available_start_cursor,
+            covered_end_cursor=delta.end_cursor,
+            visible_content_sha256=delta.delta_content_sha256,
+        )
+    with state.lock:
+        status = state.status
+        exit_code = state.exit_code
+        completion_reason = state.completion_reason
+    if status is TerminalStatus.RUNNING:
+        observed_state = build_running_terminal_process_state()
+    else:
+        if status not in {
+            TerminalStatus.SUCCESS,
+            TerminalStatus.ERROR,
+            TerminalStatus.TIMEOUT,
+            TerminalStatus.KILLED,
+        }:
+            raise ValueError(f"terminal process has non-observable status: {status}")
+        observed_state = build_terminal_lifecycle_outcome(
+            status=status.value,
+            exit_code=exit_code if exit_code is not None else -1,
+            kill_reason=(
+                completion_reason.value if completion_reason is not None else None
+            ),
+        )
+    return build_frozen_fact(
+        TerminalProcessObservationSemanticFact,
+        schema_version="terminal_process_observation_semantic.v1",
+        requested_start_cursor=state.output.initial_cursor,
+        observed_start_cursor=delta.available_start_cursor,
+        observed_end_cursor=delta.end_cursor,
+        output_coverage=coverage,
+        observed_state=observed_state,
+    )
+
+
+def _completion_event_reference(
+    state: TerminalProcessState,
+) -> ContextEventReferenceFact | None:
+    with state.lock:
+        event = state.completion_recorded_event
+        runtime_session_id = state.origin_runtime_session_id
+    if event is None or event.sequence is None or runtime_session_id is None:
+        return None
+    from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+    from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+
+    raw = RawStoredEventEnvelope.from_stored_event(
+        event=event,
+        runtime_session_id=runtime_session_id,
+        schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+    )
+    return ContextEventReferenceFact(
+        runtime_session_id=runtime_session_id,
+        event_id=event.id,
+        sequence=event.sequence,
+        event_type=str(event.type),
+        payload_fingerprint=raw.payload_fingerprint,
     )
 
 
@@ -907,9 +1114,6 @@ def _claim_kill_transition(
         if state.status is not TerminalStatus.RUNNING:
             return False
         state.completion_reason = reason
-        if reason in {TerminalKillReason.TEARDOWN, TerminalKillReason.LIFETIME_WATCHDOG}:
-            state.completion_suppressed = True
-            state.record_event = None
         state.status = TerminalStatus.KILLED
         state.exit_code = -signal.SIGTERM
         state.ended_at = time.monotonic()
@@ -995,6 +1199,8 @@ def _record_claimed_completion_event(
         if isinstance(exc, Exception):
             return None
         raise
+    with state.lock:
+        state.completion_recorded_event = stored
     _finish_completion_event_recording(state, success=True)
     return stored
 
@@ -1011,7 +1217,10 @@ def _claim_completion_event_recording(
             return None
         if state.status is TerminalStatus.RUNNING:
             return None
-        if state.completion_suppressed:
+        if (
+            state.completion_notification_reservation_required
+            and not state.completion_notification_reservation_confirmed
+        ):
             return None
         if state.completion_record_state is not TerminalCompletionRecordState.PENDING:
             return None
@@ -1030,18 +1239,38 @@ def _claim_completion_event_recording(
             "run_id": state.origin_run_id,
             "turn_id": state.origin_turn_id,
             "reply_id": state.origin_reply_id,
-            "process_id": state.process_id,
             "terminal_session_id": state.terminal_session_id,
             "command": state.command,
-            "status": state.status.value,
-            "exit_code": state.exit_code if state.exit_code is not None else -1,
             "cwd": str(state.cwd),
-            "timed_out": state.timed_out,
             "duration_seconds": _duration_seconds_locked(state),
             "backend_type": state.backend_type.value,
             "io_mode": state.io_mode.value,
             "tool_call_id": state.origin_tool_call_id,
-            "completion_reason": state.completion_reason.value if state.completion_reason is not None else None,
+            "output_recovery_reference": state.output.recovery_reference(),
+            "completion_semantic": build_frozen_fact(
+                TerminalProcessCompletionSemanticFact,
+                schema_version="terminal_process_completion_semantic.v1",
+                terminal_output_cursor=state.output.end_cursor,
+                outcome=build_terminal_lifecycle_outcome(
+                    status=state.status.value,
+                    exit_code=(state.exit_code if state.exit_code is not None else -1),
+                    kill_reason=(
+                        state.completion_reason.value
+                        if state.completion_reason is not None
+                        else None
+                    ),
+                ),
+            ),
+            "owner_host_session_id": state.owner_host_session_id,
+            "owner_conversation_id": state.owner_conversation_id,
+            "origin_runtime_session_id": (
+                state.origin_runtime_session_id
+                or f"terminal-runtime:{state.owner_host_session_id or 'standalone'}"
+            ),
+            "origin_run_entry_kind": (
+                state.origin_run_entry_kind
+                or ("host_main_run" if state.owner_host_session_id else "standalone")
+            ),
         }
         candidate = state.completion_event_candidate
     return record_event, fields, candidate
@@ -1115,12 +1344,27 @@ def _completion_record_contract_present(state: TerminalProcessState) -> bool:
 
 def _completion_record_contract_present_locked(state: TerminalProcessState) -> bool:
     return (
-        not state.completion_suppressed
-        and state.record_event is not None
+        state.record_event is not None
         and state.origin_run_id is not None
         and state.origin_turn_id is not None
         and state.origin_reply_id is not None
     )
+
+
+def confirm_completion_notification_reservation(
+    state: TerminalProcessState,
+) -> None:
+    """Adopt the durable process-head reservation before completion can publish."""
+
+    with state.lock:
+        state.completion_notification_reservation_confirmed = True
+        should_start = (
+            state.yielded
+            and state.status is not TerminalStatus.RUNNING
+            and state.completion_record_state is TerminalCompletionRecordState.PENDING
+        )
+    if should_start:
+        _start_completion_event_recording(state)
 
 
 def _join_reader(state: TerminalProcessState) -> None:

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 
 FILE_WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
-TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
+TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process", "terminal_monitor"})
 PLAN_WORKFLOW_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
-READ_ONLY_RECOVERY_TOOL_NAMES = frozenset({"read_file", "search_files", "artifact_read"})
+READ_ONLY_RECOVERY_TOOL_NAMES = frozenset(
+    {"read_file", "search_files", "artifact_read"}
+)
 SUBAGENT_SYSTEM_TOOL_NAMES = frozenset(
     {
         "spawn_agent",

@@ -17,6 +17,7 @@ RUNTIME_TRUTH_TABLES = (
     "tool_execution_records",
     "artifacts",
     "working_context_summaries",
+    "runtime_projection_checkpoints",
 )
 
 RUNTIME_TRUTH_SCHEMA_SQL = """
@@ -123,6 +124,40 @@ CREATE TABLE IF NOT EXISTS ledger_materialization_accounts (
     state_payload JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS runtime_projection_checkpoints (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    projection_kind TEXT NOT NULL,
+    through_sequence BIGINT NOT NULL CHECK (through_sequence >= 0),
+    projection_schema_version TEXT NOT NULL,
+    ledger_prefix JSONB NOT NULL,
+    validation_base_through_sequence BIGINT NOT NULL CHECK (
+        validation_base_through_sequence >= 0
+        AND validation_base_through_sequence <= through_sequence
+    ),
+    validation_base_state_payload JSONB NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    state_payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, projection_kind)
+);
+
+ALTER TABLE runtime_projection_checkpoints
+    ADD COLUMN IF NOT EXISTS ledger_prefix JSONB;
+ALTER TABLE runtime_projection_checkpoints
+    ADD COLUMN IF NOT EXISTS validation_base_through_sequence BIGINT;
+ALTER TABLE runtime_projection_checkpoints
+    ADD COLUMN IF NOT EXISTS validation_base_state_payload JSONB;
+DELETE FROM runtime_projection_checkpoints
+WHERE ledger_prefix IS NULL
+   OR validation_base_through_sequence IS NULL
+   OR validation_base_state_payload IS NULL;
+ALTER TABLE runtime_projection_checkpoints
+    ALTER COLUMN ledger_prefix SET NOT NULL;
+ALTER TABLE runtime_projection_checkpoints
+    ALTER COLUMN validation_base_through_sequence SET NOT NULL;
+ALTER TABLE runtime_projection_checkpoints
+    ALTER COLUMN validation_base_state_payload SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,

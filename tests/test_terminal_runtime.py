@@ -12,7 +12,7 @@ from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
 from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
-from pulsara_agent.runtime.terminal.output import OutputAccumulator
+from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal
 from pulsara_agent.runtime.terminal.process import (
     PendingTerminalCompletionError,
     ProcessInputError,
@@ -834,7 +834,7 @@ def test_terminal_runtime_completion_event_race_does_not_miss_fast_yield(tmp_pat
     assert result.process_id is None or len(events) == 1
 
 
-def test_terminal_runtime_user_kill_records_completion_event_but_shutdown_suppresses(tmp_path) -> None:
+def test_terminal_runtime_user_kill_and_shutdown_both_record_lifecycle_completion(tmp_path) -> None:
     ctx = EventContext(run_id="run:kill", turn_id="turn:kill", reply_id="reply:kill")
     user_events = []
     teardown_events = []
@@ -869,7 +869,9 @@ def test_terminal_runtime_user_kill_records_completion_event_but_shutdown_suppre
     assert user_events[0].status == "killed"
     assert user_events[0].completion_reason == "user_tool_kill"
     assert "completion_reason" not in user_events[0].metadata
-    assert teardown_events == []
+    assert len(teardown_events) == 1
+    assert teardown_events[0].status == "killed"
+    assert teardown_events[0].completion_reason == "teardown"
 
 
 def test_terminal_user_kill_does_not_relabel_existing_natural_terminal_fact(
@@ -1373,7 +1375,7 @@ def test_terminal_recording_worker_base_exception_returns_ownership_to_pending(
     assert manager.pending_completion_count(owner_host_session_id="host:a") == 1
 
 
-def test_terminal_runtime_lifetime_watchdog_suppresses_completion_event(tmp_path) -> None:
+def test_terminal_runtime_lifetime_watchdog_records_completion_event(tmp_path) -> None:
     ctx = EventContext(run_id="run:watchdog", turn_id="turn:watchdog", reply_id="reply:watchdog")
     events = []
     manager = make_manager(tmp_path)
@@ -1400,15 +1402,15 @@ def test_terminal_runtime_lifetime_watchdog_suppresses_completion_event(tmp_path
         final = manager.poll_process(result.process_id, owner_host_session_id="host:a")
 
     assert final.status is TerminalStatus.KILLED
-    assert events == []
+    assert len(events) == 1
+    assert events[0].status == "killed"
+    assert events[0].completion_reason == "lifetime_watchdog"
 
 
-def test_output_accumulator_redacts_secret_split_across_chunks() -> None:
-    accumulator = OutputAccumulator()
+def test_output_journal_redacts_secret_split_across_chunks() -> None:
+    accumulator = SanitizedOutputJournal()
 
     accumulator.append(b"API_KEY=sec")
-    assert accumulator.snapshot(max_chars=100).text == ""
-
     accumulator.append(b"ret\n")
     snapshot = accumulator.snapshot(max_chars=100)
 

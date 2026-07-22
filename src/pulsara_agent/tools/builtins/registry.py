@@ -28,7 +28,11 @@ from pulsara_agent.tools.builtins.memory_query import (
     MemoryGetTool,
     MemorySearchTool,
 )
-from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
+from pulsara_agent.tools.builtins.plan import (
+    AskPlanQuestionTool,
+    EnterPlanTool,
+    ExitPlanTool,
+)
 from pulsara_agent.tools.builtins.subagent import (
     CreateAgentTasksTool,
     ListAgentsTool,
@@ -41,6 +45,7 @@ from pulsara_agent.tools.builtins.subagent import (
     WaitAgentTasksTool,
 )
 from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal_monitor import TerminalMonitorTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import (
@@ -84,9 +89,7 @@ def build_core_tool_registry(
         contract_id = str(
             getattr(tool, "binding_contract_id", f"pulsara.{origin}.{tool.name}")
         )
-        contract_version = str(
-            getattr(tool, "binding_contract_version", "v1")
-        )
+        contract_version = str(getattr(tool, "binding_contract_version", "v1"))
         registry.register(
             tool,
             binding_contract=build_tool_binding_contract(
@@ -97,6 +100,7 @@ def build_core_tool_registry(
                 binding_attributes=binding_attributes,
             ),
         )
+
     # PERMISSION_POLICY_CONTRACT: gate is the sole authority. All tools are
     # registered unconditionally and stay visible across every mode; the
     # PolicyPermissionGate denies disallowed calls at evaluation time
@@ -115,6 +119,9 @@ def build_core_tool_registry(
             owner_host_session_id=runtime_session.terminal_owner_host_session_id,
             owner_conversation_id=runtime_session.terminal_owner_conversation_id,
             permission_state=permission_state,
+            terminal_notification_account=(
+                runtime_session.terminal_notification_account_coordinator
+            ),
         )
     )
     register(
@@ -123,6 +130,15 @@ def build_core_tool_registry(
             runtime_session.terminal_sessions,
             owner_host_session_id=runtime_session.terminal_owner_host_session_id,
             permission_state=permission_state,
+        )
+    )
+    register(
+        TerminalMonitorTool(
+            root,
+            runtime_session.terminal_sessions,
+            owner_host_session_id=runtime_session.terminal_owner_host_session_id,
+            permission_state=permission_state,
+            terminal_monitor_coordinator=(runtime_session.terminal_monitor_coordinator),
         )
     )
     register(EditFileTool(root))
@@ -152,13 +168,40 @@ def build_core_tool_registry(
             )
         )
     if memory_proposal_sink is not None:
-        register(RememberClaimTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
-        register(RememberPreferenceTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
-        register(RememberObservationTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
-        register(RememberActionBoundaryTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
-        register(RememberDecisionTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
+        register(
+            RememberClaimTool(
+                sink=memory_proposal_sink,
+                runtime_session_id=runtime_session.runtime_session_id,
+            )
+        )
+        register(
+            RememberPreferenceTool(
+                sink=memory_proposal_sink,
+                runtime_session_id=runtime_session.runtime_session_id,
+            )
+        )
+        register(
+            RememberObservationTool(
+                sink=memory_proposal_sink,
+                runtime_session_id=runtime_session.runtime_session_id,
+            )
+        )
+        register(
+            RememberActionBoundaryTool(
+                sink=memory_proposal_sink,
+                runtime_session_id=runtime_session.runtime_session_id,
+            )
+        )
+        register(
+            RememberDecisionTool(
+                sink=memory_proposal_sink,
+                runtime_session_id=runtime_session.runtime_session_id,
+            )
+        )
     subagent_context = runtime_session.default_event_metadata.get("subagent")
-    if runtime_session.subagent_runtime is not None and isinstance(subagent_context, dict):
+    if runtime_session.subagent_runtime is not None and isinstance(
+        subagent_context, dict
+    ):
         subagent_run_id = subagent_context.get("subagent_run_id")
         if isinstance(subagent_run_id, str) and subagent_run_id:
             register(
@@ -166,18 +209,61 @@ def build_core_tool_registry(
                 origin="subagent_system",
             )
             register(
-                ReportAgentResultTool(runtime_session.subagent_runtime, subagent_run_id),
+                ReportAgentResultTool(
+                    runtime_session.subagent_runtime, subagent_run_id
+                ),
                 origin="subagent_system",
             )
     elif runtime_session.subagent_runtime is not None:
-        register(SpawnAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(WaitAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(StopAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(ListAgentsTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(CreateAgentTasksTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(WaitAgentTasksTool(runtime_session.subagent_runtime), origin="subagent_system")
-        register(StopAgentTaskTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(
+            SpawnAgentTool(runtime_session.subagent_runtime), origin="subagent_system"
+        )
+        register(
+            WaitAgentTool(runtime_session.subagent_runtime), origin="subagent_system"
+        )
+        register(
+            StopAgentTool(runtime_session.subagent_runtime), origin="subagent_system"
+        )
+        register(
+            ListAgentsTool(runtime_session.subagent_runtime), origin="subagent_system"
+        )
+        register(
+            CreateAgentTasksTool(runtime_session.subagent_runtime),
+            origin="subagent_system",
+        )
+        register(
+            WaitAgentTasksTool(runtime_session.subagent_runtime),
+            origin="subagent_system",
+        )
+        register(
+            StopAgentTaskTool(runtime_session.subagent_runtime),
+            origin="subagent_system",
+        )
     for tool in extra_tools:
         origin = "mcp" if hasattr(tool, "binding_identity") else "custom"
         register(tool, origin=origin)
+    _validate_terminal_public_input_bindings(registry)
     return registry
+
+
+def _validate_terminal_public_input_bindings(registry: ToolRegistry) -> None:
+    from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
+    from pulsara_agent.primitives.context import context_fingerprint
+    from pulsara_agent.terminal_public_api import builtin_tool_input_contract_binding
+
+    descriptors = {item.name: item for item in builtin_tool_descriptors()}
+    for name in ("terminal_process", "terminal_monitor"):
+        binding = builtin_tool_input_contract_binding(name)
+        tool_schema = registry.get(name).parameters
+        descriptor_schema = descriptors[name].input_schema
+        if (
+            tool_schema != binding.input_schema
+            or descriptor_schema != binding.input_schema
+        ):
+            raise ValueError(f"{name} public input schema binding drift")
+        for schema in (tool_schema, descriptor_schema):
+            if (
+                context_fingerprint("builtin-tool-input-schema:v1", [name, schema])
+                != binding.input_schema_fingerprint
+            ):
+                raise ValueError(f"{name} public input schema fingerprint drift")

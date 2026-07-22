@@ -13,12 +13,22 @@ from pulsara_agent.primitives.tool_result import (
     TerminalPayloadTimingFact,
     ToolResultExecutionSemanticsFact,
 )
+from pulsara_agent.primitives.terminal_observation import (
+    TerminalProcessObservationReceiptFact,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.capability.result_semantics import (
         ToolResultSemanticsRuntimeInput,
     )
     from pulsara_agent.event import ToolResultArtifactRef
+    from pulsara_agent.runtime.terminal.monitor import (
+        PreparedTerminalProcessMonitorCancellation,
+        PreparedTerminalProcessMonitorRegistration,
+    )
+    from pulsara_agent.runtime.terminal.notification import (
+        PreparedTerminalNotificationReservation,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +51,18 @@ class ToolExecutionResult:
     terminal_payload_timing: TerminalPayloadTimingFact | None = None
     semantics: ToolResultExecutionSemanticsFact | None = None
     prepared_terminal_result: "PreparedToolTerminalResult | None" = None
+    terminal_process_observation_receipt: (
+        TerminalProcessObservationReceiptFact | None
+    ) = None
+    prepared_terminal_monitor_registration: (
+        "PreparedTerminalProcessMonitorRegistration | None"
+    ) = None
+    prepared_terminal_notification_reservation: (
+        "PreparedTerminalNotificationReservation | None"
+    ) = None
+    prepared_terminal_monitor_cancellation: (
+        "PreparedTerminalProcessMonitorCancellation | None"
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +75,18 @@ class PreparedToolTerminalResult:
     artifacts: tuple["ToolResultArtifactRef", ...]
     observation_timing: ToolObservationTimingFact
     semantics: ToolResultExecutionSemanticsFact
+    terminal_process_observation_receipt: (
+        TerminalProcessObservationReceiptFact | None
+    ) = None
+    prepared_terminal_monitor_registration: (
+        "PreparedTerminalProcessMonitorRegistration | None"
+    ) = None
+    prepared_terminal_notification_reservation: (
+        "PreparedTerminalNotificationReservation | None"
+    ) = None
+    prepared_terminal_monitor_cancellation: (
+        "PreparedTerminalProcessMonitorCancellation | None"
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +106,7 @@ class ToolRuntimeContext:
     permission_snapshot_id: str | None = None
     permission_mode: str | None = None
     permission_policy: dict[str, Any] | None = None
+    run_entry_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

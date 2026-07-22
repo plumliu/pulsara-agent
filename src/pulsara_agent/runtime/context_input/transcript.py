@@ -27,7 +27,6 @@ from pulsara_agent.event.events import (
     ReplyStartEvent,
     RunEndEvent,
     RunStartEvent,
-    TerminalProcessCompletedEvent,
     TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -82,6 +81,9 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.run_entry import CurrentUserMessageFact
+from pulsara_agent.llm.user_carrier import (
+    canonical_runtime_observation_wire_from_semantic,
+)
 from pulsara_agent.primitives.tool_result import (
     ContextToolResultArtifactRefFact,
     ContextToolResultPreviewFact,
@@ -390,6 +392,14 @@ def project_context_transcript(
                 event=event,
                 current_start_sequence=current_start.sequence,
                 current_message_id=snapshot.current_user_message.message_id,
+            )
+        )
+        messages.extend(
+            _run_ingress_notification_messages(
+                event_slice=event_slice,
+                stored=stored,
+                event=event,
+                current_start_sequence=current_start.sequence,
             )
         )
 
@@ -746,45 +756,6 @@ def _prior_lifecycle_messages(
             )
         )
 
-    last_run_start_sequence = max(
-        (
-            stored.sequence
-            for stored, event in prior
-            if isinstance(event, RunStartEvent)
-        ),
-        default=0,
-    )
-    completions = tuple(
-        (stored, event)
-        for stored, event in prior
-        if isinstance(event, TerminalProcessCompletedEvent)
-        and stored.sequence > last_run_start_sequence
-        and event.created_at <= snapshot.current_user_message.observed_at_utc
-    )
-    if completions:
-        selected = completions[:3]
-        lines = tuple(_terminal_completion_note_line(event) for _, event in selected)
-        remaining = len(completions) - len(selected)
-        suffix = (
-            f" {remaining} more terminal task(s) completed; use terminal_process "
-            "list if still retained."
-            if remaining > 0
-            else ""
-        )
-        latest_stored, latest = completions[-1]
-        notes.append(
-            _lifecycle_note_message(
-                message_id=(f"terminal-completion-note:{latest_stored.sequence}"),
-                text=(
-                    "Pulsara note: terminal background task update. "
-                    + " ".join(lines)
-                    + suffix
-                ),
-                stored=latest_stored,
-                event=latest,
-                event_slice=event_slice,
-            )
-        )
     return tuple(notes)
 
 
@@ -816,15 +787,6 @@ def _lifecycle_note_message(
         blocks=(block,),
         source_sequence_start=stored.sequence,
         source_sequence_end=stored.sequence,
-    )
-
-
-def _terminal_completion_note_line(event: TerminalProcessCompletedEvent) -> str:
-    return (
-        f"Process {event.process_id} completed with status {event.status} "
-        f"and exit code {event.exit_code}. This note is lifecycle-only, not the "
-        "full output; if still retained, inspect retained output with "
-        "terminal_process log."
     )
 
 
@@ -1351,10 +1313,23 @@ def _user_message(
         ),
         source_events=(source_ref,),
     )
+    role = (
+        "runtime_request"
+        if event.current_user_message.source_kind
+        in {"host_runtime_request", "subagent_task", "subagent_primitive_objective"}
+        else "user"
+    )
+    name = (
+        "terminal_process_observation"
+        if event.current_user_message.source_kind == "host_runtime_request"
+        else "subagent_task"
+        if role == "runtime_request"
+        else "user"
+    )
     return _message_fact(
         message_id=event.current_user_message.message_id,
-        role="user",
-        name="user",
+        role=role,
+        name=name,
         run_id=event.run_id,
         turn_id=event.turn_id,
         reply_id=event.reply_id,
@@ -1365,6 +1340,64 @@ def _user_message(
         source_sequence_start=stored.sequence,
         source_sequence_end=stored.sequence,
     )
+
+
+def _run_ingress_notification_messages(
+    *,
+    event_slice: ContextEventSlice,
+    stored: FrozenStoredEvent,
+    event: RunStartEvent,
+    current_start_sequence: int,
+) -> tuple[TranscriptMessageFact, ...]:
+    ingress = event.host_run_ingress
+    if ingress is None:
+        return ()
+    attachments = (
+        ingress.attached_runtime_notifications
+        if ingress.ingress_kind == "human"
+        else ingress.source_notifications
+    )
+    source_ref = stored.to_reference(event_slice.runtime_session_id)
+    segment = (
+        "current_user"
+        if stored.sequence == current_start_sequence
+        else "prior_history"
+    )
+    messages: list[TranscriptMessageFact] = []
+    for index, attachment in enumerate(attachments):
+        wire = canonical_runtime_observation_wire_from_semantic(
+            attachment.observation_wire_semantic
+        )
+        message_id = (
+            f"terminal-notification:{event.id}:{index}:"
+            f"{attachment.attachment_fingerprint.removeprefix('sha256:')[:16]}"
+        )
+        messages.append(
+            _message_fact(
+                message_id=message_id,
+                role="runtime_observation",
+                name="terminal_process_monitor_observation",
+                run_id=event.run_id,
+                turn_id=event.turn_id,
+                reply_id=event.reply_id,
+                created_at_utc=event.current_user_message.observed_at_utc,
+                finished_at_utc=event.current_user_message.observed_at_utc,
+                segment=segment,
+                blocks=(
+                    TranscriptTextBlockFact(
+                        block_id=f"text:{message_id}",
+                        text=wire,
+                        content_fingerprint=context_fingerprint(
+                            "transcript-text:v1", wire
+                        ),
+                        source_events=(source_ref,),
+                    ),
+                ),
+                source_sequence_start=stored.sequence,
+                source_sequence_end=stored.sequence,
+            )
+        )
+    return tuple(messages)
 
 
 def _transcript_block(

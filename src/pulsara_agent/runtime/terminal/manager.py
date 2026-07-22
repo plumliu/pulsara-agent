@@ -144,6 +144,19 @@ class TerminalSessionManager:
             owner_host_session_id=owner_host_session_id,
         )
 
+    def monitorable_process(
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str,
+        origin_runtime_session_id: str,
+    ):
+        return self.process_registry.monitorable_process(
+            process_id,
+            owner_host_session_id=owner_host_session_id,
+            origin_runtime_session_id=origin_runtime_session_id,
+        )
+
     def wait_process(
         self,
         process_id: str,
@@ -230,6 +243,19 @@ class TerminalSessionManager:
 
     def kill_owned(self, owner_host_session_id: str):
         return self.process_registry.kill_owned(owner_host_session_id)
+
+    def drain_pending_completions(
+        self,
+        owner_host_session_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Drain canonical process-completion owners before monitor terminalization."""
+
+        self.process_registry.drain_pending_completions(
+            owner_host_session_id,
+            timeout_seconds=timeout_seconds,
+        )
 
     def release_owner(
         self,

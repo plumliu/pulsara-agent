@@ -649,6 +649,12 @@ class ModelStreamExecutionRegistry:
     def active_handle_count(self) -> int:
         return len(self._handles)
 
+    @property
+    def generation(self) -> int:
+        """Return the monotonic installation generation for commit guards."""
+
+        return self._generation
+
 
 def _closed_from_completion(
     completion: ModelStreamCompletion,

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from typing import Any, Protocol
 
 import psycopg
@@ -24,8 +25,17 @@ from pulsara_agent.message import (
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
+    context_fingerprint,
     freeze_json,
     thaw_json,
+)
+from pulsara_agent.primitives.context_source import ContextArtifactReferenceFact
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.terminal_observation import (
+    ArtifactTerminalObservationCoverageFact,
+    BoundedPreviewTerminalObservationCoverageFact,
+    TerminalProcessObservationReceiptFact,
+    TerminalProcessObservationSemanticFact,
 )
 from pulsara_agent.tools.base import (
     ToolCall,
@@ -42,6 +52,13 @@ DEFAULT_HUGE_PREVIEW_CHARS = 4_000
 DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS = 2_600
 _HEAD_RATIO = 0.65
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+_TERMINAL_OBSERVATION_ARTIFACT_CODEC_CONTRACT_FINGERPRINT = context_fingerprint(
+    "terminal-observation-artifact-codec-contract:v1",
+    {
+        "codec": "utf-8",
+        "covered_content": "exact-sanitized-output-range",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +93,7 @@ class ToolResultArtifactOptions:
     @property
     def effective_large_preview_chars(self) -> int:
         return self.large_preview_chars
+
 
 @dataclass(frozen=True, slots=True)
 class AdaptivePreview:
@@ -127,6 +145,13 @@ class ToolResultArtifactRecord:
     stored_complete: bool = True
     loss_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchivedToolResultCandidate:
+    tool_result_reference: ToolResultArtifactRef
+    context_reference: ContextArtifactReferenceFact
+    candidate: ToolResultArtifactCandidate
 
 
 class ToolResultArtifactIndex(Protocol):
@@ -320,7 +345,7 @@ class ToolResultArtifactService:
         elif candidates:
             primary_preview = build_adaptive_preview(result.output, options)
 
-        refs: list[ToolResultArtifactRef] = []
+        archived_candidates: list[_ArchivedToolResultCandidate] = []
         for ordinal, candidate in enumerate(candidates):
             size_bytes = _candidate_size_bytes(candidate)
             if (
@@ -328,7 +353,7 @@ class ToolResultArtifactService:
                 and size_bytes <= options.effective_archive_threshold_bytes
             ):
                 continue
-            refs.append(
+            archived_candidates.append(
                 self._archive_candidate(
                     candidate,
                     event_context=event_context,
@@ -338,6 +363,7 @@ class ToolResultArtifactService:
                     preview=primary_preview if ordinal == primary_ordinal else None,
                 )
             )
+        refs = [item.tool_result_reference for item in archived_candidates]
 
         if refs:
             final_preview = next(
@@ -362,18 +388,15 @@ class ToolResultArtifactService:
         ):
             processed = result
         else:
-            processed = ToolExecutionResult(
-                call_id=result.call_id,
-                tool_name=result.tool_name,
-                status=result.status,
+            processed = replace(
+                result,
                 output=processed_output,
-                metadata=result.metadata,
-                artifact_candidates=result.artifact_candidates,
                 display_payload=processed_display_payload,
-                semantics_input=result.semantics_input,
-                terminal_payload_timing=result.terminal_payload_timing,
-                semantics=result.semantics,
             )
+        processed = _attach_exact_terminal_observation_artifact_coverage(
+            processed,
+            archived_candidates=tuple(archived_candidates),
+        )
         return processed, tuple(refs)
 
     def _artifact_read_source_refs(
@@ -412,7 +435,7 @@ class ToolResultArtifactService:
         ordinal: int,
         size_bytes: int,
         preview: AdaptivePreview | None = None,
-    ) -> ToolResultArtifactRef:
+    ) -> _ArchivedToolResultCandidate:
         role = _sanitize_part(candidate.role or "output")
         artifact_id = _artifact_id(event_context.run_id, tool_call.id, role, ordinal)
         metadata = {
@@ -466,7 +489,7 @@ class ToolResultArtifactService:
             metadata=record_metadata,
         )
         self.index.put(record)
-        return ToolResultArtifactRef(
+        tool_result_reference = ToolResultArtifactRef(
             artifact_id=write.id,
             role=candidate.role,
             media_type=candidate.media_type,
@@ -475,6 +498,93 @@ class ToolResultArtifactService:
             loss_reason=candidate.loss_reason,
             preview=final_preview,
         )
+        context_reference = build_frozen_fact(
+            ContextArtifactReferenceFact,
+            schema_version="context_artifact_reference.v1",
+            artifact_id=write.id,
+            media_type=candidate.media_type,
+            content_sha256=write.digest,
+            content_bytes=write.size_bytes,
+            artifact_contract_fingerprint=(
+                _TERMINAL_OBSERVATION_ARTIFACT_CODEC_CONTRACT_FINGERPRINT
+            ),
+        )
+        return _ArchivedToolResultCandidate(
+            tool_result_reference=tool_result_reference,
+            context_reference=context_reference,
+            candidate=candidate,
+        )
+
+
+def _attach_exact_terminal_observation_artifact_coverage(
+    result: ToolExecutionResult,
+    *,
+    archived_candidates: tuple[_ArchivedToolResultCandidate, ...],
+) -> ToolExecutionResult:
+    receipt = result.terminal_process_observation_receipt
+    if receipt is None or not isinstance(
+        receipt.observation_semantic.output_coverage,
+        BoundedPreviewTerminalObservationCoverageFact,
+    ):
+        return result
+    archived = next(
+        (
+            item
+            for item in archived_candidates
+            if item.candidate.role == "combined_output"
+            and item.candidate.text is not None
+            and item.candidate.stored_complete
+        ),
+        None,
+    )
+    if archived is None:
+        return result
+    semantic = receipt.observation_semantic
+    text = archived.candidate.text
+    assert text is not None
+    expected_chars = (
+        semantic.observed_end_cursor.sanitized_char_offset
+        - semantic.observed_start_cursor.sanitized_char_offset
+    )
+    expected_bytes = (
+        semantic.observed_end_cursor.sanitized_utf8_byte_offset
+        - semantic.observed_start_cursor.sanitized_utf8_byte_offset
+    )
+    encoded = text.encode("utf-8")
+    if len(text) != expected_chars or len(encoded) != expected_bytes:
+        return result
+    content_sha256 = f"sha256:{sha256(encoded).hexdigest()}"
+    if archived.context_reference.content_sha256 != content_sha256:
+        raise ValueError("terminal observation artifact content hash mismatch")
+    coverage = build_frozen_fact(
+        ArtifactTerminalObservationCoverageFact,
+        schema_version="artifact_terminal_observation_coverage.v1",
+        covered_start_cursor=semantic.observed_start_cursor,
+        covered_end_cursor=semantic.observed_end_cursor,
+        artifact_reference=archived.context_reference,
+        covered_range_content_sha256=content_sha256,
+        artifact_codec_contract_fingerprint=(
+            _TERMINAL_OBSERVATION_ARTIFACT_CODEC_CONTRACT_FINGERPRINT
+        ),
+    )
+    observation_semantic = build_frozen_fact(
+        TerminalProcessObservationSemanticFact,
+        schema_version="terminal_process_observation_semantic.v1",
+        requested_start_cursor=semantic.requested_start_cursor,
+        observed_start_cursor=semantic.observed_start_cursor,
+        observed_end_cursor=semantic.observed_end_cursor,
+        output_coverage=coverage,
+        observed_state=semantic.observed_state,
+    )
+    updated_receipt = build_frozen_fact(
+        TerminalProcessObservationReceiptFact,
+        schema_version="terminal_process_observation_receipt.v1",
+        observation_semantic=observation_semantic,
+        action_kind=receipt.action_kind,
+        origin_tool_call_id=receipt.origin_tool_call_id,
+        completion_event_reference=receipt.completion_event_reference,
+    )
+    return replace(result, terminal_process_observation_receipt=updated_receipt)
 
 
 def _candidate_size_bytes(candidate: ToolResultArtifactCandidate) -> int:
@@ -510,7 +620,7 @@ def _artifact_ref_from_record(
 def _options_for_tool_call(
     options: ToolResultArtifactOptions, tool_call: ToolCall
 ) -> ToolResultArtifactOptions:
-    if tool_call.name not in {"terminal", "terminal_process"}:
+    if tool_call.name not in {"terminal", "terminal_process", "terminal_monitor"}:
         return options
     cap = effective_terminal_output_cap(tool_call.arguments.get("max_output_chars"))
     if cap is None:
@@ -638,7 +748,7 @@ def _rewrite_result_output_with_preview(
     preview: AdaptivePreview,
     metadata: ToolResultPreviewMetadata | None,
 ) -> tuple[str, FrozenJsonObjectFact | None]:
-    if result.tool_name not in {"terminal", "terminal_process"}:
+    if result.tool_name not in {"terminal", "terminal_process", "terminal_monitor"}:
         return preview.text, result.display_payload
     if result.display_payload is None:
         raise ValueError(

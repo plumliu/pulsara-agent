@@ -172,6 +172,32 @@ def terminal_process_tool_action_policy() -> LongHorizonToolPolicyFact:
     )
 
 
+def terminal_monitor_tool_action_policy() -> LongHorizonToolPolicyFact:
+    contract = _classifier_contract(
+        classifier_id="pulsara.tool_action.terminal_monitor",
+        policy_payload={
+            "kind": "terminal_monitor_action",
+            "observe_actions": ["list"],
+            "default_action_class": LongHorizonActionClass.PROCESS_CONTROL.value,
+            "rollout_cost_units": 1,
+        },
+    )
+    return _tool_policy(
+        contracts=(
+            LongHorizonActionClass.EVIDENCE_HYDRATION,
+            LongHorizonActionClass.PROCESS_CONTROL,
+        ),
+        max_rollout_cost_units=1,
+        allowed_in_phases=(
+            RolloutPhase.EXPLORATION,
+            RolloutPhase.WARNING,
+            RolloutPhase.RESTRICTED,
+            RolloutPhase.FINALIZATION_ONLY,
+        ),
+        contract=contract,
+    )
+
+
 def terminal_tool_action_policy() -> LongHorizonToolPolicyFact:
     contract = _classifier_contract(
         classifier_id="pulsara.tool_action.terminal_command",
@@ -212,6 +238,13 @@ def default_tool_action_classifier_registry() -> ToolActionClassifierRegistry:
             classify=_classify_terminal_process,
         )
     )
+    terminal_monitor_policy = terminal_monitor_tool_action_policy()
+    registry.register(
+        ToolActionClassifierBinding(
+            contract=terminal_monitor_policy.action_classifier_contract,
+            classify=_classify_terminal_monitor,
+        )
+    )
     terminal_command_policy = terminal_tool_action_policy()
     registry.register(
         ToolActionClassifierBinding(
@@ -227,6 +260,8 @@ def builtin_tool_action_policy(name: str) -> LongHorizonToolPolicyFact:
         return terminal_tool_action_policy()
     if name == "terminal_process":
         return terminal_process_tool_action_policy()
+    if name == "terminal_monitor":
+        return terminal_monitor_tool_action_policy()
     if name in {
         "artifact_read",
         "wait_agent",
@@ -236,7 +271,13 @@ def builtin_tool_action_policy(name: str) -> LongHorizonToolPolicyFact:
         "memory_explain",
     }:
         return fixed_tool_action_policy(LongHorizonActionClass.EVIDENCE_HYDRATION)
-    if name in {"read_file", "search_files", "memory_search", "spawn_agent", "create_agent_tasks"}:
+    if name in {
+        "read_file",
+        "search_files",
+        "memory_search",
+        "spawn_agent",
+        "create_agent_tasks",
+    }:
         return fixed_tool_action_policy(LongHorizonActionClass.EVIDENCE_ACQUISITION)
     if name in {
         "edit_file",
@@ -306,9 +347,7 @@ def _tool_policy(
     }
     return LongHorizonToolPolicyFact(
         **payload,
-        policy_fingerprint=context_fingerprint(
-            "long-horizon-tool-policy:v1", payload
-        ),
+        policy_fingerprint=context_fingerprint("long-horizon-tool-policy:v1", payload),
     )
 
 
@@ -336,6 +375,14 @@ def _classify_terminal_process(
 ) -> tuple[LongHorizonActionClass, int]:
     action = call.arguments.get("action")
     if action in {"list", "log", "poll", "wait"}:
+        return LongHorizonActionClass.EVIDENCE_HYDRATION, 1
+    return LongHorizonActionClass.PROCESS_CONTROL, 1
+
+
+def _classify_terminal_monitor(
+    call: ToolCall,
+) -> tuple[LongHorizonActionClass, int]:
+    if call.arguments.get("action") == "list":
         return LongHorizonActionClass.EVIDENCE_HYDRATION, 1
     return LongHorizonActionClass.PROCESS_CONTROL, 1
 
@@ -435,8 +482,7 @@ def _classify_terminal_segment(tokens: list[str]) -> LongHorizonActionClass:
     if executable == "env":
         command_index = 0
         while command_index < len(arguments) and (
-            arguments[command_index].startswith("-")
-            or "=" in arguments[command_index]
+            arguments[command_index].startswith("-") or "=" in arguments[command_index]
         ):
             command_index += 1
         if command_index == len(arguments):
@@ -483,8 +529,7 @@ def _classify_terminal_segment(tokens: list[str]) -> LongHorizonActionClass:
     ):
         return LongHorizonActionClass.EXTERNAL_ACTION
     if executable == "sort" and any(
-        argument == "-o" or argument.startswith("--output")
-        for argument in arguments
+        argument == "-o" or argument.startswith("--output") for argument in arguments
     ):
         return LongHorizonActionClass.SYNTHESIS_MUTATION
     if executable in _TERMINAL_READ_ONLY_COMMANDS:

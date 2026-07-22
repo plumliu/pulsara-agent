@@ -504,6 +504,19 @@ def build_tool_result_terminal_event(
         artifacts=tuple(prepared.artifacts),
         observation_timing=prepared.observation_timing,
         execution_semantics=semantics,
+        terminal_process_observation_receipt=(
+            prepared.terminal_process_observation_receipt
+        ),
+        terminal_process_monitor_registration=(
+            None
+            if prepared.prepared_terminal_monitor_registration is None
+            else prepared.prepared_terminal_monitor_registration.registration_semantic
+        ),
+        terminal_process_monitor_cancellation=(
+            None
+            if prepared.prepared_terminal_monitor_cancellation is None
+            else prepared.prepared_terminal_monitor_cancellation.cancellation_semantic
+        ),
     )
 
 

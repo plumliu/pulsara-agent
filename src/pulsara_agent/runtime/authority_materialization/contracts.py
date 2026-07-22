@@ -981,6 +981,8 @@ def build_default_authority_materialization_contract_bundle(
             EventType.CONTEXT_WINDOW_CLOSED,
             EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED,
             EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED,
+            EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION,
+            EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED,
         ),
         PhysicalOperationKind.CHECKPOINT_COMMIT: (
             EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED,
