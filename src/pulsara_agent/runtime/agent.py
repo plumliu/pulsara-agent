@@ -278,6 +278,7 @@ from pulsara_agent.runtime.recovery import (
 )
 from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
+    EventWriteConflict,
     RuntimeSession,
 )
 from pulsara_agent.runtime.run_entry import (
@@ -519,7 +520,7 @@ def _subagent_event_log_backend(runtime_session: RuntimeSession):
         return factory, locator
     if isinstance(parent_log, PostgresEventLog):
         locator = PostgresEventLogLocator(
-            dsn=parent_log.dsn,
+            connection_provider=parent_log.connection_provider,
             workspace_root=runtime_session.workspace_root,
         )
         return locator.event_log_for_runtime_session, locator
@@ -4450,8 +4451,14 @@ class AgentRuntime:
                 raise
             except Exception as exc:
                 from pulsara_agent.host.ingress import HostIngressAdmissionStale
+                from pulsara_agent.runtime.terminal.notification import (
+                    TerminalNotificationAdmissionStale,
+                )
 
-                if isinstance(exc, HostIngressAdmissionStale):
+                if isinstance(
+                    exc,
+                    (HostIngressAdmissionStale, TerminalNotificationAdmissionStale),
+                ):
                     active_run_monitor_replan_required = True
                 else:
                     event = await self.runtime_session.emit(
@@ -5348,88 +5355,128 @@ class AgentRuntime:
                 timeout_seconds=5.0,
             )
             state.scratchpad["long_horizon_child_drain_done"] = True
-        pending = state.scratchpad.get("pending_run_terminal_candidates")
-        if isinstance(pending, tuple) and pending:
-            candidates = pending
-            if not isinstance(candidates[-1], RunEndEvent):
-                raise RuntimeError("pending run terminal batch has invalid shape")
-            candidate = candidates[-1]
-        elif pending is not None:
-            raise RuntimeError("pending run terminal candidates have invalid type")
-        else:
-            candidate = RunEndEvent(
-                id=terminal_event_id,
-                **self._event_context(state).event_fields(),
-                status=state.status.value,
-                stop_reason=state.stop_reason,
-                terminalization_kind=terminalization_kind,
-                abort_kind=state.abort_kind.value
-                if state.abort_kind is not None
-                else None,
-                error_message=state.error_message,
-            )
-            candidates = self._build_run_terminal_candidates(
-                state=state,
-                run_end=candidate,
-                terminalization_kind=terminalization_kind,
-            )
-        state.scratchpad["pending_run_terminal_candidates"] = candidates
-        state.scratchpad["pending_run_end_candidate"] = candidate
-        try:
-            stored = tuple(
-                await self.runtime_session.emit_many(candidates, state=state)
-            )
-        except BaseException as exc:
-            outcome = self.runtime_session.resolved_event_write_outcome(exc)
-            if outcome.status == "unknown":
-                raise
-            if outcome.status == "none":
-                state.scratchpad["run_end_commit_state"] = "pending"
-                try:
-                    stored_retry = tuple(
-                        await self.runtime_session.emit_many(candidates, state=state)
-                    )
-                except BaseException as retry_error:
-                    retry_outcome = self.runtime_session.resolved_event_write_outcome(
-                        retry_error
-                    )
-                    if retry_outcome.status != "full":
-                        raise
-                    retry_confirmed = tuple(retry_outcome.committed_events)
-                    if not _is_exact_run_terminal_batch(
-                        retry_confirmed,
+        while True:
+            pending = state.scratchpad.get("pending_run_terminal_candidates")
+            if isinstance(pending, tuple) and pending:
+                candidates = pending
+                if not isinstance(candidates[-1], RunEndEvent):
+                    raise RuntimeError("pending run terminal batch has invalid shape")
+                candidate = candidates[-1]
+            elif pending is not None:
+                raise RuntimeError(
+                    "pending run terminal candidates have invalid type"
+                )
+            else:
+                candidate = RunEndEvent(
+                    id=terminal_event_id,
+                    **self._event_context(state).event_fields(),
+                    status=state.status.value,
+                    stop_reason=state.stop_reason,
+                    terminalization_kind=terminalization_kind,
+                    abort_kind=state.abort_kind.value
+                    if state.abort_kind is not None
+                    else None,
+                    error_message=state.error_message,
+                )
+                candidates = self._build_run_terminal_candidates(
+                    state=state,
+                    run_end=candidate,
+                    terminalization_kind=terminalization_kind,
+                )
+            if not isinstance(candidates[0], ContextWindowClosedEvent):
+                raise RuntimeError("run terminal batch must start with window close")
+            expected_last_sequence = candidates[0].source_through_sequence
+            state.scratchpad["pending_run_terminal_candidates"] = candidates
+            state.scratchpad["pending_run_end_candidate"] = candidate
+            try:
+                stored = tuple(
+                    await self.runtime_session.emit_many(
                         candidates,
-                    ):
-                        self.runtime_session.latch_event_commit_outcome_unknown()
-                        raise RuntimeError(
-                            "run terminal retry confirmation was not exact"
-                        ) from retry_error
-                    self._mark_run_terminal_committed(state)
-                    raise
-                if not _is_exact_run_terminal_batch(stored_retry, candidates):
-                    raise RuntimeError(
-                        "run terminal bounded retry returned wrong batch"
+                        expected_last_sequence=expected_last_sequence,
+                        state=state,
                     )
+                )
+            except EventWriteConflict:
+                self._prepare_run_terminal_replan(state)
+                await asyncio.sleep(0)
+                continue
+            except BaseException as exc:
+                outcome = self.runtime_session.resolved_event_write_outcome(exc)
+                if outcome.status == "unknown":
+                    raise
+                if outcome.status == "none":
+                    state.scratchpad["run_end_commit_state"] = "pending"
+                    try:
+                        stored_retry = tuple(
+                            await self.runtime_session.emit_many(
+                                candidates,
+                                expected_last_sequence=expected_last_sequence,
+                                state=state,
+                            )
+                        )
+                    except EventWriteConflict:
+                        self._prepare_run_terminal_replan(state)
+                        await asyncio.sleep(0)
+                        continue
+                    except BaseException as retry_error:
+                        retry_outcome = (
+                            self.runtime_session.resolved_event_write_outcome(
+                                retry_error
+                            )
+                        )
+                        if retry_outcome.status != "full":
+                            raise
+                        retry_confirmed = tuple(retry_outcome.committed_events)
+                        if not _is_exact_run_terminal_batch(
+                            retry_confirmed,
+                            candidates,
+                        ):
+                            self.runtime_session.latch_event_commit_outcome_unknown()
+                            raise RuntimeError(
+                                "run terminal retry confirmation was not exact"
+                            ) from retry_error
+                        self._mark_run_terminal_committed(state)
+                        raise
+                    if not _is_exact_run_terminal_batch(stored_retry, candidates):
+                        raise RuntimeError(
+                            "run terminal bounded retry returned wrong batch"
+                        )
+                    self._mark_run_terminal_committed(state)
+                    for event in stored_retry:
+                        yield event
+                    return
+                confirmed = tuple(outcome.committed_events)
+                if not _is_exact_run_terminal_batch(confirmed, candidates):
+                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    raise RuntimeError(
+                        "run terminal confirmation was not exact"
+                    ) from exc
                 self._mark_run_terminal_committed(state)
-                for event in stored_retry:
-                    yield event
-                return
-            confirmed = tuple(outcome.committed_events)
-            if not _is_exact_run_terminal_batch(confirmed, candidates):
-                self.runtime_session.latch_event_commit_outcome_unknown()
-                raise RuntimeError("run terminal confirmation was not exact") from exc
+                raise
+            if not _is_exact_run_terminal_batch(stored, candidates):
+                raise RuntimeError("run terminal commit returned wrong batch")
             self._mark_run_terminal_committed(state)
-            raise
-        if not _is_exact_run_terminal_batch(stored, candidates):
-            raise RuntimeError("run terminal commit returned wrong batch")
-        self._mark_run_terminal_committed(state)
-        for event in stored:
-            yield event
+            for event in stored:
+                yield event
+            return
+
+    def _prepare_run_terminal_replan(self, state: LoopState) -> None:
+        previous = state.scratchpad.get("run_terminal_replan_count", 0)
+        if not isinstance(previous, int) or isinstance(previous, bool):
+            raise RuntimeError("run terminal replan count is invalid")
+        attempt = previous + 1
+        if attempt > 8:
+            raise RuntimeError("run terminalization exceeded its replan bound")
+        state.scratchpad["run_terminal_replan_count"] = attempt
+        state.scratchpad["run_end_commit_state"] = "replanning"
+        state.scratchpad.pop("pending_run_end_candidate", None)
+        state.scratchpad.pop("pending_run_terminal_candidates", None)
 
     def _mark_run_terminal_committed(self, state: LoopState) -> None:
         state.finalized = True
         self._latch_context_input_after_terminalization(state)
         state.scratchpad["run_end_commit_state"] = "committed"
+        state.scratchpad.pop("run_terminal_replan_count", None)
         state.scratchpad.pop("pending_run_end_candidate", None)
         state.scratchpad.pop("pending_run_terminal_candidates", None)
 

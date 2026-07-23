@@ -24,7 +24,7 @@ from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import build_durable_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from tests.conftest import emit_test_accepted_model_reply
-from tests.support import test_llm_config
+from tests.support import test_llm_config, verified_postgres_access_lease
 
 
 OXIGRAPH_URL = "http://localhost:7878"
@@ -176,6 +176,9 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(
     wiring = build_durable_runtime_wiring(
         _settings_for_storage(storage),
         tmp_path,
+        postgres_access_lease=verified_postgres_access_lease(
+            storage.postgres_dsn
+        ),
         runtime_session_id=runtime_session_id,
         graph_id=graph_id,
     )
@@ -234,6 +237,9 @@ def test_durable_runtime_delete_graph_clears_oxigraph_named_graph(tmp_path) -> N
     wiring = build_durable_runtime_wiring(
         _settings_for_storage(storage),
         tmp_path,
+        postgres_access_lease=verified_postgres_access_lease(
+            storage.postgres_dsn
+        ),
         runtime_session_id=runtime_session_id,
         graph_id=graph_id,
     )

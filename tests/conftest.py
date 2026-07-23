@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import builtins
 from functools import lru_cache
+import os
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -54,6 +56,11 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from tests.support import test_resolved_target_fact
+from tests.support.postgres_database import (
+    admin_root_dsn,
+    create_migrated_postgres_test_database,
+    drop_postgres_test_database,
+)
 from pulsara_agent.primitives.long_horizon import (
     ChildRolloutSubaccountFact,
     ResolvedChildRolloutBudgetFact,
@@ -89,6 +96,75 @@ from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
     TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
 )
 from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
+
+
+_POSTGRES_TEST_MODULES = frozenset(
+    {
+        "test_action_boundary_trigger.py",
+        "test_artifact_store_contract.py",
+        "test_durable_memory.py",
+        "test_durable_memory_contract.py",
+        "test_event_log_contract.py",
+        "test_host_resume.py",
+        "test_inspector.py",
+        "test_long_horizon_checkpoint.py",
+        "test_memory_candidate_pool.py",
+        "test_memory_contradiction.py",
+        "test_memory_explain.py",
+        "test_memory_governance.py",
+        "test_memory_governance_relatedness.py",
+        "test_memory_index_sync.py",
+        "test_memory_lifecycle.py",
+        "test_memory_reconcile.py",
+        "test_memory_supersede.py",
+        "test_memory_vector_index_sync.py",
+        "test_memory_vector_schema.py",
+        "test_oxigraph_graph_store.py",
+        "test_oxigraph_materializer.py",
+        "test_postgres_driver.py",
+        "test_postgres_graph_jsonld_store.py",
+        "test_postgres_graph_store.py",
+        "test_recall_v1.py",
+        "test_recall_v2.py",
+        "test_retrieval_runtime.py",
+        "test_schema_migrations.py",
+        "test_subagent_postgres_integration.py",
+        "test_working_context.py",
+    }
+)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    postgres_marker = pytest.mark.postgres
+    for item in items:
+        if Path(str(item.fspath)).name in _POSTGRES_TEST_MODULES:
+            item.add_marker(postgres_marker)
+
+
+@pytest.fixture(autouse=True)
+def _bind_marked_postgres_test_database(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("postgres") is not None:
+        request.getfixturevalue("migrated_postgres_database")
+
+
+@pytest.fixture(scope="session")
+def migrated_postgres_database():
+    try:
+        database = create_migrated_postgres_test_database()
+    except Exception as exc:
+        if os.environ.get("CI"):
+            pytest.fail(f"migrated PostgreSQL test database unavailable in CI: {exc}")
+        pytest.skip(f"migrated PostgreSQL test database unavailable: {exc}")
+    previous = os.environ.get("PULSARA_POSTGRES_DSN")
+    os.environ["PULSARA_POSTGRES_DSN"] = database.runtime_dsn
+    try:
+        yield database
+    finally:
+        if previous is None:
+            os.environ.pop("PULSARA_POSTGRES_DSN", None)
+        else:
+            os.environ["PULSARA_POSTGRES_DSN"] = previous
+        drop_postgres_test_database(admin_root_dsn(), database.database_name)
 
 
 @lru_cache(maxsize=64)

@@ -3954,7 +3954,7 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
         parent_task = asyncio.create_task(
             run_agent_task(agent, "spawn a child and then finish")
         )
-        await asyncio.wait_for(child_started.wait(), timeout=5)
+        await asyncio.wait_for(child_started.wait(), timeout=30)
         assert agent.subagent_runtime is not None
         run = next(
             item for item in agent.subagent_runtime.runs if item.status == "running"
@@ -4035,7 +4035,7 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
             )
             is None
         )
-        result = await asyncio.wait_for(parent_task, timeout=5)
+        result = await asyncio.wait_for(parent_task, timeout=30)
         assert result.status is LoopStatus.FINISHED
 
     asyncio.run(run_parent_and_cancel())

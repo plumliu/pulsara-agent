@@ -6,10 +6,15 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Condition, Lock
+from time import monotonic
 from typing import ContextManager, Protocol
 
-import psycopg
 from psycopg.rows import dict_row
+
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class CheckpointMaintenanceSessionNotQuiescent(RuntimeError):
@@ -135,7 +140,7 @@ class InMemoryCheckpointMaintenanceAuthority:
 class PostgresCheckpointMaintenanceAuthority:
     """Connection-owned advisory lock for closed durable sessions."""
 
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
     @contextmanager
     def acquire_shared(
@@ -170,7 +175,6 @@ class PostgresCheckpointMaintenanceAuthority:
         if not runtime_session_id:
             raise ValueError("checkpoint maintenance runtime session is required")
         lock_key = f"pulsara:checkpoint-maintenance:{runtime_session_id}"
-        connection = psycopg.connect(self.dsn, row_factory=dict_row)
         acquired = False
         lock_function = (
             "pg_try_advisory_lock"
@@ -182,61 +186,61 @@ class PostgresCheckpointMaintenanceAuthority:
             if exclusive
             else "pg_advisory_unlock_shared"
         )
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    f"select {lock_function}(hashtextextended(%s, 0)) as acquired",
-                    (lock_key,),
-                )
-                acquired = bool(cursor.fetchone()["acquired"])
-                if not acquired:
-                    raise CheckpointMaintenanceLockUnavailable(
-                        "checkpoint_maintenance_lock_unavailable"
-                    )
-                if require_quiescent:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.CHECKPOINT_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
+            try:
+                with connection.cursor() as cursor:
                     cursor.execute(
-                        """
-                        select metadata #>> '{lifecycle,closed_at}' as closed_at
-                        from sessions
-                        where id = %s
-                        """,
-                        (runtime_session_id,),
+                        f"select {lock_function}(hashtextextended(%s, 0)) as acquired",
+                        (lock_key,),
                     )
-                    session = cursor.fetchone()
-                    cursor.execute(
-                        """
-                        select count(*) as active_count
-                        from runs
-                        where session_id = %s and status = 'running'
-                        """,
-                        (runtime_session_id,),
-                    )
-                    active_count = int(cursor.fetchone()["active_count"])
-                    if (
-                        session is None
-                        or session["closed_at"] is None
-                        or active_count != 0
-                    ):
-                        raise CheckpointMaintenanceSessionNotQuiescent(
-                            "checkpoint_maintenance_session_not_quiescent"
+                    acquired = bool(cursor.fetchone()["acquired"])
+                    if not acquired:
+                        raise CheckpointMaintenanceLockUnavailable(
+                            "checkpoint_maintenance_lock_unavailable"
                         )
-            yield CheckpointMaintenancePermit(
-                runtime_session_id=runtime_session_id,
-                authority_kind="postgres_advisory_lock",
-                exclusive=exclusive,
-            )
-        finally:
-            if acquired:
-                try:
+                    if require_quiescent:
+                        cursor.execute(
+                            """
+                            select metadata #>> '{lifecycle,closed_at}' as closed_at
+                            from sessions
+                            where id = %s
+                            """,
+                            (runtime_session_id,),
+                        )
+                        session = cursor.fetchone()
+                        cursor.execute(
+                            """
+                            select count(*) as active_count
+                            from runs
+                            where session_id = %s and status = 'running'
+                            """,
+                            (runtime_session_id,),
+                        )
+                        active_count = int(cursor.fetchone()["active_count"])
+                        if (
+                            session is None
+                            or session["closed_at"] is None
+                            or active_count != 0
+                        ):
+                            raise CheckpointMaintenanceSessionNotQuiescent(
+                                "checkpoint_maintenance_session_not_quiescent"
+                            )
+                yield CheckpointMaintenancePermit(
+                    runtime_session_id=runtime_session_id,
+                    authority_kind="postgres_advisory_lock",
+                    exclusive=exclusive,
+                )
+            finally:
+                if acquired:
                     with connection.cursor() as cursor:
                         cursor.execute(
                             f"select {unlock_function}(hashtextextended(%s, 0))",
                             (lock_key,),
                         )
-                finally:
-                    connection.close()
-            else:
-                connection.close()
 
 
 def checkpoint_maintenance_authority_for_event_log(
@@ -247,5 +251,7 @@ def checkpoint_maintenance_authority_for_event_log(
     from pulsara_agent.event_log.postgres import PostgresEventLog
 
     if isinstance(event_log, PostgresEventLog):
-        return PostgresCheckpointMaintenanceAuthority(event_log.dsn)
+        return PostgresCheckpointMaintenanceAuthority(
+            event_log.connection_provider
+        )
     return None

@@ -1,21 +1,11 @@
-"""Durable storage schemas and adapters."""
+"""Durable storage contracts and verified connection authority."""
 
-from pulsara_agent.storage.memory_schema import (
-    MEMORY_SUBSTRATE_BOOTSTRAP_SQL,
-    MEMORY_SUBSTRATE_EXTENSION_REQUIREMENT_SQL,
-    MEMORY_SUBSTRATE_SCHEMA_SQL,
+from pulsara_agent.storage.migrations.manifest import (
     MEMORY_SUBSTRATE_TABLES,
-)
-from pulsara_agent.storage.postgres_schema import (
-    RUNTIME_TRUTH_SCHEMA_SQL,
     RUNTIME_TRUTH_TABLES,
 )
 
 __all__ = [
-    "MEMORY_SUBSTRATE_BOOTSTRAP_SQL",
-    "MEMORY_SUBSTRATE_EXTENSION_REQUIREMENT_SQL",
-    "MEMORY_SUBSTRATE_SCHEMA_SQL",
     "MEMORY_SUBSTRATE_TABLES",
-    "RUNTIME_TRUTH_SCHEMA_SQL",
     "RUNTIME_TRUTH_TABLES",
 ]

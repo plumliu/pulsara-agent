@@ -236,18 +236,19 @@ docker compose up -d postgres oxigraph
 cp .env.example .env
 $EDITOR .env
 
+uv run pulsara db migrate --env-file .env
+uv run pulsara db verify --deep --env-file .env
 uv run pulsara config-check --env-file .env
 uv run pulsara host repl --env-file .env --workspace .
 ```
 
-仓库自带的 Docker PostgreSQL 会在数据库首次初始化时安装 pgvector。对于既有数据库或外部托管数据库，PostgreSQL 管理员必须在
-`PULSARA_POSTGRES_DSN` 指向的同一个数据库中执行一次：
+仓库自带的 Docker 环境只创建数据库管理员角色与受限 runtime 角色，不在容器初始化阶段创建 pgvector 或 Pulsara 表。
+`pulsara db migrate` 是唯一 schema mutation owner：它使用 `PULSARA_POSTGRES_ADMIN_DSN` 安装 pgvector、执行不可变 migration、
+补齐 runtime grants，并写入 durable migration ledger。
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-`PULSARA_POSTGRES_DSN` 应继续使用普通应用角色。Pulsara 的运行时 schema 初始化只验证 pgvector 已存在，不会请求安装扩展所需的管理员权限。
+`PULSARA_POSTGRES_DSN` 必须绑定受限 runtime 角色。Host、Inspector、checkpoint 和 benchmark runtime 路径只做验证；数据库未迁移、
+版本过旧或 catalog 漂移时，会在分配 session 资源之前 fail closed。V1 不接管没有 migration ledger 的旧 Pulsara 表；hard cut 时应同时
+重置 PostgreSQL 数据库及其对应的 Oxigraph projection，再执行 migration。
 
 在 REPL 中：
 
@@ -282,9 +283,13 @@ PULSARA_BASE_URL=https://api.openai.com/v1
 PULSARA_PRO_MODEL=gpt-5
 PULSARA_FLASH_MODEL=gpt-5-mini
 
-PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
+PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:pulsara_admin@localhost:5432/pulsara
+PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:pulsara_runtime@localhost:5432/pulsara
 PULSARA_OXIGRAPH_URL=http://localhost:7878
 ```
+
+admin DSN 只由 `pulsara db migrate` 读取，不进入 runtime settings、wiring、日志或 Inspector 输出。可使用
+`pulsara db status` 查看有界 migration 状态，使用 `pulsara db verify --deep` 执行离线完整 catalog 检查。
 
 目前主路径面向 OpenAI-compatible Responses API。其他兼容提供商在 wire 行为匹配时也可以工作。
 

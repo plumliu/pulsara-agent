@@ -13,7 +13,7 @@ _Created: 2026-07-04_
 - [src/pulsara_agent/graph/postgres.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/graph/postgres.py)
 - [src/pulsara_agent/graph/oxigraph.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/graph/oxigraph.py)
 - [src/pulsara_agent/graph/jsonld_codec.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/graph/jsonld_codec.py)
-- [src/pulsara_agent/storage/memory_schema.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/memory_schema.py)
+- [src/pulsara_agent/storage/migrations/](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/migrations)
 - [src/pulsara_agent/storage/postgres_memory_projection.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/postgres_memory_projection.py)
 - [tests/test_ontology_registry.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_ontology_registry.py)
 - [tests/test_execution_evidence_ledger.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_execution_evidence_ledger.py)
@@ -164,10 +164,7 @@ Projection refresh 规则：
 
 ## 7. Memory substrate schema
 
-Memory substrate 的 PostgreSQL 初始化分成两个权限边界：
-
-- `MEMORY_SUBSTRATE_BOOTSTRAP_SQL` 是 deployment/admin owner，只安装 pgvector；
-- `MEMORY_SUBSTRATE_SCHEMA_SQL` 是普通应用角色 owner，只验证 prerequisite 并创建/升级 Pulsara 自有 function、table 与 index。
+Memory substrate 的 PostgreSQL physical schema只由versioned migration registry拥有。`PostgresGraphStore` required接收verified connection provider；constructor、write、projection refresh与delete path均不得执行schema SQL。
 
 它必须包含：
 
@@ -180,7 +177,7 @@ Memory substrate 的 PostgreSQL 初始化分成两个权限边界：
 - `recall_traces`
 - `recall_usages`
 
-`CREATE EXTENSION IF NOT EXISTS vector` 必须只存在于 versioned bootstrap SQL 与部署初始化 artifact 中。Host、repository、worker 和普通 schema ensure 路径不得执行它，也不得要求 `PULSARA_POSTGRES_DSN` 角色拥有 `CREATE EXTENSION` 权限。Bundled Docker 在 fresh database init 时执行 bootstrap；existing/managed PostgreSQL 由管理员在目标 database 一次性执行同一声明式 SQL。Runtime schema 在 extension 缺失时必须以稳定 prerequisite error fail closed，不能退化为无向量表的半初始化状态。
+`CREATE EXTENSION vector` 只能存在于 privileged migration 0001。Bundled Docker role genesis不创建extension或Pulsara objects；管理员必须先运行`pulsara db migrate`。Host、repository、worker与runtime role只做verify/DML；extension缺失或版本过旧时在startup verification阶段fail closed，不能退化为无向量表的半初始化状态。完整契约见 [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
 
 `memory_vector_index` primary key 必须包含：
 
@@ -236,6 +233,7 @@ InMemory graph store 只允许测试/兼容使用。
 - 不允许非 governed memory entity 进入 `memory_nodes`。
 - 不允许 relation projection 包含未 allowlist 的任意 JSON-LD field。
 - 不允许新增 schema table 后不更新 schema tests 与契约。
+- 不允许 GraphStore constructor/write path执行DDL或接受raw PostgreSQL DSN。
 
 ---
 
@@ -253,6 +251,6 @@ InMemory graph store 只允许测试/兼容使用。
 - `find_by_type` 返回 defensive copies。
 - PostgresGraphStore 写 canonical memory 后 `graph_documents` 与 `memory_nodes` 同步。
 - `set_status` 同步 JSON-LD payload 与 projection。
-- memory bootstrap 声明 pgvector extension，runtime schema 包含 prerequisite guard 与 required tables，且生产 runtime 不引用 privileged bootstrap SQL。
+- fresh migrated database的manifest包含pgvector与全部memory relations；受限runtime role可以执行GraphStore DML但不能执行DDL。
 - Oxigraph materializer 能 round-trip JSON-LD document。
 - Oxigraph unavailable/failure 通过 outbox failed status 暴露，而不是悄悄吞掉。

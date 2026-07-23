@@ -213,6 +213,7 @@ Diagnostics 不能修复状态；修复必须由明确 repair API 执行。
 
 Health inspection 必须检查：
 
+- verified PostgreSQL migration head、durable registry prefix、fast executable schema fingerprint、PostgreSQL/pgvector版本与last verification time；
 - required Postgres tables；
 - recent session sequence gaps；
 - compaction diagnostics；
@@ -222,6 +223,8 @@ Health inspection 必须检查：
 - Oxigraph configured/connected state。
 
 Oxigraph failure 只影响 health report，不得让 Postgres health 信息丢失。
+
+Inspector必须借用verify-only service签发的connection provider。Schema health不得显示admin DSN、runtime DSN、password、host authority参数或其他credential；它只显示secret-safe database/schema identity。Inspector不得执行migration、grant repair或runtime schema bootstrap。
 
 ---
 

@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 
 import pytest
+from tests.support import unverified_test_postgres_access_lease
 
 from tests.test_agent_runtime_loop import _pending_mcp_installation_audit
 from tests.test_host_lifecycle_contract import (
@@ -100,6 +101,11 @@ def _enable_fake_durable_manifest(
     async def no_retrieval_resources(_self):
         return None
 
+    access_lease = unverified_test_postgres_access_lease()
+
+    async def fake_postgres_access_lease(_self):
+        return access_lease
+
     core.durable = True
     monkeypatch.setattr(
         host_core,
@@ -110,6 +116,11 @@ def _enable_fake_durable_manifest(
         HostCore,
         "_get_retrieval_resources",
         no_retrieval_resources,
+    )
+    monkeypatch.setattr(
+        HostCore,
+        "_get_postgres_access_lease",
+        fake_postgres_access_lease,
     )
     monkeypatch.setattr(HostCore, "_manifest_store", lambda _self: store)
 

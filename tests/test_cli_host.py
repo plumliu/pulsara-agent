@@ -57,7 +57,41 @@ class _CheckpointReport:
         return dict(self.payload)
 
 
+class _FakePostgresAccessLease:
+    def __init__(self) -> None:
+        self.connection_provider = object()
+        self.released = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        self.released = True
+
+
+class _FakePostgresVerificationService:
+    def __init__(self, lease: _FakePostgresAccessLease) -> None:
+        self.lease = lease
+
+    async def acquire(self, *_args, **_kwargs) -> _FakePostgresAccessLease:
+        return self.lease
+
+
+def _install_checkpoint_access(monkeypatch) -> _FakePostgresAccessLease:
+    lease = _FakePostgresAccessLease()
+    monkeypatch.setattr(
+        cli,
+        "acquire_verified_postgres_access_sync",
+        lambda *_args, **_kwargs: lease,
+    )
+    return lease
+
+
 def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -81,9 +115,9 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: event_log)
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: archive)
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: archive)
     monkeypatch.setattr(
-        cli, "PostgresCheckpointMaintenanceAuthority", lambda _dsn: authority
+        cli, "PostgresCheckpointMaintenanceAuthority", lambda _provider: authority
     )
 
     def doctor(**kwargs):
@@ -107,6 +141,7 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
 def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
     monkeypatch,
 ) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -126,11 +161,13 @@ def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: SimpleNamespace())
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: SimpleNamespace())
+    monkeypatch.setattr(
+        cli, "PostgresArtifactStore", lambda _provider: SimpleNamespace()
+    )
     monkeypatch.setattr(
         cli,
         "PostgresCheckpointMaintenanceAuthority",
-        lambda _dsn: SimpleNamespace(),
+        lambda _provider: SimpleNamespace(),
     )
 
     with pytest.raises(ValueError, match="--through-sequence is unsupported"):
@@ -138,6 +175,7 @@ def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
 
 
 def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -158,11 +196,11 @@ def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> 
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: "event-log")
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: "archive")
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: "archive")
     monkeypatch.setattr(
         cli,
         "PostgresCheckpointMaintenanceAuthority",
-        lambda _dsn: "maintenance-authority",
+        lambda _provider: "maintenance-authority",
     )
 
     def gc(**kwargs):
@@ -386,10 +424,22 @@ class FakeCore:
 
 @pytest.fixture
 def inspect_wiring(monkeypatch):
+    lease = _FakePostgresAccessLease()
     monkeypatch.setattr(
         cli.PulsaraSettings,
         "from_env",
-        classmethod(lambda cls, prefix="PULSARA": object()),
+        classmethod(
+            lambda cls, prefix="PULSARA": SimpleNamespace(
+                storage=SimpleNamespace(
+                    postgres_dsn="postgresql://runtime@localhost/test"
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "process_postgres_schema_verification_service",
+        lambda: _FakePostgresVerificationService(lease),
     )
 
     def _build(_settings, workspace_root, **_kwargs):

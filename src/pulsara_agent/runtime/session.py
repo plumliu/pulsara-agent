@@ -4111,9 +4111,27 @@ class RuntimeSession:
                     "RuntimeSession ledger or committed reducer requires reconciliation"
                     + (f" ({'; '.join(failed)})" if failed else "")
                 )
+            materialization_account = self.materialization_account_store.snapshot()
+            if (
+                materialization_account is not None
+                and expected_last_sequence is not None
+                and expected_last_sequence
+                != materialization_account.ledger_through_sequence
+            ):
+                # A caller may prepare a batch from a reducer snapshot while another
+                # writer advances the ledger. Reject that stale candidate before any
+                # reducer validates its sequence-sensitive fingerprints.
+                raise EventWriteConflict(
+                    runtime_session_id=self.runtime_session_id,
+                    expected_last_sequence=expected_last_sequence,
+                    actual_last_sequence=(
+                        materialization_account.ledger_through_sequence
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
             self._validate_run_lifecycle_batch(events)
             self.long_horizon_state_store.validate_next_batch(events)
-            if self.materialization_account_store.snapshot() is not None:
+            if materialization_account is not None:
                 return self._commit_accounted_one_shot_reduce_enqueue(
                     events,
                     expected_last_sequence=expected_last_sequence,
@@ -4759,9 +4777,14 @@ class RuntimeSession:
         self,
         events: Iterable[AgentEvent],
         *,
+        expected_last_sequence: int | None = None,
         state: LoopState | None = None,
     ) -> list[AgentEvent]:
-        result = await self.write_events(tuple(events), state=state)
+        result = await self.write_events(
+            tuple(events),
+            expected_last_sequence=expected_last_sequence,
+            state=state,
+        )
         if result.publication_errors:
             raise EventPublicationAfterCommitError(result)
         return list(result.committed_events)

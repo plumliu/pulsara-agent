@@ -2,20 +2,17 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import psycopg
-import pytest
+from tests.support.postgres import connect_postgres_test_database
 
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 def test_pgvector_schema_supports_hnsw_compound_key_and_cascade() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/vector-schema/{uuid4().hex}"
     memory_id = f"preference:{uuid4().hex}"
-    with _connect_or_skip(dsn) as connection:
+    with connect_postgres_test_database(dsn, autocommit=True) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
             cursor.execute(
                 """
                 SELECT extversion FROM pg_extension WHERE extname = 'vector'
@@ -57,10 +54,3 @@ def test_pgvector_schema_supports_hnsw_compound_key_and_cascade() -> None:
                 (graph_id,),
             )
             assert cursor.fetchone() == (0,)
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, autocommit=True)
-    except psycopg.Error as exc:
-        pytest.skip(f"PostgreSQL unavailable: {exc}")

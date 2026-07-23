@@ -98,7 +98,7 @@ class _BudgetPressureMemoryInstruction(NoopMemoryHooks):
         return "PROVIDER_SOURCE_MUST_BE_OMITTED_" * 800
 
 
-_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS = 9_344
+_STRICT_TOOL_SCHEMA_TEST_CONTEXT_TOKENS = 10_752
 
 
 class _StableMemoryProjection(NoopMemoryHooks):

@@ -5,16 +5,19 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class RecallTraceStore(Protocol):
@@ -49,17 +52,14 @@ class RecallTraceStore(Protocol):
 
 @dataclass(slots=True)
 class PostgresRecallTraceStore:
-    dsn: str | None = None
+    connection_provider: VerifiedPostgresConnectionProviderProtocol | None = None
     connection: Connection | None = None
 
     def __post_init__(self) -> None:
-        if self.dsn is None and self.connection is None:
-            raise ValueError("PostgresRecallTraceStore requires either dsn or connection")
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with self._cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+        if (self.connection_provider is None) == (self.connection is None):
+            raise ValueError(
+                "PostgresRecallTraceStore requires exactly one verified provider or transaction connection"
+            )
 
     def record(
         self,
@@ -180,11 +180,11 @@ class PostgresRecallTraceStore:
                 yield cursor
             return
 
-        assert self.dsn is not None
-        connection_context = (
-            psycopg.connect(self.dsn, row_factory=row_factory)
-            if row_factory is not None
-            else psycopg.connect(self.dsn)
+        assert self.connection_provider is not None
+        connection_context = self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
         )
         with connection_context as connection:
             with connection.cursor() as cursor:

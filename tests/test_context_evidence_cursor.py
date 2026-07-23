@@ -43,7 +43,6 @@ def test_evidence_cursor_remains_process_local_memoization() -> None:
         REPO_ROOT / "src/pulsara_agent/event",
         REPO_ROOT / "src/pulsara_agent/primitives",
         REPO_ROOT / "src/pulsara_agent/event_log/serialization.py",
-        REPO_ROOT / "src/pulsara_agent/storage/postgres_schema.py",
     )
     violations: list[str] = []
     for root in durable_paths:

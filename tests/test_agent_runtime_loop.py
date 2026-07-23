@@ -4320,6 +4320,7 @@ def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> N
 @dataclass(slots=True)
 class SyncConcurrencyProbe:
     lock: threading.Lock = field(default_factory=threading.Lock)
+    rendezvous: threading.Barrier | None = None
     active: int = 0
     max_active: int = 0
 
@@ -4345,6 +4346,11 @@ class SleepTool:
                     self.probe.active,
                 )
         try:
+            if self.probe is not None and self.probe.rendezvous is not None:
+                try:
+                    self.probe.rendezvous.wait(timeout=10)
+                except threading.BrokenBarrierError:
+                    pass
             time.sleep(self.delay)
         finally:
             if self.probe is not None:
@@ -5015,7 +5021,7 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
         llm_runtime=make_llm_runtime(transport),
     )
     registry = ToolRegistry()
-    probe = SyncConcurrencyProbe()
+    probe = SyncConcurrencyProbe(rendezvous=threading.Barrier(2))
     registry.register(SleepTool("sleep_a", delay=0.2, probe=probe))
     registry.register(SleepTool("sleep_b", delay=0.2, probe=probe))
     _install_registry_with_explicit_test_descriptors(agent, registry)

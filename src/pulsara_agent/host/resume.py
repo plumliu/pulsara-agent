@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import psycopg
 from psycopg.rows import dict_row
 
 from pulsara_agent.event import (
@@ -37,7 +36,12 @@ from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.runtime.authority_materialization import (
     commit_quiescent_accounted_batch,
 )
-from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
+from time import monotonic
+
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 RESUME_RECOVERED_STOP_REASON = "resume_recovered_interrupted"
@@ -59,7 +63,7 @@ class DanglingRunRepairResult:
 
 def repair_dangling_runs_for_resume(
     *,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     runtime_session_id: str,
     workspace_root: str | None = None,
 ) -> DanglingRunRepairResult:
@@ -71,13 +75,12 @@ def repair_dangling_runs_for_resume(
     tool calls and explain the interruption to the model.
     """
 
-    _ensure_schema(dsn)
     log = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=connection_provider,
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
     )
-    archive = PostgresArtifactStore(dsn)
+    archive = PostgresArtifactStore(connection_provider)
     model_recovery = ModelStreamRecoveryService(
         event_log=log,
         archive=archive,
@@ -92,7 +95,9 @@ def repair_dangling_runs_for_resume(
     recovered_model_control_call_ids = tuple(
         item.resolved_model_call_id for item in control_recovery.recovered
     )
-    running = _running_runs_with_latest_context(dsn, runtime_session_id)
+    running = _running_runs_with_latest_context(
+        connection_provider, runtime_session_id
+    )
     if not running:
         return DanglingRunRepairResult(
             runtime_session_id=runtime_session_id,
@@ -115,7 +120,9 @@ def repair_dangling_runs_for_resume(
             continue
         # Idempotency guard: another resume/open may have repaired it after the
         # initial SELECT but before this append.
-        if _run_has_end_event(dsn, runtime_session_id, run_id):
+        if _run_has_end_event(
+            connection_provider, runtime_session_id, run_id
+        ):
             skipped.append(run_id)
             continue
         starts = [
@@ -226,14 +233,15 @@ def repair_dangling_runs_for_resume(
     )
 
 
-def _ensure_schema(dsn: str) -> None:
-    with psycopg.connect(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
-
-
-def _running_runs_with_latest_context(dsn: str, runtime_session_id: str) -> list[dict[str, Any]]:
-    with psycopg.connect(dsn, row_factory=dict_row) as connection:
+def _running_runs_with_latest_context(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    runtime_session_id: str,
+) -> list[dict[str, Any]]:
+    with connection_provider.connection(
+        lane=PostgresConnectionLane.HOST_CONTROL,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -265,8 +273,15 @@ def _running_runs_with_latest_context(dsn: str, runtime_session_id: str) -> list
             return list(cursor.fetchall())
 
 
-def _run_has_end_event(dsn: str, runtime_session_id: str, run_id: str) -> bool:
-    with psycopg.connect(dsn) as connection:
+def _run_has_end_event(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    runtime_session_id: str,
+    run_id: str,
+) -> bool:
+    with connection_provider.connection(
+        lane=PostgresConnectionLane.HOST_CONTROL,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """

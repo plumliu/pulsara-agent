@@ -25,7 +25,7 @@
   },
   "result_contract": {
     "contract_id": "pulsara.durable-runtime.result",
-    "contract_version": "1",
+    "contract_version": "2",
     "raw_sample_vector_required": true,
     "production_acceptance_excludes_counterfactual": true,
     "production_acceptance_excludes_sensitivity": true,
@@ -39,6 +39,11 @@
       "postgres.server_version",
       "postgres.configuration_fingerprint",
       "postgres.connection_pool_fingerprint",
+      "postgres.migration_head_version",
+      "postgres.durable_registry_prefix_fingerprint",
+      "postgres.deep_catalog_fingerprint",
+      "postgres.pgvector_extension_version",
+      "postgres.template_business_empty",
       "runtime_capacity.configuration_fingerprint"
     ]
   },

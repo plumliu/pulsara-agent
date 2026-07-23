@@ -1065,21 +1065,11 @@ def _ensure_test_postgres_runtime_owner(agent) -> None:
     if not isinstance(archive, PostgresArtifactStore):
         return
 
-    import psycopg
-
-    with psycopg.connect(archive.dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                insert into sessions (id, workspace_root)
-                values (%s, %s)
-                on conflict (id) do nothing
-                """,
-                (
-                    agent.runtime_session.runtime_session_id,
-                    str(agent.runtime_session.workspace_root),
-                ),
-            )
+    event_log = agent.runtime_session.event_log
+    ensure_owner = getattr(event_log, "ensure_runtime_session_owner", None)
+    if ensure_owner is None:
+        raise TypeError("PostgreSQL test runtime lacks a verified session-owner port")
+    ensure_owner()
 
 
 @dataclass(frozen=True, slots=True)

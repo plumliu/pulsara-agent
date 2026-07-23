@@ -10,7 +10,7 @@ _Created: 2026-07-04_
 - [src/pulsara_agent/event_log/protocol.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/event_log/protocol.py)
 - [src/pulsara_agent/event_log/postgres.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/event_log/postgres.py)
 - [src/pulsara_agent/event_log/serialization.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/event_log/serialization.py)
-- [src/pulsara_agent/storage/postgres_schema.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/postgres_schema.py)
+- [src/pulsara_agent/storage/migrations/](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/migrations)
 - [tests/test_event_message_system.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_event_message_system.py)
 - [tests/test_inspector.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_inspector.py)
 
@@ -261,7 +261,7 @@ Runtime artifact storage 是 event log 的旁路 payload store。
 
 ## 8. Schema ownership
 
-`RUNTIME_TRUTH_SCHEMA_SQL` 是 runtime truth schema 的创建入口。
+Versioned PostgreSQL migration registry是runtime truth physical schema的唯一创建/升级入口。`PostgresEventLog` required接收verified connection provider；constructor、append、projection checkpoint与reopen path均不得执行DDL或做grant repair。
 
 它拥有：
 
@@ -275,6 +275,8 @@ Runtime artifact storage 是 event log 的旁路 payload store。
 - working_context_summaries。
 
 Memory canonical substrate schema 不属于本契约；见 [MEMORY_SURFACES_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MEMORY_SURFACES_CONTRACT.zh.md)。
+
+Host在构造EventLog之前必须完成exact-head fast verification。每个direct/pooled/replacement physical connection在可见前重新验证database、role、search path、server与registry prefix。Migration ledger只证明physical schema，不证明历史event JSON payload兼容；event hard cut仍需独立decoder/migration/reset。完整契约见 [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
 
 ---
 

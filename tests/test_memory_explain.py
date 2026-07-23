@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import json
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import PostgresMemoryQuery
-from pulsara_agent.memory.recall.explain import ClaimKind, Explanation, ExplanationClaim, explain_memory, validate_explanation
+from pulsara_agent.memory.recall.explain import (
+    ClaimKind,
+    Explanation,
+    ExplanationClaim,
+    explain_memory,
+    validate_explanation,
+)
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery
 from pulsara_agent.ontology import memory
@@ -23,12 +32,18 @@ def test_explainer_only_claims_superseded_when_materialized_edge_exists() -> Non
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     lifecycle = MemoryLifecycle(graph=store, mutable=store)
     try:
-        store.put_jsonld(_preference("preference:old", "The user prefers verbose summaries."), graph_id=graph_id)
-        store.put_jsonld(_preference("preference:new", "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference("preference:old", "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        store.put_jsonld(
+            _preference("preference:new", "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
 
         old_before = query.fetch_nodes(["preference:old"], graph_id=graph_id)[0]
         before = explain_memory(old_before)
@@ -43,7 +58,9 @@ def test_explainer_only_claims_superseded_when_materialized_edge_exists() -> Non
         old_after = query.fetch_nodes(["preference:old"], graph_id=graph_id)[0]
         after = explain_memory(old_after)
 
-        superseded_claims = [claim for claim in after.claims if claim.kind is ClaimKind.SUPERSEDED_BY]
+        superseded_claims = [
+            claim for claim in after.claims if claim.kind is ClaimKind.SUPERSEDED_BY
+        ]
         assert len(superseded_claims) == 1
         assert superseded_claims[0].grounded_on == (
             f"rel:preference:new|{memory.SUPERSEDES.name}|preference:old",
@@ -56,10 +73,13 @@ def test_explanation_validator_rejects_ungrounded_claim() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
-        store.put_jsonld(_preference("preference:plain", "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference("preference:plain", "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         view = query.fetch_nodes(["preference:plain"], graph_id=graph_id)[0]
 
         with pytest.raises(ValueError):
@@ -84,12 +104,18 @@ def test_memory_explain_tool_returns_grounded_payload() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     lifecycle = MemoryLifecycle(graph=store, mutable=store)
     try:
-        store.put_jsonld(_preference("preference:old", "The user prefers verbose summaries."), graph_id=graph_id)
-        store.put_jsonld(_preference("preference:new", "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference("preference:old", "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        store.put_jsonld(
+            _preference("preference:new", "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         lifecycle.supersede(
             old_id="preference:old",
             new_id="preference:new",
@@ -132,12 +158,18 @@ def test_graph_rerank_adds_grounded_reason_for_superseding_memory() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     lifecycle = MemoryLifecycle(graph=store, mutable=store)
     try:
-        store.put_jsonld(_preference("preference:old", "The user prefers verbose summaries."), graph_id=graph_id)
-        store.put_jsonld(_preference("preference:new", "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference("preference:old", "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        store.put_jsonld(
+            _preference("preference:new", "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         lifecycle.supersede(
             old_id="preference:old",
             new_id="preference:new",
@@ -178,10 +210,3 @@ def _preference(memory_id: str, statement: str) -> dict:
         updated_at=now,
         gate_reason="test",
     ).to_jsonld()
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

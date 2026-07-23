@@ -6,14 +6,18 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Protocol
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
 from pulsara_agent.ontology import memory
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,12 +101,14 @@ class MemoryQuery(Protocol):
 
 @dataclass(slots=True)
 class PostgresMemoryQuery:
-    dsn: str | None = None
+    connection_provider: VerifiedPostgresConnectionProviderProtocol | None = None
     connection: Connection | None = None
 
     def __post_init__(self) -> None:
-        if self.dsn is None and self.connection is None:
-            raise ValueError("PostgresMemoryQuery requires either dsn or connection")
+        if (self.connection_provider is None) == (self.connection is None):
+            raise ValueError(
+                "PostgresMemoryQuery requires exactly one verified provider or transaction connection"
+            )
 
     def fetch_nodes(self, ids: Sequence[str], *, graph_id: str | None = None) -> list[CanonicalNodeView]:
         ordered_ids = _dedupe_preserving_order(ids)
@@ -385,8 +391,12 @@ class PostgresMemoryQuery:
                 yield cursor
             return
 
-        assert self.dsn is not None
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        assert self.connection_provider is not None
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 yield cursor
 

@@ -1,7 +1,9 @@
+from tests.support.postgres import verified_postgres_provider
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.entities.memory import ActionBoundary, Observation, Preference
 from pulsara_agent.graph import PostgresGraphStore
@@ -15,7 +17,7 @@ from pulsara_agent.settings import StorageConfig
 def graph_store():
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
-    graph = PostgresGraphStore(dsn=dsn)
+    graph = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     graph_id = f"graph:test:{uuid4().hex}"
     try:
         yield graph, graph_id
@@ -43,7 +45,9 @@ def test_preference_round_trips(graph_store) -> None:
     assert doc == preference.to_jsonld()
     assert doc["@type"] == [memory.PREFERENCE.name]
     assert doc[memory.STATEMENT.name] == "Prefer tabs over spaces."
-    assert [d["@id"] for d in graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)] == ["preference:tabs"]
+    assert [
+        d["@id"] for d in graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)
+    ] == ["preference:tabs"]
 
 
 def test_action_boundary_round_trips_with_conditions(graph_store) -> None:
@@ -93,12 +97,6 @@ def test_observation_round_trips(graph_store) -> None:
     assert doc["@type"] == [memory.OBSERVATION.name]
     assert doc[memory.HAS_EVIDENCE.name] == [{"@id": "evidence:ci-flaky"}]
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def test_preference_gate_rejects_empty_statement() -> None:

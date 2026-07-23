@@ -6,10 +6,10 @@ import asyncio
 import traceback
 from dataclasses import dataclass
 from enum import StrEnum
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -22,7 +22,10 @@ from pulsara_agent.memory.canonical.mutation_outbox import (
     parse_mutation_payload,
 )
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class VectorSyncStatus(StrEnum):
@@ -56,7 +59,7 @@ class _ClaimedOutbox:
 
 @dataclass(slots=True)
 class MemoryVectorIndexSync:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
     provider: EmbeddingProvider
     provider_name: str = "openai_compatible"
     claim_ttl_seconds: float = 60.0
@@ -66,9 +69,13 @@ class MemoryVectorIndexSync:
             raise ValueError(
                 f"memory_vector_index requires 1024 dimensions, got {self.provider.dimensions}"
             )
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     @property
     def embedding_fingerprint(self) -> str:
@@ -136,7 +143,7 @@ class MemoryVectorIndexSync:
         return applied
 
     def _load_snapshot(self, graph_id: str, memory_id: str) -> _Snapshot | None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -158,7 +165,7 @@ class MemoryVectorIndexSync:
         )
 
     def _hash_is_current(self, snapshot: _Snapshot) -> bool:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -172,7 +179,7 @@ class MemoryVectorIndexSync:
         return row is not None and row[0] == snapshot.embedded.text_hash
 
     def _finalize_snapshot(self, snapshot: _Snapshot, vector: list[float]) -> bool:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -215,7 +222,7 @@ class MemoryVectorIndexSync:
         return True
 
     def _delete_vector(self, graph_id: str, memory_id: str) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "DELETE FROM memory_vector_index WHERE graph_id = %s AND memory_id = %s",
@@ -223,7 +230,7 @@ class MemoryVectorIndexSync:
                 )
 
     def _list_memory_ids(self, graph_id: str) -> tuple[str, ...]:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT id FROM memory_nodes WHERE graph_id = %s ORDER BY id",
@@ -243,7 +250,7 @@ class MemoryVectorIndexSync:
             params.append(_graph_key(graph_id))
         params.append(limit)
         claims: list[_ClaimedOutbox] = []
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
@@ -291,7 +298,7 @@ class MemoryVectorIndexSync:
         applied: bool,
         error: str | None,
     ) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -330,7 +337,7 @@ class MemoryVectorIndexSync:
                 )
 
     def _release_claim(self, claim: _ClaimedOutbox) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

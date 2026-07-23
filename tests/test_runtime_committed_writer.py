@@ -122,6 +122,7 @@ def test_write_conflict_catches_reducer_and_publisher_to_actual_high_water(tmp_p
     assert [item.event.sequence for item in recording.events] == [1]
     assert runtime.publisher.enqueued_through_sequence == 1
     assert [event.text for event in runtime.event_log.iter()] == ["external"]
+    assert not runtime.reconciliation_required
 
 
 def test_async_and_thread_writes_share_session_write_coordinator(tmp_path) -> None:

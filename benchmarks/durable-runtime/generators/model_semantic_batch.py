@@ -5,10 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import AsyncIterator
-
-import psycopg
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -62,8 +60,13 @@ from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.tool_artifacts import (
     PostgresToolResultArtifactIndex,
 )
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 from generators.runtime_fixture import bootstrap_benchmark_root_run
+from runners.postgres_sandbox import VerifiedBenchmarkDatabaseLease
 from runners.scenario_contracts import (
     ModelSemanticBatchMatrixScenario,
     SemanticBatchCase,
@@ -197,7 +200,7 @@ async def run_model_semantic_batch_sample(
     *,
     scenario: ModelSemanticBatchMatrixScenario,
     execution_case: SemanticBatchCase,
-    dsn: str,
+    database_lease: VerifiedBenchmarkDatabaseLease,
     workspace_root: Path,
     sample_identity: str,
 ) -> ModelSemanticBatchObservation:
@@ -212,16 +215,17 @@ async def run_model_semantic_batch_sample(
         turn_id=f"turn:benchmark:{_hex_identity(sample_identity + ':turn')}",
         reply_id=f"reply:benchmark:{_hex_identity(sample_identity + ':reply')}",
     )
+    provider = database_lease.connection_provider
     event_log = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=provider,
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
     )
     runtime_session = RuntimeSession(
         workspace_root,
         event_log=event_log,
-        archive=PostgresArtifactStore(dsn),
-        tool_result_artifacts=PostgresToolResultArtifactIndex(dsn),
+        archive=PostgresArtifactStore(provider),
+        tool_result_artifacts=PostgresToolResultArtifactIndex(provider),
         runtime_session_id=runtime_session_id,
     )
     try:
@@ -290,7 +294,7 @@ async def run_model_semantic_batch_sample(
         )
         port = RecordingModelStreamCommitPort(runtime_session=runtime_session)
         before = event_log.read_ledger_usage_snapshot()
-        wal_before = _current_wal_lsn(dsn)
+        wal_before = _current_wal_lsn(provider)
         started = perf_counter()
         handle = runtime.start_stream(
             call=call,
@@ -303,7 +307,7 @@ async def run_model_semantic_batch_sample(
         completion = await handle.wait_completed()
         result = await handle.wait_result()
         model_stream_wall_seconds = perf_counter() - started
-        wal_after = _current_wal_lsn(dsn)
+        wal_after = _current_wal_lsn(provider)
         after = event_log.read_ledger_usage_snapshot()
         if completion.terminal_outcome != "completed":
             raise RuntimeError(
@@ -337,7 +341,7 @@ async def run_model_semantic_batch_sample(
                 after.candidate_payload_bytes - before.candidate_payload_bytes
             ),
             postgres_cluster_wal_lsn_delta_bytes=_wal_bytes(
-                dsn,
+                provider,
                 wal_before,
                 wal_after,
             ),
@@ -530,8 +534,13 @@ def _hex_identity(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
-def _current_wal_lsn(dsn: str) -> str:
-    with psycopg.connect(dsn) as connection:
+def _current_wal_lsn(
+    provider: VerifiedPostgresConnectionProviderProtocol,
+) -> str:
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute("select pg_current_wal_lsn()::text")
             row = cursor.fetchone()
@@ -540,8 +549,15 @@ def _current_wal_lsn(dsn: str) -> str:
     return str(row[0])
 
 
-def _wal_bytes(dsn: str, before: str, after: str) -> int:
-    with psycopg.connect(dsn) as connection:
+def _wal_bytes(
+    provider: VerifiedPostgresConnectionProviderProtocol,
+    before: str,
+    after: str,
+) -> int:
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "select pg_wal_lsn_diff(%s::pg_lsn, %s::pg_lsn)::bigint",

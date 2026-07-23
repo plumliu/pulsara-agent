@@ -90,11 +90,14 @@ CLI 可用：
 Pulsara CLI 顶层命令：
 
 - `config-check`
+- `db status|migrate|verify`
 - `host run`
 - `host repl`
 - `host inspect`
 - `inspect run|session|artifact|memory|health`
 - `skills sync-bundled|status|reset`
+
+`db migrate` 是唯一 privileged PostgreSQL schema mutation入口，只读取storage env中的admin/runtime DSN，不加载LLM配置。`db status`与`db verify [--deep]`输出有界、secret-redacted JSON；普通Host/Inspector启动只做runtime-role fast verify，不得auto-migrate。完整边界见 [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
 
 Removed / prohibited:
 
@@ -283,7 +286,7 @@ Subcommands：
 
 规则：
 
-- 使用 `PostgresInspectorStore(settings.storage.postgres_dsn)`；
+- 在创建Inspector store前，从process-owned schema verification service借用verified access lease；`PostgresInspectorStore`只接收该lease的connection provider，不接收raw DSN；
 - `oxigraph_url` 来自 settings；
 - 输出 JSON；
 - `memory` 不存在时必须以 not found 错误退出，不能成功返回空报告；

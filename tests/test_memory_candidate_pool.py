@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 from dataclasses import dataclass
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
@@ -12,7 +15,11 @@ from tests.support.model_stream import (
 from tests.support.governance import make_test_governance_decision_record
 
 from pulsara_agent.event import EventContext
-from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.event.candidates import (
+    InvalidAttemptPayload,
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
     MemoryWriteUnitOfWork,
@@ -25,7 +32,11 @@ from pulsara_agent.memory import (
     WriteFailedOutcome,
     WriteSucceededOutcome,
 )
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
+from pulsara_agent.memory.candidates.pool import (
+    CandidateOrigin,
+    CandidatePool,
+    CandidatePoolProposal,
+)
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 
@@ -43,9 +54,17 @@ def pool_case(request, tmp_path) -> _PoolCase:
     session_id = f"runtime:test:{uuid4().hex}"
     ctx = _ctx("postgres")
     _connect_or_skip(dsn).close()
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:parent", delta="seed"))
-    pool = PostgresCandidatePool(dsn=dsn)
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **ctx.event_fields(), block_id="text:parent", delta="seed"
+        )
+    )
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
 
     def cleanup() -> None:
         with _connect_or_skip(dsn) as connection:
@@ -60,7 +79,9 @@ def pool_case(request, tmp_path) -> _PoolCase:
     return _PoolCase(pool=pool, session_id=session_id, ctx=ctx)
 
 
-def test_candidate_pool_round_trips_valid_and_invalid_payloads(pool_case: _PoolCase) -> None:
+def test_candidate_pool_round_trips_valid_and_invalid_payloads(
+    pool_case: _PoolCase,
+) -> None:
     valid = _pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
     invalid = _pooled_invalid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
 
@@ -68,13 +89,24 @@ def test_candidate_pool_round_trips_valid_and_invalid_payloads(pool_case: _PoolC
     pool_case.pool.append_candidate(invalid)
 
     pending = _pending_for_case(pool_case)
-    assert [candidate.entry_id for candidate in pending] == [valid.entry_id, invalid.entry_id]
-    assert isinstance(pool_case.pool.get_candidate(valid.entry_id).payload, ValidCandidatePayload)
-    assert isinstance(pool_case.pool.get_candidate(invalid.entry_id).payload, InvalidAttemptPayload)
+    assert [candidate.entry_id for candidate in pending] == [
+        valid.entry_id,
+        invalid.entry_id,
+    ]
+    assert isinstance(
+        pool_case.pool.get_candidate(valid.entry_id).payload, ValidCandidatePayload
+    )
+    assert isinstance(
+        pool_case.pool.get_candidate(invalid.entry_id).payload, InvalidAttemptPayload
+    )
 
 
-def test_skip_decision_terminally_removes_candidate_from_pending(pool_case: _PoolCase) -> None:
-    candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+def test_skip_decision_terminally_removes_candidate_from_pending(
+    pool_case: _PoolCase,
+) -> None:
+    candidate = pool_case.pool.append_candidate(
+        _pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
+    )
     governance_batch_id = f"governance:test:{uuid4().hex}"
     decision = SkipDecision(
         target_entry_ids=(candidate.entry_id,),
@@ -114,8 +146,12 @@ def test_system_evidence_rejection_terminally_removes_candidate_from_pending(
     assert _pending_for_case(pool_case) == []
 
 
-def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _PoolCase) -> None:
-    candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+def test_write_failed_decision_does_not_terminally_remove_candidate(
+    pool_case: _PoolCase,
+) -> None:
+    candidate = pool_case.pool.append_candidate(
+        _pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
+    )
     governance_batch_id = f"governance:test:{uuid4().hex}"
     decision = SubmitAsIsDecision(
         target_entry_id=candidate.entry_id,
@@ -139,8 +175,12 @@ def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _
     ]
 
 
-def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolCase) -> None:
-    candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+def test_write_succeeded_decision_terminally_removes_candidate(
+    pool_case: _PoolCase,
+) -> None:
+    candidate = pool_case.pool.append_candidate(
+        _pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
+    )
     governance_batch_id = f"governance:test:{uuid4().hex}"
     decision = SubmitAsIsDecision(
         target_entry_id=candidate.entry_id,
@@ -166,7 +206,9 @@ def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolC
     assert _pending_for_case(pool_case) == []
 
 
-def test_governance_origin_candidates_are_audit_rows_not_pending(pool_case: _PoolCase) -> None:
+def test_governance_origin_candidates_are_audit_rows_not_pending(
+    pool_case: _PoolCase,
+) -> None:
     candidate = _pooled_valid(
         pool_case,
         entry_id=f"pool:test:{uuid4().hex}",
@@ -183,7 +225,9 @@ def test_governance_origin_candidates_are_audit_rows_not_pending(pool_case: _Poo
     assert _pending_for_case(pool_case) == []
 
 
-def test_compaction_origin_candidate_round_trips_provenance(pool_case: _PoolCase) -> None:
+def test_compaction_origin_candidate_round_trips_provenance(
+    pool_case: _PoolCase,
+) -> None:
     candidate = _pooled_valid(
         pool_case,
         entry_id=f"pool:test:{uuid4().hex}",
@@ -218,14 +262,21 @@ def test_compaction_origin_candidate_round_trips_provenance(pool_case: _PoolCase
     ]
 
 
-def test_candidate_pool_proposal_preserves_provenance_metadata(pool_case: _PoolCase) -> None:
+def test_candidate_pool_proposal_preserves_provenance_metadata(
+    pool_case: _PoolCase,
+) -> None:
     proposal = CandidatePoolProposal(
-        payload=ValidCandidatePayload(candidate=_preference(f"candidate:test:{uuid4().hex}")),
+        payload=ValidCandidatePayload(
+            candidate=_preference(f"candidate:test:{uuid4().hex}")
+        ),
         origin=CandidateOrigin.COMPACTION,
         source_event_id="event:context-compaction-completed",
         source_artifact_id="context_compaction:test:summary",
         intent_fingerprint="sha256:test-intent",
-        metadata={"compaction_id": "context_compaction:test", "summary_excerpt": "bounded"},
+        metadata={
+            "compaction_id": "context_compaction:test",
+            "summary_excerpt": "bounded",
+        },
     )
 
     pooled = proposal.to_pooled(
@@ -242,15 +293,29 @@ def test_candidate_pool_proposal_preserves_provenance_metadata(pool_case: _PoolC
     assert pooled.metadata == proposal.metadata
 
 
-def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(tmp_path) -> None:
+def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     ctx = _ctx("uow")
     _connect_or_skip(dsn).close()
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     candidate = _pooled_valid(
-        _PoolCase(pool=PostgresCandidatePool(dsn), session_id=runtime_session_id, ctx=ctx),
+        _PoolCase(
+            pool=PostgresCandidatePool(verified_postgres_provider(dsn)),
+            session_id=runtime_session_id,
+            ctx=ctx,
+        ),
         entry_id=f"pool:test:{uuid4().hex}",
         origin=CandidateOrigin.COMPACTION,
     ).model_copy(
@@ -258,18 +323,23 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(tmp_p
             "source_event_id": "event:context-compaction-completed",
             "source_artifact_id": "context_compaction:test:summary",
             "intent_fingerprint": "sha256:uow-test",
-            "metadata": {"compaction_id": "context_compaction:uow", "summary_excerpt": "bounded"},
+            "metadata": {
+                "compaction_id": "context_compaction:uow",
+                "summary_excerpt": "bounded",
+            },
         }
     )
     try:
         with MemoryWriteUnitOfWork(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
-            archive=PostgresArtifactStore(dsn),
+            archive=PostgresArtifactStore(verified_postgres_provider(dsn)),
         ) as uow:
             uow.decisions.append_candidate(candidate)
 
-        fetched = PostgresCandidatePool(dsn).get_candidate(candidate.entry_id)
+        fetched = PostgresCandidatePool(verified_postgres_provider(dsn)).get_candidate(
+            candidate.entry_id
+        )
 
         assert fetched.origin is CandidateOrigin.COMPACTION
         assert fetched.source_event_id == candidate.source_event_id
@@ -279,8 +349,13 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(tmp_p
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("delete from memory_candidates where entry_id = %s", (candidate.entry_id,))
-                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+                cursor.execute(
+                    "delete from memory_candidates where entry_id = %s",
+                    (candidate.entry_id,),
+                )
+                cursor.execute(
+                    "delete from sessions where id = %s", (runtime_session_id,)
+                )
 
 
 def _preference(candidate_id: str) -> PreferenceCandidate:
@@ -309,7 +384,9 @@ def _pooled_valid(
 ) -> PooledMemoryCandidate:
     return PooledMemoryCandidate(
         entry_id=entry_id,
-        payload=ValidCandidatePayload(candidate=_preference(f"candidate:test:{uuid4().hex}")),
+        payload=ValidCandidatePayload(
+            candidate=_preference(f"candidate:test:{uuid4().hex}")
+        ),
         origin=origin,
         source_session_id=pool_case.session_id,
         source_run_id=pool_case.ctx.run_id,
@@ -343,10 +420,3 @@ def _ctx(label: str) -> EventContext:
         turn_id=f"turn:candidate-pool:{label}:{suffix}",
         reply_id=f"reply:candidate-pool:{label}:{suffix}",
     )
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 import json
 from uuid import uuid4
 
-import psycopg
-import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
-from pulsara_agent.memory import CandidatePoolProposal, InMemoryCandidatePool, PooledMemoryCandidate, PostgresMemoryQuery
+from pulsara_agent.memory import (
+    CandidatePoolProposal,
+    InMemoryCandidatePool,
+    PooledMemoryCandidate,
+    PostgresMemoryQuery,
+)
 from pulsara_agent.memory.candidates.pool import CandidateOrigin
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
@@ -43,8 +50,10 @@ def test_lexical_recall_returns_active_memory_and_filters_rejected() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    service = LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    service = LexicalMemoryRecallService(
+        PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    )
     try:
         _put_preference(
             store,
@@ -63,13 +72,18 @@ def test_lexical_recall_returns_active_memory_and_filters_rejected() -> None:
 
         result = asyncio.run(
             service.recall(
-                RecallQuery(text="Please remember my concise summaries preference.", scopes=("ctx:user",)),
+                RecallQuery(
+                    text="Please remember my concise summaries preference.",
+                    scopes=("ctx:user",),
+                ),
                 graph_id=graph_id,
             )
         )
 
         assert result.status is RecallStatus.OK
-        assert [item.memory_id for item in result.items] == ["preference:active-concise"]
+        assert [item.memory_id for item in result.items] == [
+            "preference:active-concise"
+        ]
     finally:
         store.delete_graph(graph_id)
 
@@ -78,7 +92,7 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -90,12 +104,16 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
         hooks = DurableMemoryHooks(
             candidate_pool=InMemoryCandidatePool(),
             sink=MemoryProposalSink(),
-            recall=LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn)),
+            recall=LexicalMemoryRecallService(
+                PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+            ),
             graph_id=graph_id,
         )
         state = LoopState(session_id="runtime:test")
         state.current_scope = "ctx:workspace/other_project"
-        state.messages.append(UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")]))
+        state.messages.append(
+            UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")])
+        )
 
         projection = asyncio.run(hooks.project(state, token_budget=200))
 
@@ -108,12 +126,16 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
         store.delete_graph(graph_id)
 
 
-def test_durable_memory_project_reuses_same_run_projection_across_tool_loop_turns() -> None:
+def test_durable_memory_project_reuses_same_run_projection_across_tool_loop_turns() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    delegate = LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    delegate = LexicalMemoryRecallService(
+        PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    )
 
     class CountingRecall:
         calls = 0
@@ -138,7 +160,9 @@ def test_durable_memory_project_reuses_same_run_projection_across_tool_loop_turn
             graph_id=graph_id,
         )
         state = LoopState(session_id="runtime:tool-loop-cache")
-        state.messages.append(UserMsg(name="user", content="Can you keep this concise?"))
+        state.messages.append(
+            UserMsg(name="user", content="Can you keep this concise?")
+        )
 
         first = asyncio.run(hooks.project(state, token_budget=200))
         second = asyncio.run(hooks.project(state, token_budget=200))
@@ -154,7 +178,7 @@ def test_durable_memory_project_uses_read_scope_set() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -175,12 +199,16 @@ def test_durable_memory_project_uses_read_scope_set() -> None:
         hooks = DurableMemoryHooks(
             candidate_pool=InMemoryCandidatePool(),
             sink=MemoryProposalSink(),
-            recall=LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn)),
+            recall=LexicalMemoryRecallService(
+                PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+            ),
             graph_id=graph_id,
             read_scopes=frozenset({"ctx:user", "ctx:workspace/test_project"}),
         )
         state = LoopState(session_id="runtime:test")
-        state.messages.append(UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")]))
+        state.messages.append(
+            UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")])
+        )
 
         projection = asyncio.run(hooks.project(state, token_budget=200))
 
@@ -195,7 +223,7 @@ def test_candidate_pool_entries_are_not_recall_sources() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     pool = InMemoryCandidatePool()
     pool.append_candidate(
         PooledMemoryCandidate(
@@ -215,7 +243,9 @@ def test_candidate_pool_entries_are_not_recall_sources() -> None:
             source_reply_id="reply:test",
         )
     )
-    service = LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn))
+    service = LexicalMemoryRecallService(
+        PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    )
     try:
         result = asyncio.run(
             service.recall(
@@ -271,7 +301,7 @@ def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     pool = InMemoryCandidatePool()
     sink = MemoryProposalSink()
     try:
@@ -285,12 +315,16 @@ def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
         hooks = DurableMemoryHooks(
             candidate_pool=pool,
             sink=sink,
-            recall=LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn)),
+            recall=LexicalMemoryRecallService(
+                PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+            ),
             graph_id=graph_id,
         )
         state = LoopState(session_id="runtime:test")
         state.current_scope = "ctx:user"
-        state.messages.append(UserMsg(name="user", content="Can you keep this concise?"))
+        state.messages.append(
+            UserMsg(name="user", content="Can you keep this concise?")
+        )
 
         projection = asyncio.run(hooks.project(state, token_budget=200))
         assert projection is not None
@@ -310,7 +344,9 @@ def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
             intent_fingerprint="intent:echo",
         )
 
-        asyncio.run(hooks.after_model_reply(state, AssistantMsg(name="assistant", content="ok")))
+        asyncio.run(
+            hooks.after_model_reply(state, AssistantMsg(name="assistant", content="ok"))
+        )
 
         assert pool.list_candidates() == []
         assert sink.pending_count() == 0
@@ -322,8 +358,8 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     recall = LexicalMemoryRecallService(query)
     try:
         _put_preference(
@@ -356,7 +392,11 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
             ToolCall(
                 id="call:memory-search",
                 name="memory_search",
-                arguments={"query": "concise summaries", "scope": "ctx:user", "kind": "Preference"},
+                arguments={
+                    "query": "concise summaries",
+                    "scope": "ctx:user",
+                    "kind": "Preference",
+                },
             )
         )
         search_payload = json.loads(search_result.output)
@@ -378,12 +418,19 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
         hidden_get_payload = json.loads(hidden_get_result.output)
 
         assert default_search_payload["status"] == "ok"
-        assert [item["memory_id"] for item in default_search_payload["results"]] == ["preference:tool-concise"]
+        assert [item["memory_id"] for item in default_search_payload["results"]] == [
+            "preference:tool-concise"
+        ]
         assert search_payload["status"] == "ok"
         assert search_payload["results"][0]["memory_id"] == "preference:tool-concise"
-        assert search_payload["results"][0]["deep_recall"] == "memory_get preference:tool-concise"
+        assert (
+            search_payload["results"][0]["deep_recall"]
+            == "memory_get preference:tool-concise"
+        )
         assert get_payload["status"] == "ok"
-        assert get_payload["memory"]["statement"] == "The user prefers concise summaries."
+        assert (
+            get_payload["memory"]["statement"] == "The user prefers concise summaries."
+        )
         assert get_payload["memory"]["status"] == "active"
         assert hidden_get_payload["status"] == "empty"
         assert hidden_get_payload["reason"] == "scope_not_visible"
@@ -414,8 +461,8 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     recall = LexicalMemoryRecallService(query)
     try:
         _put_preference(
@@ -435,9 +482,15 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
             scope="ctx:workspace/other_project",
         )
         read_scopes = frozenset({"ctx:user", "ctx:workspace/test_project"})
-        search = MemorySearchTool(recall=recall, graph_id=graph_id, read_scopes=read_scopes)
-        get = MemoryGetTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
-        explain = MemoryExplainTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
+        search = MemorySearchTool(
+            recall=recall, graph_id=graph_id, read_scopes=read_scopes
+        )
+        get = MemoryGetTool(
+            memory_query=query, graph_id=graph_id, read_scopes=read_scopes
+        )
+        explain = MemoryExplainTool(
+            memory_query=query, graph_id=graph_id, read_scopes=read_scopes
+        )
 
         default_payload = json.loads(
             search.execute(
@@ -462,7 +515,10 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
                 ToolCall(
                     id="call:memory-search-hidden",
                     name="memory_search",
-                    arguments={"query": "concise summaries", "scope": "ctx:workspace/other_project"},
+                    arguments={
+                        "query": "concise summaries",
+                        "scope": "ctx:workspace/other_project",
+                    },
                 )
             ).output
         )
@@ -486,9 +542,13 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
         )
 
         assert default_payload["status"] == "ok"
-        assert [item["memory_id"] for item in default_payload["results"]] == ["preference:visible-concise"]
+        assert [item["memory_id"] for item in default_payload["results"]] == [
+            "preference:visible-concise"
+        ]
         assert empty_scope_payload["status"] == "ok"
-        assert [item["memory_id"] for item in empty_scope_payload["results"]] == ["preference:visible-concise"]
+        assert [item["memory_id"] for item in empty_scope_payload["results"]] == [
+            "preference:visible-concise"
+        ]
         assert hidden_scope_payload["status"] == "empty"
         assert hidden_scope_payload["reason"] == "scope_not_visible"
         assert hidden_get_payload["status"] == "empty"
@@ -506,10 +566,12 @@ def test_recall_trace_records_usage_and_suppresses_recent_auto_injection() -> No
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     session_id = f"runtime:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    trace_store = PostgresRecallTraceStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    trace_store = PostgresRecallTraceStore(
+        connection_provider=verified_postgres_provider(dsn)
+    )
     service = LexicalMemoryRecallService(
-        PostgresMemoryQuery(dsn=dsn),
+        PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn)),
         trace_store=trace_store,
     )
     try:
@@ -520,7 +582,9 @@ def test_recall_trace_records_usage_and_suppresses_recent_auto_injection() -> No
             statement="The user prefers concise summaries.",
             status=memory.NodeStatus.ACTIVE,
         )
-        MemorySearchIndexSync(dsn=dsn).sync_memory("preference:trace-concise", graph_id=graph_id)
+        MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).sync_memory("preference:trace-concise", graph_id=graph_id)
 
         first = asyncio.run(
             service.recall(
@@ -568,7 +632,9 @@ def test_recall_trace_records_usage_and_suppresses_recent_auto_injection() -> No
         assert second.status is RecallStatus.EMPTY
         assert "preference:trace-concise" in second.filtered_ids
         assert explicit.status is RecallStatus.OK
-        assert [item.memory_id for item in explicit.items] == ["preference:trace-concise"]
+        assert [item.memory_id for item in explicit.items] == [
+            "preference:trace-concise"
+        ]
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -608,10 +674,12 @@ def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> Non
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     session_id = f"runtime:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    trace_store = PostgresRecallTraceStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    trace_store = PostgresRecallTraceStore(
+        connection_provider=verified_postgres_provider(dsn)
+    )
     service = LexicalMemoryRecallService(
-        PostgresMemoryQuery(dsn=dsn),
+        PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn)),
         trace_store=trace_store,
     )
     registry = ToolRegistry()
@@ -630,7 +698,9 @@ def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> Non
             statement="The user prefers concise summaries.",
             status=memory.NodeStatus.ACTIVE,
         )
-        MemorySearchIndexSync(dsn=dsn).sync_memory(
+        MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).sync_memory(
             "preference:trace-tool-concise",
             graph_id=graph_id,
         )
@@ -701,12 +771,6 @@ def _put_preference(
     )
 
 
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
-
 
 class _FailingMemoryQuery:
     def __init__(self) -> None:
@@ -727,6 +791,8 @@ class _RecordingRecallService:
     def __init__(self) -> None:
         self.last_query: RecallQuery | None = None
 
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult:
         self.last_query = query
         return RecallResult(status=RecallStatus.EMPTY)

@@ -1031,6 +1031,7 @@ def test_inspector_reports_exact_only_after_payload_replay(
 
         class _Store:
             dsn = "postgresql://unused"
+            connection_provider = object()
 
             @staticmethod
             def events_for_session(runtime_session_id):
@@ -1114,6 +1115,7 @@ def test_inspector_distinguishes_zero_cap_omitted_subagent_selection(
 
         class _Store:
             dsn = "postgresql://unused"
+            connection_provider = object()
 
             @staticmethod
             def events_for_session(runtime_session_id):

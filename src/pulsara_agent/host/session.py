@@ -169,6 +169,9 @@ from pulsara_agent.runtime.run_entry import (
     prepare_agent_run_draft,
 )
 from pulsara_agent.runtime.session import EventPublicationAfterCommitError
+from pulsara_agent.runtime.terminal.notification import (
+    TerminalNotificationAdmissionStale,
+)
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.long_horizon.run_contract import (
@@ -1492,6 +1495,22 @@ class HostSession:
         try:
             stored = tuple(await runtime_session.emit_many(candidates, state=state))
         except BaseException as exc:
+            if isinstance(
+                exc,
+                (HostIngressAdmissionStale, TerminalNotificationAdmissionStale),
+            ):
+                self._set_boundary_commit_confirmation(
+                    BoundaryBatchCommitStatus.NONE,
+                )
+                self._set_boundary_commit_state("not_started")
+                runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
+                    state.run_id
+                )
+                if isinstance(exc, HostIngressAdmissionStale):
+                    raise
+                raise HostIngressAdmissionStale(
+                    "Host ingress notification authority changed before RunStart"
+                ) from exc
             if isinstance(exc, EventPublicationAfterCommitError):
                 self._set_boundary_commit_state("publication_failed")
                 confirmed = tuple(exc.result.committed_events)
@@ -5006,6 +5025,19 @@ class HostSession:
         try:
             stored = tuple(await runtime_session.emit_many(candidates, state=state))
         except BaseException as exc:
+            if isinstance(
+                exc,
+                (HostIngressAdmissionStale, TerminalNotificationAdmissionStale),
+            ):
+                self._set_boundary_commit_confirmation(
+                    BoundaryBatchCommitStatus.NONE,
+                )
+                self._set_boundary_commit_state("not_started")
+                if isinstance(exc, HostIngressAdmissionStale):
+                    raise
+                raise HostIngressAdmissionStale(
+                    "Host ingress notification authority changed before resume"
+                ) from exc
             if isinstance(exc, EventPublicationAfterCommitError):
                 self._set_boundary_commit_state("publication_failed")
                 committed_events = tuple(exc.result.committed_events)

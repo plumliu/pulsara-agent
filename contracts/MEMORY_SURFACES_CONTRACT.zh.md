@@ -374,6 +374,7 @@ governed canonical memory graph 的唯一写入口是：
 - 生产 wiring 只能注入 PostgreSQL `MemoryWriteUnitOfWork`。PostgreSQL 是 governed canonical authority；Oxigraph、search 与 vector 都是 outbox 驱动的异步派生面，不进入同步 UoW。
 - 生产 `RuntimeSession` 必须显式注入 PostgreSQL event log、artifact store 与 tool-result artifact index；裸构造不得创建任何 InMemory 默认依赖。
 - `MemoryWriteUnitOfWork.archive` 是必填依赖，生产 wiring 必须传入 `PostgresArtifactStore`，不得以 InMemory archive 补缺。
+- 所有PostgreSQL memory/governance stores与UOW required接收同一verified connection provider；constructor、`__enter__`、write、outbox replay和maintenance path均不得执行DDL、`ensure_schema()`或接受raw DSN。
 - durable storage 配置必须提供非空 Oxigraph URL；durable wiring 总是构造真实 `OxigraphGraphStore`。空 URL 是配置错误，不表示允许静默关闭该 surface。
 - `InMemoryMemoryWriteUnitOfWork` 只服务显式的 deprecated compatibility/test wiring，不是 fallback，也不满足生产 durability、事务原子性或 async materialization 契约。测试 fake 只能验证 executor 决策逻辑；事务、rollback 与 outbox 一致性必须由 real PostgreSQL 测试证明。
 - `durable=False` / in-memory runtime 暂留作后向兼容，但属于 unsupported production path；后续功能不得新增对该路径的依赖。
@@ -385,6 +386,10 @@ governed canonical memory graph 的唯一写入口是：
 3. 每条 governed memory 写都有原子的 decision / mutation provenance
 4. 不得以“未配置 UoW”为条件 fallback 到 InMemory 或 no-op outbox
 5. 生产 CLI 不得暴露 backend downgrade 开关；InMemory builder 只作为 deprecated 测试兼容 API 保留
+
+### 8.4 Physical schema ownership
+
+Memory、candidate、governance、recall、vector、working-context与outbox tables/functions/indexes只由packaged PostgreSQL migration registry创建。受限runtime role只获得所需DML/USAGE/EXECUTE privileges。Schema未迁移、head不匹配、pgvector缺失或catalog drift必须在Host resource allocation前失败；UOW不得“顺便修复”schema。完整契约见 [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
 
 ---
 

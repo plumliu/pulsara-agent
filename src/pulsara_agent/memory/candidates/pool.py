@@ -1,5 +1,4 @@
 """Durable memory candidate pool.
-
 The candidate pool is an append-only inbox for proposed durable memories. It is
 not canonical semantic memory: only governance may turn a candidate into a
 ``mem:*`` graph node by calling ``MemoryWriteService``.
@@ -10,10 +9,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from time import monotonic
 from typing import Annotated, Any, Literal, Protocol
 from uuid import uuid4
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -25,6 +24,10 @@ from pulsara_agent.primitives.governance_evidence import (
     CandidateQuotedEvidenceLocatorFact,
 )
 from pulsara_agent.ontology import memory
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class CandidateOrigin(StrEnum):
@@ -294,18 +297,17 @@ class InMemoryCandidatePool:
 
 @dataclass(slots=True)
 class PostgresCandidatePool:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
-    def __post_init__(self) -> None:
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(CANDIDATE_POOL_SCHEMA_SQL)
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.GOVERNANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -353,7 +355,7 @@ class PostgresCandidatePool:
         return candidate
 
     def get_candidate(self, entry_id: str) -> PooledMemoryCandidate:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -369,7 +371,7 @@ class PostgresCandidatePool:
         return candidate_from_storage_row(row)
 
     def list_candidates(self) -> list[PooledMemoryCandidate]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -396,7 +398,7 @@ class PostgresCandidatePool:
         return pending
 
     def evidence_rejection_event_id(self, entry_id: str) -> str | None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -413,7 +415,7 @@ class PostgresCandidatePool:
         return str(value) if value is not None else None
 
     def _evidence_rejected_entry_ids(self) -> set[str]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -430,7 +432,7 @@ class PostgresCandidatePool:
         entry_id: str,
         rejection_event_id: str,
     ) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 _mark_candidate_evidence_rejected_with_cursor(
                     cursor,
@@ -441,7 +443,7 @@ class PostgresCandidatePool:
     def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
         candidate_ids = {candidate.entry_id for candidate in self.list_candidates()}
         _validate_decision_targets(record, candidate_ids)
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -477,7 +479,7 @@ class PostgresCandidatePool:
         return record
 
     def list_decisions(self) -> list[MemoryGovernanceDecisionRecord]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -622,86 +624,3 @@ def _mark_candidate_evidence_rejected_with_cursor(
 _payload_adapter = TypeAdapter(CandidatePayload)
 _decision_adapter = TypeAdapter(GovernanceDecision)
 _outcome_adapter = TypeAdapter(GovernanceWriteOutcome)
-
-
-CANDIDATE_POOL_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS memory_candidates (
-    entry_id TEXT PRIMARY KEY,
-    payload JSONB NOT NULL,
-    origin TEXT NOT NULL,
-    source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    source_turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    source_reply_id TEXT NOT NULL,
-    source_tool_call_id TEXT,
-    user_quote TEXT,
-    quoted_evidence_locator JSONB,
-    source_event_id TEXT,
-    source_artifact_id TEXT,
-    intent_fingerprint TEXT,
-    evidence_rejection_event_id TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS source_event_id TEXT;
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS source_artifact_id TEXT;
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS intent_fingerprint TEXT;
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS quoted_evidence_locator JSONB;
-
-ALTER TABLE memory_candidates
-    ADD COLUMN IF NOT EXISTS evidence_rejection_event_id TEXT;
-
-CREATE INDEX IF NOT EXISTS idx_memory_candidates_source_run
-    ON memory_candidates(source_run_id, created_at);
-
-CREATE INDEX IF NOT EXISTS idx_memory_candidates_origin
-    ON memory_candidates(origin);
-
-CREATE INDEX IF NOT EXISTS idx_memory_candidates_session_origin_fingerprint
-    ON memory_candidates(source_session_id, origin, intent_fingerprint)
-    WHERE intent_fingerprint IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS memory_governance_decisions (
-    decision_id TEXT PRIMARY KEY,
-    governance_batch_id TEXT NOT NULL,
-    batch_input_fingerprint TEXT NOT NULL,
-    batch_input_reference_fingerprint TEXT NOT NULL,
-    governance_model_call_id TEXT NOT NULL,
-    decision_index INTEGER NOT NULL,
-    requested_decision_payload_fingerprint TEXT NOT NULL,
-    decision_payload_fingerprint TEXT NOT NULL,
-    decision JSONB NOT NULL,
-    write_outcome JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS batch_input_fingerprint TEXT NOT NULL;
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS batch_input_reference_fingerprint TEXT NOT NULL;
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS governance_model_call_id TEXT NOT NULL;
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS decision_index INTEGER NOT NULL;
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS requested_decision_payload_fingerprint TEXT NOT NULL;
-ALTER TABLE memory_governance_decisions
-    ADD COLUMN IF NOT EXISTS decision_payload_fingerprint TEXT NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_memory_governance_decisions_batch
-    ON memory_governance_decisions(governance_batch_id, created_at);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_governance_decisions_input_index
-    ON memory_governance_decisions(batch_input_fingerprint, decision_index);
-""".strip()

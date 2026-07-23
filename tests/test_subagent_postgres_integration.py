@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
@@ -52,12 +56,6 @@ class _FailingObserver:
         raise RuntimeError("synthetic observer failure")
 
 
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
-
 
 def _delete_sessions(dsn: str, session_ids: list[str]) -> None:
     with _connect_or_skip(dsn) as connection:
@@ -70,18 +68,22 @@ def _durable_runtime(tmp_path: Path):
     _connect_or_skip(dsn).close()
     parent_session_id = f"runtime:subagent-postgres-parent:{uuid4().hex}"
     parent_log = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=parent_session_id,
         workspace_root=tmp_path,
     )
     parent = RuntimeSession(
         tmp_path,
         event_log=parent_log,
-        archive=PostgresArtifactStore(dsn),
-        tool_result_artifacts=PostgresToolResultArtifactIndex(dsn),
+        archive=PostgresArtifactStore(verified_postgres_provider(dsn)),
+        tool_result_artifacts=PostgresToolResultArtifactIndex(
+            verified_postgres_provider(dsn)
+        ),
         runtime_session_id=parent_session_id,
     )
-    locator = PostgresEventLogLocator(dsn=dsn, workspace_root=tmp_path)
+    locator = PostgresEventLogLocator(
+        connection_provider=verified_postgres_provider(dsn), workspace_root=tmp_path
+    )
     runtime = SubagentRuntime(
         parent_runtime_session=parent,
         child_event_log_factory=locator.event_log_for_runtime_session,
@@ -118,9 +120,7 @@ async def _start_parent_run(parent: RuntimeSession, context: EventContext) -> No
         )
     )
     stored = next(
-        event
-        for event in result.committed_events
-        if isinstance(event, RunStartEvent)
+        event for event in result.committed_events if isinstance(event, RunStartEvent)
     )
     parent.transcript_projection_checkpoint_service.adopt_committed_run_seed(stored)
 
@@ -131,10 +131,13 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def run() -> None:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
-            child = await runtime.spawn_fake(task="durable child", event_context=context)
+            child = await runtime.spawn_fake(
+                task="durable child", event_context=context
+            )
             child_session_id = child.child_runtime_session_id
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             child_context = EventContext(
@@ -170,12 +173,16 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
         assert child_session_id is not None
         parent_events = parent.event_log.iter()
         child_events = PostgresEventLog(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=child_session_id,
             workspace_root=tmp_path,
         ).iter()
-        assert any(isinstance(event, SubagentRunStartedEvent) for event in parent_events)
-        assert any(isinstance(event, SubagentMessageSentEvent) for event in parent_events)
+        assert any(
+            isinstance(event, SubagentRunStartedEvent) for event in parent_events
+        )
+        assert any(
+            isinstance(event, SubagentMessageSentEvent) for event in parent_events
+        )
         assert not any(
             isinstance(event, RunStartEvent) and event.run_id.startswith("run:child:")
             for event in parent_events
@@ -196,11 +203,17 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
             )
             == 2
         )
-        assert not any(isinstance(event, SubagentRunStartedEvent) for event in child_events)
+        assert not any(
+            isinstance(event, SubagentRunStartedEvent) for event in child_events
+        )
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )
 
 
@@ -210,10 +223,13 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def run() -> None:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
-            child = await runtime.spawn_fake(task="durable child report", event_context=context)
+            child = await runtime.spawn_fake(
+                task="durable child report", event_context=context
+            )
             child_session_id = child.child_runtime_session_id
             child_context = EventContext(
                 run_id=f"run:child-report:{uuid4().hex}",
@@ -251,7 +267,9 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
         graph_events = [
             event
             for event in parent.event_log.iter()
-            if isinstance(event, (SubagentPhaseReportedEvent, SubagentResultSubmittedEvent))
+            if isinstance(
+                event, (SubagentPhaseReportedEvent, SubagentResultSubmittedEvent)
+            )
         ]
         assert len(graph_events) == 2
         assert all(event.run_id == context.run_id for event in graph_events)
@@ -260,7 +278,11 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )
 
 
@@ -271,7 +293,7 @@ def test_event_log_deterministic_contract_matches_in_memory_and_postgres(
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:event-log-parity:{uuid4().hex}"
     postgres = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
@@ -304,10 +326,13 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def seed() -> tuple[str, str]:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
-            child = await runtime.spawn_fake(task="durable child", event_context=context)
+            child = await runtime.spawn_fake(
+                task="durable child", event_context=context
+            )
             child_session_id = child.child_runtime_session_id
             native_run_id = f"run:child-native:{uuid4().hex}"
             native_context = EventContext(
@@ -348,10 +373,12 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
             return child.subagent_run_id, native_run_id
 
         subagent_run_id, native_run_id = asyncio.run(seed())
-        fresh_locator = PostgresEventLogLocator(dsn=dsn, workspace_root=tmp_path)
+        fresh_locator = PostgresEventLogLocator(
+            connection_provider=verified_postgres_provider(dsn), workspace_root=tmp_path
+        )
         state = fold_subagent_graph(parent.event_log.iter())
         hydrator = SubagentGraphHydrator(
-            archive=PostgresArtifactStore(dsn),
+            archive=PostgresArtifactStore(verified_postgres_provider(dsn)),
             parent_runtime_session_id=parent.runtime_session_id,
             event_log_locator=fresh_locator,
         )
@@ -369,7 +396,11 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )
 
 
@@ -379,11 +410,14 @@ def test_postgres_subagent_graph_survives_observer_failure_and_restart(
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def seed() -> str:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
             parent.publisher.subscribe(_FailingObserver())
-            child = await runtime.spawn_fake(task="observer failure", event_context=context)
+            child = await runtime.spawn_fake(
+                task="observer failure", event_context=context
+            )
             child_session_id = child.child_runtime_session_id
             await runtime.complete_fake(
                 child.subagent_run_id,
@@ -394,7 +428,7 @@ def test_postgres_subagent_graph_survives_observer_failure_and_restart(
 
         subagent_run_id = asyncio.run(seed())
         fresh_parent_log = PostgresEventLog(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=parent.runtime_session_id,
             workspace_root=tmp_path,
         )
@@ -408,7 +442,11 @@ def test_postgres_subagent_graph_survives_observer_failure_and_restart(
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )
 
 
@@ -416,6 +454,7 @@ def test_postgres_subagent_three_way_projection_equality(tmp_path: Path) -> None
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def seed() -> None:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
@@ -453,28 +492,30 @@ def test_postgres_subagent_three_way_projection_equality(tmp_path: Path) -> None
         fresh_parent = RuntimeSession(
             tmp_path,
             event_log=PostgresEventLog(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=parent.runtime_session_id,
                 workspace_root=tmp_path,
             ),
-            archive=PostgresArtifactStore(dsn),
-            tool_result_artifacts=PostgresToolResultArtifactIndex(dsn),
+            archive=PostgresArtifactStore(verified_postgres_provider(dsn)),
+            tool_result_artifacts=PostgresToolResultArtifactIndex(
+                verified_postgres_provider(dsn)
+            ),
             runtime_session_id=parent.runtime_session_id,
         )
         fresh_runtime = SubagentRuntime(
             parent_runtime_session=fresh_parent,
             child_event_log_factory=PostgresEventLogLocator(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 workspace_root=tmp_path,
             ).event_log_for_runtime_session,
             event_log_locator=PostgresEventLogLocator(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 workspace_root=tmp_path,
             ),
         )
         runtime_projection = fresh_runtime.graph()
         inspect_projection = InspectorService(
-            PostgresInspectorStore(dsn),
+            PostgresInspectorStore(verified_postgres_provider(dsn)),
             oxigraph_url=None,
         ).inspect_session(parent.runtime_session_id)["subagent_graph"]
 
@@ -509,7 +550,11 @@ def test_postgres_subagent_three_way_projection_equality(tmp_path: Path) -> None
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )
 
 
@@ -519,6 +564,7 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
     dsn, parent, _locator, runtime, context = _durable_runtime(tmp_path)
     child_session_id: str | None = None
     try:
+
         async def seed() -> None:
             nonlocal child_session_id
             await _start_parent_run(parent, context)
@@ -598,5 +644,9 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
     finally:
         _delete_sessions(
             dsn,
-            [session_id for session_id in (child_session_id, parent.runtime_session_id) if session_id],
+            [
+                session_id
+                for session_id in (child_session_id, parent.runtime_session_id)
+                if session_id
+            ],
         )

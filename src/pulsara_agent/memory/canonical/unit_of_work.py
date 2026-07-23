@@ -6,11 +6,11 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from types import TracebackType
 from collections.abc import Sequence
-from typing import Any, Protocol, Self
+from typing import Any, ContextManager, Protocol, Self
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -21,7 +21,6 @@ from pulsara_agent.event.candidates import CandidatePayload
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.memory.candidates.pool import (
-    CANDIDATE_POOL_SCHEMA_SQL,
     CandidatePool,
     GovernanceDecision,
     GovernanceWriteOutcome,
@@ -40,7 +39,10 @@ from pulsara_agent.memory.governance.event_outbox import (
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL, RUNTIME_TRUTH_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class GovernanceDecisionRepository(Protocol):
@@ -105,7 +107,7 @@ class GovernanceWriteUnitOfWork(Protocol):
 class MemoryWriteUnitOfWork:
     """Bind canonical graph, decision rows, and outbox writes to one connection."""
 
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
     runtime_session_id: str
     archive: ArtifactStore
     graph_id: str | None = None
@@ -113,6 +115,11 @@ class MemoryWriteUnitOfWork:
     gate: MemoryWriteGate = field(default_factory=MemoryWriteGate)
 
     connection: Connection | None = field(init=False, default=None)
+    _connection_owner: ContextManager[Connection] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     graph: PostgresGraphStore = field(init=False)
     decisions: "CandidateDecisionRepository" = field(init=False)
     outbox: "OutboxRepository" = field(init=False)
@@ -121,16 +128,13 @@ class MemoryWriteUnitOfWork:
     memory_write_service: MemoryWriteService = field(init=False)
 
     def __enter__(self) -> "MemoryWriteUnitOfWork":
-        self.connection = psycopg.connect(self.dsn)
-        with self.connection.cursor() as cursor:
-            cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
-            cursor.execute(CANDIDATE_POOL_SCHEMA_SQL)
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
-        resolved_graph_id = self.graph_id or DEFAULT_GRAPH_ID
-        self.graph = PostgresGraphStore(
-            connection=self.connection,
-            initialize_schema=False,
+        self._connection_owner = self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_UOW,
+            deadline_monotonic=monotonic() + 30.0,
         )
+        self.connection = self._connection_owner.__enter__()
+        resolved_graph_id = self.graph_id or DEFAULT_GRAPH_ID
+        self.graph = PostgresGraphStore(connection=self.connection)
         self.decisions = CandidateDecisionRepository(self.connection)
         self.outbox = OutboxRepository(self.connection)
         self.runtime_events = GovernanceEventOutboxRepository(
@@ -160,8 +164,10 @@ class MemoryWriteUnitOfWork:
             else:
                 self.connection.rollback()
         finally:
-            self.connection.close()
+            assert self._connection_owner is not None
+            self._connection_owner.__exit__(exc_type, exc, traceback)
             self.connection = None
+            self._connection_owner = None
 
     @property
     def resolved_graph_id(self) -> str:

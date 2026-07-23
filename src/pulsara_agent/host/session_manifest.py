@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -27,7 +26,12 @@ from pulsara_agent.runtime.permission_snapshot import (
     require_preset_permission_mode_for_policy,
     validate_preset_policy_payload,
 )
-from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
+from time import monotonic
+
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 RESUME_SCHEMA_VERSION = 1
@@ -112,13 +116,17 @@ class ResumableSessionSummary:
 class SessionManifestStore:
     """Read/write facade for the V1 resume manifest in Postgres."""
 
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
+    def __init__(
+        self, connection_provider: VerifiedPostgresConnectionProviderProtocol
+    ) -> None:
+        self.connection_provider = connection_provider
 
-    def ensure_schema(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def upsert_open_manifest(
         self,
@@ -130,9 +138,8 @@ class SessionManifestStore:
         permission_policy: EffectivePermissionPolicy,
         created_by: str,
     ) -> SessionManifest:
-        self.ensure_schema()
         now = utc_now_iso()
-        existing = self.get(runtime_session_id, ensure_schema=False)
+        existing = self.get(runtime_session_id)
         existing_metadata = existing.metadata if existing is not None else {}
         created_at = existing.created_at if existing is not None else now
         permission_mode = require_preset_permission_mode_for_policy(
@@ -152,7 +159,7 @@ class SessionManifestStore:
             closed_at=None,
             archived=False,
         )
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -169,9 +176,8 @@ class SessionManifestStore:
         return manifest
 
     def touch(self, runtime_session_id: str) -> None:
-        self.ensure_schema()
         now = utc_now_iso()
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -186,9 +192,8 @@ class SessionManifestStore:
                 )
 
     def mark_closed(self, runtime_session_id: str) -> None:
-        self.ensure_schema()
         now = utc_now_iso()
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -202,10 +207,8 @@ class SessionManifestStore:
                     (RESUME_SCHEMA_VERSION, now, runtime_session_id),
                 )
 
-    def get(self, runtime_session_id: str, *, ensure_schema: bool = True) -> SessionManifest | None:
-        if ensure_schema:
-            self.ensure_schema()
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+    def get(self, runtime_session_id: str) -> SessionManifest | None:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -226,7 +229,6 @@ class SessionManifestStore:
         include_closed: bool = False,
         limit: int = 20,
     ) -> list[ResumableSessionSummary]:
-        self.ensure_schema()
         predicates = ["true"]
         params: list[object] = []
         if workspace_root is not None:
@@ -239,7 +241,7 @@ class SessionManifestStore:
             predicates.append("metadata #>> '{lifecycle,closed_at}' is null")
             predicates.append("coalesce((metadata #>> '{lifecycle,archived}')::boolean, false) = false")
         params.append(limit)
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""

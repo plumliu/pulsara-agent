@@ -5,8 +5,12 @@ import urllib.parse
 import urllib.request
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import (
+    connect_postgres_test_database as _connect_or_skip,
+    verified_postgres_provider,
+)
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import OxigraphGraphStore
@@ -60,7 +64,10 @@ def test_oxigraph_materializer_applies_pending_surface_and_marks_outbox_partial(
     try:
         _insert_outbox(dsn, graph_id=graph_id, outbox_id=outbox_id, memory_id=memory_id, document=document)
 
-        applied = OxigraphMaterializer(oxigraph=store, dsn=dsn).consume_outbox(graph_id=graph_id)
+        applied = OxigraphMaterializer(
+            oxigraph=store,
+            connection_provider=verified_postgres_provider(dsn),
+        ).consume_outbox(graph_id=graph_id)
 
         assert applied == 1
         fetched = store.get_jsonld(memory_id, graph_id=graph_id)
@@ -101,7 +108,10 @@ def test_oxigraph_materializer_retries_failed_surface_once_oxigraph_recovers() -
     try:
         _insert_outbox(dsn, graph_id=graph_id, outbox_id=outbox_id, memory_id=memory_id, document=document)
 
-        applied = OxigraphMaterializer(oxigraph=bad_store, dsn=dsn).consume_outbox(graph_id=graph_id)
+        applied = OxigraphMaterializer(
+            oxigraph=bad_store,
+            connection_provider=verified_postgres_provider(dsn),
+        ).consume_outbox(graph_id=graph_id)
         assert applied == 0
 
         with _connect_or_skip(dsn) as connection:
@@ -116,7 +126,10 @@ def test_oxigraph_materializer_retries_failed_surface_once_oxigraph_recovers() -
                 assert attempt_count == 1
                 assert isinstance(last_error, str) and last_error
 
-        applied = OxigraphMaterializer(oxigraph=good_store, dsn=dsn).consume_outbox(graph_id=graph_id)
+        applied = OxigraphMaterializer(
+            oxigraph=good_store,
+            connection_provider=verified_postgres_provider(dsn),
+        ).consume_outbox(graph_id=graph_id)
 
         assert applied == 1
         fetched = good_store.get_jsonld(memory_id, graph_id=graph_id)
@@ -162,7 +175,10 @@ def test_oxigraph_materializer_replays_graph_reset_tombstone() -> None:
         store.put_jsonld(document, graph_id=graph_id)
         _insert_graph_reset_outbox(dsn, graph_id=graph_id, outbox_id=outbox_id)
 
-        applied = OxigraphMaterializer(oxigraph=store, dsn=dsn).consume_outbox(graph_id=graph_id)
+        applied = OxigraphMaterializer(
+            oxigraph=store,
+            connection_provider=verified_postgres_provider(dsn),
+        ).consume_outbox(graph_id=graph_id)
 
         assert applied == 1
         assert not store.has_jsonld(memory_id, graph_id=graph_id)
@@ -280,10 +296,3 @@ def _delete_outbox(dsn: str, outbox_id: str) -> None:
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,))
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

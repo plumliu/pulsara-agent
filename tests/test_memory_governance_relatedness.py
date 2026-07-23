@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 import math
 from datetime import UTC, datetime
@@ -135,13 +137,18 @@ class _Reranker:
         self.calls += 1
         if self.fail:
             raise RuntimeError("reranker unavailable")
-        return [RerankResult(index=index, score=0.9 - index * 0.01) for index in range(len(documents))]
+        return [
+            RerankResult(index=index, score=0.9 - index * 0.01)
+            for index in range(len(documents))
+        ]
 
     async def aclose(self):
         return None
 
 
-def test_relatedness_batches_deduplicated_embedding_and_hides_exact_scores_from_prompt() -> None:
+def test_relatedness_batches_deduplicated_embedding_and_hides_exact_scores_from_prompt() -> (
+    None
+):
     views = [_view("preference:egg-tart", "The user likes egg tarts.")]
     embedding = _Embedding()
     service = _service(views, embedding=embedding, reranker=_Reranker())
@@ -154,7 +161,9 @@ def test_relatedness_batches_deduplicated_embedding_and_hides_exact_scores_from_
 
     assert len(embedding.calls) == 1
     assert len(embedding.calls[0]) == len(set(embedding.calls[0]))
-    assert result.for_candidate("pool:a").allowlist == frozenset({"preference:egg-tart"})
+    assert result.for_candidate("pool:a").allowlist == frozenset(
+        {"preference:egg-tart"}
+    )
     prompt = result.for_candidate("pool:a").prompt_view()[0]
     assert prompt["match_channels"] == ["dense", "rerank"]
     assert not any("score" in key for key in prompt)
@@ -175,7 +184,10 @@ def test_relatedness_labeled_semantic_fixture_meets_recall_at_k_gate() -> None:
         _view("preference:javascript", "Use JavaScript for browser scripts."),
         _view("preference:concise", "The user prefers concise answers."),
         _view("preference:concise-zh", "用户偏好简短回答。"),
-        _view("preference:hard-negative", "The user prefers detailed architecture reports."),
+        _view(
+            "preference:hard-negative",
+            "The user prefers detailed architecture reports.",
+        ),
     ]
     service = _service(views, embedding=_Embedding(), candidate_limit=2)
 
@@ -195,12 +207,13 @@ def test_relatedness_labeled_semantic_fixture_meets_recall_at_k_gate() -> None:
     assert recall_at_k >= 0.95
     assert miss_rate <= 0.05
     assert all(
-        len(result.for_candidate(entry_id).memories) <= 2
-        for entry_id, _, _ in labeled
+        len(result.for_candidate(entry_id).memories) <= 2 for entry_id, _, _ in labeled
     )
 
 
-def test_versioned_deterministic_alias_channel_surfaces_target_without_dense_provider() -> None:
+def test_versioned_deterministic_alias_channel_surfaces_target_without_dense_provider() -> (
+    None
+):
     view = _view("preference:egg-tart", "The user enjoys egg tarts.")
     query = _MemoryQuery(
         [view],
@@ -254,7 +267,9 @@ def test_committed_but_unindexed_gap_repair_is_bounded_and_traced() -> None:
     assert len(embedding.calls[0]) == 3
 
 
-def test_rerank_failure_keeps_allowlist_but_marks_partial_and_disables_lifecycle() -> None:
+def test_rerank_failure_keeps_allowlist_but_marks_partial_and_disables_lifecycle() -> (
+    None
+):
     views = [_view("preference:egg-tart", "The user likes egg tarts.")]
     service = _service(views, embedding=_Embedding(), reranker=_Reranker(fail=True))
 
@@ -305,7 +320,11 @@ def test_unconfigured_reranker_is_deployment_relative_full() -> None:
 def test_sync_face_validation_removes_cross_scope_and_inactive_vector_hits() -> None:
     views = [
         _view("preference:right", "The user likes egg tarts."),
-        _view("preference:wrong-scope", "The user likes egg tarts.", scope="ctx:workspace/x"),
+        _view(
+            "preference:wrong-scope",
+            "The user likes egg tarts.",
+            scope="ctx:workspace/x",
+        ),
         _view(
             "preference:inactive",
             "The user likes egg tarts.",
@@ -349,7 +368,7 @@ def test_postgres_committed_but_unindexed_memory_is_found_from_sync_face() -> No
     graph_id = f"graph:test/relatedness/{uuid4().hex}"
     memory_id = "preference:committed-unindexed-egg-tart"
     now = datetime.now(UTC).isoformat()
-    store = PostgresGraphStore(dsn)
+    store = PostgresGraphStore(verified_postgres_provider(dsn))
     try:
         store.put_jsonld(
             Preference(
@@ -368,10 +387,12 @@ def test_postgres_committed_but_unindexed_memory_is_found_from_sync_face() -> No
         )
         embedding = _Embedding1024()
         service = GovernanceRelatednessService(
-            memory_query=PostgresMemoryQuery(dsn=dsn),
+            memory_query=PostgresMemoryQuery(
+                connection_provider=verified_postgres_provider(dsn)
+            ),
             tokenizer=RegexWordSplitTokenizer(),
             embedding=embedding,
-            vector_query=MemoryVectorQuery(dsn),
+            vector_query=MemoryVectorQuery(verified_postgres_provider(dsn)),
             provider_name="fixture",
             options=MemoryGovernanceRelatednessOptions(
                 dense_candidate_min_score=0.25,
@@ -386,16 +407,26 @@ def test_postgres_committed_but_unindexed_memory_is_found_from_sync_face() -> No
             )
         )
 
-        assert result.for_candidate("pool:postgres-gap").allowlist == frozenset({memory_id})
+        assert result.for_candidate("pool:postgres-gap").allowlist == frozenset(
+            {memory_id}
+        )
         assert result.diagnostics["relatedness_inline_embed_count"] == 1
         assert len(embedding.calls) == 1
     finally:
         with psycopg.connect(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("delete from memory_vector_index where graph_id = %s", (graph_id,))
-                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
-                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
-                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "delete from memory_vector_index where graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "delete from graph_documents where graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "delete from memory_nodes where graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "delete from memory_relations where graph_id = %s", (graph_id,)
+                )
 
 
 def _service(
@@ -412,7 +443,9 @@ def _service(
         memory_query=_MemoryQuery(views, missing_ids=missing_ids),  # type: ignore[arg-type]
         tokenizer=RegexWordSplitTokenizer(),
         embedding=embedding,
-        vector_query=_VectorQuery(views if vector_views is None else vector_views) if embedding else None,  # type: ignore[arg-type]
+        vector_query=_VectorQuery(views if vector_views is None else vector_views)
+        if embedding
+        else None,  # type: ignore[arg-type]
         reranker=reranker,
         provider_name="fixture",
         options=MemoryGovernanceRelatednessOptions(
@@ -425,7 +458,9 @@ def _service(
     )
 
 
-def _candidate(entry_id: str, statement: str, *, scope: str = "ctx:user") -> PooledMemoryCandidate:
+def _candidate(
+    entry_id: str, statement: str, *, scope: str = "ctx:user"
+) -> PooledMemoryCandidate:
     return PooledMemoryCandidate(
         entry_id=entry_id,
         payload=ValidCandidatePayload(

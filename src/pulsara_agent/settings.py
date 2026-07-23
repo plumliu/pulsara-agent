@@ -12,7 +12,9 @@ from pulsara_agent.retrieval.config import RetrievalConfig
 
 
 DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
-DEFAULT_POSTGRES_DSN = "postgresql://pulsara:pulsara@localhost:5432/pulsara"
+DEFAULT_POSTGRES_DSN = (
+    "postgresql://pulsara_runtime:pulsara_runtime@localhost:5432/pulsara"
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -134,6 +134,9 @@ from pulsara_agent.runtime.tool_artifacts import (
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.storage.schema_verification_service import (
+    VerifiedPostgresAccessLease,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +296,7 @@ def build_durable_runtime_wiring(
     settings: PulsaraSettings,
     workspace_root: Path,
     *,
+    postgres_access_lease: VerifiedPostgresAccessLease,
     runtime_session_id: str | None = None,
     reopen_deadline_monotonic: float | None = None,
     graph_id: str | None = None,
@@ -309,14 +313,15 @@ def build_durable_runtime_wiring(
         else f"graph:runtime/{runtime_session_id}"
     )
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
+    connection_provider = postgres_access_lease.connection_provider
     event_log = PostgresEventLog(
-        dsn=settings.storage.postgres_dsn,
+        connection_provider=connection_provider,
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
     )
-    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
+    archive = PostgresArtifactStore(connection_provider)
     tool_result_artifacts = PostgresToolResultArtifactIndex(
-        dsn=settings.storage.postgres_dsn
+        connection_provider
     )
     runtime_session = RuntimeSession(
         workspace_root,
@@ -328,16 +333,21 @@ def build_durable_runtime_wiring(
         terminal_binding=terminal_binding,
         extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
     )
-    postgres_graph = PostgresGraphStore(settings.storage.postgres_dsn)
+    postgres_graph = PostgresGraphStore(connection_provider)
+    mutation_outbox = MutationOutboxWriter(
+        connection_provider=connection_provider
+    )
     if not settings.storage.oxigraph_url.strip():
         raise ValueError("durable runtime wiring requires a non-empty Oxigraph URL")
     oxigraph_graph = OxigraphGraphStore(settings.storage.oxigraph_url)
     graph: GraphStore = DurableGraphFacade(
-        postgres=postgres_graph, oxigraph=oxigraph_graph
+        postgres=postgres_graph,
+        oxigraph=oxigraph_graph,
+        mutation_outbox=mutation_outbox,
     )
-    candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
+    candidate_pool = PostgresCandidatePool(connection_provider)
     candidate_projection_outbox = PostgresCandidateProjectionOutbox(
-        dsn=settings.storage.postgres_dsn
+        connection_provider
     )
     candidate_projection_dispatcher = CandidateProjectionOutboxDispatcher(
         runtime_session_id=runtime_session.runtime_session_id,
@@ -349,10 +359,10 @@ def build_durable_runtime_wiring(
         repository=candidate_projection_outbox,
         dispatcher=candidate_projection_dispatcher,
     )
-    memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
+    memory_query = PostgresMemoryQuery(connection_provider=connection_provider)
     tokenizer = build_tokenizer(settings.retrieval.tokenizer)
     working_context_store = (
-        PostgresWorkingContextStore(dsn=settings.storage.postgres_dsn)
+        PostgresWorkingContextStore(connection_provider)
         if memory_domain is not None
         else None
     )
@@ -363,7 +373,7 @@ def build_durable_runtime_wiring(
     dense_recall = (
         DenseCandidateService(
             provider=retrieval_resources.embedding,
-            vector_query=MemoryVectorQuery(settings.storage.postgres_dsn),
+            vector_query=MemoryVectorQuery(connection_provider),
             provider_name=settings.retrieval.embedding.provider,
         )
         if retrieval_resources is not None and retrieval_resources.embedding is not None
@@ -382,7 +392,7 @@ def build_durable_runtime_wiring(
             retrieval_resources.embedding if retrieval_resources is not None else None
         ),
         vector_query=(
-            MemoryVectorQuery(settings.storage.postgres_dsn)
+            MemoryVectorQuery(connection_provider)
             if retrieval_resources is not None
             and retrieval_resources.embedding is not None
             else None
@@ -409,7 +419,7 @@ def build_durable_runtime_wiring(
         sparse=sparse_recall,
         dense=dense_recall,
         reranker=semantic_reranker,
-        trace_store=PostgresRecallTraceStore(dsn=settings.storage.postgres_dsn),
+        trace_store=PostgresRecallTraceStore(connection_provider=connection_provider),
         graph_candidates=GraphCandidateService(memory_query=memory_query),
     )
     _register_timeline_hook(
@@ -417,12 +427,12 @@ def build_durable_runtime_wiring(
         graph=graph,
         archive=archive,
         graph_id=resolved_graph_id,
-        mutation_outbox=MutationOutboxWriter(dsn=settings.storage.postgres_dsn),
+        mutation_outbox=mutation_outbox,
     )
     runtime_session.hook_manager.register_event(
         None,
         CanonicalMutationOutboxReplayHook(
-            dsn=settings.storage.postgres_dsn,
+            connection_provider=connection_provider,
             graph_id=resolved_graph_id,
             oxigraph_url=settings.storage.oxigraph_url,
         ),
@@ -431,7 +441,7 @@ def build_durable_runtime_wiring(
         graph,
         archive,
         resolved_graph_id,
-        mutation_outbox=MutationOutboxWriter(dsn=settings.storage.postgres_dsn),
+        mutation_outbox=mutation_outbox,
     )
 
     def governance_event_commit_port(events):
@@ -439,7 +449,7 @@ def build_durable_runtime_wiring(
 
     governance_event_dispatcher = GovernanceEventOutboxDispatcher(
         store=PostgresGovernanceEventOutboxStore(
-            dsn=settings.storage.postgres_dsn,
+            connection_provider=connection_provider,
             runtime_session_id=runtime_session.runtime_session_id,
         ),
         event_commit_port=governance_event_commit_port,
@@ -455,7 +465,7 @@ def build_durable_runtime_wiring(
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-            dsn=settings.storage.postgres_dsn,
+            connection_provider=connection_provider,
             runtime_session_id=runtime_session.runtime_session_id,
             graph_id=resolved_graph_id,
             archive=archive,
@@ -474,10 +484,10 @@ def build_durable_runtime_wiring(
         ),
     )
     governance_claims = PostgresMemoryGovernanceCandidateClaimRepository(
-        dsn=settings.storage.postgres_dsn
+        connection_provider
     )
     governance_preparations = PostgresGovernanceBatchPreparationRepository(
-        dsn=settings.storage.postgres_dsn
+        connection_provider
     )
     governance_evidence = GovernanceSourceEvidenceBuilder(
         runtime_session_id=runtime_session.runtime_session_id,
@@ -519,6 +529,7 @@ def build_agent_runtime_wiring(
     workspace_root: Path,
     *,
     durable: bool,
+    postgres_access_lease: VerifiedPostgresAccessLease | None = None,
     model_role: ModelRole,
     options: LLMOptions | None = None,
     system_prompt: str | None = None,
@@ -542,6 +553,9 @@ def build_agent_runtime_wiring(
         build_durable_runtime_wiring(
             settings,
             workspace_root,
+            postgres_access_lease=_required_postgres_access_lease(
+                postgres_access_lease
+            ),
             runtime_session_id=runtime_session_id,
             reopen_deadline_monotonic=reopen_deadline_monotonic,
             graph_id=graph_id,
@@ -877,6 +891,14 @@ def _runtime_session_id_kwargs(runtime_session_id: str | None) -> dict[str, str]
     if runtime_session_id is None:
         return {}
     return {"runtime_session_id": runtime_session_id}
+
+
+def _required_postgres_access_lease(
+    lease: VerifiedPostgresAccessLease | None,
+) -> VerifiedPostgresAccessLease:
+    if lease is None:
+        raise ValueError("durable runtime wiring requires a verified PostgreSQL access lease")
+    return lease
 
 
 def _new_runtime_session_id() -> str:

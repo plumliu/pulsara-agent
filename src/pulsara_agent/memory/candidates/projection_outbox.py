@@ -8,7 +8,6 @@ from threading import RLock
 from time import monotonic
 from typing import TYPE_CHECKING, Protocol, Sequence
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -22,6 +21,10 @@ from pulsara_agent.memory.candidates.pool import CandidatePool, PooledMemoryCand
 from pulsara_agent.primitives.governance_evidence import (
     CandidateProjectionOutboxItemFact,
     CandidateProjectionProducerKind,
+)
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
 )
 
 if TYPE_CHECKING:
@@ -175,12 +178,14 @@ class InMemoryCandidateProjectionOutbox:
 
 @dataclass(slots=True)
 class PostgresCandidateProjectionOutbox:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
-    def __post_init__(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(CANDIDATE_PROJECTION_OUTBOX_SCHEMA_SQL)
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.GOVERNANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def transaction_companion(
         self,
@@ -273,7 +278,7 @@ class PostgresCandidateProjectionOutbox:
         runtime_session_id: str,
         limit: int = 100,
     ) -> tuple[CandidateProjectionOutboxRow, ...]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -295,7 +300,7 @@ class PostgresCandidateProjectionOutbox:
         producer_event_id: str,
         candidate_entry_id: str,
     ) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -632,35 +637,6 @@ def stable_event_identity_from_row(row: dict[str, object]):
     return StableEventIdentityFact.model_validate(row["producer_event_identity"])
 
 
-CANDIDATE_PROJECTION_OUTBOX_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS memory_candidate_projection_outbox (
-    runtime_session_id TEXT NOT NULL,
-    producer_kind TEXT NOT NULL CHECK (producer_kind IN ('reflection', 'compaction')),
-    producer_event_id TEXT NOT NULL,
-    candidate_entry_id TEXT NOT NULL,
-    candidate_index INTEGER NOT NULL CHECK (candidate_index >= 0),
-    outbox_item_fingerprint TEXT NOT NULL,
-    producer_payload_fingerprint TEXT NOT NULL,
-    producer_event_identity JSONB NOT NULL,
-    candidate_payload_fingerprint TEXT NOT NULL,
-    candidate_attribution_fingerprint TEXT NOT NULL,
-    candidate_payload JSONB NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'applying', 'applied', 'failed')),
-    last_stable_failure_code TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    applied_at TIMESTAMPTZ,
-    PRIMARY KEY (
-        runtime_session_id,
-        producer_kind,
-        producer_event_id,
-        candidate_entry_id
-    )
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_candidate_projection_outbox_pending
-    ON memory_candidate_projection_outbox(runtime_session_id, status, created_at);
-""".strip()
 
 
 __all__ = [

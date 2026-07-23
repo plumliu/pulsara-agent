@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import RLock
+from time import monotonic
 from typing import Protocol, Sequence
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -28,6 +28,10 @@ from pulsara_agent.primitives.governance_evidence import (
     GovernanceCandidateClaimStatus,
     GovernanceBatchInputReferenceFact,
     MemoryGovernanceCandidateClaimFact,
+)
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
 )
 
 
@@ -215,15 +219,17 @@ class InMemoryGovernanceBatchPreparationRepository:
 
 @dataclass(slots=True)
 class PostgresGovernanceBatchPreparationRepository:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
-    def __post_init__(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(GOVERNANCE_BATCH_PREPARATION_SCHEMA_SQL)
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.GOVERNANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def stage(self, record: GovernanceBatchPreparationRecord) -> None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -284,7 +290,7 @@ class PostgresGovernanceBatchPreparationRepository:
         runtime_session_id: str,
         governance_batch_id: str,
     ) -> GovernanceBatchPreparationRecord | None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -459,23 +465,6 @@ class GovernanceBatchStateTransitionCompanion:
             )
 
 
-GOVERNANCE_BATCH_PREPARATION_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS memory_governance_batch_inputs (
-    runtime_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    governance_batch_id TEXT NOT NULL,
-    batch_input_reference JSONB NOT NULL,
-    preparing_claims_fingerprint TEXT NOT NULL,
-    source_ledger_through_sequence BIGINT NOT NULL CHECK (source_ledger_through_sequence >= 0),
-    resolved_model_call_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('staged', 'prepared', 'terminal')),
-    prepared_event_id TEXT,
-    terminal_event_id TEXT,
-    record_fingerprint TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (runtime_session_id, governance_batch_id)
-);
-""".strip()
 
 
 def _validate_status_transition(

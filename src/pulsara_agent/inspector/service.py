@@ -287,7 +287,7 @@ class InspectorService:
             and prior_boundary is not None
             and event.sequence < prior_boundary
         ]
-        archive = PostgresArtifactStore(self.store.dsn)
+        archive = PostgresArtifactStore(self.store.connection_provider)
         prior_messages = rebuild_prior_messages(
             _BoundedEventLog(prior_events),
             archive=archive,
@@ -501,6 +501,7 @@ class InspectorService:
         }
 
     def inspect_health(self) -> dict[str, Any]:
+        schema_binding = self.store.connection_provider.schema_binding
         table_presence = self.store.required_table_presence(_REQUIRED_TABLES)
         recent_session_ids = self.store.recent_session_ids()
         sequence_diagnostics = []
@@ -546,6 +547,21 @@ class InspectorService:
             "inspect_kind": "health",
             "postgres": {
                 "connected": True,
+                "schema": {
+                    "migration_head_version": schema_binding.migration_head_version,
+                    "durable_registry_prefix_fingerprint": (
+                        schema_binding.durable_registry_prefix_fingerprint
+                    ),
+                    "fast_executable_schema_fingerprint": (
+                        schema_binding.fast_executable_schema_fingerprint
+                    ),
+                    "pgvector_extension_version": (
+                        schema_binding.pgvector_extension_version
+                    ),
+                    "last_verified_at_utc": (
+                        self.store.connection_provider.verification_observed_at_utc
+                    ),
+                },
                 "tables": table_presence,
                 "recent_session_count": len(recent_session_ids),
                 "run_projection_stale_count": stale_count,
@@ -641,7 +657,7 @@ class _InspectorEventLogLocator:
         session = self.store.session(runtime_session_id)
         workspace_root = session.get("workspace_root") if session is not None else None
         return PostgresEventLog(
-            dsn=self.store.dsn,
+            connection_provider=self.store.connection_provider,
             runtime_session_id=runtime_session_id,
             workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
@@ -2976,7 +2992,7 @@ def _context_input_replay_projection(
         }
 
     audit = event.input_audit
-    archive = PostgresArtifactStore(store.dsn)
+    archive = PostgresArtifactStore(store.connection_provider)
     try:
         manifest = load_context_input_manifest(audit=audit, archive=archive)
         primary = _context_event_slice_for_range(
@@ -2995,7 +3011,7 @@ def _context_input_replay_projection(
             for item in manifest.snapshot.named_event_ranges
         )
         replay_event_log = PostgresEventLog(
-            dsn=store.dsn,
+            connection_provider=store.connection_provider,
             runtime_session_id=audit.source_runtime_session_id,
         )
         replayed = replay_context_input(
@@ -3830,7 +3846,7 @@ def _context_event_slice_for_range(
     through_sequence: int,
 ) -> ContextEventSlice:
     snapshot = PostgresEventLog(
-        dsn=store.dsn,
+        connection_provider=store.connection_provider,
         runtime_session_id=runtime_session_id,
     ).read_raw_range_snapshot(
         minimum_sequence=first_sequence,

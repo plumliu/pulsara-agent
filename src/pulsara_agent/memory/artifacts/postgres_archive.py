@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from math import ceil
 from time import monotonic
 from typing import Any
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -20,11 +18,16 @@ from pulsara_agent.memory.foundation.records import (
     ArtifactTextSlice,
     ArtifactWriteResult,
 )
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+    postgres_operation_deadline,
+)
 
 
 @dataclass(slots=True)
 class PostgresArtifactStore:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
     def put_text(
         self,
@@ -45,7 +48,7 @@ class PostgresArtifactStore:
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         stored_at = f"postgres://artifacts/{blob_id}"
 
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(None) as connection:
             with connection.cursor() as cursor:
                 self._lock_artifact(cursor, blob_id)
                 self._validate_owner(cursor, session_id=session_id, run_id=run_id)
@@ -114,7 +117,7 @@ class PostgresArtifactStore:
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         stored_at = f"postgres://artifacts/{blob_id}"
 
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(None) as connection:
             with connection.cursor() as cursor:
                 self._lock_artifact(cursor, blob_id)
                 self._validate_owner(cursor, session_id=session_id, run_id=run_id)
@@ -277,7 +280,7 @@ class PostgresArtifactStore:
             raise ValueError("offset_chars must be >= 0")
         if max_chars < 1:
             raise ValueError("max_chars must be >= 1")
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(None) as connection:
             with connection.cursor() as cursor:
                 row = self._artifact_row(cursor, blob_id)
                 self._validate_read_owner(row, session_id=session_id)
@@ -323,15 +326,11 @@ class PostgresArtifactStore:
                 return text_body
 
     def _connect(self, deadline_monotonic: float | None):
-        if deadline_monotonic is None:
-            return psycopg.connect(self.dsn, row_factory=dict_row)
-        remaining = deadline_monotonic - monotonic()
-        if remaining <= 0:
-            raise TimeoutError("artifact database deadline exceeded before connect")
-        return psycopg.connect(
-            self.dsn,
+        deadline = postgres_operation_deadline(deadline_monotonic)
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
             row_factory=dict_row,
-            connect_timeout=max(1, ceil(remaining)),
+            deadline_monotonic=deadline,
         )
 
     @staticmethod
@@ -347,7 +346,7 @@ class PostgresArtifactStore:
         )
 
     def get_bytes(self, blob_id: str, *, session_id: str | None = None) -> bytes:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(None) as connection:
             with connection.cursor() as cursor:
                 row = self._artifact_row(cursor, blob_id)
                 self._validate_read_owner(row, session_id=session_id)
@@ -367,7 +366,7 @@ class PostgresArtifactStore:
     ) -> bool:
         """Delete one cache artifact only when every durable identity matches."""
 
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(None) as connection:
             with connection.cursor() as cursor:
                 self._lock_artifact(cursor, blob_id)
                 cursor.execute(

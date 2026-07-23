@@ -654,9 +654,10 @@ def test_authority_hard_cut_has_no_legacy_account_migration_path() -> None:
 
 
 def test_model_call_and_transcript_reads_keep_physical_bounds_and_indexes() -> None:
-    schema = (REPO_ROOT / "src/pulsara_agent/storage/postgres_schema.py").read_text(
-        encoding="utf-8"
-    )
+    schema = (
+        REPO_ROOT
+        / "src/pulsara_agent/storage/migrations/sql/0002_runtime_truth_baseline.sql"
+    ).read_text(encoding="utf-8")
     materialize = (REPO_ROOT / "src/pulsara_agent/llm/materialize.py").read_text(
         encoding="utf-8"
     )

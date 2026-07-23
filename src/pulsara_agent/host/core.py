@@ -70,6 +70,10 @@ from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSy
 from pulsara_agent.memory.canonical.vector_worker import MemoryVectorIndexWorker
 from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.storage.schema_verification_service import (
+    VerifiedPostgresAccessLease,
+    process_postgres_schema_verification_service,
+)
 
 
 _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS = 30.0
@@ -114,6 +118,16 @@ class HostCore:
     _retrieval_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
     )
+    _postgres_access_lease: VerifiedPostgresAccessLease | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _postgres_access_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
     _governance_coordinator: MemoryGovernanceCoordinator | None = field(
         default=None, init=False, repr=False
     )
@@ -151,13 +165,6 @@ class HostCore:
                     resolver=runtime_wiring.build_llm_runtime(self.settings.llm),
                 )
             )
-        if self.durable and self.checkpoint_maintenance_authority is None:
-            self.checkpoint_maintenance_authority = (
-                PostgresCheckpointMaintenanceAuthority(
-                    self.settings.storage.postgres_dsn
-                )
-            )
-
     # -- Lifecycle gate -------------------------------------------------------
 
     @property
@@ -214,6 +221,7 @@ class HostCore:
         if not self.durable:
             raise RuntimeError("resume_session requires durable HostCore wiring")
         self._raise_if_not_accepting("resume a session")
+        await self._get_postgres_access_lease()
         guard = (
             self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
@@ -283,6 +291,7 @@ class HostCore:
     ) -> list[ResumableSessionSummary]:
         if not self.durable:
             return []
+        await self._get_postgres_access_lease()
         workspace = (
             resolve_workspace(workspace_input, scratch_root=self.scratch_root)
             if workspace_input is not None
@@ -315,6 +324,7 @@ class HostCore:
             raise RuntimeError(
                 "repair_session_for_resume requires durable HostCore wiring"
             )
+        access_lease = await self._get_postgres_access_lease()
         guard = (
             self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
@@ -325,7 +335,7 @@ class HostCore:
             if manifest is None:
                 raise KeyError(f"runtime session not found: {runtime_session_id}")
             return repair_dangling_runs_for_resume(
-                dsn=self.settings.storage.postgres_dsn,
+                connection_provider=access_lease.connection_provider,
                 runtime_session_id=runtime_session_id,
                 workspace_root=manifest.workspace_root,
             )
@@ -347,6 +357,9 @@ class HostCore:
     ) -> HostSession:
         self._raise_if_not_accepting("open a session")
         await self._drain_failed_open_mcp_supervisors()
+        postgres_access_lease = (
+            await self._get_postgres_access_lease() if self.durable else None
+        )
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
         conversation_id = conversation_id or f"conversation:{uuid4().hex}"
@@ -367,8 +380,10 @@ class HostCore:
             if repair_dangling_on_resume:
                 if runtime_session_id is None:
                     raise RuntimeError("dangling repair requires a runtime_session_id")
+                if postgres_access_lease is None:
+                    raise RuntimeError("durable resume requires PostgreSQL access")
                 repair_dangling_runs_for_resume(
-                    dsn=self.settings.storage.postgres_dsn,
+                    connection_provider=postgres_access_lease.connection_provider,
                     runtime_session_id=runtime_session_id,
                     workspace_root=str(workspace.workspace_root),
                 )
@@ -386,6 +401,7 @@ class HostCore:
                 self.settings,
                 workspace.workspace_root,
                 durable=self.durable,
+                postgres_access_lease=postgres_access_lease,
                 model_role=model_role,
                 options=options,
                 system_prompt=system_prompt,
@@ -840,6 +856,11 @@ class HostCore:
                         await resources.aclose()
                     except BaseException as exc:
                         errors.append(exc)
+                async with self._postgres_access_lock:
+                    postgres_access_lease = self._postgres_access_lease
+                    self._postgres_access_lease = None
+                if postgres_access_lease is not None:
+                    postgres_access_lease.release()
         except BaseException as exc:
             # Even an unexpected coordinator failure must not strand every
             # concurrent waiter behind a permanently-CLOSING HostCore.
@@ -880,6 +901,35 @@ class HostCore:
             if first_error is not None:
                 raise first_error
 
+    async def _get_postgres_access_lease(self) -> VerifiedPostgresAccessLease:
+        if not self.durable:
+            raise RuntimeError("in-memory HostCore has no PostgreSQL access lease")
+        async with self._postgres_access_lock:
+            existing = self._postgres_access_lease
+            if existing is not None:
+                return existing
+            if self._lifecycle is not HostCoreLifecycle.OPEN:
+                raise RuntimeError(
+                    "HostCore is closing; cannot verify PostgreSQL schema"
+                )
+            access_lease = await process_postgres_schema_verification_service().acquire(
+                self.settings.storage.postgres_dsn,
+                deadline_monotonic=monotonic() + 30.0,
+            )
+            if self._lifecycle is not HostCoreLifecycle.OPEN:
+                access_lease.release()
+                raise RuntimeError(
+                    "HostCore closed while PostgreSQL schema was being verified"
+                )
+            self._postgres_access_lease = access_lease
+            if self.checkpoint_maintenance_authority is None:
+                self.checkpoint_maintenance_authority = (
+                    PostgresCheckpointMaintenanceAuthority(
+                        access_lease.connection_provider
+                    )
+                )
+            return access_lease
+
     async def _get_retrieval_resources(self) -> RetrievalRuntimeResources:
         async with self._retrieval_lock:
             if self._lifecycle is not HostCoreLifecycle.OPEN:
@@ -893,9 +943,10 @@ class HostCore:
                 self._governance_coordinator = MemoryGovernanceCoordinator()
                 self._retrieval_resources.attach_worker(self._governance_coordinator)
                 if self._retrieval_resources.embedding is not None:
+                    access_lease = await self._get_postgres_access_lease()
                     vector_worker = MemoryVectorIndexWorker(
                         MemoryVectorIndexSync(
-                            dsn=self.settings.storage.postgres_dsn,
+                            connection_provider=access_lease.connection_provider,
                             provider=self._retrieval_resources.embedding,
                             provider_name=self.settings.retrieval.embedding.provider,
                         )
@@ -977,4 +1028,7 @@ class HostCore:
             shutil.rmtree(workspace.workspace_root, ignore_errors=True)
 
     def _manifest_store(self) -> SessionManifestStore:
-        return SessionManifestStore(self.settings.storage.postgres_dsn)
+        access_lease = self._postgres_access_lease
+        if access_lease is None:
+            raise RuntimeError("PostgreSQL access lease has not been verified")
+        return SessionManifestStore(access_lease.connection_provider)

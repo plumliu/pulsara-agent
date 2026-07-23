@@ -10,9 +10,10 @@ from pathlib import Path
 import sys
 import time
 
-import psycopg
-
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.storage.schema_verification_service import (
+    acquire_verified_postgres_access_sync,
+)
 
 from benchmarks.suites.contracts import DogfoodContractError, load_suite
 from benchmarks.suites.runner import CoreDogfoodRunner, write_suite_summary
@@ -99,13 +100,18 @@ def main(argv: list[str] | None = None) -> int:
     selected = suite.select(frozenset(args.scenario))
     settings = _load_settings(args.env_file, override=args.override_env)
     try:
-        with psycopg.connect(
-            settings.storage.postgres_dsn, connect_timeout=3
-        ) as connection:
-            connection.execute("select 1")
-    except psycopg.Error as exc:
-        print(f"PostgreSQL preflight failed: {exc}", file=sys.stderr)
+        postgres_lease = acquire_verified_postgres_access_sync(
+            settings.storage.postgres_dsn,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+    except Exception as exc:
+        print(
+            f"PostgreSQL schema preflight failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return 2
+    else:
+        postgres_lease.release()
 
     started_at = datetime.now(timezone.utc)
     started_monotonic = time.monotonic()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from uuid import uuid4
 
@@ -18,7 +20,6 @@ from pulsara_agent.memory.canonical.mutation_outbox import (
 )
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 class _ClosingProvider:
@@ -155,7 +156,6 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
             assert second.wiring.runtime_wiring.retrieval_resources is resources
             with psycopg.connect(storage.postgres_dsn) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
                     cursor.execute(
                         "INSERT INTO graph_documents (graph_id, id, type, payload) VALUES (%s, %s, 'Preference', %s)",
                         (
@@ -177,7 +177,9 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
                         """,
                         (graph_id, memory_id),
                     )
-            outbox_id = MutationOutboxWriter(dsn=storage.postgres_dsn).append_payload(
+            outbox_id = MutationOutboxWriter(
+                connection_provider=verified_postgres_provider(storage.postgres_dsn)
+            ).append_payload(
                 CanonicalMutationPayload(
                     mutation_lane=CanonicalMutationLane.GOVERNED_MEMORY,
                     dirty_memory_ids=(memory_id,),

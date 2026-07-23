@@ -8,9 +8,14 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from typing import Any, Protocol
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from time import monotonic
+
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 from pulsara_agent.capability.descriptor import (
     CapabilityArtifactMode,
@@ -192,10 +197,14 @@ class InMemoryToolResultArtifactIndex:
 
 @dataclass(slots=True)
 class PostgresToolResultArtifactIndex:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
     def put(self, record: ToolResultArtifactRecord) -> None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -247,7 +256,11 @@ class PostgresToolResultArtifactIndex:
     def get_for_session(
         self, artifact_id: str, *, session_id: str
     ) -> ToolResultArtifactRecord | None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

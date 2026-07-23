@@ -42,7 +42,11 @@ from context_journal import (  # noqa: E402
     ContextSuiteJournal,
 )
 from network_guard import external_network_guard  # noqa: E402
-from postgres_sandbox import PostgresTemplateDatabaseSandbox  # noqa: E402
+from postgres_sandbox import (  # noqa: E402
+    PostgresTemplateDatabaseSandbox,
+    acquire_verified_benchmark_database_lease,
+    postgres_dsn_with_database,
+)
 from progress import BenchmarkProgressReporter  # noqa: E402
 from result_contract import (  # noqa: E402
     BenchmarkEnvironmentFact,
@@ -594,6 +598,26 @@ def _smoke_worker(
     return result.model_dump(mode="json")
 
 
+def _capture_verified_benchmark_environment(
+    *,
+    postgres_dsn: str,
+    template_database: str,
+) -> BenchmarkEnvironmentFact:
+    template_dsn = postgres_dsn_with_database(postgres_dsn, template_database)
+    lease = acquire_verified_benchmark_database_lease(
+        template_dsn,
+        database_name=template_database,
+    )
+    try:
+        return capture_benchmark_environment(
+            repo_root=REPO_ROOT,
+            runner_build_fingerprint=_runner_build_fingerprint(),
+            postgres_database_lease=lease,
+        )
+    finally:
+        lease.release()
+
+
 def _run_writer_benchmark(
     *,
     manifest,
@@ -664,10 +688,9 @@ def _run_writer_benchmark(
     benchmark_run_id = _benchmark_run_id(
         manifest.manifest_contract_fingerprint
     )
-    environment = capture_benchmark_environment(
-        repo_root=REPO_ROOT,
-        runner_build_fingerprint=_runner_build_fingerprint(),
+    environment = _capture_verified_benchmark_environment(
         postgres_dsn=postgres_dsn,
+        template_database=template,
     )
     sample_rows: list[WriterBenchmarkSampleResultFact] = []
     sample_ordinal = 0
@@ -706,7 +729,7 @@ def _run_writer_benchmark(
                                 run_model_semantic_batch_sample(
                                     scenario=scenario,
                                     execution_case=execution_case,
-                                    dsn=iteration_database.dsn,
+                                    database_lease=iteration_database,
                                     workspace_root=workspace_root,
                                     sample_identity=(
                                         f"{benchmark_run_id}:{phase}:"
@@ -719,7 +742,9 @@ def _run_writer_benchmark(
                                 close_postgres_event_pool,
                             )
 
-                            close_postgres_event_pool(iteration_database.dsn)
+                            close_postgres_event_pool(
+                                iteration_database.connection_provider
+                            )
                     observations[case.case_id] = observation
                 if phase == "warmup":
                     continue
@@ -838,10 +863,14 @@ def _run_context_suite(
         raise DatasetContractError(
             "formal context suite must include all executable scenarios"
         )
-    environment = capture_benchmark_environment(
-        repo_root=REPO_ROOT,
-        runner_build_fingerprint=_runner_build_fingerprint(),
+    template = template_database or conninfo_to_dict(postgres_dsn).get("dbname")
+    if not template:
+        raise DatasetContractError(
+            "template database is required when the DSN omits dbname"
+        )
+    environment = _capture_verified_benchmark_environment(
         postgres_dsn=postgres_dsn,
+        template_database=template,
     )
     if formal_run and environment.git.dirty:
         raise DatasetContractError(
@@ -1037,10 +1066,9 @@ def _run_context_benchmark(
     benchmark_run_id = _benchmark_run_id(
         manifest.manifest_contract_fingerprint
     )
-    environment = capture_benchmark_environment(
-        repo_root=REPO_ROOT,
-        runner_build_fingerprint=_runner_build_fingerprint(),
+    environment = _capture_verified_benchmark_environment(
         postgres_dsn=postgres_dsn,
+        template_database=template,
     )
     owns_reporter = progress_reporter is None
     reporter = progress_reporter or BenchmarkProgressReporter(
@@ -1103,7 +1131,7 @@ def _run_context_benchmark(
                                                 else None
                                             ),
                                             mode=case.mode,
-                                            dsn=iteration_database.dsn,
+                                            database_lease=iteration_database,
                                             workspace_root=workspace_root,
                                             sample_identity=(
                                                 f"{benchmark_run_id}:{phase}:"
@@ -1118,7 +1146,7 @@ def _run_context_benchmark(
                                     )
 
                                     close_postgres_event_pool(
-                                        iteration_database.dsn
+                                        iteration_database.connection_provider
                                     )
                             if phase == "measured":
                                 semantic_grade = _grade_context_observation(

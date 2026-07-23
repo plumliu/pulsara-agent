@@ -282,22 +282,24 @@ docker compose up -d postgres oxigraph
 cp .env.example .env
 $EDITOR .env
 
+uv run pulsara db migrate --env-file .env
+uv run pulsara db verify --deep --env-file .env
 uv run pulsara config-check --env-file .env
 uv run pulsara host repl --env-file .env --workspace .
 ```
 
-The bundled Docker PostgreSQL installs pgvector during first-time database
-initialization. For an existing or externally managed database, a PostgreSQL
-administrator must install it once in the exact database named by
-`PULSARA_POSTGRES_DSN`:
+The bundled Docker setup creates an admin database owner and a restricted
+runtime role. It does not create pgvector or Pulsara tables during container
+initialization. `pulsara db migrate` is the only schema mutation owner; it uses
+`PULSARA_POSTGRES_ADMIN_DSN` to install pgvector, apply immutable migrations,
+reconcile runtime grants, and record the durable migration ledger.
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-Keep `PULSARA_POSTGRES_DSN` bound to the normal application role. Pulsara's
-runtime schema initialization verifies that pgvector exists but never requests
-extension-install privileges.
+Keep `PULSARA_POSTGRES_DSN` bound to the restricted runtime role. Host,
+Inspector, checkpoint, and benchmark runtime paths are verify-only and fail
+before allocating session resources when the database is unmigrated, stale, or
+drifted. Existing unmanaged Pulsara tables are deliberately not adopted in V1;
+reset the PostgreSQL database (and the corresponding Oxigraph projection) before
+the migration cutover.
 
 Inside the REPL:
 
@@ -343,9 +345,15 @@ PULSARA_FLASH_MAX_OUTPUT_TOKENS=1024
 PULSARA_FLASH_DEFAULT_OUTPUT_TOKENS=512
 PULSARA_FLASH_INPUT_SAFETY_MARGIN_TOKENS=128
 
-PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
+PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:pulsara_admin@localhost:5432/pulsara
+PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:pulsara_runtime@localhost:5432/pulsara
 PULSARA_OXIGRAPH_URL=http://localhost:7878
 ```
+
+The admin DSN is read only by `pulsara db migrate`; it is not part of runtime
+settings, wiring, logs, or Inspector output. Use `pulsara db status` for a
+bounded migration report and `pulsara db verify --deep` for an offline full
+catalog check.
 
 The model-limit values above are only internally consistent examples, not a
 model catalog. Set them to the documented limits of the exact provider/model

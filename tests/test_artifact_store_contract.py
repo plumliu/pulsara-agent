@@ -1,3 +1,4 @@
+from tests.support.postgres import verified_postgres_provider
 import asyncio
 import hashlib
 import urllib.parse
@@ -6,8 +7,9 @@ from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from tests.support.runtime_session import in_memory_runtime_session
 
 from tests.support.model_stream import (
@@ -29,12 +31,6 @@ from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.settings import StorageConfig
 
 
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
-
 
 def _runtime_session_id() -> str:
     return f"runtime:test:{uuid4().hex}"
@@ -48,11 +44,21 @@ def _event_context(label: str) -> EventContext:
     )
 
 
-def _seed_runtime_parent_rows(dsn: str, tmp_path: Path, *, runtime_session_id: str | None = None):
+def _seed_runtime_parent_rows(
+    dsn: str, tmp_path: Path, *, runtime_session_id: str | None = None
+):
     session_id = runtime_session_id or _runtime_session_id()
     ctx = _event_context("artifact-parent")
-    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=session_id, workspace_root=tmp_path)
-    event_log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:parent", delta="parent"))
+    event_log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=session_id,
+        workspace_root=tmp_path,
+    )
+    event_log.append(
+        make_text_block_segment_event(
+            **ctx.event_fields(), block_id="text:parent", delta="parent"
+        )
+    )
     return session_id, ctx
 
 
@@ -86,7 +92,7 @@ def _artifact_id_from_node_ref(node_id: str) -> str:
 def artifact_store() -> ArtifactStore:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
-    return PostgresArtifactStore(dsn=dsn)
+    return PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
 
 
 def test_artifact_store_puts_and_gets_text(artifact_store: ArtifactStore) -> None:
@@ -102,10 +108,12 @@ def test_artifact_store_puts_and_gets_text(artifact_store: ArtifactStore) -> Non
         assert result.size_bytes == len(content.encode("utf-8"))
         assert artifact_store.get_text(blob_id) == content
     finally:
-        _delete_artifact(artifact_store.dsn, blob_id)
+        _delete_artifact(StorageConfig.from_env().postgres_dsn, blob_id)
 
 
-def test_artifact_store_put_text_is_idempotent_for_same_content(artifact_store: ArtifactStore) -> None:
+def test_artifact_store_put_text_is_idempotent_for_same_content(
+    artifact_store: ArtifactStore,
+) -> None:
     blob_id = f"artifact:test:{uuid4().hex}"
 
     try:
@@ -115,7 +123,7 @@ def test_artifact_store_put_text_is_idempotent_for_same_content(artifact_store: 
         assert first == second
         assert artifact_store.get_text(blob_id) == "same"
     finally:
-        _delete_artifact(artifact_store.dsn, blob_id)
+        _delete_artifact(StorageConfig.from_env().postgres_dsn, blob_id)
 
 
 def test_postgres_artifact_store_reloads_persisted_text() -> None:
@@ -124,9 +132,13 @@ def test_postgres_artifact_store_reloads_persisted_text() -> None:
     _connect_or_skip(dsn).close()
 
     try:
-        first_store = PostgresArtifactStore(dsn=dsn)
+        first_store = PostgresArtifactStore(
+            connection_provider=verified_postgres_provider(dsn)
+        )
         first_store.put_text(blob_id, "durable")
-        second_store = PostgresArtifactStore(dsn=dsn)
+        second_store = PostgresArtifactStore(
+            connection_provider=verified_postgres_provider(dsn)
+        )
 
         assert second_store.get_text(blob_id) == "durable"
     finally:
@@ -136,7 +148,7 @@ def test_postgres_artifact_store_reloads_persisted_text() -> None:
 def test_postgres_artifact_store_rejects_same_id_with_different_content() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     _connect_or_skip(dsn).close()
 
     try:
@@ -151,29 +163,39 @@ def test_postgres_artifact_store_rejects_same_id_with_different_content() -> Non
 def test_postgres_artifact_store_rejects_missing_session_owner() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     _connect_or_skip(dsn).close()
 
     try:
         with pytest.raises(ValueError, match="does not exist"):
-            store.put_text(blob_id, "owned", session_id=f"runtime:missing:{uuid4().hex}")
+            store.put_text(
+                blob_id, "owned", session_id=f"runtime:missing:{uuid4().hex}"
+            )
     finally:
         _delete_artifact(dsn, blob_id)
 
 
 def test_postgres_artifact_store_rejects_run_without_session() -> None:
-    store = PostgresArtifactStore(dsn=StorageConfig.from_env().postgres_dsn)
+    store = PostgresArtifactStore(
+        connection_provider=verified_postgres_provider(
+            StorageConfig.from_env().postgres_dsn
+        )
+    )
 
     with pytest.raises(ValueError, match="requires session_id"):
-        store.put_text(f"artifact:test:{uuid4().hex}", "owned", run_id=f"run:{uuid4().hex}")
+        store.put_text(
+            f"artifact:test:{uuid4().hex}", "owned", run_id=f"run:{uuid4().hex}"
+        )
 
 
-def test_postgres_artifact_store_rejects_run_owned_by_another_session(tmp_path: Path) -> None:
+def test_postgres_artifact_store_rejects_run_owned_by_another_session(
+    tmp_path: Path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     owner_session_id, owner_ctx = _seed_runtime_parent_rows(dsn, tmp_path)
     other_session_id, _other_ctx = _seed_runtime_parent_rows(dsn, tmp_path)
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
 
     try:
         with pytest.raises(ValueError, match="already belongs to runtime session"):
@@ -189,18 +211,24 @@ def test_postgres_artifact_store_rejects_run_owned_by_another_session(tmp_path: 
         _delete_session(dsn, other_session_id)
 
 
-def test_postgres_artifact_store_rejects_owner_conflict_for_same_id(tmp_path: Path) -> None:
+def test_postgres_artifact_store_rejects_owner_conflict_for_same_id(
+    tmp_path: Path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     first_session_id, first_ctx = _seed_runtime_parent_rows(dsn, tmp_path)
     second_session_id, second_ctx = _seed_runtime_parent_rows(dsn, tmp_path)
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
 
     try:
-        store.put_text(blob_id, "same", session_id=first_session_id, run_id=first_ctx.run_id)
+        store.put_text(
+            blob_id, "same", session_id=first_session_id, run_id=first_ctx.run_id
+        )
 
         with pytest.raises(ValueError, match="already belongs to runtime session"):
-            store.put_text(blob_id, "same", session_id=second_session_id, run_id=second_ctx.run_id)
+            store.put_text(
+                blob_id, "same", session_id=second_session_id, run_id=second_ctx.run_id
+            )
     finally:
         _delete_artifact(dsn, blob_id)
         _delete_session(dsn, first_session_id)
@@ -210,7 +238,7 @@ def test_postgres_artifact_store_rejects_owner_conflict_for_same_id(tmp_path: Pa
 def test_postgres_artifact_store_concurrent_same_content_is_idempotent() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     barrier = Barrier(2)
     _connect_or_skip(dsn).close()
 
@@ -228,10 +256,12 @@ def test_postgres_artifact_store_concurrent_same_content_is_idempotent() -> None
         _delete_artifact(dsn, blob_id)
 
 
-def test_postgres_artifact_store_concurrent_different_content_rejects_one_writer() -> None:
+def test_postgres_artifact_store_concurrent_different_content_rejects_one_writer() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     barrier = Barrier(2)
     _connect_or_skip(dsn).close()
 
@@ -322,7 +352,7 @@ def test_postgres_deterministic_artifact_rejects_metadata_only_conflict() -> Non
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     blob_id = f"artifact:test:{uuid4().hex}"
-    store = PostgresArtifactStore(dsn=dsn)
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     try:
         store.put_text_if_absent_or_confirm_identical(
             blob_id,
@@ -353,16 +383,18 @@ def test_postgres_deterministic_artifact_concurrent_writers_confirm_identity() -
 
     def put() -> str:
         barrier.wait(timeout=2)
-        return PostgresArtifactStore(
-            dsn=dsn
-        ).put_text_if_absent_or_confirm_identical(
-            blob_id,
-            "same",
-            session_id=None,
-            run_id=None,
-            media_type="text/plain",
-            semantic_metadata={"renderer": "v1", "cap": 17},
-        ).status
+        return (
+            PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
+            .put_text_if_absent_or_confirm_identical(
+                blob_id,
+                "same",
+                session_id=None,
+                run_id=None,
+                media_type="text/plain",
+                semantic_metadata={"renderer": "v1", "cap": 17},
+            )
+            .status
+        )
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -376,11 +408,13 @@ def test_postgres_deterministic_artifact_concurrent_writers_confirm_identity() -
         _delete_artifact(dsn, blob_id)
 
 
-def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path) -> None:
+def test_run_timeline_persistence_can_use_postgres_artifact_store(
+    tmp_path: Path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()
     event_log = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
@@ -403,9 +437,9 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
         tmp_path,
         runtime_session_id=runtime_session_id,
     )
-    archive = PostgresArtifactStore(dsn=dsn)
+    archive = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
     graph_id = f"graph:test:{uuid4().hex}"
-    graph = PostgresGraphStore(dsn=dsn)
+    graph = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     runtime.hook_manager.register_event(
         None,
         RunTimelinePersistenceHook(
@@ -417,8 +451,14 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
     )
 
     async def run() -> None:
-        await runtime.emit(make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="hello"))
-        await runtime.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
+        await runtime.emit(
+            make_text_block_segment_event(
+                **ctx.event_fields(), block_id="text:1", delta="hello"
+            )
+        )
+        await runtime.emit(
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed")
+        )
 
     try:
         asyncio.run(run())
@@ -436,11 +476,16 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
         assert timeline.run_id == ctx.run_id
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("select session_id, run_id from artifacts where id = %s", (blob_id,))
+                cursor.execute(
+                    "select session_id, run_id from artifacts where id = %s", (blob_id,)
+                )
                 assert cursor.fetchone() == (runtime_session_id, ctx.run_id)
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("delete from artifacts where id like %s", (f"timeline:{runtime_session_id}:{ctx.run_id}:%",))
+                cursor.execute(
+                    "delete from artifacts where id like %s",
+                    (f"timeline:{runtime_session_id}:{ctx.run_id}:%",),
+                )
         graph.delete_graph(graph_id)
         _delete_session(dsn, runtime_session_id)

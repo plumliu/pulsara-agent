@@ -24,6 +24,8 @@ _Created: 2026-07-04_
   - 覆盖 LLM role/model selection、provider-neutral request、transport event translation、usage、retry、provider profiles。
 - [EVENT_LOG_STORAGE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/EVENT_LOG_STORAGE_CONTRACT.zh.md)
   - 覆盖 typed event log、Postgres runtime truth schema、sequence、parent rows、run projection、artifact storage。
+- [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)
+  - 覆盖 PostgreSQL migration registry/ledger、admin/runtime role、verify-only startup、physical connection provider、部署与测试数据库边界。
 - [RUNTIME_EVENT_PUBLISHING_HOOKS_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RUNTIME_EVENT_PUBLISHING_HOOKS_CONTRACT.zh.md)
   - 覆盖 post-commit runtime event publisher、ordered subscriber delivery、RuntimeHookManager、observer hook isolation、tool-result error event helpers。
 - [MESSAGE_TRANSCRIPT_CONTEXT_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MESSAGE_TRANSCRIPT_CONTEXT_CONTRACT.zh.md)
