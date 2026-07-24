@@ -115,8 +115,11 @@ Compaction summary 必须带 no-write-back fence，并明确区分:
 - mid-turn compact 不得把 current run 的 `RUN_START`、current user input、assistant tool call、tool result、pending approval、pending plan interaction 或 pending MCP elicitation payload 写入 summary。
 - pending approval / pending plan interaction / pending MCP elicitation 状态下不得自动 compact；必须等 resolution 后回到 tool-follow-up safe point。
 - 手动 `:compact` 只允许 idle session。
-- 手动 `:compact` 直接写入的 compaction events 必须 publish 到 `RuntimeSession.publisher`，避免后续 runtime event 出现 sequence gap；但不得同时触发 REPL compaction listener 双输出。
-- mid-turn compact 直接写入的 started/completed/failed events 也必须 publish 到 `RuntimeSession.publisher`，并作为 active run event stream 的一部分可观察；不得通过 HostSession idle listener 在 REPL prompt 后后台打印。
+- 手动 `:compact` 与 mid-turn compaction都必须通过 injected RuntimeSession compaction
+  commit port提交；service缺少该 port时构造失败。不存在 direct EventLog fallback。
+- RuntimeSession是 Started/Completed/Failed 的唯一 publisher。Host listener只消费 service
+  返回的 exact terminal receipt；Host/mid-turn不得按 sequence post-scan、event-type filter
+  或二次调用 `publish_stored_events()`。
 - Missing summary artifact 必须 fail-open 到 full event replay。
 - Repeated auto compact failure 必须有 circuit breaker，避免每轮重复烧模型。
 - Compact model 不得获得工具 schema；compact prompt 必须强制 text-only/no-tools。
@@ -130,6 +133,37 @@ Compaction summary 必须带 no-write-back fence，并明确区分:
 - confirmation读取自身抛错时同样必须转移pending owner；不得把unknown confirmation降格为raw cancellation并遗忘后台write。
 - session/recovery发现orphan Started时，使用Started冻结的terminal ID和模型/预算事实写
   `recovery_terminalization/recovered_interrupted` Failed event，不重新resolve模型或重新规划window。
+
+### 6.1 Core attempt 与 candidate projection ownership
+
+每次 compaction core attempt只收集本 attempt commit receipts中的
+Started + Completed/Failed。`ContextCompactionAttemptResult`不得扫描 ledger寻找 terminal，
+也不得包含并发的无关 event。Started publication失败使用
+`failure_stage="started_publication"` 的稳定 Failed；其 summarizer fields全部为空。
+
+Memory candidate proposal是独立 projection owner，不属于 core terminal correctness。
+Completed publication为 completed/enqueued且 prepared input成功后才能安装 owner；
+unavailable/failed-after-commit必须返回 `suppressed_by_publication_latch`，不写
+producer/outbox。Owner phases固定为 owner-installed、candidate-frozen、
+producer-bundle-full、projection-applied；caller cancellation只 detach，迟到 outcome由
+owner与 existing projection outbox消费。Proposal失败不得把 canonical Completed改写为
+Failed。
+
+Publication failure若发生在 PRE_RUN/manual、没有 active run，只完成 terminal maintenance
+并关闭 session，不伪造 RunEnd。MID_TURN active run必须关闭 exact window/account并以
+`compaction_publication_unavailable` 写 aborted RunEnd；source refs exact绑定 Started与最终
+Completed/Failed。Terminal-maintenance lease使用 reserved deadline tail，绑定 exact ordered
+batch。
+
+Model summarization deadline与durable event-write deadline是两个owner。Started、
+Completed和Failed candidate分别在其第一次writer admission时冻结自己的absolute write
+budget；模型调用耗时不得提前消耗尚未构造的Completed/Failed写入预算。相同candidate的
+NONE retry与pending drain复用原budget且不得续期；restart恢复出的orphan terminal
+candidate只在首次physical recovery write admission时取得新的recovery budget。
+`ContextCompactionAttemptResult.terminal_event_deadline_budget`只携带本attempt最终
+Completed/Failed candidate的首次admission budget，并必须与该terminal commit receipt
+逐值相等；not-attempted结果必须为`None`。结果不得保留或覆盖成语义不明确的
+attempt-wide/latest-receipt deadline。
 
 ## 7. Inspector
 
@@ -155,11 +189,11 @@ Inspector 必须能解释:
 - run-end 不得调度后台 auto compact;
 - single huge completed run 可在下一轮 preflight 触发 auto compact;
 - preflight compact 后继续消费原始 current user input;
-- manual `:compact` publishes direct-written compaction events without duplicate listener notice;
+- manual `:compact` 通过 RuntimeSession writer发布 exact compaction receipts且无重复 listener notice;
 - approval / plan / MCP suspended-run resume 不触发 auto compact;
 - mid-turn compact 只压 current run 前的历史 prefix;
 - current run assistant tool call 和 tool result 保留在 rewritten `LoopState.messages` tail;
-- mid-turn compact failed event publish 后，后续 runtime event 不得因 sequence gap 卡住;
+- mid-turn compact failed event由 RuntimeSession发布，后续 runtime event 不得因 sequence gap 卡住;
 - inspector windows 显示 mid-turn phase/safe-point metadata;
 - inspector windows/diagnostics;
 - real LLM dogfood 覆盖 long-session compact/resume。

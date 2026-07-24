@@ -238,6 +238,13 @@ Real dogfood 不应只断言 final text。
 - artifact id / compaction id；
 - downloaded / deleted file evidence。
 
+Provider报告的`total_tokens`、cached input、uncached input与output usage属于结果
+telemetry，不是scenario correctness hard gate。尤其gross `total_tokens`会在每次model
+call中重复计入已缓存prefix，既不表示单次context峰值，也不等价于真实费用；不得仅因多次
+调用累计超过一个固定token数而把语义、durable lifecycle与hidden verifier均正确的轨迹判为
+失败。V1防失控硬边界由scenario timeout、maximum model calls、maximum tool calls、
+provider单次context budget与rollover bound共同承担。
+
 ---
 
 ## 5. Core trajectory coverage

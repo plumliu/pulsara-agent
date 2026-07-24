@@ -67,6 +67,9 @@ from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessMonitorRegistrationSemanticFact,
     TerminalProcessObservationReceiptFact,
 )
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredTerminalSourceFact,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import RuntimeSession
@@ -219,6 +222,9 @@ class ToolResultEndCandidate:
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
+    mcp_input_required_terminal_source: (
+        McpInputRequiredTerminalSourceFact | None
+    ) = None
 
     def __post_init__(self) -> None:
         if not all((self.id, self.run_id, self.turn_id, self.reply_id, self.tool_call_id)):
@@ -295,6 +301,9 @@ class ToolResultEndCandidate:
             ),
             terminal_process_monitor_cancellation=(
                 self.terminal_process_monitor_cancellation
+            ),
+            mcp_input_required_terminal_source=(
+                self.mcp_input_required_terminal_source
             ),
             terminal_projection=projection,
         )
@@ -555,6 +564,7 @@ class ToolTerminalProjectionService:
             terminal_process_observation_receipt=None,
             terminal_process_monitor_registration=None,
             terminal_process_monitor_cancellation=None,
+            mcp_input_required_terminal_source=None,
         )
         payload = ToolTerminalProjectionPayloadFact(
             schema_version="tool_terminal_projection_payload.v2",
@@ -617,6 +627,7 @@ class ToolTerminalProjectionService:
             result_state=ToolResultStateFact(block.state.value),
             terminal_process_monitor_registration_semantic_fingerprint=None,
             terminal_process_monitor_cancellation_semantic_fingerprint=None,
+            mcp_input_required_terminal_source_fingerprint=None,
             semantic_fingerprint=semantic.semantic_fingerprint,
         )
         reference = build_frozen_fact(
@@ -781,6 +792,9 @@ class ToolTerminalProjectionService:
             terminal_process_monitor_cancellation=(
                 terminal.terminal_process_monitor_cancellation
             ),
+            mcp_input_required_terminal_source=(
+                terminal.mcp_input_required_terminal_source
+            ),
         )
         payload = ToolTerminalProjectionPayloadFact(
             schema_version="tool_terminal_projection_payload.v2",
@@ -841,6 +855,11 @@ class ToolTerminalProjectionService:
                 None
                 if terminal.terminal_process_monitor_cancellation is None
                 else terminal.terminal_process_monitor_cancellation.cancellation_semantic_fingerprint
+            ),
+            mcp_input_required_terminal_source_fingerprint=(
+                None
+                if terminal.mcp_input_required_terminal_source is None
+                else terminal.mcp_input_required_terminal_source.source_fingerprint
             ),
             semantic_fingerprint=semantic.semantic_fingerprint,
         )

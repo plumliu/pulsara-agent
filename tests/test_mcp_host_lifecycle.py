@@ -28,6 +28,7 @@ from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     McpCapabilitySnapshotInstalledEvent,
+    McpInputRequiredBindingChangedEvent,
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
 )
@@ -1101,7 +1102,7 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         binding_change_events = [
             event
             for event in event_log.iter()
-            if getattr(event, "name", None) == "mcp_input_required_binding_changed"
+            if isinstance(event, McpInputRequiredBindingChangedEvent)
         ]
         assert len(binding_change_events) == 1
         await core.shutdown()

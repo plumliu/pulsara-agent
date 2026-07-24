@@ -23,7 +23,12 @@ from pulsara_agent.capability.result_semantics import (
     default_essential_capture_policy,
     ToolResultSemanticsBuilderRegistry,
 )
-from pulsara_agent.primitives.context import CapabilityDescriptorRenderAttributionFact
+from pulsara_agent.primitives.context import (
+    CapabilityDescriptorRenderAttributionFact,
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
+)
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 from pulsara_agent.primitives.tool_result import (
     ToolResultEssentialCapturePolicyFact,
@@ -446,8 +451,13 @@ def _with_tool_observation_timing_seed(
     context_id: str | None,
     model_call_index: int | None,
 ) -> ToolExecutionSuspended:
-    payload = dict(suspended.payload)
-    seed = dict(payload.get("tool_observation_timing_seed") or {})
+    prepared = suspended.prepared_mcp_input_required
+    existing_seed = prepared.tool_observation_timing_seed
+    seed = (
+        dict(thaw_json(existing_seed))
+        if isinstance(existing_seed, FrozenJsonObjectFact)
+        else {}
+    )
     seed.update(
         {
             "tool_call_id": suspended.tool_call_id,
@@ -461,8 +471,16 @@ def _with_tool_observation_timing_seed(
             "source_model_call_index": model_call_index,
         }
     )
-    payload["tool_observation_timing_seed"] = seed
-    return replace(suspended, payload=payload)
+    frozen_seed = freeze_json(seed)
+    if not isinstance(frozen_seed, FrozenJsonObjectFact):
+        raise AssertionError("MCP timing seed must freeze as an object")
+    return replace(
+        suspended,
+        prepared_mcp_input_required=prepared.model_copy(
+            update={"tool_observation_timing_seed": frozen_seed},
+            deep=True,
+        ),
+    )
 
 
 def _tool_origin_from_descriptor(descriptor: CapabilityDescriptor | None) -> str:

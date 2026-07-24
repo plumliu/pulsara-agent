@@ -175,7 +175,6 @@ class EvidenceGateContract(FrozenContract):
     max_model_calls: int = Field(ge=1, le=256)
     min_tool_calls: int = Field(ge=0, le=512)
     max_tool_calls: int = Field(ge=0, le=512)
-    max_total_tokens: int = Field(ge=1, le=10_000_000)
     event_count_minimums: tuple[EventCountMinimum, ...] = ()
     forbidden_event_types: tuple[str, ...] = ()
     root_run_tool_gate: RootRunToolGate | None = None

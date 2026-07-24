@@ -876,9 +876,15 @@ class EventLog(Protocol):
         turn_id: str | None = None,
         reply_id: str | None = None,
         after_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]: ...
 
-    def get_by_id(self, event_id: str) -> AgentEvent | None: ...
+    def get_by_id(
+        self,
+        event_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> AgentEvent | None: ...
 
     def confirm_batch(
         self,
@@ -1026,7 +1032,7 @@ class EventLog(Protocol):
 
     def replay(self, reply_id: str) -> Msg: ...
 
-    def next_sequence(self) -> int: ...
+    def next_sequence(self, *, deadline_monotonic: float | None = None) -> int: ...
 
 
 def raw_checkpoint_catalog_identity(

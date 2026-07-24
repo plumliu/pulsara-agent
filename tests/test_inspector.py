@@ -33,6 +33,7 @@ from tests.support.model_stream import (
     make_tool_call_end_event,
     make_tool_call_start_event,
 )
+from tests.support.events import typed_non_transcript_event
 
 from pulsara_agent.primitives.long_horizon import default_child_rollout_policy
 
@@ -43,7 +44,6 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
-    CustomEvent,
     EventContext,
     McpCapabilitySnapshotInstalledEvent,
     ModelCallStartEvent,
@@ -1437,7 +1437,7 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(
         )
         ctx = _ctx("missing-compaction-summary")
         log.extend(_simple_run_events(ctx, user_input="old", text="done"))
-        log.append(
+        completed = log.append(
             ContextCompactionCompletedEvent(
                 **ctx.event_fields(),
                 **compaction_completed_contract_fields(
@@ -1461,6 +1461,17 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(
         report = _service(dsn).inspect_session(runtime_session_id)
 
         assert report["compaction_windows"][0]["summary_artifact_present"] is False
+        assert report["compaction_candidate_projection_durable_status"] == [
+            {
+                "compaction_id": completed.compaction_id,
+                "completed_event_id": completed.id,
+                "completed_sequence": completed.sequence,
+                "core_status": "completed",
+                "status": "not_durably_observable",
+                "producer_event_id": None,
+                "durable_evidence": [],
+            }
+        ]
         assert any(
             diagnostic["code"] == "context_compaction_missing_summary_artifact"
             for diagnostic in report["diagnostics"]
@@ -1664,6 +1675,14 @@ def test_inspect_session_links_context_compaction_memory_candidates(
             window["memory_candidates"][0]["governance_decisions"][0]["decision_id"]
             == decision_id
         )
+        projection_status = next(
+            item
+            for item in report["compaction_candidate_projection_durable_status"]
+            if item["compaction_id"] == completed.compaction_id
+        )
+        assert projection_status["status"] == "not_durably_observable"
+        assert projection_status["producer_event_id"] == proposed.id
+        assert projection_status["durable_evidence"] == ["producer_event"]
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
@@ -1827,7 +1846,7 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                         descriptor_id="builtin:read_file",
                     ),
                 ),
-                CustomEvent(
+                typed_non_transcript_event(
                     **ctx.event_fields(),
                     name="capability_gate_decision",
                     value={

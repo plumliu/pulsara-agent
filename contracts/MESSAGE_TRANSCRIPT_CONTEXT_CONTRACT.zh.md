@@ -274,3 +274,16 @@ canonical transcript或confirmed Long-Horizon projection。
 `TerminalProcessCompletedEvent`只属于lifecycle authority，不直接追加模型可见completion note，也不进入transcript semantic accumulator。模型可见的terminal事实只能由以下一个owner投影：显式`poll/log/wait` ToolResult receipt、monitor observation attachment，或下一次human run携带的unmonitored completion attachment。Matching receipt/monitor delivery必须有durable disposition，禁止同一completion重复进入provider input。
 
 Progress observation最多一个pending；completion可supersede progress，但最终output range必须从`last_consumed_cursor`开始，不能从仅已落盘、尚未交付的`last_observation_cursor`开始。Receipt只有在visible/artifact range完整覆盖pending的available-start到end，并在completion分支同时join相同typed lifecycle outcome时，才可消费notification。Running receipt不得消费completion。
+
+---
+
+## 13. Typed runtime audit non-transcript boundary
+
+MCP input-required suspension/resolution/expired/binding-changed/resume-failed/closure、
+context-compaction request、mid-turn compaction skip与 tool-result evidence projection failure
+全部属于 explicit `non_transcript`。它们推进 ledger continuity，但不直接生成 user/assistant
+message，也不进入 transcript semantic accumulator。
+
+MCP normal ToolResult仍由 typed ToolResult terminal projection成为模型可见事实；closure和
+resume-failed只提供 lifecycle/recovery authority。Compaction Started/Completed/Failed仍按
+既有 summary boundary规则投影；request/skip audit不能成为第二份 compaction message。

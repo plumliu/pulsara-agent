@@ -27,7 +27,7 @@ from pulsara_agent.event import (
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
 )
-from pulsara_agent.event_log import EventLog, InMemoryEventLog
+from pulsara_agent.event_log import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.model_call import ModelCallDiagnosticFact
 from pulsara_agent.primitives.frozen import build_frozen_fact
@@ -90,18 +90,9 @@ class ModelStreamRecoveryService:
         *,
         event_log: EventLog,
         archive: ArtifactStore,
-        allow_unbootstrapped_test_events: bool = False,
     ) -> None:
-        if allow_unbootstrapped_test_events and not isinstance(
-            event_log, InMemoryEventLog
-        ):
-            raise ValueError(
-                "unbootstrapped model recovery is restricted to the in-memory "
-                "pytest event log"
-            )
         self._event_log = event_log
         self._archive = archive
-        self._allow_unbootstrapped_test_events = allow_unbootstrapped_test_events
         self._terminal_contracts = build_default_terminal_projection_contract_bundle()
         self._materialization_contracts = (
             build_default_authority_materialization_contract_bundle()
@@ -185,14 +176,9 @@ class ModelStreamRecoveryService:
             deadline_monotonic=deadline_monotonic
         )
         if account is None:
-            if not self._allow_unbootstrapped_test_events:
-                raise ModelStreamRecoveryStructuralError(
-                    "non-empty model recovery ledger is missing its required "
-                    "materialization account"
-                )
-            return self._commit_unbootstrapped_test_batch(
-                batch=batch,
-                high_water=high_water,
+            raise ModelStreamRecoveryStructuralError(
+                "non-empty model recovery ledger is missing its required "
+                "materialization account"
             )
         if account.ledger_through_sequence != high_water:
             raise ModelStreamRecoveryStructuralError(
@@ -285,29 +271,6 @@ class ModelStreamRecoveryService:
                 "model recovery terminal settlement could not be confirmed"
             ) from exc
         return committed.stored_events
-
-    def _commit_unbootstrapped_test_batch(
-        self,
-        *,
-        batch: tuple[AgentEvent, ...],
-        high_water: int,
-    ) -> tuple[AgentEvent, ...]:
-        try:
-            return tuple(
-                self._event_log.extend(
-                    batch,
-                    expected_last_sequence=high_water,
-                )
-            )
-        except BaseException:
-            confirmation = self._event_log.confirm_batch(batch)
-            if confirmation.missing_event_ids:
-                if confirmation.committed_events:
-                    raise ModelStreamRecoveryStructuralError(
-                        "model recovery terminal batch committed partially"
-                    )
-                raise
-            return confirmation.committed_events
 
     def _build_recovery_terminal_batch(
         self,

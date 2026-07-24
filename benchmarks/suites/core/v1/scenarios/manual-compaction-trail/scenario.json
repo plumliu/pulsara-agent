@@ -33,7 +33,6 @@
     "max_model_calls": 16,
     "min_tool_calls": 7,
     "max_tool_calls": 24,
-    "max_total_tokens": 350000,
     "event_count_minimums": [
       {"event_type": "CONTEXT_COMPACTION_COMPLETED", "minimum": 1},
       {"event_type": "MODEL_CALL_END", "minimum": 3},

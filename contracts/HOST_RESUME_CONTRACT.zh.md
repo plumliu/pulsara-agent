@@ -181,9 +181,18 @@ Resume 不能恢复旧 pending approval / pending plan interaction / pending MCP
 
 当前 V1 语义：
 
-- dangling active run 先被 repair 为 aborted；
+- model stream/control recovery先运行；
+- MCP active lifecycle recovery随后运行；进程重启后 exact Supervisor lease owner必然丢失，
+  因此提交 typed closure + terminal ToolResult + settlement，再关闭 window/account并写
+  exact RunEnd；
+- 其余 dangling active run最后才被 repair 为 aborted；
+- HostCore在上述任何recovery之前冻结一个open-scoped absolute deadline；main/child MCP
+  lifecycle、每个dangling run/child、所有query与最终projection repair必须共享它；
+- 该共享deadline只适用于resume；fresh open在前置资源准备和schema verification完成后，
+  由新`RuntimeSession`于bootstrap admission独立冻结startup deadline；
 - 新 turn 从 repaired transcript 继续；
-- process-local MCP pending lease只在同一live HostSession内支持resume，不跨进程重建；
+- process-local MCP pending lease只在同一live HostSession内支持resume，SESSION_REOPEN
+  不重新 acquire或伪造同名 lease；
 - 用户需要重新发出需要执行的意图；
 - 不自动重放未完成工具调用。
 
@@ -191,7 +200,8 @@ Resume 不能恢复旧 pending approval / pending plan interaction / pending MCP
 
 ### 9.1 Live MCP pending lease
 
-同一live HostSession收到`ToolExecutionSuspended(interaction_kind="mcp_input_required")`时，executor持有的exact slot
+同一live HostSession收到带 required typed
+`McpInputRequiredSuspensionFact` 的 `ToolExecutionSuspended` 时，executor持有的exact slot
 lease必须先`promote_lease_to_pending(interaction_id)`，durable suspension event提交确认后再confirm reservation；若
 pending event在commit前失败则abort reservation并归还lease；若event已commit、仅ordered publisher/observer失败，
 canonical pending fact已经成立，必须confirm reservation并保留pending ownership，不得错误归还lease。Resume通过
@@ -228,6 +238,12 @@ ledger并阻止后续破坏性teardown。
 Suspension/resume写入等待publication期间被取消时仍按stable candidate batch确认：`NONE`恢复写前state并保留或abort
 对应reservation；`FULL`折叠canonical fact并推进唯一Supervisor lease owner；`PARTIAL/UNKNOWN`恢复可定位的pending carrier、
 latch ledger并保留lease。Host close不得把“state已被提前clear”解释为没有pending owner。
+
+Suspension、resume boundary或 resume-failed event durable FULL、publication
+unavailable时，Host不得继续普通 dispatch。Active interaction由 typed closure + error
+ToolResult收口；terminal disposition已经关闭 interaction时不生成第二个 closure，只由
+terminal-maintenance owner关闭 active run。Closure publication failure只继续 RunEnd；
+RunEnd publication failure不再生成任何 event，只 bounded close。
 
 ---
 

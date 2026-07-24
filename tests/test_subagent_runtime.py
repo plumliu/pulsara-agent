@@ -9,6 +9,7 @@ import pytest
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support.capability import preview_capability_plan
+from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
 
 from tests.support.raw_provider import (
@@ -30,7 +31,6 @@ from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ChildRolloutSubaccountClosedEvent,
     ContextCompiledEvent,
-    CustomEvent,
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
@@ -744,7 +744,7 @@ def test_list_projection_does_not_hydrate_full_child_transcript(
             reply_id="reply:child-list-boundary",
         )
         await child_session.emit(
-            CustomEvent(
+            typed_non_transcript_event(
                 **child_context.event_fields(),
                 name="child_raw_transcript_marker",
                 value={"secret_marker": "MUST_NOT_BE_HYDRATED_BY_LIST"},

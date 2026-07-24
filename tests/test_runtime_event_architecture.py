@@ -11,7 +11,14 @@ import pytest
 from pulsara_agent.primitives.authority_materialization import (
     LedgerWriteAdmissionClass,
 )
-from pulsara_agent.event.events import AgentEvent, EventBase
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    build_bounded_runtime_failure_diagnostic,
+)
+from pulsara_agent.event.events import AgentEvent, EventBase, EventType
+from pulsara_agent.event_log import AGENT_EVENT_SCHEMA_VERSION
+from pulsara_agent.event_log.transcript_prefix import (
+    EXPLICIT_NON_TRANSCRIPT_EVENT_TYPES,
+)
 from pulsara_agent.llm.raw_provider import (
     RawProviderBlockEnd,
     RawProviderBlockStart,
@@ -42,6 +49,45 @@ MEMORY_GOVERNANCE_DIR = (
     REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
 )
 SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    (
+        "execution_evidence_projection_error.v1",
+        "compaction_candidate_projection_preparation_error.v1",
+        "compaction_candidate_projection_owner_installation_error.v1",
+    ),
+)
+def test_runtime_failure_diagnostic_profiles_never_persist_raw_error_text(
+    profile_id: str,
+) -> None:
+    diagnostic = build_bounded_runtime_failure_diagnostic(
+        error=RuntimeError(
+            "Bearer durable-secret access_token=token-value sk-very-secret"
+        ),
+        redaction_profile_id=profile_id,
+    )
+
+    durable = diagnostic.model_dump_json()
+    assert "durable-secret" not in durable
+    assert "token-value" not in durable
+    assert "sk-very-secret" not in durable
+
+
+def test_runtime_failure_explicit_message_is_scrubbed_by_closed_profile() -> None:
+    diagnostic = build_bounded_runtime_failure_diagnostic(
+        error=RuntimeError("not persisted"),
+        redaction_profile_id="mcp_input_required_resume_error.v1",
+        redacted_message=(
+            "Authorization: Bearer explicit-secret password=hunter2 "
+            "https://user:credential@example.test"
+        ),
+    )
+
+    assert "explicit-secret" not in diagnostic.redacted_message
+    assert "hunter2" not in diagnostic.redacted_message
+    assert "credential" not in diagnostic.redacted_message
 
 
 def test_terminal_monitor_hard_cut_has_no_watch_or_legacy_accumulator() -> None:
@@ -318,6 +364,56 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
         "TOOL_CALL_ARGUMENTS_SEGMENT",
     ):
         assert by_type[event_type].event_domain == "non_transcript"
+
+
+def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
+    assert AGENT_EVENT_SCHEMA_VERSION == 6
+    assert "CUSTOM" not in EventType.__members__
+    assert all(
+        getattr(event_type, "__name__", "") != "CustomEvent"
+        for event_type in get_args(AgentEvent)
+    )
+
+    old_vocabulary = (
+        "mcp_input_required_expired",
+        "mcp_input_required_resolved",
+        "mcp_input_required_binding_changed",
+        "mcp_input_required_resume_failed",
+        "compaction_requested",
+        "mid_turn_compaction_skipped",
+        "tool_result_persistence_failed",
+    )
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in old_vocabulary:
+            if marker in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
+                )
+    assert violations == []
+
+
+def test_typed_runtime_audit_events_are_explicit_non_transcript() -> None:
+    expected = {
+        EventType.TOOL_EXECUTION_SUSPENDED.value,
+        EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED.value,
+        EventType.MCP_INPUT_REQUIRED_EXPIRED.value,
+        EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED.value,
+        EventType.MCP_INPUT_REQUIRED_RESUME_FAILED.value,
+        EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED.value,
+        EventType.CONTEXT_COMPACTION_REQUESTED.value,
+        EventType.MID_TURN_CONTEXT_COMPACTION_SKIPPED.value,
+        EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED.value,
+    }
+    assert EXPLICIT_NON_TRANSCRIPT_EVENT_TYPES == expected
+
+    registry = build_default_transcript_event_domain_registry_binding().contract
+    by_type = {entry.event_type: entry for entry in registry.supported_events}
+    assert {
+        event_type: by_type[event_type].event_domain
+        for event_type in sorted(expected)
+    } == {event_type: "non_transcript" for event_type in sorted(expected)}
 
 
 def test_runtime_wiring_imports_in_clean_interpreter() -> None:
@@ -710,8 +806,20 @@ def test_runtime_async_event_writes_use_one_session_fifo_writer() -> None:
         for item in ast.walk(write_events)
         if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
     }
-    assert "execute" in calls
+    assert "write_events_with_deadline" in calls
     assert "execute_blocking" not in calls
+    write_events_with_deadline = _find_callable(
+        tree,
+        class_name="RuntimeSession",
+        name="write_events_with_deadline",
+    )
+    deadline_calls = {
+        item.func.attr
+        for item in ast.walk(write_events_with_deadline)
+        if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+    }
+    assert "execute" in deadline_calls
+    assert "execute_blocking" not in deadline_calls
 
     service = (
         REPO_ROOT / "src/pulsara_agent/runtime/event_write_service.py"

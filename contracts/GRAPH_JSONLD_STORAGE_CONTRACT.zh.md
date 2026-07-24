@@ -254,3 +254,17 @@ InMemory graph store 只允许测试/兼容使用。
 - fresh migrated database的manifest包含pgvector与全部memory relations；受限runtime role可以执行GraphStore DML但不能执行DDL。
 - Oxigraph materializer 能 round-trip JSON-LD document。
 - Oxigraph unavailable/failure 通过 outbox failed status 暴露，而不是悄悄吞掉。
+
+---
+
+## 12. Event vocabulary hard-cut boundary
+
+Event schema generation 6删除 `CustomEvent`。MCP lifecycle、compaction request/skip与
+tool-result evidence projection failure是 EventLog typed non-transcript facts，不改变
+JSON-LD ontology或 GraphStore write protocol。Reset workflow必须同时清空旧 PostgreSQL
+event world与 Oxigraph runtime projection，防止旧 CUSTOM payload或旧 graph projection被新
+decoder误认。
+
+只有已有 typed timeline/outbox materializer可以选择性投影这些 facts；GraphStore不得从
+event metadata/free-form payload猜测新的 entity，也不得把 typed failure audit当作 durable
+retry job。

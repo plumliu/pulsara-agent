@@ -69,7 +69,39 @@ Runtime event publishing 是 in-process post-commit bus。
 - compatibility wrapper 可在 publication error 后抛 `EventPublicationAfterCommitError`，异常必须携带已经 committed 的 `EventWriteResult`；
 - Subagent 等新 command path 必须消费 `write_*` result，不把 observer error误判成 commit failure。
 
+Critical publication-aware owner，包括 MCP input-required lifecycle、mandatory runtime
+audit 与 compaction core，禁止调用上述 compatibility wrapper。它们必须在第一次 admission
+冻结一个 ordinary deadline 与 terminal-maintenance tail，并调用
+`write_event(s)_with_deadline()`；所有 `NONE` retry、confirmation、account/reducer 与
+publication wait复用同一 absolute deadline，不能在循环中续期。
+
+critical event durable FULL 后若 publication 为 `unavailable` 或
+`failed_after_commit`，RuntimeSession 安装
+`publication_reconciliation_required` latch。V1 不声称 live catch-up；ordinary mutation
+立即 fail closed。只有 RuntimeSession 唯一 issuer 签发的 borrower-scoped
+`PublicationTerminalMaintenanceLease` 可以提交预先绑定的 exact ordered terminal batch。
+Lease 验证 owner kind、latch generation、handle对象身份、attempt generation、candidate
+IDs/payload fingerprints与 transaction companion；`NONE` 回到新 generation 的 ISSUED，
+`FULL` 才 CONSUMED，`PARTIAL/UNKNOWN` 进入 reconciliation。
+
+`NONE` 重试必须使用确定性、有上限且受原 absolute deadline裁剪的退避；禁止
+`sleep(0)` 忙循环。Session-owned mandatory audit owner在 shared task终结后必须移除
+candidate/task owner，或只保留显式有界的receipt cache，不得让已完成attempt随session增长。
+
+携带 `PublicationLatchedRunTerminationFact` 的 RunEnd在precommit阶段必须按reason把每个
+source ref exact rebind到同一runtime ledger中的真实stored event，并继续验证domain matrix：
+compaction的Started/terminal pairing、MCP suspension/resolution/disposition/closure/
+ToolResult identity chain，以及mandatory audit的唯一typed source。仅重算caller提供的
+accumulator不构成authority证明。
+
+Online compaction Started/Completed/Failed 的唯一 publication owner也是 RuntimeSession。
+Host listener只是 process-local observer；Host与 mid-turn compactor不得扫描 committed
+sequence、调用 `publish_stored_events()` 或把 listener 当第二个 publisher。
+
 registered committed reducer failure 不是 observer failure：event仍已 commit，但 session进入 `reconciliation_required`，后续 mutation fail closed；safe point必须从完整 EventLog rebuild，成功后才能恢复写入。
+
+Typed failure audit只证明 durable failure fact，不等于 durable hook/projection retry job。
+Publisher仍是 in-process bus；cross-process durable hook/outbox属于独立开放债务。
 
 `publish_stored_event(event, state=...)` 契约：
 

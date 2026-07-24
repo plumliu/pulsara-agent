@@ -225,12 +225,23 @@ MCP input-required 使用通用 tool suspension seam。
 
 - 停止当前 tool batch；
 - 取消尚未完成的兄弟 tool task；
-- 写 `tool_execution_suspended` custom event；
+- 写 required typed `McpInputRequiredSuspensionFact`，冻结 interaction/server/round、
+  binding、request envelope fingerprints、pending lease reservation、deadline与
+  predecessor resolution；
 - 设置 `pending_interaction_kind="mcp_input_required"`；
 - 由 HostSession 暴露 `PendingMcpInputRequired`，并由supervisor保留exact pending slot lease。
 
-用户 resolution 后，runtime 必须调用 adapter 的 resume path，将 answer 路由回原pending lease对应的
-manager/server/request state。Resume前仍重做capability/permission gate；它不能按当前同名tool acquire新slot。
+用户 resolution 在 ingress admission、第一次 await 前被冻结为唯一 immutable
+`PreparedMcpInputRequiredResolution`；Host boundary与
+`McpInputRequiredResolutionSubmittedEvent`同批 FULL 后，adapter只能消费该 prepared
+canonical bytes。Resume前仍重做capability/permission gate；它不能按当前同名tool acquire
+新slot。
+
+`resume_failed -> resolution_submitted` 是 attempt-scoped chain：ordinal递增，新
+resolution exact引用前一 resolution 与 resume-failed。Normal terminal ToolResult也必须
+exact引用其 source resolution；expired/binding-changed、closure与 ToolResult terminal按
+typed atomic matrix提交。Active MCP suspension未由 terminal disposition或
+`McpInputRequiredInteractionClosedEvent`关闭时，普通 RunEnd必须被拒绝。
 Supervisor safe point只在Host `_run_lock`内安装candidate；worker completion、TTL timer或retry callback不得在active run
 中间交换surface。Related binding reconfigure会terminal deny pending request并取消引用该binding identity的child；无关
 server变化不影响pending lease。
@@ -261,6 +272,10 @@ Run finalization 必须 emit exactly one `RUN_END`，除非 run 已经 finalized
 - stop_reason；
 - abort_kind（若有）；
 - error_message（若有）。
+
+MCP publication failure或SESSION_REOPEN closure路径还必须携带 exact typed closure /
+publication-latched termination refs。Generic dangling-run repair必须在 MCP lifecycle
+recovery之后运行，遇到 active MCP suspension时 delegate/skip，不能提前生成普通 RunEnd。
 
 Memory `on_turn_end` hook 在正常 finalization 前运行；如果 hook 失败，runtime 必须 emit `RUN_ERROR` 并把 run 标记为 failed，而不是吞掉错误。
 

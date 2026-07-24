@@ -213,11 +213,6 @@ def grade_durable_evidence(
         f"reported={reported_usage_calls}, missing={missing_usage_calls}, "
         f"model_calls={model_call_count}",
     )
-    check(
-        "total_token_budget",
-        total_tokens <= gate.max_total_tokens,
-        f"total_tokens={total_tokens}, maximum={gate.max_total_tokens}",
-    )
     if gate.require_positive_cached_input_tokens:
         continuation_cache_hit = _has_positive_continuation_cache_hit(session_report)
         check(

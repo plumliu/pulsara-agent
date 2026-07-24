@@ -166,7 +166,25 @@ def test_cache_scenario_grader_requires_real_cache_and_balanced_lifecycle() -> N
         verifier=verifier,
     )
     assert grade.passed
+    assert grade.total_tokens == 300
     assert grade.cached_input_tokens == 80
+    assert all(
+        item.assertion_id != "total_token_budget" for item in grade.assertions
+    )
+
+    session_report["model_usage_by_run"] = [
+        {**item, "total_tokens": 10_000_000}
+        for item in session_report["model_usage_by_run"]
+    ]
+    gross_usage_is_telemetry = grade_durable_evidence(
+        scenario=scenario,
+        session_report=session_report,
+        root_run_reports=root_reports,
+        final_texts=("one", "two", "three"),
+        verifier=verifier,
+    )
+    assert gross_usage_is_telemetry.passed
+    assert gross_usage_is_telemetry.total_tokens == 30_000_000
 
     session_report["provider_input_generations"] = [
         {

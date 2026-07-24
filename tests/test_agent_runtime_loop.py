@@ -38,6 +38,7 @@ from pulsara_agent.event import (
     EventType,
     ExistingGenerationPreparationAbandonedEvent,
     McpCapabilitySnapshotInstalledEvent,
+    MidTurnContextCompactionSkippedEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallRejectedEvent,
@@ -62,6 +63,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    ToolResultEvidenceProjectionFailedEvent,
     ToolExecutionSuspendedEvent,
     UserConfirmResultEvent,
 )
@@ -94,10 +96,17 @@ from pulsara_agent.llm.errors import ModelContextIdentityMismatch
 from tests.support import run_agent_task, stream_agent_task, test_llm_config
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.primitives.mcp import (
+    McpBindingIdentityFact,
     McpInstalledServerSnapshotFact,
     McpReconcileAttemptSummaryFact,
     McpServerLifecycleTimingFact,
 )
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    MidTurnCompactionSkipFact,
+    build_runtime_event_deadline_budget,
+    prepare_mcp_input_required_suspension,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonActionClass,
@@ -1092,6 +1101,65 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     assert supervisor.close_calls == 1
 
 
+def test_abort_waiting_mcp_releases_pending_lease_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class LeaseSupervisor:
+        def __init__(self) -> None:
+            self.completed: list[str] = []
+            self.close_calls = 0
+
+        def complete_pending_lease(self, interaction_id: str) -> None:
+            self.completed.append(interaction_id)
+
+        async def close_retiring_slots(self, **_kwargs) -> None:
+            self.close_calls += 1
+
+    supervisor = LeaseSupervisor()
+    runtime_session.mcp_supervisor = supervisor
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    state.stop_reason = "waiting_user"
+    state.pending_interaction_kind = "mcp_input_required"
+    state.pending_interaction_payload = {
+        "interaction_id": "mcp_input_required:user-stop",
+    }
+
+    async def terminalize(self, current_state, *, reason):
+        assert self is agent
+        assert current_state is state
+        assert reason.value == "user_stop"
+        if False:
+            yield None
+
+    async def finalize(self, current_state, **_kwargs):
+        assert self is agent
+        assert current_state is state
+        if False:
+            yield None
+
+    monkeypatch.setattr(
+        AgentRuntime,
+        "_terminalize_pending_mcp_for_abort",
+        terminalize,
+    )
+    monkeypatch.setattr(AgentRuntime, "_finalize_run", finalize)
+
+    asyncio.run(_collect_async(agent.stream_abort_run(state)))
+
+    assert supervisor.completed == ["mcp_input_required:user-stop"]
+    assert supervisor.close_calls == 1
+    assert state.status is LoopStatus.ABORTED
+
+
 def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_lease(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1136,34 +1204,37 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
     )
     account = prepared_run.root_account
     assert account is not None
-    reservation_payload = {
-        "reservation_id": "rollout_reservation:tool:cancel-suspend",
-        "account_id": account.account_id,
-        "owner_kind": "tool_call",
-        "owner_id": "call:mcp-suspend-cancel",
-        "phase_at_reservation": RolloutPhase.EXPLORATION,
-        "budget_bucket": RolloutBudgetBucket.EXPLORATION,
-        "reserved_milliunits": account.policy.tool_cost_unit_weight_milli,
-        "model_call_reservation_quote": None,
-        "source_sequence": 1,
-    }
-    reservation = RolloutReservationFact(
-        **reservation_payload,
-        semantic_fingerprint=context_fingerprint(
-            "rollout-reservation:v1", reservation_payload
-        ),
+    prepared_suspension = _prepared_test_mcp_suspension(
+        interaction_id="mcp_input_required:suspend-cancel",
+        tool_call_id="call:mcp-suspend-cancel",
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id="reservation:suspend-cancel",
     )
     suspended = ToolExecutionSuspended(
         tool_call_id="call:mcp-suspend-cancel",
         tool_name="mcp__docs__lookup",
         interaction_kind="mcp_input_required",
-        payload={
-            "interaction_id": "mcp_input_required:suspend-cancel",
-            "mcp_pending_lease_reservation_id": "reservation:suspend-cancel",
-        },
+        prepared_mcp_input_required=prepared_suspension,
     )
 
     async def run() -> None:
+        reservation_payload = {
+            "reservation_id": "rollout_reservation:tool:cancel-suspend",
+            "account_id": account.account_id,
+            "owner_kind": "tool_call",
+            "owner_id": "call:mcp-suspend-cancel",
+            "phase_at_reservation": RolloutPhase.EXPLORATION,
+            "budget_bucket": RolloutBudgetBucket.EXPLORATION,
+            "reserved_milliunits": account.policy.tool_cost_unit_weight_milli,
+            "model_call_reservation_quote": None,
+            "source_sequence": 1,
+        }
+        reservation = RolloutReservationFact(
+            **reservation_payload,
+            semantic_fingerprint=context_fingerprint(
+                "rollout-reservation:v1", reservation_payload
+            ),
+        )
         await runtime_session.write_events(
             (
                 RolloutBudgetAccountOpenedEvent(
@@ -1198,6 +1269,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
             suspension_candidate,
             reservation_id,
             expected_reservation_fingerprint,
+            deadline_monotonic=None,
         ):
             assert self.runtime_session is runtime_session
             result = await original_commit_suspension(
@@ -1205,6 +1277,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
                 suspension_candidate=suspension_candidate,
                 reservation_id=reservation_id,
                 expected_reservation_fingerprint=(expected_reservation_fingerprint),
+                deadline_monotonic=deadline_monotonic,
             )
             committed.set()
             try:
@@ -1288,13 +1361,12 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                payload={
-                    "interaction_id": "mcp_input_required:precommit-none",
-                    "mcp_pending_lease_reservation_id": "lease:precommit-none",
-                    "original_request": {
-                        "arguments": {},
-                    },
-                },
+                prepared_mcp_input_required=_prepared_test_mcp_suspension(
+                    interaction_id="mcp_input_required:precommit-none",
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    pending_lease_reservation_id="lease:precommit-none",
+                ),
             )
 
     class LeaseSupervisor:
@@ -1391,11 +1463,12 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                payload={
-                    "interaction_id": "mcp_input_required:physical-tail",
-                    "mcp_pending_lease_reservation_id": "lease:physical-tail",
-                    "original_request": {"arguments": {}},
-                },
+                prepared_mcp_input_required=_prepared_test_mcp_suspension(
+                    interaction_id="mcp_input_required:physical-tail",
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    pending_lease_reservation_id="lease:physical-tail",
+                ),
             )
 
     class LeaseSupervisor:
@@ -1592,20 +1665,47 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
         terminal_result,
     )
     committed = asyncio.Event()
+    original_write_events_with_deadline = (
+        type(runtime_session).write_events_with_deadline
+    )
 
     if failure_mode == "precommit":
 
-        async def fail_before_commit(self, _events, *, state=None):
+        async def fail_before_commit(
+            self,
+            _events,
+            *,
+            deadline_monotonic,
+            **_kwargs,
+        ):
             assert self is runtime_session
-            del state
-            raise EventCommitError("synthetic precommit failure")
+            raise EventCommitError(
+                "synthetic precommit failure",
+                commit_outcome="none",
+                deadline_monotonic=deadline_monotonic,
+            )
 
-        monkeypatch.setattr(type(runtime_session), "emit_many", fail_before_commit)
+        monkeypatch.setattr(
+            type(runtime_session),
+            "write_events_with_deadline",
+            fail_before_commit,
+        )
     elif failure_mode == "cancel_after_commit":
 
-        async def commit_then_wait(self, events, *, state=None):
+        async def commit_then_wait(
+            self,
+            events,
+            *,
+            deadline_monotonic,
+            **kwargs,
+        ):
             assert self is runtime_session
-            result = await runtime_session.write_events(tuple(events), state=state)
+            result = await original_write_events_with_deadline(
+                self,
+                tuple(events),
+                deadline_monotonic=deadline_monotonic,
+                **kwargs,
+            )
             committed.set()
             try:
                 await asyncio.Event().wait()
@@ -1617,22 +1717,32 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
                         result=result,
                     )
                 ) from cancelled
-            return list(result.committed_events)
+            return result
 
-        monkeypatch.setattr(type(runtime_session), "emit_many", commit_then_wait)
+        monkeypatch.setattr(
+            type(runtime_session),
+            "write_events_with_deadline",
+            commit_then_wait,
+        )
     else:
 
-        async def fail_before_unknown_confirmation(self, _events, *, state=None):
+        async def fail_before_unknown_confirmation(
+            self,
+            _events,
+            *,
+            deadline_monotonic,
+            **_kwargs,
+        ):
             assert self is runtime_session
-            del state
             raise EventCommitError(
                 "synthetic unknown commit acknowledgement",
                 commit_outcome="unknown",
+                deadline_monotonic=deadline_monotonic,
             )
 
         monkeypatch.setattr(
             type(runtime_session),
-            "emit_many",
+            "write_events_with_deadline",
             fail_before_unknown_confirmation,
         )
 
@@ -2193,6 +2303,65 @@ def test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path) -> 
     assert transition is LoopTransition.CONTINUE_AFTER_TOOL
     assert pending_count == 1
     assert visible_count >= 3
+
+
+def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
+    tmp_path,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    skip = build_frozen_fact(
+        MidTurnCompactionSkipFact,
+        schema_version="mid_turn_context_compaction_skip.v1",
+        reason="current_run_start_missing",
+        current_run_start_event_reference=None,
+        safe_point="before_followup_model_call",
+    )
+    stored = runtime_session.event_log.append(
+        MidTurnContextCompactionSkippedEvent(
+            run_id="run:mid-turn-publication",
+            turn_id="turn:mid-turn-publication",
+            reply_id="reply:mid-turn-publication",
+            skip=skip,
+        )
+    )
+    deadline_budget = build_runtime_event_deadline_budget(
+        admitted_at_monotonic=time.monotonic(),
+        total_timeout_seconds=30.0,
+        terminal_reserve_seconds=10.0,
+    )
+    runtime_session.latch_publication_reconciliation_required()
+
+    class PublicationFailedCompactor:
+        async def maybe_compact_before_followup(self, **_kwargs):
+            return MidTurnCompactionResult(
+                compacted=False,
+                events=(stored,),
+                skipped_reason="current_run_start_missing",
+                mandatory_audit_deadline_budget=deadline_budget,
+                mandatory_audit_publication_failed=True,
+            )
+
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+        context_compactor=PublicationFailedCompactor(),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.RUNNING
+
+    emitted = asyncio.run(
+        _collect_async(agent._continue_after_tool_before_followup(state))
+    )
+
+    assert emitted == [stored]
+    assert state.status is LoopStatus.ABORTED
+    termination = state.scratchpad["publication_latched_run_termination"]
+    assert (
+        termination.reason
+        == "mandatory_runtime_audit_publication_unavailable"
+    )
+    assert termination.source_event_references[0].event_id == stored.id
 
 
 def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
@@ -3303,6 +3472,38 @@ _BUILTIN_TOOL_NAMES = frozenset(
 )
 
 
+def _prepared_test_mcp_suspension(
+    *,
+    interaction_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    pending_lease_reservation_id: str,
+):
+    return prepare_mcp_input_required_suspension(
+        interaction_id=interaction_id,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        server_id="docs",
+        round_count=1,
+        binding_identity=McpBindingIdentityFact(
+            server_id="docs",
+            slot_id="slot:docs",
+            snapshot_id="snapshot:docs",
+            discovery_generation=1,
+        ),
+        pending_lease_reservation_id=pending_lease_reservation_id,
+        protocol_version="2026-07-28",
+        input_requests=(),
+        original_request={
+            "source_method": "tools/call",
+            "tool_name": tool_name,
+            "arguments": {},
+        },
+        request_state=None,
+        deadline_monotonic=None,
+    )
+
+
 def _install_registry_with_explicit_test_descriptors(
     agent: AgentRuntime, registry: ToolRegistry
 ) -> None:
@@ -4258,8 +4459,7 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
     assert result.status is LoopStatus.FINISHED
     assert result.stop_reason == "final"
     assert any(
-        event.type is EventType.CUSTOM
-        and event.name == "tool_result_persistence_failed"
+        isinstance(event, ToolResultEvidenceProjectionFailedEvent)
         for event in events
     )
     assert not any(
@@ -4269,6 +4469,55 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
     assert any(
         isinstance(event, RunEndEvent) and event.status == "finished"
         for event in events
+    )
+
+
+def test_evidence_projection_publication_failure_aborts_with_typed_run_end(
+    tmp_path,
+) -> None:
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class FailEvidenceFailurePublication:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            if isinstance(
+                published.event,
+                ToolResultEvidenceProjectionFailedEvent,
+            ):
+                raise RuntimeError("synthetic evidence audit publication failure")
+
+    runtime_session.publisher.subscribe(FailEvidenceFailurePublication())
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
+                ]
+            },
+            {"text": "must not be sampled"},
+        ]
+    )
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        tool_result_persistence_hook=FailingPersistenceHook(),
+    )
+
+    result = asyncio.run(run_agent_task(agent, "read"))
+    events = runtime_session.event_log.iter(run_id=result.state.run_id)
+    run_end = next(event for event in events if isinstance(event, RunEndEvent))
+
+    assert result.status is LoopStatus.ABORTED
+    assert len(transport.contexts) == 1
+    assert run_end.publication_latched_termination is not None
+    assert (
+        run_end.publication_latched_termination.reason
+        == "mandatory_runtime_audit_publication_unavailable"
     )
 
 

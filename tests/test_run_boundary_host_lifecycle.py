@@ -506,7 +506,7 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
     tmp_path, monkeypatch
 ) -> None:
     from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
-    from pulsara_agent.event import CustomEvent
+    from tests.support.events import typed_non_transcript_event
     from pulsara_agent.primitives.run_boundary import BoundaryBatchCommitStatus
 
     async def scenario() -> None:
@@ -528,7 +528,7 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
         attempt = session._boundary_attempt
         state = session._preparing_state
         assert attempt is not None and state is not None
-        candidate = CustomEvent(
+        candidate = typed_non_transcript_event(
             id="boundary-candidate:conflict",
             run_id=state.run_id,
             turn_id=state.turn_id,
@@ -542,7 +542,14 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
             BoundaryBatchCommitStatus.UNKNOWN
         )
         session.wiring.runtime_wiring.event_log.append(
-            candidate.model_copy(update={"value": {"value": 2}})
+            typed_non_transcript_event(
+                id=candidate.id,
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                name="candidate",
+                value={"value": 2},
+            )
         )
         confirmation = session._boundary_batch_confirmation(attempt)
         assert confirmation is not None

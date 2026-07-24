@@ -758,42 +758,42 @@ def test_event_schema_fingerprint_is_canonical_under_schema_key_order() -> None:
 def test_same_event_type_version_with_different_schema_fingerprint_is_registry_conflict() -> (
     None
 ):
-    class FirstCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class FirstProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class ChangedCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class ChangedProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: int
 
     registry = EventSchemaDomainRegistry()
     registry.register(
-        event_model=FirstCustomEvent,
+        event_model=FirstProjectionRequestedEvent,
         event_schema_version="agent-event:custom:test-v1",
     )
     with pytest.raises(EventSchemaRegistryConflict):
         registry.register(
-            event_model=ChangedCustomEvent,
+            event_model=ChangedProjectionRequestedEvent,
             event_schema_version="agent-event:custom:test-v1",
         )
 
 
 def test_event_schema_semantic_change_requires_version_and_fingerprint_change() -> None:
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class ChangedCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class ChangedProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: int
 
     registry = EventSchemaDomainRegistry()
     first = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:semantic-v1",
     )
     second = registry.register(
-        event_model=ChangedCustomEvent,
+        event_model=ChangedProjectionRequestedEvent,
         event_schema_version="agent-event:custom:semantic-v2",
     )
 
@@ -806,20 +806,20 @@ def test_event_schema_semantic_change_requires_version_and_fingerprint_change() 
 
 
 def test_historical_decoder_restores_old_schema_before_current_union() -> None:
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         legacy_value: str
 
     registry = EventSchemaDomainRegistry()
     binding = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:legacy-v0",
     )
     payload = canonical_json_bytes(
-        LegacyCustomEvent(legacy_value="historical").model_dump(mode="json")
+        LegacyProjectionRequestedEvent(legacy_value="historical").model_dump(mode="json")
     )
     resolved = registry.resolve_historical_binding(
-        event_type=str(EventType.CUSTOM),
+        event_type=str(EventType.PROJECTION_REQUESTED),
         event_schema_version=binding.schema_contract.event_schema_version,
         event_schema_fingerprint=(binding.schema_contract.event_schema_fingerprint),
         event_domain_contract_fingerprint=(
@@ -828,7 +828,7 @@ def test_historical_decoder_restores_old_schema_before_current_union() -> None:
     )
 
     decoded = resolved.decode_owned_payload(payload)
-    assert isinstance(decoded, LegacyCustomEvent)
+    assert isinstance(decoded, LegacyProjectionRequestedEvent)
     assert decoded.legacy_value == "historical"
 
 
@@ -860,22 +860,22 @@ def test_event_schema_domain_fingerprint_drift_is_contract_mismatch() -> None:
 
 
 def test_historical_event_domain_binding_rebinds_after_registry_upgrade() -> None:
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class CurrentCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class CurrentProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         generation: int
 
     registry = EventSchemaDomainRegistry()
     legacy = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-v1",
     )
     registry.register(
-        event_model=CurrentCustomEvent,
+        event_model=CurrentProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-v2",
     )
 
@@ -891,22 +891,22 @@ def test_historical_event_domain_binding_rebinds_after_registry_upgrade() -> Non
 
 
 def test_event_domain_is_immutable_for_event_type_and_schema_version() -> None:
-    class FirstCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class FirstProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class NextCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class NextProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         generation: int
 
     registry = EventSchemaDomainRegistry()
     first = registry.register(
-        event_model=FirstCustomEvent,
+        event_model=FirstProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-stable-v1",
     )
     second = registry.register(
-        event_model=NextCustomEvent,
+        event_model=NextProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-stable-v2",
     )
 
@@ -925,13 +925,13 @@ def test_new_non_graph_event_does_not_change_existing_graph_reducer_contract() -
         )
     before = build_default_subagent_graph_reducer_binding(registry).contract
 
-    class AdditionalCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class AdditionalProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         additional_non_graph_field: bool
 
     registry.register(
-        event_model=AdditionalCustomEvent,
+        event_model=AdditionalProjectionRequestedEvent,
         event_schema_version="agent-event:custom:additional-non-graph-v2",
     )
     after = build_default_subagent_graph_reducer_binding(registry).contract

@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.primitives.mcp import McpBindingIdentityFact
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    prepare_mcp_input_required_suspension,
+)
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
     McpBindingIdentity,
@@ -98,7 +102,27 @@ class McpCapabilityTool:
                     tool_call_id=call.id,
                     tool_name=call.name,
                     interaction_kind="mcp_input_required",
-                    payload=payload,
+                    prepared_mcp_input_required=(
+                        prepare_mcp_input_required_suspension(
+                            interaction_id=interaction_id,
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                            server_id=self.server_id,
+                            round_count=result.round_count,
+                            binding_identity=_binding_identity_fact(
+                                self.binding_identity
+                            ),
+                            pending_lease_reservation_id=reservation.reservation_id,
+                            protocol_version=result.protocol_version,
+                            input_requests=tuple(
+                                request.to_dict()
+                                for request in result.input_requests
+                            ),
+                            original_request=result.original_request.to_dict(),
+                            request_state=result.request_state,
+                            deadline_monotonic=result.deadline_monotonic,
+                        )
+                    ),
                 )
             except Exception as exc:
                 if reservation is None:
@@ -159,26 +183,30 @@ class McpCapabilityTool:
         finally:
             self.supervisor.return_pending_borrow(resolution.interaction_id)
         if isinstance(result, McpInputRequired):
-            payload = result.to_payload()
-            payload.update(
-                {
-                    "interaction_id": resolution.interaction_id,
-                    "tool_call_id": resolution.tool_call_id or "",
-                    "tool_name": self.name,
-                    "wrapper_tool_call_id": resolution.tool_call_id or "",
-                    "wrapper_tool_name": self.name,
-                    "server_id": self.server_id,
-                    "original_tool_name": self.original_tool_name,
-                    "mcp_binding_identity": _binding_identity_payload(
-                        self.binding_identity
-                    ),
-                }
+            pending = self.supervisor.pending_lease_reservation(
+                resolution.interaction_id
             )
+            tool_call_id = str(resolution.tool_call_id or "")
             return ToolExecutionSuspended(
-                tool_call_id=str(payload.get("tool_call_id") or ""),
+                tool_call_id=tool_call_id,
                 tool_name=self.name,
                 interaction_kind="mcp_input_required",
-                payload=payload,
+                prepared_mcp_input_required=prepare_mcp_input_required_suspension(
+                    interaction_id=resolution.interaction_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=self.name,
+                    server_id=self.server_id,
+                    round_count=result.round_count,
+                    binding_identity=_binding_identity_fact(self.binding_identity),
+                    pending_lease_reservation_id=pending.reservation_id,
+                    protocol_version=result.protocol_version,
+                    input_requests=tuple(
+                        request.to_dict() for request in result.input_requests
+                    ),
+                    original_request=result.original_request.to_dict(),
+                    request_state=result.request_state,
+                    deadline_monotonic=result.deadline_monotonic,
+                ),
             )
         normalized = _normalize_mcp_result(result)
         tool_call_id = str(resolution.tool_call_id or "")
@@ -245,3 +273,12 @@ def _binding_identity_payload(identity: McpBindingIdentity) -> dict[str, object]
         "snapshot_id": identity.snapshot_id,
         "discovery_generation": identity.discovery_generation,
     }
+
+
+def _binding_identity_fact(identity: McpBindingIdentity) -> McpBindingIdentityFact:
+    return McpBindingIdentityFact(
+        server_id=identity.server_id,
+        slot_id=identity.slot_id,
+        snapshot_id=identity.snapshot_id,
+        discovery_generation=identity.discovery_generation,
+    )

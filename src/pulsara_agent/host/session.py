@@ -16,12 +16,13 @@ from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     ContextWindowOpenedEvent,
     EventContext,
     EventType,
     McpCapabilitySnapshotInstalledEvent,
+    McpInputRequiredResumeFailedEvent,
+    McpInputRequiredResolutionSubmittedEvent,
     ModelCallControlDispositionResolvedEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
@@ -37,6 +38,7 @@ from pulsara_agent.event import (
     TerminalProcessMonitorObservationCommittedEvent,
     TerminalProcessObservationDeliveryDeferredEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
+    ToolExecutionSuspendedEvent,
     utc_now,
 )
 from pulsara_agent.host.run_boundary import (
@@ -68,6 +70,14 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileAttemptSummaryFact,
     McpBindingIdentityFact,
     McpInstallationReferenceFact,
+)
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredResolutionAttemptFact,
+    McpInputRequiredSourceAuthorityFact,
+    PreparedMcpInputRequiredResolution,
+    build_runtime_event_deadline_budget,
+    prepare_mcp_input_required_resolution,
+    stable_runtime_event_id,
 )
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.model_call import (
@@ -209,6 +219,10 @@ from pulsara_agent.capability.types import (
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
+from pulsara_agent.runtime.compaction.service import (
+    ContextCompactionInvocationFailed,
+    ContextCompactionPublicationFailedAfterCommit,
+)
 
 
 _MAX_RUN_SEED_REFREEZE_ATTEMPTS = 3
@@ -1545,7 +1559,14 @@ class HostSession:
             runtime_session.acknowledge_committed_mcp_installation_audits(confirmed)
             committed = self._committed_host_entry_from_stored(
                 confirmed,
-                publication_status="failed_after_commit",
+                publication_status=(
+                    "failed_after_commit"
+                    if isinstance(exc, EventPublicationAfterCommitError)
+                    and exc.result.publication_errors
+                    else "unavailable"
+                    if isinstance(exc, EventPublicationAfterCommitError)
+                    else "failed_after_commit"
+                ),
             )
             await self._ingress_coordinator.mark_committed(
                 prepared.ingress_owner,
@@ -3017,6 +3038,7 @@ class HostSession:
                 pending=pending,
                 interaction_kind=boundary_input.interaction_kind,
                 identity=boundary_input.identity,
+                resolution=boundary_input.resolution,
             )
             state = self._resume_active_state(pending)
             self._complete_boundary_attempt_after_activation()
@@ -3164,9 +3186,20 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_mcp_input_required(resolution.interaction_id)
         self._raise_if_active_run()
+        prepared_resolution = prepare_mcp_input_required_resolution(
+            source_suspension_event_reference=(
+                pending.source_suspension_event_reference
+            ),
+            source_suspension_fact_fingerprint=(
+                pending.suspension_fact.suspension_fact_fingerprint
+            ),
+            interaction_id=resolution.interaction_id,
+            responses=resolution.responses,
+            cancelled=resolution.cancelled,
+        )
         return await self._ingress_coordinator.submit(
             kind="resume",
-            payload=resolution,
+            payload=prepared_resolution,
             ingress_id=f"host_ingress_resume:{uuid4().hex}",
             resume_match_key=resolution.interaction_id,
             runner=lambda owner: self._run_resume_ingress(
@@ -3174,10 +3207,10 @@ class HostSession:
                 pending=pending,
                 interaction_id=resolution.interaction_id,
                 interaction_kind="mcp_input_required",
-                resolution=resolution,
+                resolution=prepared_resolution,
                 router=lambda state: (
                     self.wiring.agent_runtime.resume_after_mcp_input_required(
-                        state, resolution
+                        state, prepared_resolution
                     )
                 ),
                 recover_pending_on_publication_failure=True,
@@ -3715,24 +3748,37 @@ class HostSession:
         if service is None:
             raise RuntimeError("context compaction is not configured for this session")
         async with self._run_lock:
-            event_log = self.wiring.runtime_wiring.event_log
-            before_sequence = await asyncio.to_thread(event_log.next_sequence)
             try:
                 target = self.wiring.agent_runtime.resolve_run_model_target()
-                event = await service.compact(
+                attempt = await service.compact(
                     target_model_target=target,
                     trigger="manual",
                     reason="user_requested",
                     force=True,
                 )
-            finally:
-                await self._publish_compaction_events_after(before_sequence)
+            except (
+                ContextCompactionInvocationFailed,
+                ContextCompactionPublicationFailedAfterCommit,
+            ) as exc:
+                if exc.result.terminal_event is not None:
+                    self._notify_compaction_listeners(exc.result.terminal_event)
+                if isinstance(
+                    exc,
+                    ContextCompactionPublicationFailedAfterCommit,
+                ):
+                    self.begin_close()
+                raise
+            event = attempt.terminal_event
+            if event is not None:
+                self._notify_compaction_listeners(event)
             return {
-                "compacted": event is not None,
+                "compacted": isinstance(event, ContextCompactionCompletedEvent),
                 "compaction_id": event.compaction_id if event is not None else None,
-                "summary_artifact_id": event.summary_artifact_id
-                if event is not None
-                else None,
+                "summary_artifact_id": (
+                    event.summary_artifact_id
+                    if isinstance(event, ContextCompactionCompletedEvent)
+                    else None
+                ),
                 "window_id": event.window_id if event is not None else None,
                 "through_sequence": event.through_sequence
                 if event is not None
@@ -3786,6 +3832,7 @@ class HostSession:
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
         self.begin_close()
+        close_deadline = time.monotonic() + drain_timeout_seconds
         runtime_session = self.wiring.runtime_wiring.runtime_session
         await self._ingress_coordinator.begin_close()
         dispatch_task = self._terminal_notification_dispatch_task
@@ -3796,11 +3843,14 @@ class HostSession:
             reason=reason, timeout_seconds=drain_timeout_seconds
         )
         await runtime_session.model_stream_execution_registry.drain_all(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            deadline_monotonic=close_deadline
         )
         await self._finalize_suspended_run(reason)
+        await runtime_session.mandatory_runtime_audit_owner.drain(
+            deadline_monotonic=close_deadline
+        )
         await runtime_session.tool_execution_terminal_registry.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            deadline_monotonic=close_deadline
         )
         await asyncio.to_thread(
             runtime_session.terminal_monitor_coordinator.stop_admission_and_drain_workers,
@@ -3829,6 +3879,11 @@ class HostSession:
         await self.wiring.runtime_wiring.memory_governance_executor.flush_pending_event_outbox_async(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
+        compaction_service = self.wiring.runtime_wiring.compaction_service
+        if compaction_service is not None:
+            await compaction_service.stop_candidate_projection_admission_and_drain(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
         candidate_projection_port = (
             self.wiring.runtime_wiring.candidate_projection_commit_port
         )
@@ -3860,7 +3915,6 @@ class HostSession:
         await manifest_service.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
-        compaction_service = self.wiring.runtime_wiring.compaction_service
         if compaction_service is not None:
             await compaction_service.drain_pending_terminalizations(
                 timeout_seconds=drain_timeout_seconds
@@ -4825,12 +4879,18 @@ class HostSession:
         pending: PendingInteraction,
         interaction_kind: str,
         identity: HostRunBoundaryIdentityFact,
+        resolution: object | None = None,
     ) -> tuple[
         LoopState,
         CommittedInteractionResumeBoundary,
         tuple[AgentEvent, ...],
     ]:
         self._set_boundary_phase(HostRunBoundaryPhase.ADMISSION)
+        deadline_budget = build_runtime_event_deadline_budget(
+            admitted_at_monotonic=time.monotonic(),
+            total_timeout_seconds=30.0,
+            terminal_reserve_seconds=10.0,
+        )
         state = self._require_suspended_state(pending)
         self._set_boundary_phase(HostRunBoundaryPhase.CONTRACT_RESOLUTION)
         started = self._original_run_start_for_resume(state)
@@ -4992,6 +5052,152 @@ class HostSession:
             id=identity.boundary_id,
             boundary=boundary_fact,
         )
+        prepared_mcp_resolution: PreparedMcpInputRequiredResolution | None = None
+        mcp_resolution_event: McpInputRequiredResolutionSubmittedEvent | None = None
+        if isinstance(pending, PendingMcpInputRequired):
+            if interaction_kind != "mcp_input_required" or not isinstance(
+                resolution,
+                PreparedMcpInputRequiredResolution,
+            ):
+                raise RuntimeError(
+                    "MCP resume boundary requires its prepared resolution owner"
+                )
+            source_suspension = self.wiring.runtime_wiring.event_log.get_by_id(
+                pending.source_suspension_event_reference.event_id
+            )
+            if (
+                not isinstance(source_suspension, ToolExecutionSuspendedEvent)
+                or source_suspension.sequence is None
+                or source_suspension.suspension != pending.suspension_fact
+                or event_reference_from_stored(
+                    source_suspension,
+                    runtime_session_id=self.runtime_session_id,
+                )
+                != pending.source_suspension_event_reference
+            ):
+                raise RuntimeError(
+                    "MCP resume source suspension is not exact durable authority"
+                )
+            if (
+                resolution.source_suspension_event_reference
+                != pending.source_suspension_event_reference
+                or resolution.source_suspension_fact_fingerprint
+                != pending.suspension_fact.suspension_fact_fingerprint
+                or resolution.interaction_id != pending.interaction_id
+            ):
+                raise RuntimeError("prepared MCP resolution source authority drifted")
+            source_fact = pending.suspension_fact
+            source_authority = build_frozen_fact(
+                McpInputRequiredSourceAuthorityFact,
+                schema_version="mcp_input_required_source_authority.v1",
+                interaction=source_fact.interaction,
+                binding_identity=source_fact.binding_identity,
+                pending_lease_reservation=source_fact.pending_lease_reservation,
+                request_envelope_semantic_fingerprint=(
+                    source_fact.request_envelope
+                    .request_envelope_semantic_fingerprint
+                ),
+                rollout_reservation_id=source_fact.rollout_reservation_id,
+                rollout_reservation_fingerprint=(
+                    source_fact.rollout_reservation_fingerprint
+                ),
+                source_mcp_installation_id=(
+                    source_fact.source_mcp_installation_id
+                ),
+                durable_deadline_utc=source_fact.durable_deadline_utc,
+                deadline_policy_fingerprint=(
+                    source_fact.deadline_policy_fingerprint
+                ),
+                predecessor_resolution_submitted_event_reference=(
+                    source_fact.predecessor_resolution_submitted_event_reference
+                ),
+                source_suspension_fact_fingerprint=(
+                    source_fact.suspension_fact_fingerprint
+                ),
+                source_suspension_event_reference=(
+                    pending.source_suspension_event_reference
+                ),
+                original_run_start_event_reference=event_reference_from_stored(
+                    started,
+                    runtime_session_id=self.runtime_session_id,
+                ),
+            )
+            predecessor_resolution = (
+                working_set.latest_mcp_input_required_resolution_ref
+            )
+            predecessor_failure = (
+                working_set.latest_mcp_resume_failure_event_ref
+            )
+            if predecessor_failure is None:
+                attempt = build_frozen_fact(
+                    McpInputRequiredResolutionAttemptFact,
+                    schema_version="mcp_input_required_resolution_attempt.v1",
+                    round_count=source_fact.interaction.round_count,
+                    attempt_ordinal=1,
+                    predecessor_resolution_submitted_event_reference=None,
+                    predecessor_resume_failed_event_reference=None,
+                )
+            else:
+                if predecessor_resolution is None:
+                    raise RuntimeError(
+                        "MCP resume-failed state lost its predecessor resolution"
+                    )
+                previous_resolution = (
+                    self.wiring.runtime_wiring.event_log.get_by_id(
+                        predecessor_resolution.event_id
+                    )
+                )
+                previous_failure = self.wiring.runtime_wiring.event_log.get_by_id(
+                    predecessor_failure.event_id
+                )
+                if (
+                    not isinstance(
+                        previous_resolution,
+                        McpInputRequiredResolutionSubmittedEvent,
+                    )
+                    or not isinstance(
+                        previous_failure,
+                        McpInputRequiredResumeFailedEvent,
+                    )
+                    or previous_resolution.source.source_suspension_event_reference
+                    != pending.source_suspension_event_reference
+                    or previous_failure.resolution_submitted_event_reference
+                    != predecessor_resolution
+                ):
+                    raise RuntimeError("MCP resolution retry chain is not exact")
+                attempt = build_frozen_fact(
+                    McpInputRequiredResolutionAttemptFact,
+                    schema_version="mcp_input_required_resolution_attempt.v1",
+                    round_count=source_fact.interaction.round_count,
+                    attempt_ordinal=previous_resolution.attempt.attempt_ordinal + 1,
+                    predecessor_resolution_submitted_event_reference=(
+                        predecessor_resolution
+                    ),
+                    predecessor_resume_failed_event_reference=predecessor_failure,
+                )
+            prepared_mcp_resolution = resolution
+            mcp_resolution_event = McpInputRequiredResolutionSubmittedEvent(
+                id=(
+                    "mcp_resolution:"
+                    + stable_runtime_event_id(
+                        "mcp-input-required-resolution-submitted-event:v1",
+                        identity.boundary_id,
+                        source_fact.interaction.round_count,
+                        attempt.attempt_ordinal,
+                        resolution.prepared_resolution_fingerprint,
+                    )
+                ),
+                **event_context.event_fields(),
+                source=source_authority,
+                resolution=resolution.resolution_semantic,
+                attempt=attempt,
+                resume_boundary_event_identity=stable_event_identity(
+                    boundary_event,
+                    runtime_session_id=self.runtime_session_id,
+                ),
+            )
+        elif interaction_kind == "mcp_input_required":
+            raise RuntimeError("MCP resume boundary lost its pending interaction")
         run_owner = self._run_execution_owners.require(state.run_id)
         incoming_execution_handles = self._new_execution_handles(
             owner_id=identity.boundary_id,
@@ -5012,13 +5218,23 @@ class HostSession:
             frozen_execution_surface=frozen_surface,
             incoming_execution_handles=incoming_execution_handles,
             pending_mcp_audits=pending_audits,
+            deadline_budget=deadline_budget,
             gate_policy=resume_gate_policy_for(interaction_kind),  # type: ignore[arg-type]
             diagnostics=(),
+            prepared_mcp_input_required_resolution=prepared_mcp_resolution,
+            mcp_input_required_resolution_event_id=(
+                mcp_resolution_event.id if mcp_resolution_event is not None else None
+            ),
         )
         attempt = self._boundary_attempt
         if attempt is not None:
             attempt.execution_handles = incoming_execution_handles
-        candidates = (*pending_audits, exposure_event, boundary_event)
+        candidates = (
+            *pending_audits,
+            exposure_event,
+            boundary_event,
+            *((mcp_resolution_event,) if mcp_resolution_event is not None else ()),
+        )
         self._set_boundary_candidates(candidates)
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
@@ -5072,8 +5288,26 @@ class HostSession:
                 state=state,
                 prepared=prepared,
                 stored=committed_events,
-                publication_status="failed_after_commit",
+                publication_status=(
+                    "failed_after_commit"
+                    if isinstance(exc, EventPublicationAfterCommitError)
+                    and exc.result.publication_errors
+                    else "unavailable"
+                    if isinstance(exc, EventPublicationAfterCommitError)
+                    else "failed_after_commit"
+                ),
             )
+            mcp_boundary_publication_failed = (
+                isinstance(exc, EventPublicationAfterCommitError)
+                and interaction_kind == "mcp_input_required"
+            )
+            if mcp_boundary_publication_failed:
+                state.scratchpad[
+                    "mcp_input_required_publication_closure_reason"
+                ] = "resume_boundary_publication_unavailable"
+                state.scratchpad["publication_terminal_deadline_budget"] = (
+                    prepared.deadline_budget
+                )
             if isinstance(exc, asyncio.CancelledError):
                 _clear_current_task_cancellation()
             if state.stop_request is not None:
@@ -5083,6 +5317,11 @@ class HostSession:
                 await self._terminalize_committed_run_after_boundary_failure(
                     state=state,
                     abort_reason=state.stop_request.reason,
+                )
+            elif mcp_boundary_publication_failed:
+                await self._terminalize_committed_run_after_boundary_failure(
+                    state=state,
+                    abort_reason=AbortKind.HOST_TEARDOWN,
                 )
             else:
                 await self._terminalize_committed_run_after_boundary_failure(
@@ -5144,13 +5383,37 @@ class HostSession:
             ),
             None,
         )
+        resolution_event = next(
+            (
+                event
+                for event in stored
+                if isinstance(event, McpInputRequiredResolutionSubmittedEvent)
+                and event.id == prepared.mcp_input_required_resolution_event_id
+            ),
+            None,
+        )
         if (
             exposure_event is None
             or exposure_event.sequence is None
             or boundary_event is None
             or boundary_event.sequence is None
+            or (
+                prepared.mcp_input_required_resolution_event_id is not None
+                and (
+                    resolution_event is None
+                    or resolution_event.sequence is None
+                )
+            )
         ):
             raise RuntimeError("resume boundary batch was not fully committed")
+        resolution_ref = (
+            event_reference_from_stored(
+                resolution_event,
+                runtime_session_id=self.runtime_session_id,
+            )
+            if resolution_event is not None
+            else None
+        )
         through_sequence = stored[-1].sequence
         if through_sequence is None:
             raise RuntimeError("resume boundary batch ended with an unsequenced event")
@@ -5232,7 +5495,12 @@ class HostSession:
                 validated_suspended_state_token_fingerprint=(
                     boundary_event.boundary.suspended_state_token_fingerprint
                 ),
+                mcp_input_required_resolution_ref=resolution_ref,
             )
+            if resolution_ref is not None:
+                state.scratchpad[
+                    "latest_mcp_input_required_resolution_reference"
+                ] = resolution_ref
         state.scratchpad.pop("suspended_state_token", None)
         return CommittedInteractionResumeBoundary(
             prepared=prepared,
@@ -5247,6 +5515,7 @@ class HostSession:
             ),
             committed_through_sequence=through_sequence,
             publication_status=publication_status,
+            mcp_input_required_resolution_event_reference=resolution_ref,
         )
 
     async def _fold_resume_boundary_or_terminalize(
@@ -5590,63 +5859,25 @@ class HostSession:
     async def _compact_if_needed_and_notify(
         self, service, **kwargs
     ) -> tuple[bool, AgentEvent | None]:
-        event_log = self.wiring.runtime_wiring.event_log
-        before_sequence = await asyncio.to_thread(event_log.next_sequence)
-        compacted = await service.compact_if_needed(**kwargs)
-        compaction_events = await self._publish_compaction_events_after(before_sequence)
-        terminal_event = self._latest_terminal_compaction_event(compaction_events)
+        try:
+            attempt = await service.compact_if_needed(**kwargs)
+        except (
+            ContextCompactionInvocationFailed,
+            ContextCompactionPublicationFailedAfterCommit,
+        ) as exc:
+            terminal_event = exc.result.terminal_event
+            if terminal_event is not None:
+                self._notify_compaction_listeners(terminal_event)
+            if isinstance(
+                exc,
+                ContextCompactionPublicationFailedAfterCommit,
+            ):
+                self.begin_close()
+            raise
+        terminal_event = attempt.terminal_event
         if terminal_event is not None:
             self._notify_compaction_listeners(terminal_event)
-        return compacted, terminal_event
-
-    async def _publish_compaction_events_after(
-        self, before_sequence: int
-    ) -> list[AgentEvent]:
-        compaction_events = await asyncio.to_thread(
-            self._compaction_events_after, before_sequence - 1
-        )
-        self.wiring.runtime_wiring.runtime_session.publish_stored_events(
-            compaction_events
-        )
-        return compaction_events
-
-    def _compaction_events_after(self, after_sequence: int) -> list[AgentEvent]:
-        event_log = self.wiring.runtime_wiring.event_log
-        through_sequence = event_log.next_sequence() - 1
-        if through_sequence <= after_sequence:
-            return []
-        snapshot = event_log.read_raw_range_snapshot(
-            minimum_sequence=after_sequence + 1,
-            through_sequence=through_sequence,
-            max_events=4_096,
-            max_payload_bytes=16 * 1024 * 1024,
-            deadline_monotonic=time.monotonic() + 10.0,
-        )
-        return [
-            event
-            for raw in snapshot.events
-            if isinstance(
-                event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
-                (
-                    ContextCompactionStartedEvent,
-                    ContextCompactionCompletedEvent,
-                    ContextCompactionMemoryCandidatesProposedEvent,
-                    ContextCompactionFailedEvent,
-                ),
-            )
-        ]
-
-    def _latest_terminal_compaction_event(
-        self, events: list[AgentEvent]
-    ) -> AgentEvent | None:
-        terminal_events = [
-            event
-            for event in events
-            if isinstance(
-                event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent)
-            )
-        ]
-        return terminal_events[-1] if terminal_events else None
+        return bool(attempt), terminal_event
 
     def _notify_compaction_listeners(self, event: AgentEvent) -> None:
         for listener in list(self._compaction_listeners):

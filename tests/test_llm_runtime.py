@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.events import typed_non_transcript_event
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -13,7 +14,6 @@ from tests.support.raw_provider import (
 )
 
 from pulsara_agent.event import (
-    CustomEvent,
     EventContext,
     EventType,
     ModelCallEndEvent,
@@ -480,7 +480,7 @@ def test_model_stream_actual_measurement_joins_projection_and_settlement() -> No
         session.materialization_coordinator.bootstrap_genesis(
             context=EVENT_CONTEXT,
             business_events=(
-                CustomEvent(
+                typed_non_transcript_event(
                     id="event:model-measurement-genesis",
                     **EVENT_CONTEXT.event_fields(),
                     name="model-measurement-genesis",
@@ -3762,7 +3762,6 @@ def test_openai_responses_transport_retries_pre_output_failure() -> None:
 
     assert len(fake_client.responses.calls) == 2
     assert fake_client.close_count == 0
-    assert not any(isinstance(event, CustomEvent) for event in events)
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
     assert any(
         isinstance(event, RawProviderTextDelta) and event.delta == "pong"
@@ -3912,9 +3911,6 @@ def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
     events = asyncio.run(collect())
 
     assert len(fake_client.responses.calls) == 1
-    assert not any(
-        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
-    )
     error = next(event for event in events if isinstance(event, RawProviderFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
@@ -3956,7 +3952,6 @@ def test_openai_responses_transport_retry_exhausted_has_durable_summary() -> Non
 
     events = asyncio.run(collect())
 
-    assert not any(isinstance(event, CustomEvent) for event in events)
     error = next(event for event in events if isinstance(event, RawProviderFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
@@ -4052,9 +4047,6 @@ def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], RolloutBudgetReservationCreatedEvent)
     assert any(isinstance(item, ModelCallStartEvent) for item in events)
-    assert not any(
-        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
-    )
     assert any(
         isinstance(event, TextBlockSegmentEvent) and event.text == "ok"
         for event in events
@@ -4581,7 +4573,6 @@ def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
     assert len(fake_client.chat.completions.calls) == 2
     assert fake_client.close_count == 0
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
-    assert not any(isinstance(event, CustomEvent) for event in events)
     assert any(
         isinstance(event, RawProviderTextDelta) and event.delta == "pong"
         for event in events
@@ -4705,9 +4696,6 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
     events = asyncio.run(collect())
 
     assert len(fake_client.chat.completions.calls) == 1
-    assert not any(
-        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
-    )
     assert any(
         isinstance(event, RawProviderToolCallDelta) and event.delta == '{"q"'
         for event in events
@@ -4754,7 +4742,6 @@ def test_openai_chat_completions_retry_exhausted_has_durable_summary() -> None:
 
     events = asyncio.run(collect())
 
-    assert not any(isinstance(event, CustomEvent) for event in events)
     error = next(event for event in events if isinstance(event, RawProviderFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None

@@ -306,7 +306,7 @@ def test_compaction_cancel_path_has_no_unbounded_commit_task_await() -> None:
         encoding="utf-8"
     )
     runtime_port = source[source.index("class RuntimeSessionCompactionEventCommitPort") :]
-    runtime_port = runtime_port[: runtime_port.index("class DirectEventLogCompactionEventCommitPort")]
+    assert "class DirectEventLogCompactionEventCommitPort" not in source
     assert "result = await task" not in runtime_port
     assert "confirm_event_batch(" not in runtime_port
     assert "PendingCompactionEventCommit(" in runtime_port

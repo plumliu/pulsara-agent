@@ -68,6 +68,10 @@ from pulsara_agent.message import TextBlock
 from pulsara_agent.message.assembler import BlockAssembler
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
+from pulsara_agent.runtime.mcp.lifecycle import McpInputRequiredLifecycleStore
+from pulsara_agent.runtime.mcp.recovery import (
+    terminalize_reopened_mcp_input_required,
+)
 from pulsara_agent.runtime.session import EventWriteConflict, RuntimeSession
 from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.subagent.projection import (
@@ -331,7 +335,12 @@ class SubagentRuntime:
             execution_handles,
         )
 
-    async def _commit_plan(self, plan: PlannedSubagentWrite) -> tuple[AgentEvent, ...]:
+    async def _commit_plan(
+        self,
+        plan: PlannedSubagentWrite,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[AgentEvent, ...]:
         if self._rollout_terminal_augmenter is not None:
             augmented = self._rollout_terminal_augmenter(plan.events)
             if augmented != plan.events:
@@ -359,10 +368,19 @@ class SubagentRuntime:
                     ) from exc
             plan = self._command_planner.validate(plan, state=state_before)
             try:
-                result = await self.parent_runtime_session.write_events(
-                    plan.events,
-                    expected_last_sequence=plan.expected_through_sequence,
-                )
+                if deadline_monotonic is None:
+                    result = await self.parent_runtime_session.write_events(
+                        plan.events,
+                        expected_last_sequence=plan.expected_through_sequence,
+                    )
+                else:
+                    result = (
+                        await self.parent_runtime_session.write_events_with_deadline(
+                            plan.events,
+                            deadline_monotonic=deadline_monotonic,
+                            expected_last_sequence=plan.expected_through_sequence,
+                        )
+                    )
             except EventWriteConflict:
                 state_after = self._graph_store.state
                 stale_sequence = plan.expected_through_sequence
@@ -1508,6 +1526,7 @@ class SubagentRuntime:
         subagent_run_id: str,
         *,
         child_run_id: str,
+        deadline_monotonic: float | None = None,
     ) -> SubagentResult:
         """Fold a normally terminated child ledger into deterministic parent facts.
 
@@ -1528,6 +1547,7 @@ class SubagentRuntime:
         child_events, child_start, child_terminal = self._require_child_terminal(
             run=run,
             child_run_id=child_run_id,
+            deadline_monotonic=deadline_monotonic,
         )
         if child_terminal.terminalization_kind != "normal":
             raise SubagentRuntimeError(
@@ -1590,6 +1610,7 @@ class SubagentRuntime:
             token_usage=None,
             tool_call_count=None,
             submitted_event=None,
+            deadline_monotonic=deadline_monotonic,
         )
         token_usage = (
             handoff.token_usage.model_dump(mode="json")
@@ -1645,7 +1666,8 @@ class SubagentRuntime:
                 events=tuple(events),
                 batch_id=run.batch_id,
                 create_tool_call_id=run.create_tool_call_id,
-            )
+            ),
+            deadline_monotonic=deadline_monotonic,
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
@@ -1663,6 +1685,7 @@ class SubagentRuntime:
         *,
         run: SubagentRunFact,
         child_run_id: str,
+        deadline_monotonic: float | None = None,
     ) -> tuple[tuple[AgentEvent, ...], RunStartEvent, RunEndEvent]:
         child_log = self.event_log_locator.event_log_for_runtime_session(
             run.child_runtime_session_id
@@ -1670,6 +1693,7 @@ class SubagentRuntime:
         child_events = _read_child_run_events(
             child_log,
             run_id=child_run_id,
+            deadline_monotonic=deadline_monotonic,
         )
         starts = [event for event in child_events if isinstance(event, RunStartEvent)]
         terminals = [event for event in child_events if isinstance(event, RunEndEvent)]
@@ -1703,11 +1727,13 @@ class SubagentRuntime:
         tool_call_count: int | None,
         submitted_event: SubagentResultSubmittedEvent | None,
         allow_synthetic: bool = False,
+        deadline_monotonic: float | None = None,
     ) -> ChildResultHandoffFact:
         try:
             child_events, start, terminal = self._require_child_terminal(
                 run=run,
                 child_run_id=child_run_id,
+                deadline_monotonic=deadline_monotonic,
             )
         except SubagentRuntimeError:
             if not allow_synthetic:
@@ -1933,6 +1959,7 @@ class SubagentRuntime:
         token_usage: dict[str, object] | None = None,
         tool_call_count: int | None = None,
         child_run_id: str | None = None,
+        deadline_monotonic: float | None = None,
     ) -> SubagentResult:
         return await self._complete_submitted_result(
             subagent_run_id,
@@ -1941,6 +1968,7 @@ class SubagentRuntime:
             tool_call_count=tool_call_count,
             child_run_id=child_run_id,
             allow_synthetic=False,
+            deadline_monotonic=deadline_monotonic,
         )
 
     async def _complete_submitted_result(
@@ -1952,6 +1980,7 @@ class SubagentRuntime:
         tool_call_count: int | None,
         child_run_id: str | None,
         allow_synthetic: bool,
+        deadline_monotonic: float | None = None,
     ) -> SubagentResult:
         state = self._graph_store.state
         run = self._require_run(subagent_run_id)
@@ -1988,6 +2017,7 @@ class SubagentRuntime:
             tool_call_count=tool_call_count,
             submitted_event=submitted_event,
             allow_synthetic=allow_synthetic,
+            deadline_monotonic=deadline_monotonic,
         )
         committed_token_usage = (
             handoff.token_usage.model_dump(mode="json")
@@ -1997,7 +2027,10 @@ class SubagentRuntime:
         child_terminal_event_id = handoff.child_terminal_reference.terminal_event_id
         child_terminal = self.event_log_locator.event_log_for_runtime_session(
             run.child_runtime_session_id
-        ).get_by_id(child_terminal_event_id)
+        ).get_by_id(
+            child_terminal_event_id,
+            deadline_monotonic=deadline_monotonic,
+        )
         child_terminal_created_at = (
             child_terminal.created_at
             if isinstance(child_terminal, RunEndEvent)
@@ -2051,7 +2084,8 @@ class SubagentRuntime:
                 events=tuple(events),
                 batch_id=run.batch_id,
                 create_tool_call_id=run.create_tool_call_id,
-            )
+            ),
+            deadline_monotonic=deadline_monotonic,
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
@@ -2074,6 +2108,7 @@ class SubagentRuntime:
         child_terminal_reference: ChildNativeTerminalReferenceFact | None = None,
         terminal_event_id: str | None = None,
         terminal_created_at: str | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
         state = self._graph_store.state
         run = self._require_run(subagent_run_id)
@@ -2150,7 +2185,8 @@ class SubagentRuntime:
                 batch_id=run.batch_id,
                 create_tool_call_id=run.create_tool_call_id,
                 repair_id=repair_id,
-            )
+            ),
+            deadline_monotonic=deadline_monotonic,
         )
         handle = self._execution_registry.get(subagent_run_id)
         child_task = handle.coroutine if handle is not None else None
@@ -2213,6 +2249,7 @@ class SubagentRuntime:
         child_terminal_reference: ChildNativeTerminalReferenceFact | None = None,
         terminal_event_id: str | None = None,
         terminal_created_at: str | None = None,
+        deadline_monotonic: float | None = None,
     ) -> SubagentRunFact:
         state = self._graph_store.state
         run = self._require_run(subagent_run_id)
@@ -2244,6 +2281,7 @@ class SubagentRuntime:
                 run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
                 max_events=1,
                 max_payload_bytes=512 * 1024,
+                deadline_monotonic=deadline_monotonic,
             )
             terminals = tuple(
                 raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
@@ -2281,7 +2319,8 @@ class SubagentRuntime:
                     child_terminal_reference=child_terminal_reference,
                     terminal_event_id=terminal_event_id,
                     terminal_created_at=terminal_created_at,
-                )
+                ),
+                deadline_monotonic=deadline_monotonic,
             )
         finally:
             if native_child_owner and self._terminal_commit_is_fully_applied(
@@ -2351,6 +2390,7 @@ class SubagentRuntime:
             "Child runtime was recorded as active but has no live task handle in this host process; "
             "marking it failed during resume/repair."
         ),
+        deadline_monotonic: float | None = None,
     ) -> tuple[SubagentRunFact, ...]:
         """Reconcile ownerless parent graph nodes from their child ledgers.
 
@@ -2360,8 +2400,15 @@ class SubagentRuntime:
         the same completion/failure builder used on the normal path.
         """
 
+        recovery_deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else asyncio.get_running_loop().time() + 30.0
+        )
         repaired: list[SubagentRunFact] = []
         for run in self.runs:
+            if asyncio.get_running_loop().time() >= recovery_deadline:
+                raise TimeoutError("child reopen recovery deadline expired")
             if run.status not in _ACTIVE_STATUSES:
                 continue
             handle = self._execution_registry.get(run.subagent_run_id)
@@ -2371,7 +2418,9 @@ class SubagentRuntime:
             child_log = self.event_log_locator.event_log_for_runtime_session(
                 run.child_runtime_session_id
             )
-            child_events = tuple(child_log.iter())
+            child_events = tuple(
+                child_log.iter(deadline_monotonic=recovery_deadline)
+            )
             starts = [
                 event
                 for event in child_events
@@ -2391,6 +2440,7 @@ class SubagentRuntime:
                             "repair": "child_run_start_not_committed",
                         }
                     ],
+                    deadline_monotonic=recovery_deadline,
                 )
                 repaired.append(self._require_run(run.subagent_run_id))
                 continue
@@ -2399,12 +2449,93 @@ class SubagentRuntime:
                     "child repair requires exactly one typed child RunStart"
                 )
             start = starts[0]
+            child_mcp_lifecycle = McpInputRequiredLifecycleStore(
+                runtime_session_id=child_log.runtime_session_id,
+                events=child_events,
+            )
+            active_child_mcp = child_mcp_lifecycle.active_for_run(start.run_id)
+            if active_child_mcp:
+                child_session = RuntimeSession(
+                    self.parent_runtime_session.workspace_root,
+                    runtime_session_id=child_log.runtime_session_id,
+                    event_log=child_log,
+                    archive=self.parent_runtime_session.archive,
+                    tool_result_artifacts=(
+                        self.parent_runtime_session.tool_result_artifacts
+                    ),
+                    reopen_deadline_monotonic=recovery_deadline,
+                    allow_unbootstrapped_test_events=(
+                        self.parent_runtime_session.allow_unbootstrapped_test_events
+                    ),
+                )
+                try:
+                    recovered_mcp = (
+                        await terminalize_reopened_mcp_input_required(
+                            child_session,
+                            run_id=start.run_id,
+                            closure_reason="child_pending_unsupported",
+                            deadline_monotonic=recovery_deadline,
+                        )
+                    )
+                    child_events = tuple(
+                        child_log.iter(deadline_monotonic=recovery_deadline)
+                    )
+                    recovered = RunEndEvent(
+                        id=start.terminal_run_end_event_id,
+                        created_at=start.created_at,
+                        run_id=start.run_id,
+                        turn_id=start.turn_id,
+                        reply_id=start.reply_id,
+                        status="aborted",
+                        stop_reason=RunStopReason.ABORTED,
+                        terminalization_kind=(
+                            RunTerminalizationKind.RECOVERED_INTERRUPTED
+                        ),
+                        abort_kind="host_teardown",
+                        mcp_input_required_closure_event_reference=(
+                            recovered_mcp.closure_event_reference
+                        ),
+                    )
+                    terminal_batch = _recovered_child_terminal_batch(
+                        child_events=child_events,
+                        start=start,
+                        recovered=recovered,
+                    )
+                    result = await child_session.write_events_with_deadline(
+                        terminal_batch,
+                        deadline_monotonic=recovery_deadline,
+                        expected_last_sequence=child_log.next_sequence(
+                            deadline_monotonic=recovery_deadline
+                        )
+                        - 1,
+                    )
+                    if (
+                        result.publication_status == "unavailable"
+                        or result.publication_errors
+                    ):
+                        raise SubagentRuntimeError(
+                            "child MCP recovery publication is unavailable"
+                        )
+                    stored_by_id = {
+                        event.id: event for event in result.committed_events
+                    }
+                    terminal = stored_by_id.get(recovered.id)
+                    if not isinstance(terminal, RunEndEvent):
+                        raise SubagentRuntimeError(
+                            "child MCP recovery did not commit RunEnd"
+                        )
+                finally:
+                    child_session.close()
+            else:
+                terminal = None
             terminals = [
                 event
                 for event in child_events
                 if isinstance(event, RunEndEvent) and event.run_id == start.run_id
             ]
-            if not terminals:
+            if terminal is not None:
+                pass
+            elif not terminals:
                 recovered = RunEndEvent(
                     id=start.terminal_run_end_event_id,
                     created_at=start.created_at,
@@ -2425,6 +2556,7 @@ class SubagentRuntime:
                     event_log=child_log,
                     business_events=terminal_batch,
                     owner_scope="subagent-dangling-child-terminal",
+                    deadline_monotonic=recovery_deadline,
                 )
                 stored_by_id = {event.id: event for event in stored}
                 if any(event.id not in stored_by_id for event in terminal_batch):
@@ -2456,11 +2588,13 @@ class SubagentRuntime:
                     await self.complete_submitted_result(
                         run.subagent_run_id,
                         child_run_id=start.run_id,
+                        deadline_monotonic=recovery_deadline,
                     )
                 else:
                     await self.complete_native_result(
                         run.subagent_run_id,
                         child_run_id=start.run_id,
+                        deadline_monotonic=recovery_deadline,
                     )
                 repaired.append(self._require_run(run.subagent_run_id))
                 continue
@@ -2493,6 +2627,7 @@ class SubagentRuntime:
                     child_terminal_reference=terminal_reference,
                     terminal_event_id=parent_event_id,
                     terminal_created_at=terminal.created_at,
+                    deadline_monotonic=recovery_deadline,
                 )
             else:
                 parent_event_id = deterministic_parent_subagent_terminal_event_id(
@@ -2520,6 +2655,7 @@ class SubagentRuntime:
                     child_terminal_reference=terminal_reference,
                     terminal_event_id=parent_event_id,
                     terminal_created_at=terminal.created_at,
+                    deadline_monotonic=recovery_deadline,
                 )
             repaired.append(self._require_run(run.subagent_run_id))
         return tuple(repaired)
@@ -4288,11 +4424,13 @@ def _read_child_run_events(
     event_log: EventLog,
     *,
     run_id: str,
+    deadline_monotonic: float | None = None,
 ) -> tuple[AgentEvent, ...]:
     raw = event_log.read_raw_run_events(
         run_id,
         max_events=16_384,
         max_payload_bytes=16 * 1024 * 1024,
+        deadline_monotonic=deadline_monotonic,
     )
     return tuple(item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw)
 

@@ -33,9 +33,9 @@
 
 | 原工作项 | 当前状态 | 当前结论 | 建议优先级 |
 |---|---|---|---|
-| Async LiveRuntimeEventWriter | `PARTIAL` + `PERF-GATED` | session-owned writer 的 correctness 主体已完成；compaction 旧桥接仍应删除，原生 async PostgreSQL 只能由 profiling 决定 | 中 |
+| Async LiveRuntimeEventWriter | `CLOSED` + `PERF-GATED` | session-owned writer correctness与compaction唯一写入/发布边界已闭环；原生 async PostgreSQL只由 profiling决定 | 无 correctness hard cut |
 | Governance events 同 UOW | `SUPERSEDED` | 已由 memory UOW 内 durable stable-candidate outbox + session-owned accounted dispatcher 闭环，不应改回直接跨 owner 写 ledger | 无新 hard cut |
-| CustomEvent typed 化 | `OPEN` | production 仍有 7 个稳定语义名称使用无 schema 的 `CustomEvent` | 高 |
+| CustomEvent typed 化 | `CLOSED` | 7 个 production事实及 MCP closure已 typed；`CustomEvent`/`EventType.CUSTOM`与旧 decoder已物理删除 | 已完成 |
 | Hook/outbox 重构 | `OPEN` | hook 失败仍只在内存，且部分 async hook 直接执行同步存储 I/O | 高，依赖 migration runner |
 | Runtime dependency-cycle cleanup | `OPEN` | lazy facade、local import 与 runtime/tools 双向依赖仍是生产结构 | 高但需分步 |
 | AgentRuntime coordinator 拆分 | `OPEN`，已有基础 | `RunWorkingSet` 与若干 coordinator 已出现，但 production scratchpad 和大范围 orchestration 仍集中 | 中后期 |
@@ -101,26 +101,22 @@
 
 换言之，原债务中的 **serialization、commit/reducer/publication 分层、thread/async 共用 owner、pool** 已经落地。
 
-### 5.3 仍然存在的窄尾巴
+### 5.3 Writer 尾巴已关闭
 
-#### A. compaction 仍保留旧 direct adapter 与 Host post-scan
+`DirectEventLogCompactionEventCommitPort`、Host/mid-turn sequence post-scan与二次
+publication已经删除。Compaction service required接收 RuntimeSession port，并从 exact
+commit receipt形成 attempt result。
 
-`runtime/compaction/commit.py::DirectEventLogCompactionEventCommitPort` 仍通过 `asyncio.to_thread(self.event_log.append, ...)` 直接写 ledger。它被标为 component-test adapter，但 `ContextCompactionService` 在缺少注入时仍会默认构造它。
+Production direct EventLog mutation由 exact AST inventory冻结为四个 owner：
 
-生产 wiring 已注入 `RuntimeSessionCompactionEventCommitPort`，所以这不是当前主路径旁路；问题在于 production package 的默认行为仍可悄悄退回旧模式。
+- RuntimeSession event batch commit；
+- RuntimeSession projection checkpoint；
+- ledger materialization atomic primitive；
+- quiescent/offline subagent checkpoint doctor。
 
-同时，`host/session.py::_publish_compaction_events_after()` 仍会在 compaction 后扫描 sequence range，并使用 hard-coded compaction event type 集合做二次 publication/discovery。RuntimeSession writer 已经拥有 ordered publication，这段逻辑是旧两段式模型留下的桥接。
-
-#### B. 少量 direct EventLog write 需要正式 allowlist
-
-当前 direct write 主要剩在：
-
-- `llm/control_recovery.py` 与 `llm/recovery.py` 的 unbootstrapped test-only 分支；
-- `runtime/long_horizon/checkpoint_doctor.py` 的 quiescent/offline repair；
-- `runtime/session.py` 的 writer-owner 内部物理 commit；
-- authority materialization account 的底层 transaction primitive。
-
-这些用途不应被一概删除，但需要 architecture guard 按 owner/场景 allowlist，避免新的 live producer再次绕过 session writer。
+两个 LLM recovery test-only direct branches已经迁出生产路径。Alias、bound method、
+`getattr`、同名函数或文件级例外均被 architecture test拒绝。因此本节 correctness债务
+`CLOSED`；原生 async driver只保留独立 `PERF-GATED` 判断。
 
 ### 5.4 原生 async PostgreSQL 是否仍是债务
 
@@ -134,14 +130,16 @@
 
 不能仅凭旧工作项名称再次启动一轮 writer 重写。
 
-### 5.5 重基线后的完成门槛
+### 5.5 已满足的完成门槛
 
-1. `ContextCompactionService` production constructor 不再拥有 direct EventLog fallback。
-2. 删除 `_publish_compaction_events_after()` 及其 hard-coded event filter。
-3. direct `event_log.append/extend` architecture guard 只允许 writer internals、offline doctor 和明确 test support。
-4. 原生 async adapter 进入独立性能提案，必须提供 queue wait、transaction wall time 和 event-loop responsiveness 的 before/after 数据。
+1. [x] `ContextCompactionService` production constructor 不再拥有 direct EventLog fallback。
+2. [x] 删除 `_publish_compaction_events_after()` 及其 hard-coded event filter。
+3. [x] direct `event_log.append/extend` exact AST guard只允许 frozen owner inventory。
+4. [ ] 原生 async adapter仅在独立性能提案提供 queue wait、transaction wall time 与
+   event-loop responsiveness before/after 后考虑；它不是 correctness未完成项。
 
-结论：**关闭原“Async LiveRuntimeEventWriter”大债务；保留一个小型 writer-tail cleanup，原生 async 化标记为 PERF-GATED。**
+结论：**关闭原“Async LiveRuntimeEventWriter”correctness债务；原生 async 化保留为
+PERF-GATED。**
 
 ## 6. Governance events 同 UOW
 
@@ -194,63 +192,16 @@ UOW FULL 后，`GovernanceEventOutboxDispatcher` 才通过 `RuntimeSession.write
 
 这些是现有实现的运维与迁移责任，不是新的 governance atomicity hard cut。
 
-## 7. CustomEvent typed 化
+## 7. Typed event vocabulary（`CLOSED`）
 
-### 7.1 当前仍是实质债务
+原 7 个 production CustomEvent已经替换为 bounded typed events，并新增
+`McpInputRequiredInteractionClosedEvent`。MCP suspension source也已从自由 payload切到
+required typed fact。`CustomEvent` class、`EventType.CUSTOM`、default union/decoder与旧
+字符串 constructor均已删除；test-only non-transcript fixture不进入 production registry。
 
-`event/events.py::CustomEvent` 仍公开：
-
-```python
-name: str
-value: dict[str, Any]
-```
-
-当前 production constructor 仍有 7 个稳定名称：
-
-1. `mcp_input_required_expired`
-2. `mcp_input_required_resolved`
-3. `mcp_input_required_binding_changed`
-4. `mcp_input_required_resume_failed`
-5. `compaction_requested`
-6. `mid_turn_compaction_skipped`
-7. `tool_result_persistence_failed`
-
-与旧审计相比，capability exposure、LLM retry、tool suspension 等若干旧名称已经迁走，债务范围明显缩小；但剩余名称都不是随手日志：
-
-- MCP 四项参与 interaction resume 与恢复解释；
-- compaction requested/skipped 参与控制面和 Inspector；
-- tool-result persistence failure 是 terminal correctness 事实。
-
-它们使用自由字典会继续绕过 schema version、reason enum、fingerprint join 和 historical decoder contract。
-
-### 7.2 推荐 hard cut
-
-按 ownership 分三组，而不是为每个字符串机械创建一个类：
-
-1. typed MCP input-required lifecycle event union；
-2. typed context-compaction request/skip event；
-3. typed tool-result persistence terminal failure event。
-
-同一 PR 应同时完成 producer、decoder、registry、Inspector/reducer 和测试迁移，随后删除对应 `CustomEvent` 写路径。
-
-V1 可保留 `CustomEvent` 作为严格受限的 diagnostic carrier，但必须满足：
-
-- name 有 namespaced allowlist；
-- payload 有字符/UTF-8 bytes/键数量 bound；
-- 不进入 transcript semantic domain；
-- 不参与 recovery、control、checkpoint 或 provider input；
-- production semantic constructor architecture guard 为零。
-
-若仓库没有真实 diagnostic 使用者，则更简单的选择是彻底删除 `CustomEvent`，测试改用明确的 non-transcript fixture event。
-
-### 7.3 完成门槛
-
-- `src/pulsara_agent` 中不存在上述 7 个 literal；
-- production 不再构造 `CustomEvent`；
-- 长期 contract 不再把已经删除的 custom name 当作正式边界；
-- historical decoder 的保留策略明确；若本轮数据库 hard reset，则不保留旧 payload 兼容。
-
-结论：**仍是 OPEN，且可以立即开始，不再依赖 writer 重构。**
+Event schema generation已 bump，采用 reset-only PostgreSQL/Oxigraph event-world，不保留旧
+CUSTOM decoder。MCP lifecycle、Inspector、recovery与 transcript-domain classification均已
+同步。结论：D2 vocabulary债务 `CLOSED`。
 
 ## 8. Hook/outbox 重构
 
@@ -593,8 +544,8 @@ Schema migration runner + verify-only startup
     └─ 后续所有新增 PostgreSQL schema
 
 Current RuntimeSession writer（已完成主体）
-    ├─ CustomEvent typed hard cut（可立即开始）
-    ├─ compaction direct-port/post-scan cleanup
+    ├─ typed event vocabulary（已闭环）
+    ├─ compaction direct-port/post-scan cleanup（已闭环）
     └─ governance event outbox（已闭环）
 
 Contracts/ports + executable import rules
@@ -621,14 +572,17 @@ Governance same-UOW 不再位于待办图中；它是已经完成的 outbox owne
 
 Migration ledger/runner/CLI、verify-only startup、verified connection provider、runtime DDL删除与受限role gate已经落地。后续durable hook schema直接在该registry上增加migration。
 
-### D2：Event vocabulary 与 writer 尾巴
+### D2：Event vocabulary 与 writer 尾巴（`CLOSED`）
 
-- typed 化 7 个 production CustomEvent；
-- 删除 compaction direct production fallback；
-- 删除 Host compaction post-scan publication；
-- direct EventLog write建立精确 allowlist。
+- [x] typed 化 7 个 production CustomEvent，并新增 typed MCP closure；
+- [x] 删除 compaction direct production fallback；
+- [x] 删除 Host/mid-turn compaction post-scan 与二次 publication；
+- [x] direct EventLog mutation建立 exact AST allowlist。
 
-### D3：Durable hook/projection jobs
+关闭范围只限上述四项。Typed failure audit不等于 durable projection retry job；compaction
+candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
+
+### D3：Durable hook/projection jobs（`OPEN`）
 
 - timeline与canonical mutation replay脱离publisher critical path；
 - durable lease/retry/dead-letter；
@@ -641,7 +595,7 @@ Migration ledger/runner/CLI、verify-only startup、verified connection provider
 - `MockMcpClientManager` 与 in-memory runtime composition移入 tests/support；
 - production HostCore删除 `durable` branch。
 
-### D5：Compaction-memory extension
+### D5：Compaction-memory extension（`OPEN`）
 
 - memory-owned extension；
 - 保留一次模型调用；
@@ -671,7 +625,7 @@ Migration ledger/runner/CLI、verify-only startup、verified connection provider
 |---|---|
 | Writer | live production direct `event_log.append/extend` 仅允许 RuntimeSession writer internals |
 | Governance | memory UOW 内必须产生 stable event outbox ticket；dispatch failure后可精确重试 |
-| CustomEvent | production semantic constructor为零，或仅剩严格 diagnostic allowlist |
+| Typed event vocabulary | production `CustomEvent`/`EventType.CUSTOM`与旧 7 个字符串constructor为零 |
 | Hooks | publisher subscriber中无同步 DB/archive/Oxigraph重工作；durable jobs可 restart |
 | Dependencies | CI import rule阻止 runtime/tools与event/replay反向边回流 |
 | Agent state | production arbitrary scratchpad key最终为零 |
@@ -693,10 +647,12 @@ Migration ledger/runner/CLI、verify-only startup、verified connection provider
 依赖表后半部分的九项工作，当前不能按“九项都未做”处理：
 
 - **1 项已被更合适的方案替代并闭环**：Governance events 同 UOW；
-- **1 项主体已完成，仅剩窄 cleanup 与性能可选项**：Async LiveRuntimeEventWriter；
+- **1 项 correctness 已完成，仅保留独立性能门控**：Async LiveRuntimeEventWriter；
 - **1 项应拆成已完成与未完成两部分**：legacy MCP 已删除，in-memory product mode仍在；
-- **5 项仍是有效债务**：CustomEvent、hooks、dependency cycles、AgentRuntime ownership、compaction-memory ownership。
+- **4 项仍是有效债务**：hooks、dependency cycles、AgentRuntime ownership、compaction-memory ownership。
 
-Schema hot-path基础工作已经完成。下一步可并行收口CustomEvent/compaction writer尾巴，随后实施durable hook jobs与依赖方向治理；不要再次重写writer或让governance UOW直接写EventLog。
+Schema hot-path与 D2 event vocabulary/writer尾巴已经完成。下一步应实施 durable hook jobs与
+依赖方向治理；D3与D5继续保持 `OPEN`，不要把本次 typed failure audit或 process-local
+projection receipt误报为 durable outbox correctness。
 
 这份重基线的目的不是减少债务数量，而是把工程投入重新对准仍然存在的风险。

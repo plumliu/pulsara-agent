@@ -7,9 +7,10 @@ from threading import Event, RLock, Thread
 
 import pytest
 from tests.conftest import emit_test_accepted_model_reply
+from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.event import CustomEvent, EventContext, PlanExitResolvedEvent
+from pulsara_agent.event import EventContext, PlanExitResolvedEvent
 from pulsara_agent.event_log.protocol import (
     RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
@@ -149,7 +150,7 @@ def test_evidence_cursor_same_high_water_and_delta_extension(
         )
 
         await runtime.emit(
-            CustomEvent(
+            typed_non_transcript_event(
                 **context.event_fields(),
                 name="cursor-non-semantic-suffix",
                 value={"step": 1},
@@ -663,7 +664,7 @@ def test_delta_read_cancellation_preserves_previous_cursor(
         original_handle = service._verified_evidence_cursor_handle  # noqa: SLF001
         assert original_handle is not None
         await runtime.emit(
-            CustomEvent(
+            typed_non_transcript_event(
                 **context.event_fields(),
                 name="cursor-cancelled-suffix",
                 value={"step": 1},

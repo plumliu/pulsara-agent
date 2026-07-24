@@ -325,6 +325,9 @@ class HostCore:
                 "repair_session_for_resume requires durable HostCore wiring"
             )
         access_lease = await self._get_postgres_access_lease()
+        reopen_deadline_monotonic = (
+            monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
+        )
         guard = (
             self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
@@ -334,10 +337,11 @@ class HostCore:
             manifest = self._manifest_store().get(runtime_session_id)
             if manifest is None:
                 raise KeyError(f"runtime session not found: {runtime_session_id}")
-            return repair_dangling_runs_for_resume(
+            return await repair_dangling_runs_for_resume(
                 connection_provider=access_lease.connection_provider,
                 runtime_session_id=runtime_session_id,
                 workspace_root=manifest.workspace_root,
+                deadline_monotonic=reopen_deadline_monotonic,
             )
 
     async def _open_session_with_runtime_id(
@@ -356,6 +360,7 @@ class HostCore:
         repair_dangling_on_resume: bool,
     ) -> HostSession:
         self._raise_if_not_accepting("open a session")
+        reopen_deadline_monotonic: float | None = None
         await self._drain_failed_open_mcp_supervisors()
         postgres_access_lease = (
             await self._get_postgres_access_lease() if self.durable else None
@@ -382,10 +387,14 @@ class HostCore:
                     raise RuntimeError("dangling repair requires a runtime_session_id")
                 if postgres_access_lease is None:
                     raise RuntimeError("durable resume requires PostgreSQL access")
-                repair_dangling_runs_for_resume(
+                reopen_deadline_monotonic = (
+                    monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
+                )
+                await repair_dangling_runs_for_resume(
                     connection_provider=postgres_access_lease.connection_provider,
                     runtime_session_id=runtime_session_id,
                     workspace_root=str(workspace.workspace_root),
+                    deadline_monotonic=reopen_deadline_monotonic,
                 )
             lease = await self._attach_supervisor(
                 workspace, host_session_id, conversation_id
@@ -393,9 +402,6 @@ class HostCore:
             mcp_supervisor, mcp_ticket = await self._build_mcp_supervisor(workspace)
             retrieval_resources = (
                 await self._get_retrieval_resources() if self.durable else None
-            )
-            reopen_deadline_monotonic = (
-                monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
             )
             wiring = build_agent_runtime_wiring(
                 self.settings,
@@ -435,8 +441,22 @@ class HostCore:
                 mcp_supervisor=mcp_supervisor,
                 reopen_deadline_monotonic=reopen_deadline_monotonic,
             )
+            agent_runtime = wiring.agent_runtime
+            runtime_open_deadline_monotonic = (
+                wiring.runtime_wiring.runtime_session.runtime_open_deadline_monotonic
+            )
+            if (
+                repair_dangling_on_resume
+                and agent_runtime._subagent_parent_features_enabled
+                and agent_runtime.subagent_runtime is not None
+                and not agent_runtime._subagent_dangling_repair_done
+            ):
+                await agent_runtime.subagent_runtime.repair_dangling_children(
+                    deadline_monotonic=runtime_open_deadline_monotonic
+                )
+                agent_runtime._subagent_dangling_repair_done = True
             await session.recover_terminal_monitor_owners_before_open(
-                deadline_monotonic=reopen_deadline_monotonic,
+                deadline_monotonic=runtime_open_deadline_monotonic,
             )
             wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
             if mcp_ticket is not None:

@@ -8,6 +8,7 @@ from typing import Any, TypeVar
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.events import typed_non_transcript_event
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -20,7 +21,6 @@ from tests.support.model_stream import (
 
 from pulsara_agent.primitives.context import ToolArgumentsParseErrorCode
 from pulsara_agent.event import (
-    CustomEvent,
     EventContext,
     LedgerMaterializationConsumerHorizonAdvancedEvent,
     PlanExitResolvedEvent,
@@ -397,7 +397,7 @@ def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
     coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="g" * 128,
                 **context.event_fields(),
                 name="genesis",
@@ -412,7 +412,7 @@ def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
     admitted = coordinator.reserve_and_commit_dispatch(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="s" * 128,
                 **context.event_fields(),
                 name="dispatch",
@@ -428,7 +428,7 @@ def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
         context=context,
         reservation=admitted.reservation,
         business_events=tuple(
-            CustomEvent(
+            typed_non_transcript_event(
                 id=f"{index:04d}" + "e" * 124,
                 **context.event_fields(),
                 name="n" * 128,
@@ -867,7 +867,7 @@ def test_event_batch_and_materialization_account_commit_atomically() -> None:
         runtime_session_id="runtime:account",
         charge_contract_fingerprint=contracts.charge_contract.contract_fingerprint,
     )
-    event = CustomEvent(
+    event = typed_non_transcript_event(
         id="event:account-business",
         run_id="run:account",
         turn_id="turn:account",
@@ -924,7 +924,7 @@ def test_genesis_and_dispatch_reservation_share_one_account_cas() -> None:
         turn_id="turn:coordinator",
         reply_id="reply:coordinator",
     )
-    first = CustomEvent(
+    first = typed_non_transcript_event(
         id="event:first-business",
         **context.event_fields(),
         name="first-business",
@@ -944,7 +944,7 @@ def test_genesis_and_dispatch_reservation_share_one_account_cas() -> None:
     assert genesis.stored_events[-1].type == "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
     assert len(genesis.resulting_account_state.generation.consumer_horizons) == 2
 
-    dispatch = CustomEvent(
+    dispatch = typed_non_transcript_event(
         id="event:dispatch-proof",
         **context.event_fields(),
         name="dispatch-proof",
@@ -993,7 +993,7 @@ def test_one_shot_operation_advances_account_without_leaving_reservation() -> No
     coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:one-shot-genesis",
                 **context.event_fields(),
                 name="one-shot-genesis",
@@ -1009,7 +1009,7 @@ def test_one_shot_operation_advances_account_without_leaving_reservation() -> No
     committed = coordinator.commit_one_shot_operation(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:one-shot-business",
                 **context.event_fields(),
                 name="one-shot-business",
@@ -1026,7 +1026,7 @@ def test_one_shot_operation_advances_account_without_leaving_reservation() -> No
     )
 
     assert tuple(event.type for event in committed.stored_events) == (
-        "CUSTOM",
+        "PROJECTION_REQUESTED",
         "PHYSICAL_OPERATION_RESERVATION_CREATED",
         "PHYSICAL_OPERATION_RESERVATION_SETTLED",
     )
@@ -1067,7 +1067,7 @@ def test_retained_reservation_charges_and_settles_exact_predecessor() -> None:
     coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:retained-genesis",
                 **context.event_fields(),
                 name="retained-genesis",
@@ -1082,7 +1082,7 @@ def test_retained_reservation_charges_and_settles_exact_predecessor() -> None:
     admitted = coordinator.reserve_and_commit_dispatch(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:retained-dispatch",
                 **context.event_fields(),
                 name="retained-dispatch",
@@ -1098,7 +1098,7 @@ def test_retained_reservation_charges_and_settles_exact_predecessor() -> None:
         context=context,
         reservation=admitted.reservation,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:retained-delta",
                 **context.event_fields(),
                 name="retained-delta",
@@ -1112,7 +1112,7 @@ def test_retained_reservation_charges_and_settles_exact_predecessor() -> None:
         context=context,
         reservation=admitted.reservation,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:retained-terminal",
                 **context.event_fields(),
                 name="retained-terminal",
@@ -1173,7 +1173,7 @@ def test_materialization_account_commit_then_raise_confirms_exact_candidate(
     committed = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:account-confirm-first",
                 **context.event_fields(),
                 name="account-confirm-first",
@@ -1213,7 +1213,7 @@ def test_graph_checkpoint_atomically_advances_only_graph_consumer() -> None:
     genesis = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:graph-horizon-genesis",
                 **context.event_fields(),
                 name="graph-horizon-genesis",
@@ -1286,7 +1286,7 @@ def test_graph_checkpoint_service_commits_horizon_in_same_account_batch(
         reply_id="reply:graph-service-horizon",
     )
     event_log.append(
-        CustomEvent(
+        typed_non_transcript_event(
             id="event:graph-service-prefix",
             **context.event_fields(),
             name="graph-service-prefix",
@@ -1372,7 +1372,7 @@ def test_materialization_account_precommit_failure_remains_none(
         coordinator.bootstrap_genesis(
             context=context,
             business_events=(
-                CustomEvent(
+                typed_non_transcript_event(
                     id="event:account-none-first",
                     **context.event_fields(),
                     name="account-none-first",
@@ -1422,7 +1422,7 @@ def test_checkpoint_barrier_closes_new_producer_admission() -> None:
     genesis = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:barrier-first",
                 **context.event_fields(),
                 name="barrier-first",
@@ -1509,7 +1509,7 @@ def test_checkpoint_barrier_closes_new_producer_admission() -> None:
         coordinator.reserve_and_commit_dispatch(
             context=context,
             business_events=(
-                CustomEvent(
+                typed_non_transcript_event(
                     id="event:blocked-behind-barrier",
                     **context.event_fields(),
                     name="blocked",
@@ -1562,7 +1562,7 @@ def test_checkpoint_success_advances_horizon_and_reopens_admission() -> None:
     genesis = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:checkpoint-success-first",
                 **context.event_fields(),
                 name="checkpoint-success-first",
@@ -1671,7 +1671,7 @@ def test_checkpoint_success_advances_horizon_and_reopens_admission() -> None:
     admitted = coordinator.reserve_and_commit_dispatch(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:after-checkpoint",
                 **context.event_fields(),
                 name="after-checkpoint",
@@ -1733,7 +1733,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
     genesis = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:checkpoint-fallback-genesis",
                 **context.event_fields(),
                 name="checkpoint-fallback-genesis",
@@ -2096,7 +2096,7 @@ def _installed_checkpoint_for_terminal_test(
     genesis = coordinator.bootstrap_genesis(
         context=context,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id=f"event:checkpoint-{suffix}-first",
                 **context.event_fields(),
                 name="checkpoint-terminal-first",
@@ -2957,7 +2957,7 @@ def test_full_source_doctor_never_bootstraps_missing_account() -> None:
 
     event_log = InMemoryEventLog(runtime_session_id="runtime:legacy-doctor")
     event_log.append(
-        CustomEvent(
+        typed_non_transcript_event(
             id="event:legacy-doctor",
             run_id="run:legacy-doctor",
             turn_id="turn:legacy-doctor",
@@ -3006,7 +3006,7 @@ def test_compile_authority_uses_bounded_delta_beyond_legacy_slice_limits() -> No
     historical_value = "x" * 1_025
     event_log.extend(
         tuple(
-            CustomEvent(
+            typed_non_transcript_event(
                 id=f"event:history:{index}",
                 run_id="run:historical",
                 turn_id="turn:historical",
@@ -3044,7 +3044,7 @@ def test_compile_authority_uses_bounded_delta_beyond_legacy_slice_limits() -> No
         )
     )
     tail = event_log.append(
-        CustomEvent(
+        typed_non_transcript_event(
             id="event:authority-history-stress-tail",
             run_id=run_id,
             turn_id=turn_id,

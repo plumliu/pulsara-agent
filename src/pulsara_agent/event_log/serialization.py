@@ -20,7 +20,7 @@ from pulsara_agent.primitives.long_horizon import EventSchemaDomainContractFact
 
 # This is a catalog migration version only.  Per-row decoder identity is the
 # event type/version/schema/domain tuple below.
-AGENT_EVENT_SCHEMA_VERSION = 5
+AGENT_EVENT_SCHEMA_VERSION = 6
 
 
 class EventSchemaRegistryConflict(RuntimeError):

@@ -1,25 +1,29 @@
-"""Typed commit boundary for compaction facts."""
+"""RuntimeSession-owned commit boundary for context-compaction facts."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from time import monotonic
 from typing import Literal, Protocol
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.event_log import EventLog
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    RuntimeEventOperationDeadlineBudget,
+)
 from pulsara_agent.runtime.session import (
-    EventPublicationAfterCommitError,
     EventPublicationError,
     EventWriteResult,
     RuntimeSession,
 )
+from pulsara_agent.runtime._retry import bounded_none_retry_delay_seconds
 from pulsara_agent.runtime.state import LoopState
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionEventCommitResult:
     candidate_event_id: str
+    candidate_deadline_budget: RuntimeEventOperationDeadlineBudget
     committed_event: AgentEvent
     committed_through_sequence: int
     publication_status: Literal["completed", "enqueued", "unavailable"]
@@ -31,12 +35,15 @@ class CompactionEventCommitPort(Protocol):
         self,
         event: AgentEvent,
         *,
+        deadline_budget: RuntimeEventOperationDeadlineBudget,
+        use_terminal_deadline: bool = False,
         state: LoopState | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventCommitResult: ...
 
 
 class CompactionCommitCancelledAfterCommit(asyncio.CancelledError):
-    """The caller was cancelled, but the candidate reached durable commit."""
+    """The caller detached after the candidate reached durable FULL."""
 
     def __init__(self, result: CompactionEventCommitResult) -> None:
         self.result = result
@@ -44,17 +51,18 @@ class CompactionCommitCancelledAfterCommit(asyncio.CancelledError):
 
 
 class CompactionPendingCommitNotDurable(RuntimeError):
-    """A cancellation-owned candidate was confirmed absent from the ledger."""
+    """A cancellation-owned candidate reached a confirmed NONE outcome."""
 
 
 @dataclass(frozen=True, slots=True)
 class PendingCompactionEventCommit:
-    """Process owner for a write that outlived caller cancellation."""
+    """Sole physical owner for a candidate after caller cancellation."""
 
     candidate_event: AgentEvent
-    task: asyncio.Task[object]
-    runtime_session: RuntimeSession | None = None
-    event_log: EventLog | None = None
+    task: asyncio.Task[EventWriteResult]
+    runtime_session: RuntimeSession
+    deadline_budget: RuntimeEventOperationDeadlineBudget
+    use_terminal_deadline: bool
 
     async def resolve(self, *, timeout_seconds: float) -> CompactionEventCommitResult:
         try:
@@ -62,60 +70,24 @@ class PendingCompactionEventCommit:
                 asyncio.shield(self.task),
                 timeout=timeout_seconds,
             )
-        except asyncio.TimeoutError:
-            raise
-        except EventPublicationAfterCommitError as exc:
-            return _runtime_write_result(self.candidate_event, exc.result)
         except BaseException as task_error:
-            if self.runtime_session is not None:
-                outcome = self.runtime_session.resolved_event_write_outcome(
-                    task_error
-                )
-                if outcome.status == "none":
-                    raise CompactionPendingCommitNotDurable(
-                        "cancelled compaction candidate was not committed"
-                    ) from task_error
-                if outcome.status == "unknown":
-                    raise
-                committed = outcome.committed_events[0]
-                return _committed_event_result(
-                    self.candidate_event,
-                    committed,
-                    publication_status="enqueued",
-                )
-            if self.event_log is not None:
-                committed = self.event_log.get_by_id(self.candidate_event.id)
-                if committed is None:
-                    raise CompactionPendingCommitNotDurable(
-                        "cancelled compaction candidate was not committed"
-                    ) from task_error
-                if committed.model_dump(
-                    mode="json", exclude={"sequence"}
-                ) != self.candidate_event.model_dump(
-                    mode="json", exclude={"sequence"}
-                ):
-                    raise RuntimeError(
-                        "cancelled compaction candidate identity conflict"
-                    ) from task_error
-                return _committed_event_result(
-                    self.candidate_event,
-                    committed,
-                    publication_status="unavailable",
-                )
-            raise
-        if isinstance(raw, EventWriteResult):
-            return _runtime_write_result(self.candidate_event, raw)
-        if isinstance(raw, AgentEvent):
-            return _committed_event_result(
-                self.candidate_event,
-                raw,
-                publication_status="unavailable",
-            )
-        raise RuntimeError("pending compaction commit returned an invalid result")
+            outcome = self.runtime_session.resolved_event_write_outcome(task_error)
+            if outcome.status == "none":
+                raise CompactionPendingCommitNotDurable(
+                    "cancelled compaction candidate was not committed"
+                ) from task_error
+            if outcome.status != "full" or outcome.result is None:
+                raise
+            raw = outcome.result
+        return _runtime_write_result(
+            self.candidate_event,
+            raw,
+            deadline_budget=self.deadline_budget,
+        )
 
 
 class CompactionCommitPendingAfterCancellation(asyncio.CancelledError):
-    """Caller cancellation transferred an in-flight write to the service."""
+    """Caller cancellation transferred the exact writer task to the service."""
 
     def __init__(self, pending: PendingCompactionEventCommit) -> None:
         self.pending = pending
@@ -130,140 +102,123 @@ class RuntimeSessionCompactionEventCommitPort:
         self,
         event: AgentEvent,
         *,
+        deadline_budget: RuntimeEventOperationDeadlineBudget,
+        use_terminal_deadline: bool = False,
         state: LoopState | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventCommitResult:
+        deadline = (
+            deadline_budget.terminal_deadline_monotonic
+            if use_terminal_deadline
+            else deadline_budget.ordinary_deadline_monotonic
+        )
         task = asyncio.create_task(
-            self.runtime_session.write_event(event, state=state)
+            self._write_exact_candidate(
+                event,
+                deadline_monotonic=deadline,
+                state=state,
+                publication_terminal_maintenance_lease=(
+                    publication_terminal_maintenance_lease
+                ),
+            ),
+            name=f"pulsara-compaction-commit:{event.id}",
         )
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError as cancelled:
-            # The shielded writer task remains the sole owner. It will resolve
-            # the original deadline and typed commit outcome without a second
-            # event-loop confirmation query.
+            if task.done() and not task.cancelled():
+                try:
+                    result = task.result()
+                except BaseException:
+                    pass
+                else:
+                    raise CompactionCommitCancelledAfterCommit(
+                        _runtime_write_result(
+                            event,
+                            result,
+                            deadline_budget=deadline_budget,
+                        )
+                    ) from cancelled
             raise CompactionCommitPendingAfterCancellation(
                 PendingCompactionEventCommit(
                     candidate_event=event,
                     task=task,
                     runtime_session=self.runtime_session,
+                    deadline_budget=deadline_budget,
+                    use_terminal_deadline=use_terminal_deadline,
                 )
             ) from cancelled
-        committed = result.committed_events[0]
-        if committed.sequence is None:
-            raise RuntimeError("compaction commit returned an unsequenced event")
-        return CompactionEventCommitResult(
-            candidate_event_id=event.id,
-            committed_event=committed,
-            committed_through_sequence=committed.sequence,
-            publication_status=result.publication_status,
-            publication_errors=result.publication_errors,
+        return _runtime_write_result(
+            event,
+            result,
+            deadline_budget=deadline_budget,
         )
 
-
-@dataclass(frozen=True, slots=True)
-class DirectEventLogCompactionEventCommitPort:
-    """Component-test adapter; production wiring uses RuntimeSession."""
-
-    event_log: EventLog
-
-    async def commit_event(
+    async def _write_exact_candidate(
         self,
         event: AgentEvent,
         *,
-        state: LoopState | None = None,
-    ) -> CompactionEventCommitResult:
-        del state
-        task = asyncio.create_task(asyncio.to_thread(self.event_log.append, event))
-        try:
-            committed = await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
+        deadline_monotonic: float,
+        state: LoopState | None,
+        publication_terminal_maintenance_lease: object | None,
+    ) -> EventWriteResult:
+        attempt_generation = 0
+        while monotonic() < deadline_monotonic:
             try:
-                committed = await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
-            except asyncio.TimeoutError:
-                raise CompactionCommitPendingAfterCancellation(
-                    PendingCompactionEventCommit(
-                        candidate_event=event,
-                        task=task,
-                        event_log=self.event_log,
+                return await self.runtime_session.write_event_with_deadline(
+                    event,
+                    deadline_monotonic=deadline_monotonic,
+                    state=state,
+                    publication_terminal_maintenance_lease=(
+                        publication_terminal_maintenance_lease
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                outcome = self.runtime_session.resolved_event_write_outcome(error)
+                if outcome.status == "none":
+                    attempt_generation += 1
+                    delay = bounded_none_retry_delay_seconds(
+                        attempt_generation,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                ) from cancelled
-            except BaseException:
-                stored = self.event_log.get_by_id(event.id)
-                if stored is None:
-                    raise cancelled
-                committed = stored
-            if committed.sequence is None:
-                raise RuntimeError("compaction commit returned an unsequenced event")
-            normalized = CompactionEventCommitResult(
-                candidate_event_id=event.id,
-                committed_event=committed,
-                committed_through_sequence=committed.sequence,
-                publication_status="unavailable",
-                publication_errors=(),
-            )
-            raise CompactionCommitCancelledAfterCommit(normalized) from cancelled
-        if committed.sequence is None:
-            raise RuntimeError("compaction commit returned an unsequenced event")
-        return CompactionEventCommitResult(
-            candidate_event_id=event.id,
-            committed_event=committed,
-            committed_through_sequence=committed.sequence,
-            publication_status="unavailable",
-            publication_errors=(),
-        )
-
-
-def _consume_background_task(task: asyncio.Task[object]) -> None:
-    """Keep cancellation from orphaning a commit task or warning on completion."""
-
-    def consume(done: asyncio.Task[object]) -> None:
-        try:
-            done.exception()
-        except BaseException:
-            pass
-
-    task.add_done_callback(consume)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                if outcome.status == "full" and outcome.result is not None:
+                    return outcome.result
+                raise
+        raise TimeoutError("compaction candidate ordinary deadline expired")
 
 
 def _runtime_write_result(
     candidate: AgentEvent,
     result: EventWriteResult,
+    *,
+    deadline_budget: RuntimeEventOperationDeadlineBudget,
 ) -> CompactionEventCommitResult:
     if len(result.committed_events) != 1:
         raise RuntimeError("compaction commit returned an invalid batch")
-    return _committed_event_result(
-        candidate,
-        result.committed_events[0],
+    committed = result.committed_events[0]
+    if committed.id != candidate.id or committed.sequence is None:
+        raise RuntimeError("compaction commit returned a mismatched event")
+    return CompactionEventCommitResult(
+        candidate_event_id=candidate.id,
+        candidate_deadline_budget=deadline_budget,
+        committed_event=committed,
+        committed_through_sequence=committed.sequence,
         publication_status=result.publication_status,
         publication_errors=result.publication_errors,
     )
 
 
-def _committed_event_result(
-    candidate: AgentEvent,
-    committed: AgentEvent,
-    *,
-    publication_status: Literal["completed", "enqueued", "unavailable"],
-    publication_errors: tuple[EventPublicationError, ...] = (),
-) -> CompactionEventCommitResult:
-    if committed.id != candidate.id or committed.sequence is None:
-        raise RuntimeError("compaction commit returned a mismatched/unsequenced event")
-    return CompactionEventCommitResult(
-        candidate_event_id=candidate.id,
-        committed_event=committed,
-        committed_through_sequence=committed.sequence,
-        publication_status=publication_status,
-        publication_errors=publication_errors,
-    )
-
-
 __all__ = [
-    "CompactionEventCommitPort",
-    "CompactionEventCommitResult",
     "CompactionCommitCancelledAfterCommit",
     "CompactionCommitPendingAfterCancellation",
+    "CompactionEventCommitPort",
+    "CompactionEventCommitResult",
     "CompactionPendingCommitNotDurable",
-    "DirectEventLogCompactionEventCommitPort",
-    "RuntimeSessionCompactionEventCommitPort",
     "PendingCompactionEventCommit",
+    "RuntimeSessionCompactionEventCommitPort",
 ]

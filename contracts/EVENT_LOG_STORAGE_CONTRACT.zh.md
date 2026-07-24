@@ -43,9 +43,28 @@ Canonical facts：
 - payload 必须包含 `type`；
 - unknown type 必须失败，而不是静默降级为 `CUSTOM`。
 
-`CUSTOM` 只用于轻量 diagnostic / compatibility 事件。已经契约化的业务 boundary（如 context compaction、plan mode、tool result、run end）必须使用 typed event。
+生产 schema 不再包含 `CustomEvent` 或 `EventType.CUSTOM`。Diagnostic、audit 与
+compatibility 事实同样必须选择一个 bounded typed event；test-only non-transcript fixture
+不得进入 default `AgentEvent` union 或 production decoder。当前 hard-cut event schema
+generation 为 `6`，旧 CUSTOM payload 不属于 supported replay world，升级必须执行
+reset-only PostgreSQL/Oxigraph event-world workflow。
 
-### 2.1 RunStart MCP installation attribution
+### 2.1 Typed runtime audit vocabulary
+
+以下 runtime facts 是 explicit non-transcript event domain：
+
+- MCP input-required expired、binding-changed、resume-failed、resolution-submitted 与
+  interaction-closed；
+- context compaction requested；
+- mid-turn context compaction skipped；
+- tool-result evidence projection failed；
+- typed MCP `ToolExecutionSuspendedEvent` source branch。
+
+每个 producer 必须预先冻结 deterministic ID 与 typed payload；`NONE` 重试复用同一
+candidate，`FULL` 采用 committed receipt，`PARTIAL/UNKNOWN` 进入 reconciliation。不得用
+旧字符串 event name、metadata 字典或 ledger post-scan 补造这些事实。
+
+### 2.2 RunStart MCP installation attribution
 
 新schema下每个`RunStartEvent`必须携带非空`mcp_installation_id`与
 `mcp_installation_owner_runtime_session_id`。Parent run的owner指向自身runtime session；subagent child使用独立
@@ -67,7 +86,7 @@ pending state切回active或继续model/tool loop。pre-commit失败保留原pen
 post-commit publication failure清除committed audit ownership但仍向上传播；
 不得因为“没有新RunStart”而跳过durable installation attribution。
 
-### 2.2 Context input durable carriers
+### 2.3 Context input durable carriers
 
 `RunStartEvent.current_user_message`、`ToolResultEndEvent.observation_timing/render_profile/essential_result/terminal_payload_timing`、
 `ContextCompiledEvent.input_audit|input_failure`均为required typed contract。Replay不得从`metadata`、tool output JSON或当前
@@ -292,6 +311,16 @@ Host在构造EventLog之前必须完成exact-head fast verification。每个dire
 - 不允许跨 session 复用 run/turn id。
 - 不允许 inspector 或 resume 读取 live scratchpad 来解释历史。
 - 不允许context replay解析tool-result JSON来补造typed execution semantics。
+- Production package 中 direct EventLog event-row/checkpoint mutation只允许以下四个
+  exact owner：
+  `RuntimeSession._commit_reduce_enqueue()`、
+  `RuntimeSession._persist_runtime_projection_checkpoint()`、
+  `LedgerMaterializationCoordinator._commit_atomic()` 与 privileged
+  `verify_or_rebuild_subagent_graph_checkpoint()`。文件后缀、同名函数、receiver alias、
+  bound-method/getattr escape均不构成授权；exact AST inventory是架构门控。
+- Online compaction、MCP audit、Host/Agent recovery不得直接调用 EventLog adapter，也不得
+  在 commit 后扫描 sequence range 再二次发布；它们只能消费
+  `RuntimeSession.write_event(s)_with_deadline()` 返回的 exact receipt。
 - `ProjectionReadyEvent`必须持久化`projection_kind`；context authority先定位当前run最新`ProjectionRequestedEvent`，再按
   `projection_id + role + scope`确认其后唯一terminal。Ready只能从该event的summary/kind与frozen wrapper
   created-at/sequence重建memory正文/timing；Failed表示本次无memory candidate。terminal缺失、不唯一或最新Failed时不得

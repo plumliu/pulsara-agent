@@ -598,11 +598,21 @@ class PostgresEventLog:
                     "stored bookkeeping envelope exceeds fixed charge bound"
                 )
 
-    def repair_run_projection(self) -> int:
+    def repair_run_projection(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> int:
         """Rebuild this session's runs summary rows from canonical events."""
 
-        with postgres_event_connection(self.connection_provider) as connection:
+        deadline = self._write_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.connection_provider,
+            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            deadline_monotonic=deadline,
+        ) as connection:
             with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=True)
                 self._lock_session(cursor)
                 cursor.execute(
                     """
@@ -668,6 +678,7 @@ class PostgresEventLog:
         turn_id: str | None = None,
         reply_id: str | None = None,
         after_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
         predicates = [sql.SQL("session_id = %s")]
         params: list[str] = [self.runtime_session_id]
@@ -698,7 +709,7 @@ class PostgresEventLog:
             """
         ).format(where=sql.SQL(" and ").join(predicates))
 
-        deadline = self._read_deadline(None)
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
             self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
@@ -712,8 +723,13 @@ class PostgresEventLog:
                     for row in cursor.fetchall()
                 ]
 
-    def get_by_id(self, event_id: str) -> AgentEvent | None:
-        deadline = self._read_deadline(None)
+    def get_by_id(
+        self,
+        event_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> AgentEvent | None:
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
             self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
@@ -1804,8 +1820,8 @@ class PostgresEventLog:
             reducer.append(event)
         return reducer.message
 
-    def next_sequence(self) -> int:
-        deadline = self._read_deadline(None)
+    def next_sequence(self, *, deadline_monotonic: float | None = None) -> int:
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
             self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,

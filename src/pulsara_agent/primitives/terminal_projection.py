@@ -26,6 +26,9 @@ from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessObservationReceiptFact,
     TerminalProcessMonitorRegistrationSemanticFact,
 )
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredTerminalSourceFact,
+)
 from pulsara_agent.primitives.tool_result import (
     ContextToolResultArtifactRefFact,
     ToolResultExecutionSemanticsFact,
@@ -447,6 +450,9 @@ class ToolTerminalProjectionSemanticFact(FrozenFactBase):
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
+    mcp_input_required_terminal_source: (
+        McpInputRequiredTerminalSourceFact | None
+    ) = None
     semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -495,6 +501,7 @@ class ToolTerminalProjectionSemanticJoinFact(FrozenFactBase):
     result_state: ToolResultStateFact
     terminal_process_monitor_registration_semantic_fingerprint: str | None = None
     terminal_process_monitor_cancellation_semantic_fingerprint: str | None = None
+    mcp_input_required_terminal_source_fingerprint: str | None = None
     semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")

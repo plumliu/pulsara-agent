@@ -340,3 +340,17 @@ batching变化只能影响 physical attribution，不能改变 governance eviden
 Authority snapshot与 exact referenced envelopes冲突时，runtime必须安装 reconciliation latch；
 candidate自身引用不存在的 source call、或 source run terminal后仍缺合法 pairing，才是可确定性
 终结的 candidate provenance invalid。两类失败不得合并为普通 governance skip。
+
+---
+
+## 11. Typed runtime audit projection boundary
+
+新的 MCP lifecycle、compaction request/skip与 tool-result evidence projection failure events
+是 canonical EventLog audit facts，不自动成为 governed memory node或 runtime semantic graph
+entity。它们可以进入 timeline/Inspector的 bounded typed projection，但不得由 generic hook
+把 payload字典直接写进 Oxigraph。
+
+Compaction memory proposal继续使用独立
+`ContextCompactionMemoryCandidatesProposedEvent + memory_candidate_projection_outbox`
+authority。Typed failure event不等于 durable projection retry job；D3 hook/outbox与 D5
+compaction-memory crash-to-durable-owner仍是独立开放债务。

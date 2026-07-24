@@ -188,6 +188,25 @@ Inspector 必须展示每个 completed compaction window：
 
 Started without completed/failed 是 warning。Completed boundary 引用 missing summary artifact 是 error。
 
+### 7.1 Typed audit、MCP lifecycle 与 candidate projection
+
+Session/run inspection必须从 typed events投影：
+
+- `mcp_input_required_lifecycle`：suspension chain、resolution attempts、resume failures、
+  terminal source、closure reason、RunEnd closure join与 reopen action；
+- `context_compaction_requests`；
+- `mid_turn_compaction_skips`；
+- `tool_result_evidence_projection_failures`；
+- `mandatory_runtime_audit_reconciliation`；
+- `compaction_candidate_projection_durable_status`。
+
+MCP投影必须复用 production `McpInputRequiredLifecycleStore`，不能另写 reducer。Compaction
+candidate historical status只从 exact proposed event、durable outbox row与 candidate-pool
+join得到。`preparation_failed`、`owner_installation_failed`、`owner_installed` 和
+`candidate_frozen` 等 process-local phase不属于 historical Inspector；无 durable
+producer/outbox authority时必须显示 `not_durably_observable`，不得从 event absence猜测。
+Host live diagnostics可以显示当前 owner receipt，但不能写回 historical report。
+
 ---
 
 ## 8. Diagnostics
@@ -249,12 +268,14 @@ Inspector必须借用verify-only service签发的connection provider。Schema he
 - inspect memory not found raises not found。
 - health reports missing table / stale run / missing artifact / outbox diagnostics。
 - timeline serializes/deserializes stable dicts。
-- capability projection comes from event log custom events。
+- capability projection comes from typed event-log facts。
 - compaction missing artifact diagnostic appears。
 - diagnostics are deterministic and read-only.
 - MCP session projection只来自bounded installed events；child run通过owner runtime session跨ledger join。
 - missing MCP installation audit产生稳定diagnostic，canonical empty不产生误报。
 - historical MCP inspect不读取live manager、不触发network或补写catalog artifact。
+- typed MCP lifecycle与 runtime使用同一 reducer；candidate projection没有 durable
+  authority时显示 `not_durably_observable`。
 
 ---
 

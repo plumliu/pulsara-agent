@@ -358,3 +358,18 @@ rollover。只有typed compatibility change、confirmed Long-Horizon rewrite或c
 Terminal monitor delivery在provider-neutral层使用typed `runtime_observation` semantic fact，wire lowering仍服从中央runtime-observation protocol；不得构造动态system/developer message或把notification伪装成human input。Attachment唯一拥有exact source event references；placement和autonomous owner只保存ordered attachment fingerprints。
 
 Safe-point delivery不是对已dispatch request的修改。只有在下一次ModelStart preparation前冻结的companion才能进入input；adapter dispatch前必须逐字节重算typed carrier。`ModelStreamStartCommitPort`接纳monitor safe-point companion时，ProviderInput append、delivery disposition、autonomy chain CAS与ModelCallStart必须属于同一writer operation。Retry复用同一stable input/attachment candidate；caller cancellation、NONE或UNKNOWN不能令provider input已前进而notification仍未消费，反之亦然。
+
+---
+
+## 19. Typed runtime audit 与 compaction transport boundary
+
+MCP input-required lifecycle、compaction request/skip与 tool-result evidence projection failure
+是 typed non-transcript audit facts，不得直接转换成 provider message。MCP normal terminal只经
+ToolResult terminal projection进入模型上下文；resume-failed/closure只影响 recovery authority。
+
+Compaction summarizer只有在 Started durable FULL且 critical publication为
+completed/enqueued后才能 dispatch。Started publication unavailable时不得启动 provider；
+terminal-maintenance owner写 `started_publication` Failed。Completed publication failure不
+启动 memory candidate projection owner，也不重发 summarizer。Compaction core exact receipt与
+side LLM model stream各自有唯一 owner，caller cancellation不能让任一方用 ledger post-scan
+猜测结果。

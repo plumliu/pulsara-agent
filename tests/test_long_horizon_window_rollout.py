@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from tests.support.events import typed_non_transcript_event
 
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
@@ -13,7 +14,6 @@ from pulsara_agent.event import (
     ContextWindowCompactionCompletedEvent,
     ContextWindowCompactionFailedEvent,
     ContextWindowOpenedEvent,
-    CustomEvent,
     EventContext,
     ModelCallEndEvent,
     ModelCallControlDispositionResolvedEvent,
@@ -132,6 +132,7 @@ from pulsara_agent.runtime.authority_materialization import (
     LedgerMaterializationAccountStore,
     LedgerMaterializationCoordinator,
     build_default_authority_materialization_contract_bundle,
+    commit_quiescent_accounted_batch,
 )
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventAuthorityView,
@@ -2430,6 +2431,55 @@ def test_quote_rejects_target_or_policy_drift() -> None:
         )
 
 
+def _commit_accounted_recovery_dispatch(
+    *,
+    log: InMemoryEventLog,
+    business_events: tuple,
+    owner_id: str,
+):
+    contracts = build_default_authority_materialization_contract_bundle()
+    store = LedgerMaterializationAccountStore(
+        state=None,
+        charge_contract=contracts.charge_contract,
+    )
+    coordinator = LedgerMaterializationCoordinator(
+        runtime_session_id=log.runtime_session_id,
+        event_log=log,
+        store=store,
+        charge_contract=contracts.charge_contract,
+        limits=contracts.limits,
+    )
+    coordinator.bootstrap_genesis(
+        context=CTX,
+        business_events=(
+            typed_non_transcript_event(
+                id=f"event:recovery-genesis:{owner_id}",
+                **CTX.event_fields(),
+                name="recovery-genesis",
+            ),
+        ),
+        genesis_profile="host_first_run",
+        genesis_burst_contract=(
+            contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.LEDGER_GENESIS
+            ).contract
+        ),
+        register_transcript_consumer=True,
+    )
+    dispatch = coordinator.reserve_and_commit_dispatch(
+        context=CTX,
+        business_events=business_events,
+        reservation_id=f"model_physical:{owner_id[-96:]}",
+        owner_id=owner_id,
+        burst_contract=(
+            contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.MODEL_CALL
+            ).contract
+        ),
+    )
+    return coordinator, dispatch
+
+
 def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
     call = test_resolved_call(purpose=ModelCallPurpose.MEMORY_REFLECTION)
     log = InMemoryEventLog()
@@ -2452,18 +2502,26 @@ def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
         **CTX.event_fields(),
         **start_fields,
     )
-    log.extend((*provider_input.companion_events, start))
+    _, dispatch = _commit_accounted_recovery_dispatch(
+        log=log,
+        business_events=(*provider_input.companion_events, start),
+        owner_id=call.fact.resolved_model_call_id,
+    )
+    stored_start = next(
+        event
+        for event in dispatch.stored_events
+        if isinstance(event, ModelCallStartEvent)
+    )
 
     report = ModelStreamRecoveryService(
         event_log=log,
         archive=InMemoryArchiveStore(),
-        allow_unbootstrapped_test_events=True,
     ).repair_incomplete_model_streams()
 
     assert report.repaired[0].terminal_outcome == "runtime_error"
     ends = [event for event in log.iter() if isinstance(event, ModelCallEndEvent)]
     assert len(ends) == 1
-    assert ends[0].id == start.recovery_plan.stable_model_call_end_event_id
+    assert ends[0].id == stored_start.recovery_plan.stable_model_call_end_event_id
     assert ends[0].estimated_input_tokens == 17
     assert ends[0].provider_dispatch_status == "dispatched"
     assert not any(isinstance(event, ReplyEndEvent) for event in log.iter())
@@ -2486,7 +2544,7 @@ def test_model_stream_recovery_atomically_settles_physical_reservation() -> None
     coordinator.bootstrap_genesis(
         context=CTX,
         business_events=(
-            CustomEvent(
+            typed_non_transcript_event(
                 id="event:model-recovery-genesis",
                 **CTX.event_fields(),
                 name="model-recovery-genesis",
@@ -2577,19 +2635,31 @@ def test_main_model_stream_recovery_closes_reply_envelope() -> None:
         **CTX.event_fields(),
         name="assistant",
     )
-    log.extend((*provider_input.companion_events, reply_start, start))
+    _, dispatch = _commit_accounted_recovery_dispatch(
+        log=log,
+        business_events=(
+            *provider_input.companion_events,
+            reply_start,
+            start,
+        ),
+        owner_id=call.fact.resolved_model_call_id,
+    )
+    stored_start = next(
+        event
+        for event in dispatch.stored_events
+        if isinstance(event, ModelCallStartEvent)
+    )
 
     ModelStreamRecoveryService(
         event_log=log,
         archive=InMemoryArchiveStore(),
-        allow_unbootstrapped_test_events=True,
     ).repair_incomplete_model_streams()
 
     events = log.iter()
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
     reply_end = next(event for event in events if isinstance(event, ReplyEndEvent))
     assert end.outcome == "runtime_error"
-    assert reply_end.id == start.recovery_plan.stable_reply_end_event_id
+    assert reply_end.id == stored_start.recovery_plan.stable_reply_end_event_id
     assert reply_end.model_terminal_outcome == end.outcome
     assert end.sequence is not None
     assert reply_end.sequence is not None and reply_end.sequence > end.sequence
@@ -2648,12 +2718,20 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
     ).push(envelope)
     assert len(prepared) == 1
     provider_error = prepared[0].event
-    log.extend((*provider_input.companion_events, start, provider_error))
+    coordinator, dispatch = _commit_accounted_recovery_dispatch(
+        log=log,
+        business_events=(*provider_input.companion_events, start),
+        owner_id=call.fact.resolved_model_call_id,
+    )
+    coordinator.commit_reserved_charge(
+        context=CTX,
+        reservation=dispatch.reservation,
+        business_events=(provider_error,),
+    )
 
     report = ModelStreamRecoveryService(
         event_log=log,
         archive=InMemoryArchiveStore(),
-        allow_unbootstrapped_test_events=True,
     ).repair_incomplete_model_streams()
 
     assert report.repaired[0].terminal_outcome == "provider_error"
@@ -2687,11 +2765,19 @@ def _commit_completed_main_model_call(
         **CTX.event_fields(),
         name="assistant",
     )
-    committed_prefix = log.extend(
-        (*provider_input.companion_events, reply_start, start)
+    coordinator, dispatch = _commit_accounted_recovery_dispatch(
+        log=log,
+        business_events=(
+            *provider_input.companion_events,
+            reply_start,
+            start,
+        ),
+        owner_id=call.fact.resolved_model_call_id,
     )
     committed_start = next(
-        event for event in committed_prefix if isinstance(event, ModelCallStartEvent)
+        event
+        for event in dispatch.stored_events
+        if isinstance(event, ModelCallStartEvent)
     )
     usage = ModelTokenUsageFact(input_tokens=0, output_tokens=0, total_tokens=0)
     reducer = ModelTerminalProjectionReducer(
@@ -2732,7 +2818,15 @@ def _commit_completed_main_model_call(
         **CTX.event_fields(),
         model_terminal_outcome="completed",
     )
-    log.extend((projection.committed_event, end, reply_end))
+    coordinator.commit_reserved_settlement(
+        context=CTX,
+        reservation=dispatch.reservation,
+        business_events=(projection.committed_event, end, reply_end),
+        terminal_outcome="completed",
+        model_stream_measurement_fingerprint=(
+            projection.document.source_fact.stream_settlement_measurement.measurement_fingerprint
+        ),
+    )
     return committed_start
 
 
@@ -2744,7 +2838,6 @@ def test_control_recovery_suppresses_completed_call_without_downstream() -> None
     report = ModelCallControlDispositionRecoveryService(
         event_log=log,
         archive=archive,
-        allow_unbootstrapped_test_events=True,
     ).repair_missing_dispositions()
 
     assert report.recovered[0].source == "recovered_suppression"
@@ -2765,13 +2858,17 @@ def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
     log = InMemoryEventLog()
     archive = InMemoryArchiveStore()
     _commit_completed_main_model_call(log, archive)
-    log.append(
-        RunEndEvent(
+    commit_quiescent_accounted_batch(
+        event_log=log,
+        business_events=(
+            RunEndEvent(
             **CTX.event_fields(),
             status="finished",
             stop_reason=RunStopReason.FINAL,
             terminalization_kind=RunTerminalizationKind.NORMAL,
-        )
+            ),
+        ),
+        owner_scope="test-control-recovery-run-end",
     )
 
     with pytest.raises(
@@ -2781,7 +2878,6 @@ def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
         ModelCallControlDispositionRecoveryService(
             event_log=log,
             archive=archive,
-            allow_unbootstrapped_test_events=True,
         ).repair_missing_dispositions()
 
 
@@ -3260,7 +3356,7 @@ def test_window_compaction_source_stale_does_not_write_failure_or_charge_circuit
         )
         try:
             await runtime_session.emit(
-                CustomEvent(
+                typed_non_transcript_event(
                     **CTX.event_fields(),
                     name="unrelated_background_fact",
                     payload={"kind": "unrelated"},

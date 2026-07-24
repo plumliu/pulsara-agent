@@ -357,7 +357,7 @@ async def _open_project_session(
     )
 
 
-def test_host_open_reuses_one_terminal_recovery_deadline(
+def test_fresh_host_open_reuses_runtime_startup_deadline_for_terminal_recovery(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -385,6 +385,40 @@ def test_host_open_reuses_one_terminal_recovery_deadline(
     runtime_deadline, physical_recovery_deadlines = asyncio.run(run())
 
     assert physical_recovery_deadlines == (runtime_deadline,)
+
+
+def test_fresh_host_open_starts_bootstrap_deadline_after_prerequisites(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import pulsara_agent.host.core as core_module
+
+    async def delayed_cleanup(self) -> None:
+        del self
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(core_module, "_HOST_OPEN_RECOVERY_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(
+        HostCore,
+        "_drain_failed_open_mcp_supervisors",
+        delayed_cleanup,
+    )
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def run() -> tuple[float, float | None]:
+        session = await _open_project_session(core, tmp_path)
+        runtime_deadline = (
+            session.wiring.runtime_wiring.runtime_session
+            .runtime_open_deadline_monotonic
+        )
+        reopen_deadline = session.reopen_deadline_monotonic
+        await core.shutdown()
+        return runtime_deadline, reopen_deadline
+
+    runtime_deadline, reopen_deadline = asyncio.run(run())
+
+    assert runtime_deadline > core_module.monotonic()
+    assert reopen_deadline is None
 
 
 def _context_text(context: LLMContext) -> str:

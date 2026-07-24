@@ -102,9 +102,22 @@ from pulsara_agent.primitives.long_horizon import (
 from pulsara_agent.primitives.mcp import (
     MAX_MCP_DIAGNOSTICS_PER_FACT,
     McpDiagnosticFact,
+    McpBindingIdentityFact,
     McpInstalledServerSnapshotFact,
     McpReconcileAttemptSummaryFact,
     McpReconcileTriggerValue,
+)
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    BoundedRuntimeFailureDiagnosticFact,
+    ContextCompactionRequestFact,
+    McpInputRequiredResolutionAttemptFact,
+    McpInputRequiredResolutionSemanticFact,
+    McpInputRequiredSourceAuthorityFact,
+    McpInputRequiredSuspensionFact,
+    McpInputRequiredTerminalSourceFact,
+    MidTurnCompactionSkipFact,
+    PublicationLatchedRunTerminationFact,
+    ToolResultEvidenceProjectionFailureFact,
 )
 from pulsara_agent.primitives.permission import (
     parse_permission_mode,
@@ -344,6 +357,13 @@ class EventType(StrEnum):
         "TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED"
     )
     TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
+    MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED = (
+        "MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED"
+    )
+    MCP_INPUT_REQUIRED_EXPIRED = "MCP_INPUT_REQUIRED_EXPIRED"
+    MCP_INPUT_REQUIRED_BINDING_CHANGED = "MCP_INPUT_REQUIRED_BINDING_CHANGED"
+    MCP_INPUT_REQUIRED_RESUME_FAILED = "MCP_INPUT_REQUIRED_RESUME_FAILED"
+    MCP_INPUT_REQUIRED_INTERACTION_CLOSED = "MCP_INPUT_REQUIRED_INTERACTION_CLOSED"
 
     REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
     USER_CONFIRM_RESULT = "USER_CONFIRM_RESULT"
@@ -400,6 +420,11 @@ class EventType(StrEnum):
 
     CONTEXT_COMPACTION_STARTED = "CONTEXT_COMPACTION_STARTED"
     CONTEXT_COMPACTION_COMPLETED = "CONTEXT_COMPACTION_COMPLETED"
+    CONTEXT_COMPACTION_REQUESTED = "CONTEXT_COMPACTION_REQUESTED"
+    MID_TURN_CONTEXT_COMPACTION_SKIPPED = "MID_TURN_CONTEXT_COMPACTION_SKIPPED"
+    TOOL_RESULT_EVIDENCE_PROJECTION_FAILED = (
+        "TOOL_RESULT_EVIDENCE_PROJECTION_FAILED"
+    )
     CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED = (
         "CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED"
     )
@@ -439,7 +464,6 @@ class EventType(StrEnum):
     ROLLOUT_PHASE_TRANSITIONED = "ROLLOUT_PHASE_TRANSITIONED"
     SUBAGENT_ROLLOUT_BUDGET_RESOLVED = "SUBAGENT_ROLLOUT_BUDGET_RESOLVED"
 
-    CUSTOM = "CUSTOM"
 
 
 def utc_now() -> str:
@@ -714,6 +738,12 @@ class RunEndEvent(EventBase):
     terminalization_kind: RunTerminalizationKind
     abort_kind: Literal["user_stop", "host_teardown"] | None = None
     error_message: str | None = None
+    mcp_input_required_closure_event_reference: ContextEventReferenceFact | None = (
+        None
+    )
+    publication_latched_termination: PublicationLatchedRunTerminationFact | None = (
+        None
+    )
 
     @model_validator(mode="after")
     def _validate_terminal_matrix(self) -> "RunEndEvent":
@@ -753,6 +783,20 @@ class RunEndEvent(EventBase):
             )
         if not valid:
             raise ValueError("RunEndEvent violates terminalization matrix")
+        closure = self.mcp_input_required_closure_event_reference
+        publication = self.publication_latched_termination
+        if closure is not None and closure.event_type != (
+            EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED.value
+        ):
+            raise ValueError("RunEnd MCP closure reference has the wrong event type")
+        if publication is not None:
+            if self.status != "aborted":
+                raise ValueError("publication-latched RunEnd must be aborted")
+            if (
+                publication.reason == "compaction_publication_unavailable"
+                and closure is not None
+            ):
+                raise ValueError("compaction publication RunEnd cannot cite MCP closure")
         return self
 
 
@@ -2238,6 +2282,9 @@ class ToolResultEndEvent(EventBase):
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
+    mcp_input_required_terminal_source: (
+        McpInputRequiredTerminalSourceFact | None
+    ) = None
     terminal_projection: ToolResultTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
@@ -2296,6 +2343,19 @@ class ToolResultEndEvent(EventBase):
             raise ValueError(
                 "ToolResultEnd monitor registration/cancellation are mutually exclusive"
             )
+        mcp_source = self.mcp_input_required_terminal_source
+        semantic_mcp_source = getattr(
+            self.terminal_projection.projection_reference.semantic_join,
+            "mcp_input_required_terminal_source_fingerprint",
+            None,
+        )
+        if (mcp_source is None) != (semantic_mcp_source is None):
+            raise ValueError("ToolResultEnd MCP terminal source matrix mismatch")
+        if (
+            mcp_source is not None
+            and mcp_source.source_fingerprint != semantic_mcp_source
+        ):
+            raise ValueError("ToolResultEnd MCP terminal source drifted")
         return self
 
 
@@ -2326,20 +2386,127 @@ class ToolResultTerminalProjectionCommittedEvent(EventBase):
 class ToolExecutionSuspendedEvent(EventBase):
     """Canonical fact that a tool call entered a pending interaction."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal[EventType.TOOL_EXECUTION_SUSPENDED] = (
         EventType.TOOL_EXECUTION_SUSPENDED
     )
-    interaction_kind: str = Field(min_length=1)
+    interaction_kind: Literal["mcp_input_required"] = "mcp_input_required"
     tool_call_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
-    payload: dict[str, Any]
+    suspension: McpInputRequiredSuspensionFact
 
     @model_validator(mode="after")
-    def _validate_payload_identity(self) -> "ToolExecutionSuspendedEvent":
-        if self.payload.get("tool_call_id") != self.tool_call_id:
-            raise ValueError("tool suspension payload tool_call_id mismatch")
-        if self.payload.get("tool_name") != self.tool_name:
-            raise ValueError("tool suspension payload tool_name mismatch")
+    def _validate_suspension_identity(self) -> "ToolExecutionSuspendedEvent":
+        interaction = self.suspension.interaction
+        if interaction.tool_call_id != self.tool_call_id:
+            raise ValueError("tool suspension tool_call_id mismatch")
+        if interaction.tool_name != self.tool_name:
+            raise ValueError("tool suspension tool_name mismatch")
+        return self
+
+
+class McpInputRequiredResolutionSubmittedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED] = (
+        EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED
+    )
+    source: McpInputRequiredSourceAuthorityFact
+    resolution: McpInputRequiredResolutionSemanticFact
+    attempt: McpInputRequiredResolutionAttemptFact
+    resume_boundary_event_identity: StableEventIdentityFact
+
+    @model_validator(mode="after")
+    def _resolution_context(self) -> "McpInputRequiredResolutionSubmittedEvent":
+        if (
+            self.source.interaction.round_count != self.attempt.round_count
+            or self.resume_boundary_event_identity.event_type
+            != EventType.RUN_INTERACTION_RESUME_BOUNDARY.value
+        ):
+            raise ValueError("MCP resolution submission authority mismatch")
+        return self
+
+
+class McpInputRequiredExpiredEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_INPUT_REQUIRED_EXPIRED] = (
+        EventType.MCP_INPUT_REQUIRED_EXPIRED
+    )
+    resolution_submitted_event_reference: ContextEventReferenceFact
+    terminal_tool_result_event_identity: StableEventIdentityFact
+
+
+class McpInputRequiredBindingChangedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED] = (
+        EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED
+    )
+    resolution_submitted_event_reference: ContextEventReferenceFact
+    terminal_tool_result_event_identity: StableEventIdentityFact
+    source_binding: McpBindingIdentityFact
+    effective_binding: McpBindingIdentityFact
+
+    @model_validator(mode="after")
+    def _binding_changed(self) -> "McpInputRequiredBindingChangedEvent":
+        if self.source_binding == self.effective_binding:
+            raise ValueError("MCP binding-changed event requires distinct bindings")
+        return self
+
+
+class McpInputRequiredResumeFailedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_INPUT_REQUIRED_RESUME_FAILED] = (
+        EventType.MCP_INPUT_REQUIRED_RESUME_FAILED
+    )
+    resolution_submitted_event_reference: ContextEventReferenceFact
+    failure_reason: Literal[
+        "adapter_resume_error",
+        "adapter_protocol_error",
+    ]
+    diagnostic: BoundedRuntimeFailureDiagnosticFact
+
+
+class McpInputRequiredInteractionClosedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED] = (
+        EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED
+    )
+    source_suspension_event_reference: ContextEventReferenceFact
+    source_resolution_submitted_event_reference: ContextEventReferenceFact | None
+    source_resume_failed_event_reference: ContextEventReferenceFact | None
+    closure_reason: Literal[
+        "suspension_publication_unavailable",
+        "resume_boundary_publication_unavailable",
+        "resume_failed_publication_unavailable",
+        "session_reopen_lease_unavailable",
+        "child_pending_unsupported",
+        "live_pending_lease_unavailable",
+    ]
+    terminal_tool_result_event_identity: StableEventIdentityFact
+
+    @model_validator(mode="after")
+    def _closure_matrix(self) -> "McpInputRequiredInteractionClosedEvent":
+        resolution = self.source_resolution_submitted_event_reference
+        failure = self.source_resume_failed_event_reference
+        if self.closure_reason == "suspension_publication_unavailable":
+            if resolution is not None or failure is not None:
+                raise ValueError("suspension publication closure cannot cite resolution")
+        elif self.closure_reason == "resume_boundary_publication_unavailable":
+            if resolution is None or failure is not None:
+                raise ValueError("resume-boundary closure reference mismatch")
+        elif self.closure_reason == "resume_failed_publication_unavailable":
+            if resolution is None or failure is None:
+                raise ValueError("resume-failed closure requires both references")
+        elif self.closure_reason == "live_pending_lease_unavailable":
+            if resolution is None or failure is not None:
+                raise ValueError("live lease closure reference mismatch")
+        elif failure is not None and resolution is None:
+            raise ValueError("MCP closure failure reference requires resolution")
         return self
 
 
@@ -3216,6 +3383,33 @@ def _validate_compaction_boundary_attribution(
         raise ValueError("compaction host boundary id cannot be empty")
 
 
+class ContextCompactionRequestedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.CONTEXT_COMPACTION_REQUESTED] = (
+        EventType.CONTEXT_COMPACTION_REQUESTED
+    )
+    request: ContextCompactionRequestFact
+
+
+class MidTurnContextCompactionSkippedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MID_TURN_CONTEXT_COMPACTION_SKIPPED] = (
+        EventType.MID_TURN_CONTEXT_COMPACTION_SKIPPED
+    )
+    skip: MidTurnCompactionSkipFact
+
+
+class ToolResultEvidenceProjectionFailedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED] = (
+        EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED
+    )
+    failure: ToolResultEvidenceProjectionFailureFact
+
+
 class ContextCompactionStartedEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPACTION_STARTED] = (
         EventType.CONTEXT_COMPACTION_STARTED
@@ -3504,7 +3698,9 @@ class ContextCompactionFailedEvent(EventBase):
         "planning",
         "summarizer_resolution",
         "summarizer_input_build",
+        "summarizer_provider_input_prepare",
         "started_append",
+        "started_publication",
         "model_validation",
         "model_stream",
         "summary_validation",
@@ -3546,6 +3742,7 @@ class ContextCompactionFailedEvent(EventBase):
             "planning",
             "summarizer_resolution",
             "summarizer_input_build",
+            "summarizer_provider_input_prepare",
             "started_append",
         }:
             raise ValueError("post-start compaction failure requires started event id")
@@ -3560,7 +3757,9 @@ class ContextCompactionFailedEvent(EventBase):
             "planning",
             "summarizer_resolution",
             "summarizer_input_build",
+            "summarizer_provider_input_prepare",
             "started_append",
+            "started_publication",
             "model_validation",
             "model_stream",
             "summary_validation",
@@ -3569,6 +3768,37 @@ class ContextCompactionFailedEvent(EventBase):
             "recovery_terminalization",
         ]
         stage_index = stages.index(self.failure_stage)
+        if self.failure_stage == "started_publication":
+            if (
+                self.started_event_id is None
+                or self.termination_kind != "failed"
+                or self.target_estimate is None
+            ):
+                raise ValueError(
+                    "started-publication failure requires Started and target estimate"
+                )
+            if any(
+                value is not None
+                for value in (
+                    self.summarizer_target,
+                    self.summarizer_call,
+                    self.summarizer_context_id,
+                    self.summarizer_input_estimated_tokens,
+                    self.summarizer_input_budget_tokens,
+                    self.summarizer_usage,
+                    self.summarizer_estimated_input_tokens,
+                    self.summarizer_reported_model_id,
+                )
+            ) or self.summarizer_usage_status != "missing":
+                raise ValueError(
+                    "started-publication failure cannot duplicate summarizer attribution"
+                )
+            _validate_compaction_target_contract(
+                target=self.target_model_target,
+                target_input_budget_tokens=self.target_input_budget_tokens,
+                target_estimate=self.target_estimate,
+            )
+            return self
         if (
             stage_index >= stages.index("summarizer_resolution")
             and self.target_estimate is None
@@ -3590,6 +3820,14 @@ class ContextCompactionFailedEvent(EventBase):
                 raise ValueError(
                     "model-stage compaction failure requires summarizer context"
                 )
+        if self.failure_stage == "summarizer_provider_input_prepare" and (
+            self.summarizer_context_id is None
+            or self.summarizer_input_estimated_tokens is None
+            or self.summarizer_input_budget_tokens is None
+        ):
+            raise ValueError(
+                "provider-input preparation failure requires summarizer context"
+            )
         if (
             stage_index >= stages.index("model_stream")
             and self.summarizer_estimated_input_tokens is None
@@ -4534,12 +4772,6 @@ class CheckpointDispatchBarrierReleasedEvent(EventBase):
     resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
-class CustomEvent(EventBase):
-    type: Literal[EventType.CUSTOM] = EventType.CUSTOM
-    name: str
-    value: dict[str, Any] = Field(default_factory=dict)
-
-
 AgentEvent: TypeAlias = (
     RunStartEvent
     | ContextWindowOpenedEvent
@@ -4595,6 +4827,11 @@ AgentEvent: TypeAlias = (
     | ToolResultTerminalProjectionCommittedEvent
     | ToolResultEndEvent
     | ToolExecutionSuspendedEvent
+    | McpInputRequiredResolutionSubmittedEvent
+    | McpInputRequiredExpiredEvent
+    | McpInputRequiredBindingChangedEvent
+    | McpInputRequiredResumeFailedEvent
+    | McpInputRequiredInteractionClosedEvent
     | RequireUserConfirmEvent
     | UserConfirmResultEvent
     | RequireExternalExecutionEvent
@@ -4635,6 +4872,9 @@ AgentEvent: TypeAlias = (
     | ProjectionFailedEvent
     | ContextCompactionStartedEvent
     | ContextCompactionCompletedEvent
+    | ContextCompactionRequestedEvent
+    | MidTurnContextCompactionSkippedEvent
+    | ToolResultEvidenceProjectionFailedEvent
     | ContextCompactionMemoryCandidatesProposedEvent
     | ContextCompactionFailedEvent
     | SubagentRunStartedEvent
@@ -4672,5 +4912,4 @@ AgentEvent: TypeAlias = (
     | PhysicalOperationReservationSettledEvent
     | CheckpointDispatchBarrierInstalledEvent
     | CheckpointDispatchBarrierReleasedEvent
-    | CustomEvent
 )
