@@ -1,3 +1,4 @@
+from tests.support.postgres import verified_postgres_provider
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,8 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from psycopg.rows import dict_row
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
@@ -70,12 +73,6 @@ from pulsara_agent.runtime.tool_action import (
 )
 from pulsara_agent.tools.base import ToolCall
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def _cleanup_session(dsn: str, runtime_session_id: str) -> None:
@@ -202,7 +199,7 @@ def event_log(request, tmp_path) -> EventLog:
     _connect_or_skip(dsn).close()
     runtime_session_id = _runtime_session_id()
     log = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
@@ -308,6 +305,8 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
                 payload_fingerprint="sha256:" + "b" * 64,
             )
         )
+
+
 def test_event_log_single_append_is_idempotent_by_exact_event_payload(
     event_log: EventLog,
 ) -> None:
@@ -645,7 +644,9 @@ def test_postgres_event_log_updates_runs_projection_on_run_lifecycle(
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx(f"postgres:run-projection:{status}:{uuid4().hex}")
         started = RunStartEvent(
@@ -691,7 +692,9 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ended_ctx = _ctx(f"postgres:run-repair-ended:{uuid4().hex}")
         running_ctx = _ctx(f"postgres:run-repair-running:{uuid4().hex}")
@@ -979,13 +982,17 @@ def test_postgres_event_log_reloads_persisted_events(tmp_path: Path) -> None:
 
     try:
         first_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("postgres:reload")
         _append_canonical_reply_events(first_log, ctx)
 
         second_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         reply_events = second_log.iter(reply_id=ctx.reply_id)
         assert [event.sequence for event in reply_events] == list(
@@ -1005,7 +1012,7 @@ def test_postgres_event_log_can_reserve_session_owner_before_first_event(
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,
         )
@@ -1040,7 +1047,9 @@ def test_postgres_event_log_concurrent_append_keeps_unique_sequences(
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("postgres:concurrent")
         events = [
@@ -1069,7 +1078,9 @@ def test_postgres_event_log_extend_allocates_contiguous_atomic_batch(
     _connect_or_skip(dsn).close()
     try:
         log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("postgres:atomic-batch")
         stored = log.extend(
@@ -1093,7 +1104,9 @@ def test_postgres_event_log_concurrent_batches_never_interleave(tmp_path: Path) 
     barrier = Barrier(2)
     _connect_or_skip(dsn).close()
     log = PostgresEventLog(
-        dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
     )
 
     def write(prefix: str):
@@ -1130,7 +1143,9 @@ def test_postgres_event_log_conditional_extend_conflict_writes_nothing(
     _connect_or_skip(dsn).close()
     try:
         log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("postgres:cas")
         log.append(
@@ -1161,12 +1176,12 @@ def test_postgres_event_log_batch_failure_rolls_back_prior_event_and_projection(
     batch_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     owner = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=owner_session_id,
         workspace_root=tmp_path,
     )
     batch = PostgresEventLog(
-        dsn=dsn,
+        connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=batch_session_id,
         workspace_root=tmp_path,
     )
@@ -1226,10 +1241,14 @@ def test_postgres_event_log_rejects_cross_session_run_id_reuse(tmp_path: Path) -
 
     try:
         first_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=first_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=first_session_id,
+            workspace_root=tmp_path,
         )
         second_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=second_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=second_session_id,
+            workspace_root=tmp_path,
         )
         first_ctx = EventContext(
             run_id="run:shared",
@@ -1266,7 +1285,9 @@ def test_postgres_event_log_rejects_cross_run_turn_id_reuse(tmp_path: Path) -> N
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         turn_id = f"turn:shared:{uuid4().hex}"
         first_ctx = EventContext(
@@ -1320,10 +1341,14 @@ def test_postgres_event_log_rejects_concurrent_cross_session_run_id_reuse(
 
     try:
         first_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=first_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=first_session_id,
+            workspace_root=tmp_path,
         )
         second_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=second_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=second_session_id,
+            workspace_root=tmp_path,
         )
         first_ctx = EventContext(
             run_id=shared_run_id,
@@ -1373,10 +1398,14 @@ def test_postgres_event_log_rejects_concurrent_cross_session_turn_id_reuse(
 
     try:
         first_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=first_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=first_session_id,
+            workspace_root=tmp_path,
         )
         second_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=second_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=second_session_id,
+            workspace_root=tmp_path,
         )
         first_ctx = EventContext(
             run_id=f"run:first:{uuid4().hex}",
@@ -1412,10 +1441,14 @@ def test_postgres_event_log_transaction_failure_leaves_no_partial_events(
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         conflicting_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=conflicting_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=conflicting_session_id,
+            workspace_root=tmp_path,
         )
         conflicting_ctx = EventContext(
             run_id="run:batch-conflict",
@@ -1467,7 +1500,9 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
 
     try:
         event_log = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         runtime = in_memory_runtime_session(
             tmp_path,
@@ -1512,7 +1547,9 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
             runtime.close()
 
         reloaded = PostgresEventLog(
-            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         deltas = [
             event

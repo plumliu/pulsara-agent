@@ -63,6 +63,11 @@ from pulsara_agent.runtime.run_entry import (
 from pulsara_agent.runtime.long_horizon.run_contract import (
     PreparedLongHorizonRunFacts,
 )
+from pulsara_agent.primitives.context import ContextEventReferenceFact
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    PreparedMcpInputRequiredResolution,
+    RuntimeEventOperationDeadlineBudget,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +201,13 @@ class PreparedInteractionResumeBoundary:
     frozen_execution_surface: FrozenCapabilityExecutionSurface
     incoming_execution_handles: BoundaryExecutionHandles
     pending_mcp_audits: tuple[AgentEvent, ...]
+    deadline_budget: RuntimeEventOperationDeadlineBudget
     gate_policy: ResumeGatePolicy
     diagnostics: tuple[HostRunBoundaryDiagnostic, ...]
+    prepared_mcp_input_required_resolution: (
+        PreparedMcpInputRequiredResolution | None
+    ) = None
+    mcp_input_required_resolution_event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +220,9 @@ class CommittedInteractionResumeBoundary:
     committed_audit_event_ids: tuple[str, ...]
     committed_through_sequence: int
     publication_status: Literal["completed", "failed_after_commit", "unavailable"]
+    mcp_input_required_resolution_event_reference: (
+        ContextEventReferenceFact | None
+    ) = None
 
 
 PrepareInteractionResumeBoundaryResult: TypeAlias = (

@@ -747,6 +747,22 @@ class McpServerSupervisor:
             owner.active_borrows += 1
             return owner.lease
 
+    def pending_lease_reservation(
+        self,
+        interaction_id: str,
+    ) -> McpPendingLeaseReservation:
+        """Return the immutable identity for one live pending lease owner."""
+
+        with self._state_lock:
+            owner = self._pending_leases.get(interaction_id)
+            if owner is None:
+                raise RuntimeError("MCP pending lease owner is unavailable")
+            return McpPendingLeaseReservation(
+                reservation_id=owner.reservation_id,
+                interaction_id=owner.interaction_id,
+                binding_identity=owner.lease.binding_identity,
+            )
+
     def return_pending_borrow(self, interaction_id: str) -> None:
         with self._state_lock:
             owner = self._pending_leases.get(interaction_id)

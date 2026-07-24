@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from uuid import uuid4
 
@@ -19,7 +21,6 @@ from pulsara_agent.memory.canonical.vector_index_sync import (
     VectorSyncStatus,
 )
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 class _FakeEmbeddingProvider:
@@ -54,7 +55,11 @@ def test_vector_sync_applies_and_skips_unchanged_hash() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id, memory_id = _seed_memory(dsn, statement="Prefer concise summaries.")
     provider = _FakeEmbeddingProvider()
-    sync = MemoryVectorIndexSync(dsn=dsn, provider=provider, provider_name="fake")
+    sync = MemoryVectorIndexSync(
+        connection_provider=verified_postgres_provider(dsn),
+        provider=provider,
+        provider_name="fake",
+    )
     try:
         first = asyncio.run(sync.sync_memory(memory_id, graph_id=graph_id))
         second = asyncio.run(sync.sync_memory(memory_id, graph_id=graph_id))
@@ -84,12 +89,18 @@ def test_vector_sync_applies_and_skips_unchanged_hash() -> None:
         _delete_graph(dsn, graph_id)
 
 
-def test_vector_sync_remote_call_holds_no_row_lock_and_stale_completion_is_rejected() -> None:
+def test_vector_sync_remote_call_holds_no_row_lock_and_stale_completion_is_rejected() -> (
+    None
+):
     async def scenario() -> None:
         dsn = StorageConfig.from_env().postgres_dsn
         graph_id, memory_id = _seed_memory(dsn, statement="Old statement")
         provider = _FakeEmbeddingProvider(blocking=True)
-        sync = MemoryVectorIndexSync(dsn=dsn, provider=provider, provider_name="fake")
+        sync = MemoryVectorIndexSync(
+            connection_provider=verified_postgres_provider(dsn),
+            provider=provider,
+            provider_name="fake",
+        )
         try:
             task = asyncio.create_task(sync.sync_memory(memory_id, graph_id=graph_id))
             await provider.started.wait()
@@ -126,7 +137,11 @@ def test_vector_outbox_claim_retries_failure_and_completes_surface() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id, memory_id = _seed_memory(dsn, statement="Retry vector projection")
     provider = _FakeEmbeddingProvider(failures=1)
-    sync = MemoryVectorIndexSync(dsn=dsn, provider=provider, provider_name="fake")
+    sync = MemoryVectorIndexSync(
+        connection_provider=verified_postgres_provider(dsn),
+        provider=provider,
+        provider_name="fake",
+    )
     payload = CanonicalMutationPayload(
         mutation_lane=CanonicalMutationLane.GOVERNED_MEMORY,
         dirty_memory_ids=(memory_id,),
@@ -134,7 +149,9 @@ def test_vector_outbox_claim_retries_failure_and_completes_surface() -> None:
             CanonicalMutationSurface.VECTOR_INDEX.value: CanonicalMutationSurfaceState.PENDING.value
         },
     )
-    outbox_id = MutationOutboxWriter(dsn=dsn).append_payload(
+    outbox_id = MutationOutboxWriter(
+        connection_provider=verified_postgres_provider(dsn)
+    ).append_payload(
         payload,
         graph_id=graph_id,
         target_entry_key="pool:vector-retry",
@@ -171,8 +188,14 @@ def test_vector_finalize_preserves_concurrent_surface_updates() -> None:
         dsn = StorageConfig.from_env().postgres_dsn
         graph_id, memory_id = _seed_memory(dsn, statement="Concurrent surfaces")
         provider = _FakeEmbeddingProvider(blocking=True)
-        sync = MemoryVectorIndexSync(dsn=dsn, provider=provider, provider_name="fake")
-        writer = MutationOutboxWriter(dsn=dsn)
+        sync = MemoryVectorIndexSync(
+            connection_provider=verified_postgres_provider(dsn),
+            provider=provider,
+            provider_name="fake",
+        )
+        writer = MutationOutboxWriter(
+            connection_provider=verified_postgres_provider(dsn)
+        )
         payload = CanonicalMutationPayload(
             mutation_lane=CanonicalMutationLane.GOVERNED_MEMORY,
             dirty_memory_ids=(memory_id,),
@@ -225,13 +248,22 @@ def _seed_memory(dsn: str, *, statement: str) -> tuple[str, str]:
         pytest.skip(f"PostgreSQL unavailable: {exc}")
     with connection:
         with connection.cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
             cursor.execute(
                 """
                 INSERT INTO graph_documents (graph_id, id, type, payload)
                 VALUES (%s, %s, 'Preference', %s)
                 """,
-                (graph_id, memory_id, Jsonb({"@id": memory_id, "@type": ["Preference"], "statement": statement})),
+                (
+                    graph_id,
+                    memory_id,
+                    Jsonb(
+                        {
+                            "@id": memory_id,
+                            "@type": ["Preference"],
+                            "statement": statement,
+                        }
+                    ),
+                ),
             )
             cursor.execute(
                 """
@@ -247,6 +279,10 @@ def _seed_memory(dsn: str, *, statement: str) -> tuple[str, str]:
 def _delete_graph(dsn: str, graph_id: str) -> None:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
+            cursor.execute(
+                "DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,)
+            )
+            cursor.execute(
+                "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+            )
             cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))

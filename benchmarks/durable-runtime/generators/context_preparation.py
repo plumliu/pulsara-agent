@@ -109,12 +109,16 @@ from pulsara_agent.runtime.tool_artifacts import (
     PostgresToolResultArtifactIndex,
 )
 from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
+from pulsara_agent.storage.postgres_connection_provider import (
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 from generators.runtime_fixture import (
     BenchmarkContextRun,
     bootstrap_benchmark_context_run,
     rebind_benchmark_context_run,
 )
+from runners.postgres_sandbox import VerifiedBenchmarkDatabaseLease
 from generators.raw_provider_fixture import (
     text_delta as RawProviderTextDelta,
     text_end as RawProviderTextBlockEnd,
@@ -507,11 +511,13 @@ async def run_context_preparation_sample(
     ),
     execution_case: CheckpointRestartCase | None,
     mode: str,
-    dsn: str,
+    database_lease: VerifiedBenchmarkDatabaseLease,
     workspace_root: Path,
     sample_identity: str,
 ) -> ContextPreparationObservation:
     """Run one trajectory and measure real context preparation at each point."""
+
+    connection_provider = database_lease.connection_provider
 
     if isinstance(scenario, CheckpointRebaseRestartScenario):
         if execution_case is None:
@@ -519,7 +525,7 @@ async def run_context_preparation_sample(
         return await _run_checkpoint_rebase_restart_sample(
             scenario=scenario,
             execution_case=execution_case,
-            dsn=dsn,
+            connection_provider=connection_provider,
             workspace_root=workspace_root,
             sample_identity=sample_identity,
         )
@@ -529,7 +535,7 @@ async def run_context_preparation_sample(
         return await _run_single_long_compaction_sample(
             scenario=scenario,
             mode=mode,
-            dsn=dsn,
+            connection_provider=connection_provider,
             workspace_root=workspace_root,
             sample_identity=sample_identity,
         )
@@ -539,7 +545,7 @@ async def run_context_preparation_sample(
         return await _run_subagent_two_children_sample(
             scenario=scenario,
             mode=mode,
-            dsn=dsn,
+            connection_provider=connection_provider,
             workspace_root=workspace_root,
             sample_identity=sample_identity,
         )
@@ -553,7 +559,7 @@ async def run_context_preparation_sample(
         reply_id=f"reply:benchmark:{_hex_identity(sample_identity + ':reply')}",
     )
     runtime_session = _runtime_session(
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
     )
@@ -602,7 +608,7 @@ async def run_context_preparation_sample(
             if mode == "process_cold":
                 runtime_session.close()
                 runtime_session = _runtime_session(
-                    dsn=dsn,
+                    connection_provider=connection_provider,
                     workspace_root=workspace_root,
                     runtime_session_id=runtime_session_id,
                 )
@@ -684,7 +690,7 @@ async def _run_checkpoint_rebase_restart_sample(
     *,
     scenario: CheckpointRebaseRestartScenario,
     execution_case: CheckpointRestartCase,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     sample_identity: str,
 ) -> ContextPreparationObservation:
@@ -697,7 +703,7 @@ async def _run_checkpoint_rebase_restart_sample(
         reply_id=f"reply:benchmark:{_hex_identity(sample_identity + ':reply')}",
     )
     runtime_session = _runtime_session(
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
     )
@@ -795,7 +801,7 @@ async def _run_checkpoint_rebase_restart_sample(
 
         runtime_session.close()
         runtime_session = _runtime_session(
-            dsn=dsn,
+            connection_provider=connection_provider,
             workspace_root=workspace_root,
             runtime_session_id=runtime_session_id,
         )
@@ -899,7 +905,7 @@ async def _run_single_long_compaction_sample(
     *,
     scenario: SingleLongCompactionScenario,
     mode: str,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     sample_identity: str,
 ) -> ContextPreparationObservation:
@@ -912,7 +918,7 @@ async def _run_single_long_compaction_sample(
         reply_id=f"reply:benchmark:{_hex_identity(sample_identity + ':reply')}",
     )
     runtime_session = _runtime_session(
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
     )
@@ -968,7 +974,7 @@ async def _run_single_long_compaction_sample(
         if mode == "process_cold":
             runtime_session, run = _reopen_context_run(
                 runtime_session=runtime_session,
-                dsn=dsn,
+                connection_provider=connection_provider,
                 workspace_root=workspace_root,
                 runtime_session_id=runtime_session_id,
                 event_context=event_context,
@@ -1097,7 +1103,7 @@ async def _run_single_long_compaction_sample(
         if mode == "process_cold":
             runtime_session, run = _reopen_context_run(
                 runtime_session=runtime_session,
-                dsn=dsn,
+                connection_provider=connection_provider,
                 workspace_root=workspace_root,
                 runtime_session_id=runtime_session_id,
                 event_context=event_context,
@@ -1137,7 +1143,7 @@ async def _run_single_long_compaction_sample(
             if mode == "process_cold":
                 runtime_session, run = _reopen_context_run(
                     runtime_session=runtime_session,
-                    dsn=dsn,
+                    connection_provider=connection_provider,
                     workspace_root=workspace_root,
                     runtime_session_id=runtime_session_id,
                     event_context=event_context,
@@ -1199,7 +1205,7 @@ async def _run_subagent_two_children_sample(
     *,
     scenario: SubagentTwoChildrenScenario,
     mode: str,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     sample_identity: str,
 ) -> ContextPreparationObservation:
@@ -1212,7 +1218,7 @@ async def _run_subagent_two_children_sample(
         reply_id=f"reply:benchmark:{_hex_identity(sample_identity + ':reply')}",
     )
     runtime_session = _runtime_session(
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
     )
@@ -1313,7 +1319,7 @@ async def _run_subagent_two_children_sample(
             if mode == "process_cold":
                 runtime_session, run, agent = _reopen_subagent_context_run(
                     runtime_session=runtime_session,
-                    dsn=dsn,
+                    connection_provider=connection_provider,
                     workspace_root=workspace_root,
                     runtime_session_id=runtime_session_id,
                     event_context=event_context,
@@ -1388,7 +1394,7 @@ async def _run_subagent_two_children_sample(
             if mode == "process_cold":
                 runtime_session, run, agent = _reopen_subagent_context_run(
                     runtime_session=runtime_session,
-                    dsn=dsn,
+                    connection_provider=connection_provider,
                     workspace_root=workspace_root,
                     runtime_session_id=runtime_session_id,
                     event_context=event_context,
@@ -1512,7 +1518,7 @@ def _bind_subagent_agent(
 def _reopen_subagent_context_run(
     *,
     runtime_session: RuntimeSession,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     runtime_session_id: str,
     event_context: EventContext,
@@ -1522,7 +1528,7 @@ def _reopen_subagent_context_run(
 ) -> tuple[RuntimeSession, BenchmarkContextRun, AgentRuntime]:
     reopened, run = _reopen_context_run(
         runtime_session=runtime_session,
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
         event_context=event_context,
@@ -1572,7 +1578,7 @@ def _control_owner(run: BenchmarkContextRun) -> RunModelCallControlOwner:
 def _reopen_context_run(
     *,
     runtime_session: RuntimeSession,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     runtime_session_id: str,
     event_context: EventContext,
@@ -1580,7 +1586,7 @@ def _reopen_context_run(
 ) -> tuple[RuntimeSession, BenchmarkContextRun]:
     runtime_session.close()
     reopened = _runtime_session(
-        dsn=dsn,
+        connection_provider=connection_provider,
         workspace_root=workspace_root,
         runtime_session_id=runtime_session_id,
     )
@@ -1976,6 +1982,9 @@ async def _prepare_compile_point(
         rendered_tool_results=rendered,
         prepared_rollups=(),
         section_candidates=prepared.prepared_candidates,
+        context_source_hydrated_contents=(
+            prepared.context_source_hydrated_contents
+        ),
         transcript_stable_entries=(
             prepared.transcript_projection_evidence.stable_entries
         ),
@@ -2168,19 +2177,19 @@ def _trajectory_steps(
 
 def _runtime_session(
     *,
-    dsn: str,
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
     workspace_root: Path,
     runtime_session_id: str,
 ) -> RuntimeSession:
     return RuntimeSession(
         workspace_root,
         event_log=PostgresEventLog(
-            dsn=dsn,
+            connection_provider=connection_provider,
             runtime_session_id=runtime_session_id,
             workspace_root=workspace_root,
         ),
-        archive=PostgresArtifactStore(dsn),
-        tool_result_artifacts=PostgresToolResultArtifactIndex(dsn),
+        archive=PostgresArtifactStore(connection_provider),
+        tool_result_artifacts=PostgresToolResultArtifactIndex(connection_provider),
         runtime_session_id=runtime_session_id,
     )
 

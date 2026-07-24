@@ -85,6 +85,8 @@ class RunWorkingSet:
     effective_exposure_event_ref: ContextEventReferenceFact | None
     latest_committed_resume_boundary: InteractionResumeBoundaryFact | None
     latest_committed_resume_boundary_ref: ContextEventReferenceFact | None
+    latest_mcp_input_required_resolution_ref: ContextEventReferenceFact | None = None
+    latest_mcp_resume_failure_event_ref: ContextEventReferenceFact | None = None
     latest_validated_suspended_state_token_fingerprint: str | None = None
     run_execution_activation: RunExecutionActivationFact | None = None
     process_segment_id: str | None = None
@@ -123,6 +125,7 @@ class RunWorkingSet:
         boundary_ref: ContextEventReferenceFact,
         frozen_execution_surface: FrozenCapabilityExecutionSurface,
         validated_suspended_state_token_fingerprint: str,
+        mcp_input_required_resolution_ref: ContextEventReferenceFact | None = None,
     ) -> None:
         if self.original_exposure_fact is None:
             raise RuntimeError("continuation requires an initial capability exposure")
@@ -133,6 +136,11 @@ class RunWorkingSet:
         self.effective_exposure_event_ref = event_ref
         self.latest_committed_resume_boundary = boundary
         self.latest_committed_resume_boundary_ref = boundary_ref
+        if mcp_input_required_resolution_ref is not None:
+            self.latest_mcp_input_required_resolution_ref = (
+                mcp_input_required_resolution_ref
+            )
+            self.latest_mcp_resume_failure_event_ref = None
         if (
             validated_suspended_state_token_fingerprint
             != boundary.suspended_state_token_fingerprint

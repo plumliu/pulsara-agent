@@ -117,6 +117,8 @@ def test_terminal_public_schemas_are_strict_branch_specific() -> None:
         "terminal_monitor"
     ).input_schema
 
+    assert process_schema["type"] == "object"
+    assert monitor_schema["type"] == "object"
     assert _actions(process_schema) == {
         "list",
         "log",

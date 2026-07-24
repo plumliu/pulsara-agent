@@ -14,11 +14,15 @@ from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
     EventContext,
+    McpInputRequiredBindingChangedEvent,
+    McpInputRequiredExpiredEvent,
+    McpInputRequiredInteractionClosedEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     ToolExecutionSuspendedEvent,
     ToolResultEndEvent,
 )
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.runtime.long_horizon.accounting import (
     resolve_run_rollout_binding,
 )
@@ -182,6 +186,7 @@ class ToolExecutionTerminalRegistry:
         reservation: RolloutReservationFact,
         candidates: Sequence[AgentEvent],
     ) -> ToolExecutionTerminalOwner:
+        self._validate_mcp_terminal_batch(candidates)
         return self._freeze(
             run_id=run_id,
             reservation=reservation,
@@ -194,6 +199,88 @@ class ToolExecutionTerminalRegistry:
                 ToolExecutionTerminalOwnerState.COMMIT_OUTCOME_UNKNOWN,
             ),
         )
+
+    def _validate_mcp_terminal_batch(
+        self,
+        candidates: Sequence[AgentEvent],
+    ) -> None:
+        terminals = tuple(
+            event for event in candidates if isinstance(event, ToolResultEndEvent)
+        )
+        if len(terminals) != 1:
+            raise ToolExecutionCommitContractError(
+                "tool terminal owner requires one prepared ToolResultEnd"
+            )
+        terminal = terminals[0]
+        source = terminal.mcp_input_required_terminal_source
+        dispositions = tuple(
+            event
+            for event in candidates
+            if isinstance(
+                event,
+                (
+                    McpInputRequiredExpiredEvent,
+                    McpInputRequiredBindingChangedEvent,
+                ),
+            )
+        )
+        closures = tuple(
+            event
+            for event in candidates
+            if isinstance(event, McpInputRequiredInteractionClosedEvent)
+        )
+        if source is None:
+            if dispositions or closures:
+                raise ToolExecutionCommitContractError(
+                    "MCP terminal companion lacks its terminal source"
+                )
+            return
+        resolution_ref = source.source_resolution_submitted_event_reference
+        if (
+            resolution_ref is None
+            and not closures
+            and terminal.state.value != "interrupted"
+        ):
+            raise ToolExecutionCommitContractError(
+                "resumed MCP terminal requires an exact resolution reference"
+            )
+        if len(dispositions) > 1 or len(closures) > 1:
+            raise ToolExecutionCommitContractError(
+                "MCP terminal batch contains duplicate companions"
+            )
+        if dispositions and closures:
+            raise ToolExecutionCommitContractError(
+                "MCP terminal disposition and closure are mutually exclusive"
+            )
+        expected_terminal_identity = stable_event_identity(
+            terminal,
+            runtime_session_id=self._runtime_session.runtime_session_id,
+        )
+        if closures:
+            closure = closures[0]
+            if (
+                closure.source_suspension_event_reference
+                != source.source_suspension_event_reference
+                or closure.source_resolution_submitted_event_reference
+                != resolution_ref
+                or closure.terminal_tool_result_event_identity
+                != expected_terminal_identity
+            ):
+                raise ToolExecutionCommitContractError(
+                    "MCP closure does not exact-join its terminal result"
+                )
+            return
+        if not dispositions:
+            return
+        disposition = dispositions[0]
+        if (
+            disposition.resolution_submitted_event_reference != resolution_ref
+            or disposition.terminal_tool_result_event_identity
+            != expected_terminal_identity
+        ):
+            raise ToolExecutionCommitContractError(
+                "MCP disposition does not exact-join its terminal result"
+            )
 
     def mark_commit_outcome_unknown(
         self,
@@ -704,6 +791,8 @@ class RuntimeSessionToolExecutionEventCommitPort:
         terminal_candidates: Sequence[AgentEvent | ToolResultEndCandidate],
         settlement_candidate: RolloutBudgetReservationSettledEvent,
         expected_reservation_fingerprint: str,
+        deadline_monotonic: float | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
     ) -> EventWriteResult:
         ends = tuple(
             event
@@ -741,6 +830,10 @@ class RuntimeSessionToolExecutionEventCommitPort:
         return await self._write_terminal_batch(
             (*terminal_candidates, settlement_candidate),
             terminal=terminal,
+            deadline_monotonic=deadline_monotonic,
+            publication_terminal_maintenance_lease=(
+                publication_terminal_maintenance_lease
+            ),
         )
 
     async def commit_gate_and_denial(
@@ -870,6 +963,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         suspension_candidate: ToolExecutionSuspendedEvent,
         reservation_id: str,
         expected_reservation_fingerprint: str,
+        deadline_monotonic: float | None = None,
     ) -> EventWriteResult:
         reservation = self._active_reservation(
             reservation_id,
@@ -892,24 +986,27 @@ class RuntimeSessionToolExecutionEventCommitPort:
             raise ToolExecutionCommitContractError(
                 "tool suspension lacks its active physical reservation"
             )
-        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else self.runtime_session.event_write_service.new_deadline_monotonic()
+        )
         binding_fingerprint = context_fingerprint(
             "tool-physical-suspension-binding:v1",
             {
                 "interaction_kind": suspension_candidate.interaction_kind,
                 "tool_call_id": suspension_candidate.tool_call_id,
-                "mcp_binding_identity": suspension_candidate.payload.get(
-                    "mcp_binding_identity"
+                "mcp_binding_identity": (
+                    suspension_candidate.suspension.binding_identity.model_dump(
+                        mode="json"
+                    )
                 ),
-                "mcp_pending_lease_reservation_id": suspension_candidate.payload.get(
-                    "mcp_pending_lease_reservation_id"
+                "mcp_pending_lease_reservation_id": (
+                    suspension_candidate.suspension.pending_lease_reservation.reservation_id
                 ),
             },
         )
-        suspension_id = str(
-            suspension_candidate.payload.get("interaction_id")
-            or suspension_candidate.id
-        )
+        suspension_id = suspension_candidate.suspension.interaction.interaction_id
         self.runtime_session.publisher.bind_running_loop()
 
         def commit_suspension_batch():
@@ -934,11 +1031,31 @@ class RuntimeSessionToolExecutionEventCommitPort:
         events: tuple[AgentEvent, ...],
         *,
         terminal: ToolResultEndEvent | ToolResultEndCandidate,
+        deadline_monotonic: float | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
     ) -> EventWriteResult:
-        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else self.runtime_session.event_write_service.new_deadline_monotonic()
+        )
+        self.runtime_session._preflight_publication_terminal_maintenance(
+            events=events,
+            transaction_companion=None,
+            deadline_monotonic=deadline,
+            lease=publication_terminal_maintenance_lease,
+        )
         prepared = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
             events,
             deadline_monotonic=deadline,
+        )
+        maintenance_attempt = (
+            self.runtime_session._admit_publication_terminal_maintenance(
+                events=prepared,
+                transaction_companion=None,
+                deadline_monotonic=deadline,
+                lease=publication_terminal_maintenance_lease,
+            )
         )
         physical_reservation = self.runtime_session.physical_reservation_for_owner(
             operation_kind=PhysicalOperationKind.TOOL_CALL,
@@ -969,13 +1086,26 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 state=self.state,
             )
 
-        return await _execute_runtime_event_write(
-            self.runtime_session,
-            commit_terminal_batch,
-            deadline_monotonic=deadline,
-            operation_kind=PhysicalOperationKind.TOOL_CALL,
-            operation_owner_id=terminal.tool_call_id,
+        try:
+            result = await _execute_runtime_event_write(
+                self.runtime_session,
+                commit_terminal_batch,
+                deadline_monotonic=deadline,
+                operation_kind=PhysicalOperationKind.TOOL_CALL,
+                operation_owner_id=terminal.tool_call_id,
+            )
+        except BaseException as error:
+            outcome = self.runtime_session.resolved_event_write_outcome(error)
+            self.runtime_session._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status=outcome.status,
+            )
+            raise
+        self.runtime_session._resolve_publication_terminal_maintenance_attempt(
+            maintenance_attempt,
+            status="full",
         )
+        return result
 
     async def _write(
         self,

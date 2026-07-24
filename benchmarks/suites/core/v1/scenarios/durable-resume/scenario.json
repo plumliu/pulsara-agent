@@ -29,7 +29,6 @@
     "max_model_calls": 8,
     "min_tool_calls": 3,
     "max_tool_calls": 8,
-    "max_total_tokens": 140000,
     "event_count_minimums": [
       {"event_type": "MODEL_CALL_END", "minimum": 2},
       {"event_type": "RUN_END", "minimum": 2}

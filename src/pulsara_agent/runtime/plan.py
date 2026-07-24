@@ -8,6 +8,11 @@ from typing import Any, Iterable, Literal, TypeAlias
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact, thaw_json
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredSuspensionFact,
+    PreparedMcpInputRequiredSuspension,
+)
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.approval import PendingApproval
 from pulsara_agent.primitives.permission import (
@@ -276,11 +281,10 @@ class PendingMcpInputRequired:
     tool_call_id: str
     tool_name: str
     server_id: str
-    protocol_version: str | None
-    request_state: str | None
+    source_suspension_event_reference: ContextEventReferenceFact
+    suspension_fact: McpInputRequiredSuspensionFact
+    prepared_suspension: PreparedMcpInputRequiredSuspension
     input_requests: tuple[dict[str, Any], ...]
-    original_request: dict[str, Any]
-    tool_observation_timing_seed: dict[str, Any] = field(default_factory=dict)
     round_count: int = 1
     deadline_monotonic: float | None = None
     created_at: float = field(default_factory=time.monotonic)
@@ -297,11 +301,14 @@ class PendingMcpInputRequired:
             "tool_call_id": self.tool_call_id,
             "tool_name": self.tool_name,
             "server_id": self.server_id,
-            "protocol_version": self.protocol_version,
-            "request_state": self.request_state,
+            "source_suspension_event_reference": (
+                self.source_suspension_event_reference.model_dump(mode="json")
+            ),
+            "suspension_fact_fingerprint": (
+                self.suspension_fact.suspension_fact_fingerprint
+            ),
+            "protocol_version": self.suspension_fact.request_envelope.protocol_version,
             "input_requests": [dict(item) for item in self.input_requests],
-            "original_request": dict(self.original_request),
-            "tool_observation_timing_seed": dict(self.tool_observation_timing_seed),
             "round_count": self.round_count,
             "created_at": self.created_at,
         }
@@ -390,28 +397,39 @@ def pending_mcp_input_required_from_state(state: LoopState, host_session_id: str
     if state.pending_interaction_kind != "mcp_input_required":
         raise ValueError("waiting state does not contain an MCP input-required interaction")
     payload = dict(state.pending_interaction_payload)
+    prepared = payload.get("prepared_mcp_input_required")
+    suspension = payload.get("suspension_fact")
+    source_reference = payload.get("source_suspension_event_reference")
+    if not isinstance(prepared, PreparedMcpInputRequiredSuspension):
+        raise ValueError("pending MCP interaction lacks its prepared suspension owner")
+    if not isinstance(suspension, McpInputRequiredSuspensionFact):
+        raise ValueError("pending MCP interaction lacks its typed suspension fact")
+    if not isinstance(source_reference, ContextEventReferenceFact):
+        raise ValueError("pending MCP interaction lacks its suspension event reference")
     return PendingMcpInputRequired(
-        interaction_id=str(payload["interaction_id"]),
+        interaction_id=prepared.interaction.interaction_id,
         kind="mcp_input_required",
         host_session_id=host_session_id,
         runtime_session_id=state.session_id,
         run_id=state.run_id,
         turn_id=state.turn_id,
         reply_id=state.reply_id,
-        tool_call_id=str(payload["tool_call_id"]),
-        tool_name=str(payload["tool_name"]),
-        server_id=str(payload["server_id"]),
-        protocol_version=(
-            str(payload["protocol_version"]) if payload.get("protocol_version") is not None else None
+        tool_call_id=prepared.interaction.tool_call_id,
+        tool_name=prepared.interaction.tool_name,
+        server_id=prepared.interaction.server_id,
+        source_suspension_event_reference=source_reference,
+        suspension_fact=suspension,
+        prepared_suspension=prepared,
+        input_requests=tuple(
+            {
+                "key": item.key,
+                "method": item.method,
+                "params": thaw_json(item.user_visible_params),
+            }
+            for item in prepared.request_envelope.ordered_user_visible_input_requests
         ),
-        request_state=str(payload["request_state"]) if payload.get("request_state") is not None else None,
-        input_requests=tuple(dict(item) for item in payload.get("input_requests") or ()),
-        original_request=dict(payload.get("original_request") or {}),
-        tool_observation_timing_seed=dict(payload.get("tool_observation_timing_seed") or {}),
-        round_count=int(payload.get("round_count") or 1),
-        deadline_monotonic=(
-            float(payload["deadline_monotonic"]) if payload.get("deadline_monotonic") is not None else None
-        ),
+        round_count=prepared.interaction.round_count,
+        deadline_monotonic=prepared.deadline_monotonic,
     )
 
 

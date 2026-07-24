@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from types import MappingProxyType
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
@@ -14,7 +17,11 @@ from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Claim, Preference
 from pulsara_agent.event import EventContext, EventType
-from pulsara_agent.event.candidates import ClaimCandidate, PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.event.candidates import (
+    ClaimCandidate,
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
@@ -30,19 +37,30 @@ from pulsara_agent.memory import (
     WriteFailedOutcome,
     WriteSucceededOutcome,
 )
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, CorrectAndSubmitDecision, PooledMemoryCandidate
+from pulsara_agent.memory.candidates.pool import (
+    CandidateOrigin,
+    CorrectAndSubmitDecision,
+    PooledMemoryCandidate,
+)
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.governance.dedupe import already_exists
-from pulsara_agent.memory.governance.executor import _SUPERSEDE_DOWNGRADE_SENTINEL, _jsonld_type_names
+from pulsara_agent.memory.governance.executor import (
+    _SUPERSEDE_DOWNGRADE_SENTINEL,
+    _jsonld_type_names,
+)
 from pulsara_agent.memory.governance.relatedness import (
     RelatednessAvailability,
     RelatednessExecutionContext,
 )
 from pulsara_agent.memory.recall.explain import ClaimKind, explain_memory
-from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
+from pulsara_agent.memory.recall.service import (
+    LexicalMemoryRecallService,
+    RecallQuery,
+    RecallStatus,
+)
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 from tests.support.memory_uow import fake_memory_uow_factory
@@ -54,7 +72,9 @@ _VERIFIED_REPLACEMENT_REF = "candidate_user_quote"
 def test_supersede_decision_facade_export_and_round_trip() -> None:
     decision = SupersedeAndSubmitDecision(
         target_entry_id="pool:test",
-        candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+        candidate=_preference_candidate(
+            "candidate:new", "The user prefers concise summaries."
+        ),
         superseded_memory_ids=("preference:old",),
         reason="User explicitly replaced the prior preference.",
     )
@@ -71,11 +91,15 @@ def test_explicit_fake_uow_supersedes_with_full_relatedness() -> None:
     batch_id = "governance:test:fake-supersede"
     source_ctx = _source_context("fake-supersede")
     log.append(
-        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed")
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
     )
     old_id = "preference:test-fake-supersede-old"
     graph.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."))
-    candidate = _preference_candidate("candidate:fake-new", "The user prefers concise summaries.")
+    candidate = _preference_candidate(
+        "candidate:fake-new", "The user prefers concise summaries."
+    )
     pooled = pool.append_candidate(
         _pooled_valid(
             runtime_session_id=runtime_session_id,
@@ -115,29 +139,47 @@ def test_explicit_fake_uow_supersedes_with_full_relatedness() -> None:
 
     assert isinstance(result.decision_record.decision, SupersedeAndSubmitDecision)
     assert result.decision_record.write_outcome.superseded_memory_ids == (old_id,)
-    assert graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
+    assert (
+        graph.get_jsonld(old_id)[memory.STATUS.name]
+        == memory.NodeStatus.SUPERSEDED.value
+    )
 
 
-def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcome(tmp_path) -> None:
+def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcome(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede:{uuid4().hex}"
     source_ctx = _source_context("supersede")
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
-    pool = PostgresCandidatePool(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
     old_id = "preference:test-supersede-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
         pooled = pool.append_candidate(
             _pooled_valid(
                 runtime_session_id=runtime_session_id,
                 source_ctx=source_ctx,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+                candidate=_preference_candidate(
+                    "candidate:new", "The user prefers concise summaries."
+                ),
             )
         )
         executor = _postgres_executor(
@@ -152,13 +194,17 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
         result = executor.apply_decision(
             SupersedeAndSubmitDecision(
                 target_entry_id=pooled.entry_id,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+                candidate=_preference_candidate(
+                    "candidate:new", "The user prefers concise summaries."
+                ),
                 superseded_memory_ids=(old_id,),
                 replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
                 reason="The user explicitly changed the summary preference.",
             ),
             governance_batch_id=batch_id,
-            relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+            relatedness_context=_relatedness_context(
+                batch_id, pooled.entry_id, (old_id,)
+            ),
             execution_identity=make_test_governance_execution_identity(
                 governance_batch_id=batch_id,
                 candidates=(pooled,),
@@ -185,11 +231,16 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
             if candidate.source_session_id == runtime_session_id
         ] == []
 
-        fetched = {view.id: view for view in query.fetch_nodes([old_id, new_id], graph_id=graph_id)}
+        fetched = {
+            view.id: view
+            for view in query.fetch_nodes([old_id, new_id], graph_id=graph_id)
+        }
         assert fetched[old_id].status is memory.NodeStatus.SUPERSEDED
         assert (memory.SUPERSEDES.name, old_id) in fetched[new_id].outgoing
         old_explanation = explain_memory(fetched[old_id])
-        assert any(claim.kind is ClaimKind.SUPERSEDED_BY for claim in old_explanation.claims)
+        assert any(
+            claim.kind is ClaimKind.SUPERSEDED_BY for claim in old_explanation.claims
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -199,10 +250,17 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
                 payload = cursor.fetchone()[0]
         documents = {item["node_id"]: item["document"] for item in payload["documents"]}
         assert set(documents) == {old_id, new_id}
-        assert documents[old_id][memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
+        assert (
+            documents[old_id][memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
+        )
         assert {"@id": old_id} in documents[new_id][memory.SUPERSEDES.name]
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
 def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> None:
@@ -212,18 +270,31 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:recall-supersede:{uuid4().hex}"
     source_ctx = _source_context("recall")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-supersede-recall-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
         pooled = pool.append_candidate(
             _pooled_valid(
                 runtime_session_id=runtime_session_id,
                 source_ctx=source_ctx,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+                candidate=_preference_candidate(
+                    "candidate:new", "The user prefers concise summaries."
+                ),
             )
         )
         executor = _postgres_executor(
@@ -238,13 +309,17 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
         result = executor.apply_decision(
             SupersedeAndSubmitDecision(
                 target_entry_id=pooled.entry_id,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+                candidate=_preference_candidate(
+                    "candidate:new", "The user prefers concise summaries."
+                ),
                 superseded_memory_ids=(old_id,),
                 replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
                 reason="Explicit replacement.",
             ),
             governance_batch_id=batch_id,
-            relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+            relatedness_context=_relatedness_context(
+                batch_id, pooled.entry_id, (old_id,)
+            ),
             execution_identity=make_test_governance_execution_identity(
                 governance_batch_id=batch_id,
                 candidates=(pooled,),
@@ -252,10 +327,14 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         new_id = result.decision_record.write_outcome.memory_id
-        MemorySearchIndexSync(dsn=dsn).rebuild(graph_id=graph_id)
+        MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).rebuild(graph_id=graph_id)
 
         recall = asyncio.run(
-            LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn)).recall(
+            LexicalMemoryRecallService(
+                PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+            ).recall(
                 RecallQuery(text="summaries preference", scopes=("ctx:user",)),
                 graph_id=graph_id,
             )
@@ -265,30 +344,55 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
         assert [item.memory_id for item in recall.items] == [new_id]
         assert old_id not in [item.memory_id for item in recall.items]
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_path) -> None:
+def test_executor_rejects_legal_active_target_outside_candidate_allowlist(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:outside-allowlist:{uuid4().hex}"
     source_ctx = _source_context("outside-allowlist")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
     log.append(
-        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="replace it"
+        )
     )
     surfaced_id = "preference:test-surfaced"
     hidden_id = "preference:test-valid-but-hidden"
     try:
-        store.put_jsonld(_preference_doc(surfaced_id, "The user prefers short plans."), graph_id=graph_id)
-        store.put_jsonld(_preference_doc(hidden_id, "The user prefers verbose summaries."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:outside-allowlist", "The user prefers concise summaries.")
+        store.put_jsonld(
+            _preference_doc(surfaced_id, "The user prefers short plans."),
+            graph_id=graph_id,
+        )
+        store.put_jsonld(
+            _preference_doc(hidden_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        candidate = _preference_candidate(
+            "candidate:outside-allowlist", "The user prefers concise summaries."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -319,7 +423,10 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_pa
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
         assert result.diagnostics == (f"relatedness_target_not_surfaced:{hidden_id}",)
-        assert store.get_jsonld(hidden_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(hidden_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
 
         partial_candidate = _preference_candidate(
             "candidate:partial-relatedness", "The user prefers compact summaries."
@@ -333,7 +440,9 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_pa
         )
         partial_context = RelatednessExecutionContext(
             governance_batch_id=batch_id,
-            allowlists=MappingProxyType({partial_pooled.entry_id: frozenset({hidden_id})}),
+            allowlists=MappingProxyType(
+                {partial_pooled.entry_id: frozenset({hidden_id})}
+            ),
             availability=MappingProxyType(
                 {partial_pooled.entry_id: RelatednessAvailability.PARTIAL}
             ),
@@ -360,7 +469,10 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_pa
             ),
         )
         assert partial_result.diagnostics == ("relatedness_evidence_partial",)
-        assert store.get_jsonld(hidden_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(hidden_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
     finally:
         _cleanup_postgres(
             dsn,
@@ -370,25 +482,42 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_pa
         )
 
 
-def test_executor_transactionally_rereads_drifted_target_and_requests_regovernance(tmp_path) -> None:
+def test_executor_transactionally_rereads_drifted_target_and_requests_regovernance(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:target-drift:{uuid4().hex}"
     source_ctx = _source_context("target-drift")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
     log.append(
-        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="replace it"
+        )
     )
     old_id = "preference:test-drifted-after-snapshot"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:drift", "The user prefers concise summaries.")
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        candidate = _preference_candidate(
+            "candidate:drift", "The user prefers concise summaries."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         context = _relatedness_context(batch_id, pooled.entry_id, (old_id,))
         # Simulate another governance batch changing the target after snapshot creation.
@@ -426,7 +555,10 @@ def test_executor_transactionally_rereads_drifted_target_and_requests_regovernan
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
-        assert "target_drift_requires_regovernance" in result.decision_record.decision.reason
+        assert (
+            "target_drift_requires_regovernance"
+            in result.decision_record.decision.reason
+        )
         assert result.diagnostics[0].startswith("relatedness_target_revision_drift")
         assert "target_drift_requires_regovernance" in result.diagnostics
     finally:
@@ -438,25 +570,46 @@ def test_executor_transactionally_rereads_drifted_target_and_requests_regovernan
         )
 
 
-def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candidate(tmp_path) -> None:
+def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candidate(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede-scope:{uuid4().hex}"
     source_ctx = _source_context("scope")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-scope-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries.", scope="ctx:workspace/test_project"), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(
+                old_id,
+                "The user prefers verbose summaries.",
+                scope="ctx:workspace/test_project",
+            ),
+            graph_id=graph_id,
+        )
         pooled = pool.append_candidate(
             _pooled_valid(
                 runtime_session_id=runtime_session_id,
                 source_ctx=source_ctx,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries.", scope="ctx:user"),
+                candidate=_preference_candidate(
+                    "candidate:new",
+                    "The user prefers concise summaries.",
+                    scope="ctx:user",
+                ),
             )
         )
         executor = _postgres_executor(
@@ -471,7 +624,11 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
         result = executor.apply_decision(
             SupersedeAndSubmitDecision(
                 target_entry_id=pooled.entry_id,
-                candidate=_preference_candidate("candidate:new", "The user prefers concise summaries.", scope="ctx:user"),
+                candidate=_preference_candidate(
+                    "candidate:new",
+                    "The user prefers concise summaries.",
+                    scope="ctx:user",
+                ),
                 superseded_memory_ids=(old_id,),
                 reason="Bad scope target.",
             ),
@@ -483,32 +640,57 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
-        assert result.decision_record.decision.reason.startswith(_SUPERSEDE_DOWNGRADE_SENTINEL)
+        assert result.decision_record.decision.reason.startswith(
+            _SUPERSEDE_DOWNGRADE_SENTINEL
+        )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         assert result.decision_record.write_outcome.superseded_memory_ids == ()
-        assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-        new_doc = store.get_jsonld(result.decision_record.write_outcome.memory_id, graph_id=graph_id)
+        assert (
+            store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
+        new_doc = store.get_jsonld(
+            result.decision_record.write_outcome.memory_id, graph_id=graph_id
+        )
         assert memory.SUPERSEDES.name not in new_doc
         assert _governance_candidate_count(pool) == 0
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_inactive(tmp_path) -> None:
+def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_inactive(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     source_ctx = _source_context("gates")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     active_old = "preference:test-gates-active"
     inactive_old = "preference:test-gates-inactive"
     claim_old = "claim:test-gates-claim"
     try:
-        store.put_jsonld(_preference_doc(active_old, "The user prefers verbose summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(active_old, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
         store.put_jsonld(
             _preference_doc(
                 inactive_old,
@@ -517,7 +699,9 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
             ),
             graph_id=graph_id,
         )
-        store.put_jsonld(_claim_doc(claim_old, "The repository uses Python."), graph_id=graph_id)
+        store.put_jsonld(
+            _claim_doc(claim_old, "The repository uses Python."), graph_id=graph_id
+        )
         executor = _postgres_executor(
             dsn=dsn,
             pool=pool,
@@ -534,22 +718,30 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
                 "type_not_supersedable",
             ),
             (
-                _preference_candidate("candidate:multi", "The user prefers compact summaries."),
+                _preference_candidate(
+                    "candidate:multi", "The user prefers compact summaries."
+                ),
                 (active_old, inactive_old),
                 "too_many_supersede_targets",
             ),
             (
-                _preference_candidate("candidate:missing", "The user prefers short status updates."),
+                _preference_candidate(
+                    "candidate:missing", "The user prefers short status updates."
+                ),
                 ("preference:missing",),
                 "supersede_target_missing",
             ),
             (
-                _preference_candidate("candidate:inactive", "The user prefers brief plans."),
+                _preference_candidate(
+                    "candidate:inactive", "The user prefers brief plans."
+                ),
                 (inactive_old,),
                 "supersede_target_not_active",
             ),
             (
-                _preference_candidate("candidate:claim-target", "The user prefers terse commit messages."),
+                _preference_candidate(
+                    "candidate:claim-target", "The user prefers terse commit messages."
+                ),
                 (claim_old,),
                 "supersede_target_type_not_supersedable",
             ),
@@ -557,18 +749,24 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
         for candidate, old_ids, reason_prefix in cases:
             batch_id = f"governance:test:gates:{uuid4().hex}"
             pooled = pool.append_candidate(
-                _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+                _pooled_valid(
+                    runtime_session_id=runtime_session_id,
+                    source_ctx=source_ctx,
+                    candidate=candidate,
+                )
             )
             result = executor.apply_decision(
                 SupersedeAndSubmitDecision(
                     target_entry_id=pooled.entry_id,
                     candidate=candidate,
                     superseded_memory_ids=old_ids,
-                        replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
+                    replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
                     reason="Proposed supersede should downgrade.",
                 ),
                 governance_batch_id=batch_id,
-                relatedness_context=_relatedness_context(batch_id, pooled.entry_id, old_ids),
+                relatedness_context=_relatedness_context(
+                    batch_id, pooled.entry_id, old_ids
+                ),
                 execution_identity=make_test_governance_execution_identity(
                     governance_batch_id=batch_id,
                     candidates=(pooled,),
@@ -577,13 +775,29 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
 
             assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
             assert reason_prefix in result.decision_record.decision.reason
-            assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+            assert isinstance(
+                result.decision_record.write_outcome, WriteSucceededOutcome
+            )
             assert result.decision_record.write_outcome.superseded_memory_ids == ()
-        assert store.get_jsonld(active_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-        assert store.get_jsonld(inactive_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
-        assert store.get_jsonld(claim_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(active_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
+        assert (
+            store.get_jsonld(inactive_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.SUPERSEDED.value
+        )
+        assert (
+            store.get_jsonld(claim_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=None)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=None,
+        )
 
 
 def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> None:
@@ -593,13 +807,24 @@ def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> 
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede-non-active:{uuid4().hex}"
     source_ctx = _source_context("non-active")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-non-active-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
         candidate = _preference_candidate(
             "candidate:needs-review",
             "The user might prefer concise summaries.",
@@ -607,7 +832,11 @@ def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> 
             verification_status=memory.VerificationStatus.INFERRED,
         )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -634,34 +863,62 @@ def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> 
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
-        assert result.decision_record.write_outcome.node_status is memory.NodeStatus.NEEDS_REVIEW
+        assert (
+            result.decision_record.write_outcome.node_status
+            is memory.NodeStatus.NEEDS_REVIEW
+        )
         assert result.decision_record.write_outcome.superseded_memory_ids == ()
-        assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersede(tmp_path) -> None:
+def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersede(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede-write-failed:{uuid4().hex}"
     source_ctx = _source_context("write-failed")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-write-failed-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
         candidate = _preference_candidate(
             "candidate:missing-evidence",
             "The user prefers concise summaries.",
             evidence_ids=("evidence:missing",),
         )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -688,7 +945,10 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
         assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
-        assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
         assert _governance_candidate_count(pool) == 0
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
@@ -698,26 +958,50 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
                 )
                 assert cursor.fetchone() == (0,)
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(tmp_path) -> None:
+def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede-rollback:{uuid4().hex}"
     source_ctx = _source_context("rollback")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-rollback-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:rollback", "The user prefers concise summaries.")
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers verbose summaries."),
+            graph_id=graph_id,
+        )
+        candidate = _preference_candidate(
+            "candidate:rollback", "The user prefers concise summaries."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = MemoryGovernanceExecutor(
             candidate_pool=pool,
@@ -727,9 +1011,11 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(tmp_pa
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: _FailingLifecycleUow(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(dsn=dsn),
+                archive=PostgresArtifactStore(
+                    connection_provider=verified_postgres_provider(dsn)
+                ),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -745,20 +1031,32 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(tmp_pa
                     reason="Inject lifecycle failure before commit.",
                 ),
                 governance_batch_id=batch_id,
-                relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+                relatedness_context=_relatedness_context(
+                    batch_id, pooled.entry_id, (old_id,)
+                ),
                 execution_identity=make_test_governance_execution_identity(
                     governance_batch_id=batch_id,
                     candidates=(pooled,),
                 ),
             )
 
-        assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("select count(*) from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "select count(*) from memory_nodes where graph_id = %s", (graph_id,)
+                )
                 assert cursor.fetchone()[0] == 1
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
 def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> None:
@@ -768,16 +1066,33 @@ def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> N
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:supersede-dedupe:{uuid4().hex}"
     source_ctx = _source_context("dedupe")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-dedupe-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers concise summaries."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:duplicate", "The user prefers concise summaries.")
+        store.put_jsonld(
+            _preference_doc(old_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
+        candidate = _preference_candidate(
+            "candidate:duplicate", "The user prefers concise summaries."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -804,9 +1119,17 @@ def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> N
 
         assert result.decision_record.decision.kind == "skip"
         assert result.decision_record.write_outcome.kind == "no_write"
-        assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
 def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> None:
@@ -819,14 +1142,20 @@ def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> No
     service = _service_on(graph)
     old_outcome = service.submit(
         _preference_candidate("candidate:old", "The user prefers verbose summaries."),
-        event_context=EventContext(run_id="run:old", turn_id="turn:old", reply_id="reply:old"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
     )
-    old_id = next(event.memory_id for event in old_outcome.events if hasattr(event, "memory_id"))
+    old_id = next(
+        event.memory_id for event in old_outcome.events if hasattr(event, "memory_id")
+    )
     pooled = pool.append_candidate(
         _pooled_valid(
             runtime_session_id="runtime:test",
             source_ctx=_source_context("legacy"),
-            candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+            candidate=_preference_candidate(
+                "candidate:new", "The user prefers concise summaries."
+            ),
         )
     )
     executor = MemoryGovernanceExecutor(
@@ -846,7 +1175,9 @@ def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> No
     result = executor.apply_decision(
         SupersedeAndSubmitDecision(
             target_entry_id=pooled.entry_id,
-            candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
+            candidate=_preference_candidate(
+                "candidate:new", "The user prefers concise summaries."
+            ),
             superseded_memory_ids=(old_id,),
             reason="Supersede attempted without relatedness context.",
         ),
@@ -864,7 +1195,9 @@ def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> No
     assert result.diagnostics == ("relatedness_context_missing",)
     assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
     assert result.decision_record.write_outcome.superseded_memory_ids == ()
-    assert graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    assert (
+        graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    )
     assert _governance_candidate_count(pool) == 0
 
 
@@ -873,21 +1206,36 @@ def test_related_dedupe_authority_remains_statement_exact() -> None:
     service = _service_on(graph)
     service.submit(
         _preference_candidate("candidate:old", "The user prefers verbose summaries."),
-        event_context=EventContext(run_id="run:old", turn_id="turn:old", reply_id="reply:old"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
     )
 
-    assert already_exists(
-        _preference_candidate("candidate:new", "The user prefers concise summaries."),
-        graph,
-    ) is False
-    assert already_exists(
-        _preference_candidate("candidate:dup", "The user prefers verbose summaries."),
-        graph,
-    ) is True
+    assert (
+        already_exists(
+            _preference_candidate(
+                "candidate:new", "The user prefers concise summaries."
+            ),
+            graph,
+        )
+        is False
+    )
+    assert (
+        already_exists(
+            _preference_candidate(
+                "candidate:dup", "The user prefers verbose summaries."
+            ),
+            graph,
+        )
+        is True
+    )
 
 
 def test_jsonld_type_names_accepts_compact_and_iri_types() -> None:
-    assert _jsonld_type_names({"@type": ["Preference", memory.CLAIM.value]}) == {"Preference", "Claim"}
+    assert _jsonld_type_names({"@type": ["Preference", memory.CLAIM.value]}) == {
+        "Preference",
+        "Claim",
+    }
 
 
 def _relatedness_context(
@@ -941,9 +1289,11 @@ def _postgres_executor(
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
-            archive=PostgresArtifactStore(dsn=dsn),
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
+            ),
             graph_id=graph_id,
             workspace_root=workspace_root,
         ),
@@ -996,7 +1346,9 @@ def _preference_candidate(
     )
 
 
-def _claim_candidate(candidate_id: str, statement: str, *, scope: str = "ctx:user") -> ClaimCandidate:
+def _claim_candidate(
+    candidate_id: str, statement: str, *, scope: str = "ctx:user"
+) -> ClaimCandidate:
     return ClaimCandidate(
         candidate_id=candidate_id,
         statement=statement,
@@ -1054,14 +1406,12 @@ def _source_context(label: str) -> EventContext:
 
 
 def _governance_candidate_count(pool) -> int:
-    return sum(1 for candidate in pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE)
+    return sum(
+        1
+        for candidate in pool.list_candidates()
+        if candidate.origin is CandidateOrigin.GOVERNANCE
+    )
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def _cleanup_postgres(
@@ -1073,7 +1423,9 @@ def _cleanup_postgres(
 ) -> None:
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("delete from memory_write_outbox where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from memory_write_outbox where graph_id = %s", (graph_id,)
+            )
             if governance_batch_id is None:
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id like %s",
@@ -1084,7 +1436,11 @@ def _cleanup_postgres(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (governance_batch_id,),
                 )
-            cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from graph_documents where graph_id = %s", (graph_id,)
+            )
             cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
-            cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from memory_relations where graph_id = %s", (graph_id,)
+            )
             cursor.execute("delete from sessions where id = %s", (runtime_session_id,))

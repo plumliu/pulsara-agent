@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.message.blocks import ToolResultState
@@ -22,6 +22,9 @@ if TYPE_CHECKING:
         ToolResultSemanticsRuntimeInput,
     )
     from pulsara_agent.event import ToolResultArtifactRef
+    from pulsara_agent.primitives.runtime_event_vocabulary import (
+        PreparedMcpInputRequiredSuspension,
+    )
     from pulsara_agent.runtime.terminal.monitor import (
         PreparedTerminalProcessMonitorCancellation,
         PreparedTerminalProcessMonitorRegistration,
@@ -93,8 +96,8 @@ class PreparedToolTerminalResult:
 class ToolExecutionSuspended:
     tool_call_id: str
     tool_name: str
-    interaction_kind: str
-    payload: dict[str, Any] = field(default_factory=dict)
+    interaction_kind: Literal["mcp_input_required"]
+    prepared_mcp_input_required: "PreparedMcpInputRequiredSuspension"
 
 
 @dataclass(frozen=True, slots=True)

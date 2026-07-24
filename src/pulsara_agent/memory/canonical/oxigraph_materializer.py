@@ -6,8 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import traceback
+from time import monotonic
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -20,23 +20,23 @@ from pulsara_agent.memory.canonical.mutation_outbox import (
     parse_mutation_payload,
     pending_surface_names,
 )
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(slots=True)
 class OxigraphMaterializer:
     oxigraph: OxigraphGraphStore
-    dsn: str | None = None
+    connection_provider: VerifiedPostgresConnectionProviderProtocol | None = None
     connection: Connection | None = None
 
     def __post_init__(self) -> None:
-        if self.dsn is None and self.connection is None:
-            raise ValueError("OxigraphMaterializer requires either dsn or connection")
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with self._cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+        if (self.connection_provider is None) == (self.connection is None):
+            raise ValueError(
+                "OxigraphMaterializer requires exactly one verified provider or transaction connection"
+            )
 
     def consume_outbox(
         self,
@@ -126,11 +126,11 @@ class OxigraphMaterializer:
                 yield cursor
             return
 
-        assert self.dsn is not None
-        connection_context = (
-            psycopg.connect(self.dsn, row_factory=row_factory)
-            if row_factory is not None
-            else psycopg.connect(self.dsn)
+        assert self.connection_provider is not None
+        connection_context = self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
         )
         with connection_context as connection:
             with connection.cursor() as cursor:

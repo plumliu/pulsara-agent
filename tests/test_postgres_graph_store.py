@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 from uuid import uuid4
 
-import psycopg
-import pytest
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
@@ -12,17 +13,20 @@ from pulsara_agent.entities.runtime import Evidence
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
 from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.settings import StorageConfig
 
 
-def test_postgres_graph_store_projects_memory_nodes_and_runtime_source_relations() -> None:
+def test_postgres_graph_store_projects_memory_nodes_and_runtime_source_relations() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     now = utc_now()
 
     store.put_jsonld(
@@ -69,28 +73,38 @@ def test_postgres_graph_store_projects_memory_nodes_and_runtime_source_relations
         limit=5,
         graph_id=graph_id,
     ) == [("preference:test-concise", 2.0)]
-    MemorySearchIndexSync(dsn=dsn).sync_memory("preference:test-concise", graph_id=graph_id)
-    assert query.fts_candidates(
-        query_text="concise summaries",
-        scopes=["ctx:user"],
-        types=["Preference"],
-        limit=5,
-        graph_id=graph_id,
-    )[0][0] == "preference:test-concise"
+    MemorySearchIndexSync(
+        connection_provider=verified_postgres_provider(dsn)
+    ).sync_memory("preference:test-concise", graph_id=graph_id)
+    assert (
+        query.fts_candidates(
+            query_text="concise summaries",
+            scopes=["ctx:user"],
+            types=["Preference"],
+            limit=5,
+            graph_id=graph_id,
+        )[0][0]
+        == "preference:test-concise"
+    )
 
     store.delete_graph(graph_id)
     assert query.fetch_nodes(["preference:test-concise"], graph_id=graph_id) == []
 
 
-def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unavailable() -> None:
+def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unavailable() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     now = utc_now()
-    postgres = PostgresGraphStore(dsn=dsn)
+    postgres = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     facade = DurableGraphFacade(
         postgres=postgres,
         oxigraph=OxigraphGraphStore("http://127.0.0.1:1"),
+        mutation_outbox=MutationOutboxWriter(
+            connection_provider=verified_postgres_provider(dsn)
+        ),
     )
 
     facade.put_jsonld(
@@ -111,8 +125,10 @@ def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unav
 
     facade.delete_graph(graph_id)
 
-    query = PostgresMemoryQuery(dsn=dsn)
-    assert query.fetch_nodes(["preference:test-delete-fallback"], graph_id=graph_id) == []
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    assert (
+        query.fetch_nodes(["preference:test-delete-fallback"], graph_id=graph_id) == []
+    )
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -132,12 +148,14 @@ def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unav
             assert isinstance(last_error, str) and last_error
 
 
-def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_tombstone() -> None:
+def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_tombstone() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     now = utc_now()
-    postgres = PostgresGraphStore(dsn=dsn)
+    postgres = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     facade = DurableGraphFacade(postgres=postgres, oxigraph=None)
 
     facade.put_jsonld(
@@ -158,8 +176,11 @@ def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_
 
     facade.delete_graph(graph_id)
 
-    query = PostgresMemoryQuery(dsn=dsn)
-    assert query.fetch_nodes(["preference:test-delete-no-oxigraph"], graph_id=graph_id) == []
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    assert (
+        query.fetch_nodes(["preference:test-delete-no-oxigraph"], graph_id=graph_id)
+        == []
+    )
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -172,10 +193,3 @@ def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_
             )
             (count,) = cursor.fetchone()
             assert count == 0
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

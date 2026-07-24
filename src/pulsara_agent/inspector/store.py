@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
-import psycopg
 from psycopg.rows import dict_row
 
 from pulsara_agent.event import AgentEvent
@@ -13,13 +13,17 @@ from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationAccountStateFact,
 )
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(slots=True)
 class PostgresInspectorStore:
     """Small read-only query facade over Pulsara's durable Postgres tables."""
 
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
     def session(self, session_id: str) -> dict[str, Any] | None:
         return self._fetchone(
@@ -66,7 +70,7 @@ class PostgresInspectorStore:
 
     def events_for_session(self, session_id: str) -> list[AgentEvent]:
         return PostgresEventLog(
-            dsn=self.dsn,
+            connection_provider=self.connection_provider,
             runtime_session_id=session_id,
         ).iter()
 
@@ -82,7 +86,7 @@ class PostgresInspectorStore:
         if owner is None:
             return []
         return PostgresEventLog(
-            dsn=self.dsn,
+            connection_provider=self.connection_provider,
             runtime_session_id=str(owner["session_id"]),
         ).iter(run_id=run_id)
 
@@ -483,13 +487,21 @@ class PostgresInspectorStore:
         return [row["id"] for row in rows]
 
     def _fetchone(self, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 return cursor.fetchone()
 
     def _fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 return list(cursor.fetchall())

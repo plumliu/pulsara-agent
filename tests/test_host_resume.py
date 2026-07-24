@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from pathlib import Path
 from typing import AsyncIterator
@@ -358,7 +360,9 @@ def test_session_manifest_rejects_custom_policy_that_only_matches_preset_axes(
     tmp_path,
 ) -> None:
     settings = _settings_or_skip()
-    store = SessionManifestStore(settings.storage.postgres_dsn)
+    store = SessionManifestStore(
+        verified_postgres_provider(settings.storage.postgres_dsn)
+    )
     runtime_session_id = f"runtime:manifest-custom:{uuid4().hex}"
     custom_like_bypass = EffectivePermissionPolicy(
         profile=PermissionProfile.TRUSTED_HOST,
@@ -395,7 +399,9 @@ def test_resume_repairs_dangling_running_run_before_replay(
     )
     workspace = _workspace(tmp_path)
     resolved = resolve_workspace(workspace)
-    store = SessionManifestStore(settings.storage.postgres_dsn)
+    store = SessionManifestStore(
+        verified_postgres_provider(settings.storage.postgres_dsn)
+    )
     store.upsert_open_manifest(
         runtime_session_id=runtime_session_id,
         conversation_id=f"conversation:{uuid4().hex}",
@@ -405,18 +411,22 @@ def test_resume_repairs_dangling_running_run_before_replay(
         created_by="test",
     )
     log = PostgresEventLog(
-        dsn=settings.storage.postgres_dsn,
+        connection_provider=verified_postgres_provider(settings.storage.postgres_dsn),
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
-    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
+    archive = PostgresArtifactStore(
+        connection_provider=verified_postgres_provider(settings.storage.postgres_dsn)
+    )
     runtime_session = RuntimeSession(
         tmp_path,
         runtime_session_id=runtime_session_id,
         event_log=log,
         archive=archive,
         tool_result_artifacts=PostgresToolResultArtifactIndex(
-            dsn=settings.storage.postgres_dsn
+            connection_provider=verified_postgres_provider(
+                settings.storage.postgres_dsn
+            )
         ),
     )
     run_start_id = f"run_start:test:{ctx.run_id}"
@@ -478,8 +488,10 @@ def test_resume_repairs_dangling_running_run_before_replay(
         runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
             stored_start
         )
-        await runtime_session.subagent_graph_checkpoint_service.checkpoint_for_admission(
-            requested_through_sequence=log.next_sequence() - 1
+        await (
+            runtime_session.subagent_graph_checkpoint_service.checkpoint_for_admission(
+                requested_through_sequence=log.next_sequence() - 1
+            )
         )
         runtime_session.close()
 

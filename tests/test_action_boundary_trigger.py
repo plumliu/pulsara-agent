@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 from uuid import uuid4
 
-import psycopg
-import pytest
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.entities.memory import ActionBoundary
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -82,8 +83,8 @@ def test_action_boundary_structured_triggers_are_indexed_for_fts() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
         now = utc_now()
         store.put_jsonld(
@@ -106,7 +107,9 @@ def test_action_boundary_structured_triggers_are_indexed_for_fts() -> None:
             graph_id=graph_id,
         )
 
-        assert MemorySearchIndexSync(dsn=dsn).sync_memory(
+        assert MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).sync_memory(
             "action-boundary:trigger-pytest",
             graph_id=graph_id,
         )
@@ -133,10 +136,3 @@ def test_action_boundary_structured_triggers_are_indexed_for_fts() -> None:
                 assert cursor.fetchone()[0] == ["terminal", "pytest", "uv"]
     finally:
         store.delete_graph(graph_id)
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

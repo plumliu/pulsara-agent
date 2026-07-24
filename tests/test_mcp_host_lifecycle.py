@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 
 import pytest
+from tests.support import unverified_test_postgres_access_lease
 
 from tests.test_agent_runtime_loop import _pending_mcp_installation_audit
 from tests.test_host_lifecycle_contract import (
@@ -27,6 +28,7 @@ from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     McpCapabilitySnapshotInstalledEvent,
+    McpInputRequiredBindingChangedEvent,
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
 )
@@ -100,6 +102,11 @@ def _enable_fake_durable_manifest(
     async def no_retrieval_resources(_self):
         return None
 
+    access_lease = unverified_test_postgres_access_lease()
+
+    async def fake_postgres_access_lease(_self):
+        return access_lease
+
     core.durable = True
     monkeypatch.setattr(
         host_core,
@@ -110,6 +117,11 @@ def _enable_fake_durable_manifest(
         HostCore,
         "_get_retrieval_resources",
         no_retrieval_resources,
+    )
+    monkeypatch.setattr(
+        HostCore,
+        "_get_postgres_access_lease",
+        fake_postgres_access_lease,
     )
     monkeypatch.setattr(HostCore, "_manifest_store", lambda _self: store)
 
@@ -1090,7 +1102,7 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         binding_change_events = [
             event
             for event in event_log.iter()
-            if getattr(event, "name", None) == "mcp_input_required_binding_changed"
+            if isinstance(event, McpInputRequiredBindingChangedEvent)
         ]
         assert len(binding_change_events) == 1
         await core.shutdown()

@@ -85,6 +85,10 @@ class TerminalNotificationContractError(RuntimeError):
     """A notification candidate does not follow the canonical state machine."""
 
 
+class TerminalNotificationAdmissionStale(TerminalNotificationContractError):
+    """A valid delivery candidate lost its mutable notification CAS."""
+
+
 class TerminalNotificationCapacityError(RuntimeError):
     """A background process or monitor cannot acquire its durable slot."""
 
@@ -1929,6 +1933,10 @@ def _validate_run_start_notification_batch(
             for item in attachment.source_event_references
             if item.event_id in pending
         )
+        if not matches:
+            raise TerminalNotificationAdmissionStale(
+                "Host ingress notification source is no longer pending"
+            )
         if len(matches) != 1:
             raise TerminalNotificationContractError(
                 "Host ingress notification does not identify one pending source"
@@ -1936,7 +1944,7 @@ def _validate_run_start_notification_batch(
         selected_ids.append(matches[0])
         selected_heads.append(pending[matches[0]][0])
     if tuple(selected_heads) != proof.selected_notification_head_fingerprints:
-        raise TerminalNotificationContractError(
+        raise TerminalNotificationAdmissionStale(
             "Host ingress notification head CAS failed"
         )
     dispositions = tuple(
@@ -1998,7 +2006,7 @@ def _validate_run_start_notification_batch(
         != proof.proposed_automatic_delivery_ordinal
         or delivery.chain_policy_fingerprint != state.chain_policy_fingerprint
     ):
-        raise TerminalNotificationContractError(
+        raise TerminalNotificationAdmissionStale(
             "autonomous Host ingress chain CAS failed"
         )
 
@@ -2042,7 +2050,7 @@ def _validate_model_start_notification_batch(
         )
     guard = prepared.commit_guard
     if projection.state_fingerprint != guard.expected_notification_state_fingerprint:
-        raise TerminalNotificationContractError(
+        raise TerminalNotificationAdmissionStale(
             "active-run monitor notification projection CAS failed"
         )
     pending = _pending_sources_by_id(projection)
@@ -2068,7 +2076,7 @@ def _validate_model_start_notification_batch(
         )
     selected_heads = tuple(pending[item][0] for item in source_ids)
     if selected_heads != guard.expected_selected_notification_head_fingerprints:
-        raise TerminalNotificationContractError(
+        raise TerminalNotificationAdmissionStale(
             "active-run monitor notification-head CAS failed"
         )
     attachments = tuple(
@@ -2103,7 +2111,7 @@ def _validate_model_start_notification_batch(
         or delivery.chain_policy_fingerprint != policy.policy_fingerprint
         or disposition.autonomy_delivery != delivery
     ):
-        raise TerminalNotificationContractError(
+        raise TerminalNotificationAdmissionStale(
             "active-run monitor automatic-delivery chain CAS failed"
         )
     if state.last_automatic_delivery_at_utc is not None:
@@ -2430,6 +2438,7 @@ __all__ = [
     "PreparedTerminalNotificationReservation",
     "PendingTerminalNotification",
     "TerminalNotificationAccountCoordinator",
+    "TerminalNotificationAdmissionStale",
     "TerminalNotificationCapacityError",
     "TerminalNotificationContractError",
     "initial_notification_account_state",

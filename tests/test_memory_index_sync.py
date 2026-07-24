@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from types import MappingProxyType
 from uuid import uuid4
 
-import psycopg
-import pytest
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from psycopg.types.json import Jsonb
 
 from tests.support.model_stream import (
@@ -34,7 +35,11 @@ from pulsara_agent.memory import (
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteSucceededOutcome
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
+from pulsara_agent.memory.recall.service import (
+    LexicalMemoryRecallService,
+    RecallQuery,
+    RecallStatus,
+)
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.governance.relatedness import (
     RelatednessAvailability,
@@ -51,9 +56,9 @@ def test_memory_search_index_rebuild_populates_fts_candidates() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
-    sync = MemorySearchIndexSync(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    sync = MemorySearchIndexSync(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -64,24 +69,32 @@ def test_memory_search_index_rebuild_populates_fts_candidates() -> None:
         )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM memory_search_index WHERE graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "DELETE FROM memory_search_index WHERE graph_id = %s", (graph_id,)
+                )
 
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        ) == []
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )
+            == []
+        )
 
         assert sync.rebuild(graph_id=graph_id) == 1
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        )[0][0] == "preference:index-rebuild"
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )[0][0]
+            == "preference:index-rebuild"
+        )
     finally:
         store.delete_graph(graph_id)
 
@@ -90,8 +103,8 @@ def test_recall_filters_stale_index_hit_through_canonical_fetch() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -131,10 +144,18 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
         reply_id=f"reply:source:{uuid4().hex}",
     )
     batch_id = f"governance:test:index-sync:{uuid4().hex}"
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
-    pool = PostgresCandidatePool(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
         candidate = pool.append_candidate(
             PooledMemoryCandidate(
@@ -156,9 +177,11 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(dsn=dsn),
+                archive=PostgresArtifactStore(
+                    connection_provider=verified_postgres_provider(dsn)
+                ),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -178,27 +201,35 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         memory_id = result.decision_record.write_outcome.memory_id
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        ) == []
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )
+            == []
+        )
 
-        applied = MemorySearchIndexSync(dsn=dsn).consume_outbox(
+        applied = MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).consume_outbox(
             graph_id=graph_id,
             governance_batch_id=batch_id,
         )
 
         assert applied == 1
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        )[0][0] == memory_id
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )[0][0]
+            == memory_id
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -213,15 +244,26 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM memory_write_outbox WHERE governance_batch_id = %s", (batch_id,))
+                cursor.execute(
+                    "DELETE FROM memory_write_outbox WHERE governance_batch_id = %s",
+                    (batch_id,),
+                )
                 cursor.execute(
                     "DELETE FROM memory_governance_decisions WHERE governance_batch_id = %s",
                     (batch_id,),
                 )
-                cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM sessions WHERE id = %s", (runtime_session_id,))
+                cursor.execute(
+                    "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM sessions WHERE id = %s", (runtime_session_id,)
+                )
 
 
 def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> None:
@@ -236,11 +278,19 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
     )
     batch_id = f"governance:test:index-sync-supersede:{uuid4().hex}"
     old_id = "preference:index-sync-supersede-old"
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
-    pool = PostgresCandidatePool(dsn=dsn)
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -257,7 +307,9 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
         )
         candidate = pool.append_candidate(
             PooledMemoryCandidate(
-                payload=ValidCandidatePayload(candidate=_preference_candidate("candidate:index-sync-supersede")),
+                payload=ValidCandidatePayload(
+                    candidate=_preference_candidate("candidate:index-sync-supersede")
+                ),
                 origin=CandidateOrigin.MAIN_AGENT_TOOL,
                 source_session_id=runtime_session_id,
                 source_run_id=source_ctx.run_id,
@@ -273,9 +325,11 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(dsn=dsn),
+                archive=PostgresArtifactStore(
+                    connection_provider=verified_postgres_provider(dsn)
+                ),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -300,11 +354,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                     {candidate.entry_id: MappingProxyType({old_id: 1})}
                 ),
                 verified_evidence_refs=MappingProxyType(
-                    {
-                        candidate.entry_id: frozenset(
-                            {_VERIFIED_REPLACEMENT_REF}
-                        )
-                    }
+                    {candidate.entry_id: frozenset({_VERIFIED_REPLACEMENT_REF})}
                 ),
             ),
             execution_identity=make_test_governance_execution_identity(
@@ -315,19 +365,24 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         assert result.decision_record.write_outcome.superseded_memory_ids == (old_id,)
 
-        applied = MemorySearchIndexSync(dsn=dsn).consume_outbox(
+        applied = MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).consume_outbox(
             graph_id=graph_id,
             governance_batch_id=batch_id,
         )
 
         assert applied == 1
-        assert query.fts_candidates(
-            query_text="verbose summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        ) == []
+        assert (
+            query.fts_candidates(
+                query_text="verbose summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )
+            == []
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -338,15 +393,26 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM memory_write_outbox WHERE governance_batch_id = %s", (batch_id,))
+                cursor.execute(
+                    "DELETE FROM memory_write_outbox WHERE governance_batch_id = %s",
+                    (batch_id,),
+                )
                 cursor.execute(
                     "DELETE FROM memory_governance_decisions WHERE governance_batch_id = %s",
                     (batch_id,),
                 )
-                cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,))
-                cursor.execute("DELETE FROM sessions WHERE id = %s", (runtime_session_id,))
+                cursor.execute(
+                    "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM sessions WHERE id = %s", (runtime_session_id,)
+                )
 
 
 def test_index_sync_retries_failed_search_surface_after_status_reset_path() -> None:
@@ -355,8 +421,8 @@ def test_index_sync_retries_failed_search_surface_after_status_reset_path() -> N
     graph_id = f"graph:test/{uuid4().hex}"
     outbox_id = f"outbox:test:{uuid4().hex}"
     memory_id = "preference:index-sync-retry"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
         _put_preference(
             store,
@@ -408,16 +474,21 @@ def test_index_sync_retries_failed_search_surface_after_status_reset_path() -> N
                     ),
                 )
 
-        applied = MemorySearchIndexSync(dsn=dsn).consume_outbox(graph_id=graph_id)
+        applied = MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).consume_outbox(graph_id=graph_id)
 
         assert applied == 1
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        )[0][0] == memory_id
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )[0][0]
+            == memory_id
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -433,7 +504,9 @@ def test_index_sync_retries_failed_search_surface_after_status_reset_path() -> N
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,))
+                cursor.execute(
+                    "DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,)
+                )
         store.delete_graph(graph_id)
 
 
@@ -516,10 +589,3 @@ def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
         gate=MemoryWriteGate(),
     )
     return MemoryWriteService(ledger=ledger)
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

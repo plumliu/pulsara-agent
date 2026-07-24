@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 import traceback
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
+
+if TYPE_CHECKING:
+    from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
 
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ class DurableGraphFacade:
 
     postgres: PostgresGraphStore
     oxigraph: OxigraphGraphStore | None = None
+    mutation_outbox: "MutationOutboxWriter | None" = None
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
         self.postgres.put_jsonld(document, graph_id=graph_id)
@@ -60,14 +64,13 @@ class DurableGraphFacade:
     def delete_graph(self, graph_id: str) -> None:
         from pulsara_agent.memory.canonical.mutation_outbox import (
             CanonicalMutationSurface,
-            MutationOutboxWriter,
             graph_reset_mutation_payload,
         )
 
         self.postgres.delete_graph(graph_id)
         reset_outbox_id: str | None = None
-        if self.oxigraph is not None and self.postgres.dsn is not None:
-            reset_outbox_id = MutationOutboxWriter(dsn=self.postgres.dsn).append_payload(
+        if self.oxigraph is not None and self.mutation_outbox is not None:
+            reset_outbox_id = self.mutation_outbox.append_payload(
                 graph_reset_mutation_payload(),
                 graph_id=graph_id,
                 target_entry_key=f"graph-reset:{graph_id}",
@@ -76,14 +79,14 @@ class DurableGraphFacade:
         if self.oxigraph is not None:
             try:
                 self.oxigraph.delete_graph(graph_id)
-                if reset_outbox_id is not None and self.postgres.dsn is not None:
-                    MutationOutboxWriter(dsn=self.postgres.dsn).mark_surface_applied(
+                if reset_outbox_id is not None and self.mutation_outbox is not None:
+                    self.mutation_outbox.mark_surface_applied(
                         reset_outbox_id,
                         CanonicalMutationSurface.OXIGRAPH.value,
                     )
             except Exception:
-                if reset_outbox_id is not None and self.postgres.dsn is not None:
-                    MutationOutboxWriter(dsn=self.postgres.dsn).mark_surface_failed(
+                if reset_outbox_id is not None and self.mutation_outbox is not None:
+                    self.mutation_outbox.mark_surface_failed(
                         reset_outbox_id,
                         CanonicalMutationSurface.OXIGRAPH.value,
                         error_text="".join(traceback.format_exc()).strip(),

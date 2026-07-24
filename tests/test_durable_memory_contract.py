@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
+
+from tests.support.postgres import verified_postgres_provider
 
 from pulsara_agent.entities.memory import Decision
 from pulsara_agent.graph import PostgresGraphStore
@@ -23,7 +26,7 @@ def graph_store() -> Iterator[tuple[object, str]]:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
         yield store, graph_id
     finally:
@@ -33,7 +36,11 @@ def graph_store() -> Iterator[tuple[object, str]]:
 def _ledger(store: object, graph_id: str) -> ExecutionEvidenceLedger:
     return ExecutionEvidenceLedger(
         graph=store,
-        archive=PostgresArtifactStore(dsn=StorageConfig.from_env().postgres_dsn),
+        archive=PostgresArtifactStore(
+            connection_provider=verified_postgres_provider(
+                StorageConfig.from_env().postgres_dsn
+            )
+        ),
         gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
@@ -55,12 +62,6 @@ def _seed_evidence(ledger: ExecutionEvidenceLedger, *, scope: str) -> str:
     )
     return evidence.evidence_id
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def test_decision_single_element_edges_round_trip(graph_store) -> None:
@@ -87,9 +88,9 @@ def test_decision_single_element_edges_round_trip(graph_store) -> None:
     assert doc[memory.HAS_EVIDENCE.name] == [{"@id": "evidence:one"}]
     assert doc[memory.BASED_ON.name] == [{"@id": "claim:one"}]
     assert doc[memory.STATEMENT.name] == "Adopt JSON-LD for durable memory."
-    assert [d["@id"] for d in store.find_by_type(memory.DECISION, graph_id=graph_id)] == [
-        "decision:single-edge"
-    ]
+    assert [
+        d["@id"] for d in store.find_by_type(memory.DECISION, graph_id=graph_id)
+    ] == ["decision:single-edge"]
 
 
 def test_submit_decision_routes_through_gate_and_links_evidence(graph_store) -> None:
@@ -162,7 +163,9 @@ def test_submit_observation_links_single_evidence(graph_store) -> None:
     ]
 
 
-def test_submit_observation_with_missing_evidence_does_not_write_partial_node(graph_store) -> None:
+def test_submit_observation_with_missing_evidence_does_not_write_partial_node(
+    graph_store,
+) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
 
@@ -178,7 +181,9 @@ def test_submit_observation_with_missing_evidence_does_not_write_partial_node(gr
     assert store.find_by_type(memory.OBSERVATION, graph_id=graph_id) == []
 
 
-def test_submit_decision_with_missing_based_on_does_not_write_partial_node(graph_store) -> None:
+def test_submit_decision_with_missing_based_on_does_not_write_partial_node(
+    graph_store,
+) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
     evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
@@ -236,7 +241,9 @@ def test_submit_preference_links_single_evidence(graph_store) -> None:
     ]
 
 
-def test_submit_preference_with_missing_evidence_does_not_write_partial_node(graph_store) -> None:
+def test_submit_preference_with_missing_evidence_does_not_write_partial_node(
+    graph_store,
+) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
 

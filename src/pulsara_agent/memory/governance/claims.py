@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import RLock
+from time import monotonic
 from typing import Protocol, Sequence
 
 import psycopg
@@ -33,6 +34,10 @@ from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
     GovernanceCandidateClaimStatus,
     MemoryGovernanceCandidateClaimFact,
+)
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
 )
 
 
@@ -368,12 +373,14 @@ class InMemoryMemoryGovernanceCandidateClaimRepository:
 
 @dataclass(slots=True)
 class PostgresMemoryGovernanceCandidateClaimRepository:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
-    def __post_init__(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(MEMORY_GOVERNANCE_CLAIM_SCHEMA_SQL)
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.GOVERNANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def claim_pending_batch(
         self,
@@ -406,7 +413,7 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
     ) -> ClaimedGovernanceBatch:
         if limit < 1:
             raise ValueError("governance claim limit must be positive")
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("set transaction isolation level serializable")
                 cursor.execute(
@@ -537,7 +544,7 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
     def claims_for_batch(
         self, *, runtime_session_id: str, governance_batch_id: str
     ) -> tuple[MemoryGovernanceCandidateClaimFact, ...]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -560,7 +567,7 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
         *,
         runtime_session_id: str,
     ) -> tuple[str, ...]:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -776,40 +783,6 @@ def _terminal_candidate_ids(
     return result
 
 
-MEMORY_GOVERNANCE_CLAIM_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS memory_governance_candidate_claims (
-    candidate_entry_id TEXT PRIMARY KEY REFERENCES memory_candidates(entry_id),
-    runtime_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    candidate_row_fingerprint TEXT NOT NULL,
-    governance_batch_id TEXT NOT NULL,
-    claim_generation INTEGER NOT NULL CHECK (claim_generation >= 1),
-    status TEXT NOT NULL CHECK (status IN ('preparing', 'prepared', 'terminal', 'released')),
-    prepared_event_id TEXT,
-    terminal_record_id TEXT,
-    previous_claim_fingerprint TEXT,
-    claim_fingerprint TEXT NOT NULL,
-    claim_payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_governance_claims_batch
-    ON memory_governance_candidate_claims(runtime_session_id, governance_batch_id, status);
-
-CREATE TABLE IF NOT EXISTS memory_candidate_evidence_rejections (
-    runtime_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    candidate_entry_id TEXT NOT NULL REFERENCES memory_candidates(entry_id),
-    claim_generation INTEGER NOT NULL CHECK (claim_generation >= 1),
-    governance_batch_id TEXT NOT NULL,
-    rejection_event_id TEXT NOT NULL,
-    rejection_payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (candidate_entry_id, claim_generation)
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_candidate_evidence_rejections_session
-    ON memory_candidate_evidence_rejections(runtime_session_id, created_at);
-""".strip()
 
 
 def _claim_for_candidate(

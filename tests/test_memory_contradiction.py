@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from datetime import datetime, timezone
 from types import MappingProxyType
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
@@ -15,7 +18,11 @@ from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Claim, Preference
 from pulsara_agent.event import EventContext, EventType
-from pulsara_agent.event.candidates import ClaimCandidate, PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.event.candidates import (
+    ClaimCandidate,
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
@@ -33,7 +40,10 @@ from pulsara_agent.memory import (
     WriteSucceededOutcome,
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
-from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync, _outbox_memory_ids
+from pulsara_agent.memory.canonical.index_sync import (
+    MemorySearchIndexSync,
+    _outbox_memory_ids,
+)
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.canonical.query import CanonicalNodeView
@@ -63,7 +73,9 @@ from tests.support.memory_uow import fake_memory_uow_factory
 def test_contradict_decision_facade_export_and_round_trip() -> None:
     decision = ContradictAndSubmitDecision(
         target_entry_id="pool:test",
-        candidate=_preference_candidate("candidate:new", "The user dislikes egg tarts."),
+        candidate=_preference_candidate(
+            "candidate:new", "The user dislikes egg tarts."
+        ),
         contradicted_memory_ids=("preference:old",),
         reason="New durable preference conflicts with an existing preference.",
     )
@@ -72,24 +84,42 @@ def test_contradict_decision_facade_export_and_round_trip() -> None:
     assert decision.contradicted_memory_ids == ("preference:old",)
 
 
-def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and_records_outcome(tmp_path) -> None:
+def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and_records_outcome(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:contradiction:{uuid4().hex}"
     source_ctx = _source_context("contradiction")
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-contradiction-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:hate-egg-tarts", "The user hates egg tarts.")
+        store.put_jsonld(
+            _preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id
+        )
+        candidate = _preference_candidate(
+            "candidate:hate-egg-tarts", "The user hates egg tarts."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -108,7 +138,9 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
                 reason="Same-scope preference conflict without explicit replacement.",
             ),
             governance_batch_id=batch_id,
-            relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+            relatedness_context=_relatedness_context(
+                batch_id, pooled.entry_id, (old_id,)
+            ),
             execution_identity=make_test_governance_execution_identity(
                 governance_batch_id=batch_id,
                 candidates=(pooled,),
@@ -135,7 +167,10 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
         assert {"@id": new_id} in old_doc[memory.CONTRADICTS.name]
         assert {"@id": old_id} in new_doc[memory.CONTRADICTS.name]
 
-        fetched = {view.id: view for view in query.fetch_nodes([old_id, new_id], graph_id=graph_id)}
+        fetched = {
+            view.id: view
+            for view in query.fetch_nodes([old_id, new_id], graph_id=graph_id)
+        }
         assert fetched[old_id].status is memory.NodeStatus.ACTIVE
         assert fetched[new_id].status is memory.NodeStatus.ACTIVE
         assert (memory.CONTRADICTS.name, new_id) in fetched[old_id].outgoing
@@ -152,7 +187,12 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
         assert {"@id": new_id} in documents[old_id][memory.CONTRADICTS.name]
         assert {"@id": old_id} in documents[new_id][memory.CONTRADICTS.name]
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
 def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> None:
@@ -162,9 +202,15 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
     runtime_session_id = "runtime:test"
     old_id = "preference:test-uow-contradiction-old"
     graph.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."))
-    candidate = _preference_candidate("candidate:uow-hate-egg-tarts", "The user hates egg tarts.")
+    candidate = _preference_candidate(
+        "candidate:uow-hate-egg-tarts", "The user hates egg tarts."
+    )
     pooled = pool.append_candidate(
-        _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=_source_context("uow"), candidate=candidate)
+        _pooled_valid(
+            runtime_session_id=runtime_session_id,
+            source_ctx=_source_context("uow"),
+            candidate=candidate,
+        )
     )
     service = _service_on(graph)
     executor = MemoryGovernanceExecutor(
@@ -208,29 +254,45 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
         EventType.MEMORY_CONTRADICTION_LINKED,
         EventType.MEMORY_CONTRADICTION_LINKED,
     ]
-    assert graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-    assert graph.get_jsonld(new_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    assert (
+        graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    )
+    assert (
+        graph.get_jsonld(new_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    )
     assert {"@id": new_id} in graph.get_jsonld(old_id)[memory.CONTRADICTS.name]
     assert {"@id": old_id} in graph.get_jsonld(new_id)[memory.CONTRADICTS.name]
     assert _governance_candidate_count(pool) == 0
 
 
-def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate(tmp_path) -> None:
+def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     source_ctx = _source_context("contradiction-gates")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     active_old = "preference:test-contradiction-gates-active"
     inactive_old = "preference:test-contradiction-gates-inactive"
     workspace_old = "preference:test-contradiction-gates-workspace"
     claim_old = "claim:test-contradiction-gates-claim"
     try:
-        store.put_jsonld(_preference_doc(active_old, "The user likes egg tarts."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(active_old, "The user likes egg tarts."), graph_id=graph_id
+        )
         store.put_jsonld(
             _preference_doc(
                 inactive_old,
@@ -247,7 +309,9 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
             ),
             graph_id=graph_id,
         )
-        store.put_jsonld(_claim_doc(claim_old, "The repository uses Python."), graph_id=graph_id)
+        store.put_jsonld(
+            _claim_doc(claim_old, "The repository uses Python."), graph_id=graph_id
+        )
         executor = _postgres_executor(
             dsn=dsn,
             pool=pool,
@@ -259,7 +323,9 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
 
         cases = [
             (
-                _claim_candidate("candidate:claim", "The repository does not use Python."),
+                _claim_candidate(
+                    "candidate:claim", "The repository does not use Python."
+                ),
                 (claim_old,),
                 "type_not_contradictable",
             ),
@@ -269,22 +335,30 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
                 "too_many_contradiction_targets",
             ),
             (
-                _preference_candidate("candidate:missing", "The user hates custard pastries."),
+                _preference_candidate(
+                    "candidate:missing", "The user hates custard pastries."
+                ),
                 ("preference:missing",),
                 "contradiction_target_missing",
             ),
             (
-                _preference_candidate("candidate:inactive", "The user hates Portuguese custard tarts."),
+                _preference_candidate(
+                    "candidate:inactive", "The user hates Portuguese custard tarts."
+                ),
                 (inactive_old,),
                 "contradiction_target_not_active",
             ),
             (
-                _preference_candidate("candidate:scope", "The user hates egg tarts for this project."),
+                _preference_candidate(
+                    "candidate:scope", "The user hates egg tarts for this project."
+                ),
                 (workspace_old,),
                 "contradiction_target_scope_mismatch",
             ),
             (
-                _preference_candidate("candidate:claim-target", "The user dislikes Python repositories."),
+                _preference_candidate(
+                    "candidate:claim-target", "The user dislikes Python repositories."
+                ),
                 (claim_old,),
                 "contradiction_target_type_not_contradictable",
             ),
@@ -292,7 +366,11 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
         for candidate, contradicted_ids, reason_prefix in cases:
             batch_id = f"governance:test:contradiction-gates:{uuid4().hex}"
             pooled = pool.append_candidate(
-                _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+                _pooled_valid(
+                    runtime_session_id=runtime_session_id,
+                    source_ctx=source_ctx,
+                    candidate=candidate,
+                )
             )
 
             result = executor.apply_decision(
@@ -313,34 +391,67 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
             )
 
             assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
-            assert result.decision_record.decision.reason.startswith(_CONTRADICTION_DOWNGRADE_SENTINEL)
+            assert result.decision_record.decision.reason.startswith(
+                _CONTRADICTION_DOWNGRADE_SENTINEL
+            )
             assert reason_prefix in result.decision_record.decision.reason
-            assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+            assert isinstance(
+                result.decision_record.write_outcome, WriteSucceededOutcome
+            )
             assert result.decision_record.write_outcome.contradicted_memory_ids == ()
             assert _governance_candidate_count(pool) == 0
 
-        assert store.get_jsonld(active_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-        assert store.get_jsonld(inactive_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
-        assert store.get_jsonld(workspace_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-        assert store.get_jsonld(claim_old, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert (
+            store.get_jsonld(active_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
+        assert (
+            store.get_jsonld(inactive_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.SUPERSEDED.value
+        )
+        assert (
+            store.get_jsonld(workspace_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
+        assert (
+            store.get_jsonld(claim_old, graph_id=graph_id)[memory.STATUS.name]
+            == memory.NodeStatus.ACTIVE.value
+        )
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=None)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=None,
+        )
 
 
-def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path) -> None:
+def test_postgres_contradiction_downgrades_when_new_node_is_not_active(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:contradiction-non-active:{uuid4().hex}"
     source_ctx = _source_context("contradiction-non-active")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-contradiction-non-active-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id
+        )
         candidate = _preference_candidate(
             "candidate:inferred-hate",
             "The user might dislike egg tarts.",
@@ -348,7 +459,11 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
             verification_status=memory.VerificationStatus.INFERRED,
         )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -375,36 +490,60 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
-        assert result.decision_record.write_outcome.node_status is memory.NodeStatus.NEEDS_REVIEW
+        assert (
+            result.decision_record.write_outcome.node_status
+            is memory.NodeStatus.NEEDS_REVIEW
+        )
         assert result.decision_record.write_outcome.contradicted_memory_ids == ()
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
         assert old_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
         assert memory.CONTRADICTS.name not in old_doc
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_postgres_contradiction_write_failure_does_not_link_or_record_contradiction(tmp_path) -> None:
+def test_postgres_contradiction_write_failure_does_not_link_or_record_contradiction(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:contradiction-write-failed:{uuid4().hex}"
     source_ctx = _source_context("contradiction-write-failed")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-contradiction-write-failed-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id
+        )
         candidate = _preference_candidate(
             "candidate:missing-evidence",
             "The user hates egg tarts.",
             evidence_ids=("evidence:missing",),
         )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = _postgres_executor(
             dsn=dsn,
@@ -443,26 +582,49 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
                 )
                 assert cursor.fetchone() == (0,)
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
-def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge(tmp_path) -> None:
+def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge(
+    tmp_path,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     batch_id = f"governance:test:contradiction-rollback:{uuid4().hex}"
     source_ctx = _source_context("contradiction-rollback")
-    store = PostgresGraphStore(dsn=dsn)
-    pool = PostgresCandidatePool(dsn=dsn)
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
+        )
+    )
     old_id = "preference:test-contradiction-rollback-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
-        candidate = _preference_candidate("candidate:rollback-hate-egg", "The user hates egg tarts.")
+        store.put_jsonld(
+            _preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id
+        )
+        candidate = _preference_candidate(
+            "candidate:rollback-hate-egg", "The user hates egg tarts."
+        )
         pooled = pool.append_candidate(
-            _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=source_ctx, candidate=candidate)
+            _pooled_valid(
+                runtime_session_id=runtime_session_id,
+                source_ctx=source_ctx,
+                candidate=candidate,
+            )
         )
         executor = MemoryGovernanceExecutor(
             candidate_pool=pool,
@@ -472,9 +634,11 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
-                dsn=dsn,
+                connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(dsn=dsn),
+                archive=PostgresArtifactStore(
+                    connection_provider=verified_postgres_provider(dsn)
+                ),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -489,7 +653,9 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
                     reason="Inject lifecycle failure after the first edge.",
                 ),
                 governance_batch_id=batch_id,
-                relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+                relatedness_context=_relatedness_context(
+                    batch_id, pooled.entry_id, (old_id,)
+                ),
                 execution_identity=make_test_governance_execution_identity(
                     governance_batch_id=batch_id,
                     candidates=(pooled,),
@@ -501,12 +667,22 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
         assert memory.CONTRADICTS.name not in old_doc
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("select count(*) from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "select count(*) from memory_nodes where graph_id = %s", (graph_id,)
+                )
                 assert cursor.fetchone()[0] == 1
-                cursor.execute("select count(*) from memory_relations where graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "select count(*) from memory_relations where graph_id = %s",
+                    (graph_id,),
+                )
                 assert cursor.fetchone()[0] == 0
     finally:
-        _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
+        _cleanup_postgres(
+            dsn,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            governance_batch_id=batch_id,
+        )
 
 
 def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -> None:
@@ -519,12 +695,20 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
     service = _service_on(graph)
     old_outcome = service.submit(
         _preference_candidate("candidate:old", "The user likes egg tarts."),
-        event_context=EventContext(run_id="run:old", turn_id="turn:old", reply_id="reply:old"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
     )
-    old_id = next(event.memory_id for event in old_outcome.events if hasattr(event, "memory_id"))
+    old_id = next(
+        event.memory_id for event in old_outcome.events if hasattr(event, "memory_id")
+    )
     candidate = _preference_candidate("candidate:new", "The user hates egg tarts.")
     pooled = pool.append_candidate(
-        _pooled_valid(runtime_session_id="runtime:test", source_ctx=_source_context("legacy"), candidate=candidate)
+        _pooled_valid(
+            runtime_session_id="runtime:test",
+            source_ctx=_source_context("legacy"),
+            candidate=candidate,
+        )
     )
     executor = MemoryGovernanceExecutor(
         candidate_pool=pool,
@@ -567,27 +751,38 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
     assert _governance_candidate_count(pool) == 0
 
 
-def test_recall_surfaces_contradiction_companion_at_zero_hop_and_grounds_path_at_one_hop() -> None:
+def test_recall_surfaces_contradiction_companion_at_zero_hop_and_grounds_path_at_one_hop() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     old_id = "preference:test-recall-like-egg"
     new_id = "preference:test-recall-avoid-custard"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     lifecycle = MemoryLifecycle(graph=store, mutable=store)
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
-        store.put_jsonld(_preference_doc(new_id, "The user avoids Portuguese custard pastries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id
+        )
+        store.put_jsonld(
+            _preference_doc(new_id, "The user avoids Portuguese custard pastries."),
+            graph_id=graph_id,
+        )
         lifecycle.link_contradiction(
             left_id=old_id,
             right_id=new_id,
             governance_batch_id=f"governance:test:recall-contradiction:{uuid4().hex}",
             graph_id=graph_id,
         )
-        MemorySearchIndexSync(dsn=dsn).rebuild(graph_id=graph_id)
+        MemorySearchIndexSync(
+            connection_provider=verified_postgres_provider(dsn)
+        ).rebuild(graph_id=graph_id)
 
-        service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+        service = LexicalMemoryRecallService(
+            query, graph_candidates=GraphCandidateService(query)
+        )
         zero_hop = asyncio.run(
             service.recall(
                 RecallQuery(
@@ -664,9 +859,9 @@ def test_zero_hop_recall_does_not_follow_hidden_contradiction_edges() -> None:
     }
 
     result = asyncio.run(
-        LexicalMemoryRecallService(_FakeMemoryQuery(views, ranked_ids=(matched_id,))).recall(
-            RecallQuery(text="egg tarts", scopes=("ctx:user",), limit=3)
-        )
+        LexicalMemoryRecallService(
+            _FakeMemoryQuery(views, ranked_ids=(matched_id,))
+        ).recall(RecallQuery(text="egg tarts", scopes=("ctx:user",), limit=3))
     )
 
     assert result.status is RecallStatus.OK
@@ -696,9 +891,9 @@ def test_recall_surfaces_contradiction_companion_beyond_limit() -> None:
     }
 
     result = asyncio.run(
-        LexicalMemoryRecallService(_FakeMemoryQuery(views, ranked_ids=(matched_id,))).recall(
-            RecallQuery(text="likes egg", scopes=("ctx:user",), limit=1)
-        )
+        LexicalMemoryRecallService(
+            _FakeMemoryQuery(views, ranked_ids=(matched_id,))
+        ).recall(RecallQuery(text="likes egg", scopes=("ctx:user",), limit=1))
     )
     projection = ProjectionBuilder().build(result, token_budget=200)
 
@@ -714,7 +909,9 @@ def test_recall_surfaces_contradiction_companion_beyond_limit() -> None:
     ]
 
 
-def _recall_item(memory_id: str, *, snippet: str, conflicts_with: tuple[str, ...] = ()) -> RecallItem:
+def _recall_item(
+    memory_id: str, *, snippet: str, conflicts_with: tuple[str, ...] = ()
+) -> RecallItem:
     why = ("contradiction_warning",) if conflicts_with else ("recall_match",)
     return RecallItem(
         memory_id=memory_id,
@@ -738,8 +935,16 @@ def test_projection_truncation_does_not_overclaim_included_or_conflicts() -> Non
     result = RecallResult(
         status=RecallStatus.OK,
         items=(
-            _recall_item("preference:left", snippet="likes tabs", conflicts_with=("preference:right",)),
-            _recall_item("preference:right", snippet="likes spaces", conflicts_with=("preference:left",)),
+            _recall_item(
+                "preference:left",
+                snippet="likes tabs",
+                conflicts_with=("preference:right",),
+            ),
+            _recall_item(
+                "preference:right",
+                snippet="likes spaces",
+                conflicts_with=("preference:left",),
+            ),
             _recall_item("preference:c", snippet="c " + "x" * 400),
             _recall_item("preference:d", snippet="d " + "x" * 400),
             _recall_item("preference:e", snippet="e " + "x" * 400),
@@ -770,8 +975,16 @@ def test_projection_generous_budget_includes_all_items_and_conflict() -> None:
     result = RecallResult(
         status=RecallStatus.OK,
         items=(
-            _recall_item("preference:left", snippet="likes tabs", conflicts_with=("preference:right",)),
-            _recall_item("preference:right", snippet="likes spaces", conflicts_with=("preference:left",)),
+            _recall_item(
+                "preference:left",
+                snippet="likes tabs",
+                conflicts_with=("preference:right",),
+            ),
+            _recall_item(
+                "preference:right",
+                snippet="likes spaces",
+                conflicts_with=("preference:left",),
+            ),
             _recall_item("preference:c", snippet="unrelated"),
         ),
     )
@@ -845,7 +1058,9 @@ def test_merge_projection_preserves_conflict_groups() -> None:
         "items": ["conflict"],
         "included_memory_ids": ["preference:a", "preference:b"],
         "filtered_memory_ids": [],
-        "conflict_groups": [{"kind": "contradiction", "memory_ids": ["preference:b", "preference:a"]}],
+        "conflict_groups": [
+            {"kind": "contradiction", "memory_ids": ["preference:b", "preference:a"]}
+        ],
         "do_not_write_back": True,
     }
 
@@ -885,9 +1100,11 @@ def _postgres_executor(
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
-            archive=PostgresArtifactStore(dsn=dsn),
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
+            ),
             graph_id=graph_id,
             workspace_root=workspace_root,
         ),
@@ -930,7 +1147,9 @@ class _FailingAfterFirstContradictionEdgeLifecycle:
 
 
 class _FakeMemoryQuery:
-    def __init__(self, views: dict[str, CanonicalNodeView], *, ranked_ids: tuple[str, ...]) -> None:
+    def __init__(
+        self, views: dict[str, CanonicalNodeView], *, ranked_ids: tuple[str, ...]
+    ) -> None:
         self._views = views
         self._ranked_ids = ranked_ids
 
@@ -1019,7 +1238,9 @@ def _preference_candidate(
     )
 
 
-def _claim_candidate(candidate_id: str, statement: str, *, scope: str = "ctx:user") -> ClaimCandidate:
+def _claim_candidate(
+    candidate_id: str, statement: str, *, scope: str = "ctx:user"
+) -> ClaimCandidate:
     return ClaimCandidate(
         candidate_id=candidate_id,
         statement=statement,
@@ -1092,14 +1313,12 @@ def _relatedness_context(
 
 
 def _governance_candidate_count(pool) -> int:
-    return sum(1 for candidate in pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE)
+    return sum(
+        1
+        for candidate in pool.list_candidates()
+        if candidate.origin is CandidateOrigin.GOVERNANCE
+    )
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def _cleanup_postgres(
@@ -1111,7 +1330,9 @@ def _cleanup_postgres(
 ) -> None:
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("delete from memory_write_outbox where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from memory_write_outbox where graph_id = %s", (graph_id,)
+            )
             if governance_batch_id is None:
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id like %s",
@@ -1122,7 +1343,11 @@ def _cleanup_postgres(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (governance_batch_id,),
                 )
-            cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from graph_documents where graph_id = %s", (graph_id,)
+            )
             cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
-            cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+            cursor.execute(
+                "delete from memory_relations where graph_id = %s", (graph_id,)
+            )
             cursor.execute("delete from sessions where id = %s", (runtime_session_id,))

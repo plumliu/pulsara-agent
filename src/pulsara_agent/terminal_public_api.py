@@ -466,6 +466,9 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     inlined = expand(raw)
     if not isinstance(inlined, dict):
         raise TypeError("terminal input schema must be an object")
+    # OpenAI-compatible providers require function parameters to declare an
+    # object at the root even when a discriminated union is expressed by oneOf.
+    inlined["type"] = "object"
     # Provider schemas need the oneOf branches, while Pydantic's discriminator
     # mapping points at the removed local $defs and is only useful to the parser.
     inlined.pop("discriminator", None)

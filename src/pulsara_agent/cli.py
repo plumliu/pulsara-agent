@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from time import monotonic
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pulsara_agent import __version__
@@ -33,7 +34,10 @@ from pulsara_agent.host import (
     normalize_workspace_kind,
     resolve_workspace,
 )
-from pulsara_agent.event import ContextCompactionCompletedEvent, ContextCompactionFailedEvent
+from pulsara_agent.event import (
+    ContextCompactionCompletedEvent,
+    ContextCompactionFailedEvent,
+)
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
@@ -96,6 +100,11 @@ from pulsara_agent.primitives.permission import (
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.settings import PulsaraSettings, load_env_file
+from pulsara_agent.storage.schema_verification_service import (
+    VerifiedPostgresAccessLease,
+    acquire_verified_postgres_access_sync,
+    process_postgres_schema_verification_service,
+)
 from pulsara_agent.tools import build_core_tool_registry
 
 
@@ -107,11 +116,17 @@ def build_parser() -> argparse.ArgumentParser:
     host = subcommands.add_parser("host", help="Run the thin HostCore smoke driver.")
     host_subcommands = host.add_subparsers(dest="host_command")
     _add_host_common_args(
-        host_subcommands.add_parser("run", help="Run one prompt through HostCore and close the session.")
+        host_subcommands.add_parser(
+            "run", help="Run one prompt through HostCore and close the session."
+        )
     ).add_argument("prompt", help="Prompt to run.")
-    repl = _add_host_common_args(host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL."))
+    repl = _add_host_common_args(
+        host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL.")
+    )
     repl_resume = repl.add_mutually_exclusive_group()
-    repl_resume.add_argument("--resume", default=None, help="Resume an existing runtime session id.")
+    repl_resume.add_argument(
+        "--resume", default=None, help="Resume an existing runtime session id."
+    )
     repl_resume.add_argument(
         "--continue",
         dest="continue_session",
@@ -125,58 +140,173 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect_cmd = _add_host_permission_args(
         _add_host_workspace_args(
-            host_subcommands.add_parser("inspect", help="Print a HostCore diagnostics snapshot.")
+            host_subcommands.add_parser(
+                "inspect", help="Print a HostCore diagnostics snapshot."
+            )
         )
     )
-    inspect_cmd.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
-    inspect_cmd.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
-    inspect_cmd.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
+    inspect_cmd.add_argument(
+        "--env-file",
+        default=None,
+        help="Load settings from a .env file before inspecting.",
+    )
+    inspect_cmd.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
+    inspect_cmd.add_argument(
+        "--prefix",
+        default="PULSARA",
+        help="Environment variable prefix. Defaults to PULSARA.",
+    )
     skills = subcommands.add_parser("skills", help="Manage Pulsara local skills.")
     skills_subcommands = skills.add_subparsers(dest="skills_command")
     sync_bundled = _add_skills_common_args(
-        skills_subcommands.add_parser("sync-bundled", help="Sync bundled Pulsara skills into PULSARA_HOME.")
+        skills_subcommands.add_parser(
+            "sync-bundled", help="Sync bundled Pulsara skills into PULSARA_HOME."
+        )
     )
     sync_bundled.add_argument(
         "--override-opt-out",
         action="store_true",
         help=f"Run even when {BUNDLED_OPT_OUT_MARKER_NAME} exists.",
     )
-    _add_skills_common_args(skills_subcommands.add_parser("status", help="Print bundled skill status."))
-    reset = _add_skills_common_args(skills_subcommands.add_parser("reset", help="Reset a bundled skill from package source."))
+    _add_skills_common_args(
+        skills_subcommands.add_parser("status", help="Print bundled skill status.")
+    )
+    reset = _add_skills_common_args(
+        skills_subcommands.add_parser(
+            "reset", help="Reset a bundled skill from package source."
+        )
+    )
     reset.add_argument("name", help="Bundled skill name to reset.")
-    mcp = subcommands.add_parser("mcp", help="Manage MCP server configuration and diagnostics.")
+    mcp = subcommands.add_parser(
+        "mcp", help="Manage MCP server configuration and diagnostics."
+    )
     mcp_subcommands = mcp.add_subparsers(dest="mcp_command")
-    _add_mcp_common_args(mcp_subcommands.add_parser("list", help="List configured MCP servers."))
-    mcp_add = _add_mcp_store_args(mcp_subcommands.add_parser("add", help="Add or replace an MCP server."))
+    _add_mcp_common_args(
+        mcp_subcommands.add_parser("list", help="List configured MCP servers.")
+    )
+    mcp_add = _add_mcp_store_args(
+        mcp_subcommands.add_parser("add", help="Add or replace an MCP server.")
+    )
     mcp_add.add_argument("server_id", help="Stable MCP server id.")
     transport = mcp_add.add_mutually_exclusive_group(required=True)
     transport.add_argument("--url", default=None, help="Streamable HTTP MCP endpoint.")
-    transport.add_argument("--command", dest="mcp_stdio_command", default=None, help="Stdio MCP command.")
-    mcp_add.add_argument("--arg", action="append", default=[], help="Stdio command argument. May be repeated.")
-    mcp_add.add_argument("--cwd", default=None, help="Optional stdio working directory.")
-    mcp_add.add_argument("--env", action="append", default=[], help="Stdio KEY=VALUE env var. May be repeated.")
-    mcp_add.add_argument("--header", action="append", default=[], help="HTTP Header=Value. Stored redacted by inspect/list.")
-    mcp_add.add_argument("--env-header", action="append", default=[], help="HTTP Header=ENV_VAR. May be repeated.")
-    mcp_add.add_argument("--bearer-token-env-var", default=None, help="Env var containing a bearer token.")
-    mcp_add.add_argument("--follow-redirects", action="store_true", help="Allow HTTP redirects for this server.")
-    mcp_add.add_argument("--disabled", action="store_true", help="Add the server disabled.")
-    mcp_add.add_argument("--required", action="store_true", help="Treat startup failure as an error diagnostic.")
+    transport.add_argument(
+        "--command", dest="mcp_stdio_command", default=None, help="Stdio MCP command."
+    )
+    mcp_add.add_argument(
+        "--arg",
+        action="append",
+        default=[],
+        help="Stdio command argument. May be repeated.",
+    )
+    mcp_add.add_argument(
+        "--cwd", default=None, help="Optional stdio working directory."
+    )
+    mcp_add.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Stdio KEY=VALUE env var. May be repeated.",
+    )
+    mcp_add.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="HTTP Header=Value. Stored redacted by inspect/list.",
+    )
+    mcp_add.add_argument(
+        "--env-header",
+        action="append",
+        default=[],
+        help="HTTP Header=ENV_VAR. May be repeated.",
+    )
+    mcp_add.add_argument(
+        "--bearer-token-env-var",
+        default=None,
+        help="Env var containing a bearer token.",
+    )
+    mcp_add.add_argument(
+        "--follow-redirects",
+        action="store_true",
+        help="Allow HTTP redirects for this server.",
+    )
+    mcp_add.add_argument(
+        "--disabled", action="store_true", help="Add the server disabled."
+    )
+    mcp_add.add_argument(
+        "--required",
+        action="store_true",
+        help="Treat startup failure as an error diagnostic.",
+    )
     mcp_add.add_argument("--connect-timeout-ms", type=int, default=10_000)
     mcp_add.add_argument("--discovery-timeout-ms", type=int, default=15_000)
     mcp_add.add_argument("--startup-deadline-ms", type=int, default=30_000)
     mcp_add.add_argument("--refresh-ttl-ms", type=int, default=300_000)
     mcp_add.add_argument("--tool-timeout-ms", type=int, default=30_000)
-    mcp_add.add_argument("--parallel-tools", action="store_true", help="Mark server tools concurrency-safe.")
-    mcp_add.add_argument("--enabled-tool", action="append", default=[], help="Allow only this original MCP tool. May be repeated.")
-    mcp_add.add_argument("--disabled-tool", action="append", default=[], help="Hide this original MCP tool. May be repeated.")
-    mcp_remove = _add_mcp_store_args(mcp_subcommands.add_parser("remove", help="Remove an MCP server."))
+    mcp_add.add_argument(
+        "--parallel-tools",
+        action="store_true",
+        help="Mark server tools concurrency-safe.",
+    )
+    mcp_add.add_argument(
+        "--enabled-tool",
+        action="append",
+        default=[],
+        help="Allow only this original MCP tool. May be repeated.",
+    )
+    mcp_add.add_argument(
+        "--disabled-tool",
+        action="append",
+        default=[],
+        help="Hide this original MCP tool. May be repeated.",
+    )
+    mcp_remove = _add_mcp_store_args(
+        mcp_subcommands.add_parser("remove", help="Remove an MCP server.")
+    )
     mcp_remove.add_argument("server_id")
-    mcp_enable = _add_mcp_store_args(mcp_subcommands.add_parser("enable", help="Enable an MCP server."))
+    mcp_enable = _add_mcp_store_args(
+        mcp_subcommands.add_parser("enable", help="Enable an MCP server.")
+    )
     mcp_enable.add_argument("server_id")
-    mcp_disable = _add_mcp_store_args(mcp_subcommands.add_parser("disable", help="Disable an MCP server."))
+    mcp_disable = _add_mcp_store_args(
+        mcp_subcommands.add_parser("disable", help="Disable an MCP server.")
+    )
     mcp_disable.add_argument("server_id")
-    _add_mcp_common_args(mcp_subcommands.add_parser("doctor", help="Connect to configured MCP servers and list capabilities."))
-    _add_mcp_common_args(mcp_subcommands.add_parser("reconnect", help="Reconnect configured MCP servers and print capabilities."))
+    _add_mcp_common_args(
+        mcp_subcommands.add_parser(
+            "doctor", help="Connect to configured MCP servers and list capabilities."
+        )
+    )
+    _add_mcp_common_args(
+        mcp_subcommands.add_parser(
+            "reconnect", help="Reconnect configured MCP servers and print capabilities."
+        )
+    )
+    database = subcommands.add_parser(
+        "db", help="Privileged PostgreSQL schema migration and verification."
+    )
+    database_subcommands = database.add_subparsers(dest="db_command")
+    for command_name, help_text in (
+        ("status", "Read the migration ledger and report schema status."),
+        ("migrate", "Apply pending packaged PostgreSQL migrations."),
+        ("verify", "Verify the exact runtime schema without changing it."),
+    ):
+        command = database_subcommands.add_parser(command_name, help=help_text)
+        command.add_argument("--env-file", default=None)
+        command.add_argument("--override-env", action="store_true")
+        command.add_argument("--prefix", default="PULSARA")
+        command.add_argument(
+            "--deadline-seconds",
+            type=float,
+            default=300.0 if command_name == "migrate" else 10.0,
+        )
+        command.add_argument("--format", choices=("json",), default="json")
+        if command_name == "verify":
+            command.add_argument("--deep", action="store_true")
     config_check = subcommands.add_parser(
         "config-check",
         help=(
@@ -199,9 +329,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Let values from --env-file override existing environment variables.",
     )
-    inspect = subcommands.add_parser("inspect", help="Read-only durable runtime inspector.")
+    inspect = subcommands.add_parser(
+        "inspect", help="Read-only durable runtime inspector."
+    )
     inspect_subcommands = inspect.add_subparsers(dest="inspect_command")
-    inspect_run = _add_inspect_common_args(inspect_subcommands.add_parser("run", help="Inspect a durable run."))
+    inspect_run = _add_inspect_common_args(
+        inspect_subcommands.add_parser("run", help="Inspect a durable run.")
+    )
     inspect_run.add_argument("run_id")
     inspect_session = _add_inspect_common_args(
         inspect_subcommands.add_parser("session", help="Inspect a durable session.")
@@ -211,9 +345,15 @@ def build_parser() -> argparse.ArgumentParser:
         inspect_subcommands.add_parser("artifact", help="Inspect an artifact.")
     )
     inspect_artifact.add_argument("artifact_id")
-    inspect_memory = _add_inspect_common_args(inspect_subcommands.add_parser("memory", help="Inspect a memory node."))
+    inspect_memory = _add_inspect_common_args(
+        inspect_subcommands.add_parser("memory", help="Inspect a memory node.")
+    )
     inspect_memory.add_argument("memory_id")
-    _add_inspect_common_args(inspect_subcommands.add_parser("health", help="Inspect durable subsystem health."))
+    _add_inspect_common_args(
+        inspect_subcommands.add_parser(
+            "health", help="Inspect durable subsystem health."
+        )
+    )
     checkpoint = subcommands.add_parser(
         "checkpoint",
         help="Privileged offline subagent graph checkpoint maintenance.",
@@ -264,9 +404,21 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         default=[],
         help="Activate a workspace skill by name for this turn. May be repeated.",
     )
-    parser.add_argument("--env-file", default=None, help="Load settings from a .env file before running.")
-    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
-    parser.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Load settings from a .env file before running.",
+    )
+    parser.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="PULSARA",
+        help="Environment variable prefix. Defaults to PULSARA.",
+    )
     parser.add_argument(
         "--model-role",
         default=ModelRole.PRO.value,
@@ -276,20 +428,34 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     return parser
 
 
-def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--workspace", default=None, help="Workspace path. Defaults to current directory.")
+def _add_host_workspace_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace path. Defaults to current directory.",
+    )
     parser.add_argument(
         "--workspace-kind",
         default=None,
         choices=("project", "transient"),
         help="Workspace kind: 'project' or 'transient'.",
     )
-    parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
-    parser.add_argument("--memory-domain-id", default=None, help="Memory domain id. Defaults to u_local.")
+    parser.add_argument(
+        "--display-label", default=None, help="Optional workspace display label."
+    )
+    parser.add_argument(
+        "--memory-domain-id",
+        default=None,
+        help="Memory domain id. Defaults to u_local.",
+    )
     return parser
 
 
-def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def _add_host_permission_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
     parser.add_argument(
         "--permission-mode",
         default=None,
@@ -323,19 +489,60 @@ def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.Argum
 
 
 def _add_skills_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--env-file", default=None, help="Load a .env file before resolving PULSARA_HOME.")
-    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Load a .env file before resolving PULSARA_HOME.",
+    )
+    parser.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
     return parser
 
 
-def _add_inspect_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
-    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
-    parser.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
-    parser.add_argument("--format", default="json", choices=("json",), help="Output format. Defaults to json.")
-    parser.add_argument("--include-payload", action="store_true", help="Include raw event or artifact payloads.")
-    parser.add_argument("--limit-events", type=int, default=200, help="Maximum event summaries to include.")
-    parser.add_argument("--max-chars", type=int, default=2000, help="Maximum artifact preview characters.")
+def _add_inspect_common_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Load settings from a .env file before inspecting.",
+    )
+    parser.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="PULSARA",
+        help="Environment variable prefix. Defaults to PULSARA.",
+    )
+    parser.add_argument(
+        "--format",
+        default="json",
+        choices=("json",),
+        help="Output format. Defaults to json.",
+    )
+    parser.add_argument(
+        "--include-payload",
+        action="store_true",
+        help="Include raw event or artifact payloads.",
+    )
+    parser.add_argument(
+        "--limit-events",
+        type=int,
+        default=200,
+        help="Maximum event summaries to include.",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=2000,
+        help="Maximum artifact preview characters.",
+    )
     return parser
 
 
@@ -359,9 +566,21 @@ def _add_checkpoint_common_args(
 
 
 def _add_mcp_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--env-file", default=None, help="Load a .env file before resolving MCP env vars.")
-    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
-    parser.add_argument("--workspace", default=None, help="Workspace path for workspace MCP config merge.")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Load a .env file before resolving MCP env vars.",
+    )
+    parser.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace path for workspace MCP config merge.",
+    )
     parser.add_argument("--config", default=None, help="Override user MCP config path.")
     return parser
 
@@ -401,12 +620,36 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
         report = settings.redacted_dict()
-        report["rollout_budget_feasibility"] = (
-            rollout_feasibility.model_dump(mode="json")
+        report["rollout_budget_feasibility"] = rollout_feasibility.model_dump(
+            mode="json"
         )
         print(json.dumps(report, indent=2))
         if not rollout_feasibility.feasible:
             raise SystemExit(2)
+        return
+
+    if args.command == "db":
+        try:
+            report = _database_command(args)
+        except Exception as exc:
+            from pulsara_agent.storage.migrations.errors import PostgresSchemaError
+
+            if not isinstance(exc, PostgresSchemaError):
+                raise
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error_code": exc.code.value,
+                        "detail": exc.detail,
+                        "retryable": exc.retryable,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            raise SystemExit(2) from exc
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
         return
 
     if args.command == "host":
@@ -416,7 +659,8 @@ def main() -> None:
             except ValueError as exc:
                 parser.error(str(exc))
             if isinstance(result, dict) and (
-                result.get("pending_approval") is not None or result.get("pending_interaction") is not None
+                result.get("pending_approval") is not None
+                or result.get("pending_interaction") is not None
             ):
                 print(json.dumps(result, indent=2))
             else:
@@ -485,6 +729,113 @@ def main() -> None:
     parser.print_help()
 
 
+def _database_command(args: argparse.Namespace) -> dict[str, object]:
+    if args.db_command is None:
+        raise ValueError("db requires a subcommand")
+    if not 1.0 <= args.deadline_seconds <= 3600.0:
+        raise ValueError("--deadline-seconds must be between 1 and 3600")
+    if args.env_file:
+        load_env_file(args.env_file, override=args.override_env)
+    runtime_dsn = os.getenv(f"{args.prefix}_POSTGRES_DSN", "").strip()
+    if not runtime_dsn:
+        raise ValueError(f"{args.prefix}_POSTGRES_DSN is required")
+    deadline = monotonic() + args.deadline_seconds
+    from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
+    from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+    from pulsara_agent.storage.migrations.runner import (
+        PostgresMigrationRunner,
+        _read_identity_from_connection,
+        read_migration_ledger,
+    )
+    from pulsara_agent.storage.migrations.verifier import (
+        classify_migration_history,
+    )
+    from pulsara_agent.storage.postgres_connection_provider import (
+        PostgresRuntimeConnectionFactory,
+    )
+
+    factory = PostgresRuntimeConnectionFactory(runtime_dsn)
+    if args.db_command == "status":
+        with factory.connect(
+            deadline_monotonic=deadline,
+            autocommit=False,
+        ) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
+                identity = _read_identity_from_connection(connection)
+                rows = read_migration_ledger(connection)
+        head = rows[-1].version if rows else None
+        observed_prefix = rows[-1].registry_prefix_fingerprint if rows else None
+        status = classify_migration_history(rows).value
+        payload = {
+            "status": status,
+            "database_name": identity.database_name,
+            "runtime_role": identity.runtime_role,
+            "migration_head_version": head,
+            "expected_head_version": POSTGRES_MIGRATION_REGISTRY.latest_version,
+            "observed_registry_prefix_fingerprint": observed_prefix,
+            "expected_registry_prefix_fingerprint": POSTGRES_MIGRATION_REGISTRY.registry_fingerprint,
+        }
+        payload["report_fingerprint"] = postgres_schema_fingerprint(
+            "pulsara:postgres-schema-status-report:v1", payload
+        )
+        return payload
+    if args.db_command == "migrate":
+        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
+        report = PostgresMigrationRunner(
+            admin_dsn=admin_dsn,
+            runtime_dsn=runtime_dsn,
+        ).migrate(deadline_monotonic=deadline)
+        verification = factory.verify_deep(deadline_monotonic=deadline)
+        payload = report.to_dict()
+        payload["deep_verification_result_fingerprint"] = (
+            verification.result.result_fingerprint
+        )
+        return payload
+    if args.deep:
+        bundle = factory.verify_deep(deadline_monotonic=deadline)
+        can_create_in_public = bundle.fast.result.effective_privilege_result.runtime_role_can_create_in_public_schema
+        return {
+            "status": "verified",
+            "mode": "deep",
+            "database_name": bundle.fast.binding.database_name,
+            "runtime_role": bundle.fast.binding.runtime_role,
+            "migration_head_version": bundle.fast.binding.migration_head_version,
+            "registry_prefix_fingerprint": bundle.fast.binding.durable_registry_prefix_fingerprint,
+            "fast_executable_schema_fingerprint": bundle.fast.binding.fast_executable_schema_fingerprint,
+            "expected_object_manifest_fingerprint": bundle.result.expected_object_manifest_fingerprint,
+            "expected_deep_catalog_fingerprint": bundle.result.expected_deep_catalog_fingerprint,
+            "observed_deep_catalog_fingerprint": bundle.result.observed_deep_catalog_fingerprint,
+            "runtime_role_can_create_in_public_schema": can_create_in_public,
+            "warnings": (
+                ("runtime_role_can_create_in_public_schema",)
+                if can_create_in_public
+                else ()
+            ),
+            "result_fingerprint": bundle.result.result_fingerprint,
+        }
+    bundle = factory.verify(deadline_monotonic=deadline)
+    can_create_in_public = bundle.result.effective_privilege_result.runtime_role_can_create_in_public_schema
+    return {
+        "status": "verified",
+        "mode": "fast",
+        "database_name": bundle.binding.database_name,
+        "runtime_role": bundle.binding.runtime_role,
+        "migration_head_version": bundle.binding.migration_head_version,
+        "registry_prefix_fingerprint": bundle.binding.durable_registry_prefix_fingerprint,
+        "fast_executable_schema_fingerprint": bundle.binding.fast_executable_schema_fingerprint,
+        "runtime_role_can_create_in_public_schema": can_create_in_public,
+        "warnings": (
+            ("runtime_role_can_create_in_public_schema",)
+            if can_create_in_public
+            else ()
+        ),
+        "result_fingerprint": bundle.result.result_fingerprint,
+    }
+
+
 async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
@@ -497,7 +848,9 @@ async def _host_run(args) -> object:
             model_role=ModelRole(args.model_role),
             permission_policy=permission_policy,
         )
-        result = await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
+        result = await session.run_turn(
+            args.prompt, active_skill_names=_active_skill_names_from_args(args)
+        )
         pending = session.get_pending_approval()
         if pending is not None:
             return {
@@ -517,7 +870,9 @@ async def _host_run(args) -> object:
         close_error = None
         if session is not None:
             try:
-                await core.close_session(session.host_session_id, close_conversation=True)
+                await core.close_session(
+                    session.host_session_id, close_conversation=True
+                )
             except BaseException as exc:
                 close_error = exc
         try:
@@ -557,55 +912,74 @@ def _inspect(args) -> dict[str, object]:
     if args.inspect_command is None:
         raise ValueError("inspect requires a subcommand")
     settings = _settings_from_inspect_args(args)
-    service = InspectorService(
-        PostgresInspectorStore(settings.storage.postgres_dsn),
-        oxigraph_url=settings.storage.oxigraph_url,
-    )
-    if args.inspect_command == "run":
-        return service.inspect_run(
-            args.run_id,
-            limit_events=args.limit_events,
-            include_payload=args.include_payload,
+    with acquire_verified_postgres_access_sync(
+        settings.storage.postgres_dsn,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as access_lease:
+        service = InspectorService(
+            PostgresInspectorStore(access_lease.connection_provider),
+            oxigraph_url=settings.storage.oxigraph_url,
         )
-    if args.inspect_command == "session":
-        return service.inspect_session(
-            args.session_id,
-            limit_events=args.limit_events,
-            include_payload=args.include_payload,
-        )
-    if args.inspect_command == "artifact":
-        return service.inspect_artifact(
-            args.artifact_id,
-            include_payload=args.include_payload,
-            max_chars=args.max_chars,
-        )
-    if args.inspect_command == "memory":
-        return service.inspect_memory(args.memory_id)
-    if args.inspect_command == "health":
-        return service.inspect_health()
-    raise ValueError(f"unsupported inspect command: {args.inspect_command}")
+        if args.inspect_command == "run":
+            return service.inspect_run(
+                args.run_id,
+                limit_events=args.limit_events,
+                include_payload=args.include_payload,
+            )
+        if args.inspect_command == "session":
+            return service.inspect_session(
+                args.session_id,
+                limit_events=args.limit_events,
+                include_payload=args.include_payload,
+            )
+        if args.inspect_command == "artifact":
+            return service.inspect_artifact(
+                args.artifact_id,
+                include_payload=args.include_payload,
+                max_chars=args.max_chars,
+            )
+        if args.inspect_command == "memory":
+            return service.inspect_memory(args.memory_id)
+        if args.inspect_command == "health":
+            return service.inspect_health()
+        raise ValueError(f"unsupported inspect command: {args.inspect_command}")
 
 
 def _checkpoint_command(args) -> dict[str, object]:
     if args.checkpoint_command is None:
         raise ValueError("checkpoint requires a subcommand")
+    if (
+        args.checkpoint_command == "doctor"
+        and args.domain == "transcript"
+        and args.through_sequence is not None
+    ):
+        raise ValueError(
+            "transcript checkpoint doctor always freezes the current "
+            "high-water; --through-sequence is unsupported"
+        )
     settings = _settings_from_inspect_args(args)
+    with acquire_verified_postgres_access_sync(
+        settings.storage.postgres_dsn,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as access_lease:
+        return _checkpoint_command_with_access(args, access_lease)
+
+
+def _checkpoint_command_with_access(
+    args,
+    access_lease: VerifiedPostgresAccessLease,
+) -> dict[str, object]:
     runtime_session_id = str(args.runtime_session_id)
     event_log = PostgresEventLog(
-        dsn=settings.storage.postgres_dsn,
+        connection_provider=access_lease.connection_provider,
         runtime_session_id=runtime_session_id,
     )
-    archive = PostgresArtifactStore(settings.storage.postgres_dsn)
+    archive = PostgresArtifactStore(access_lease.connection_provider)
     maintenance = PostgresCheckpointMaintenanceAuthority(
-        settings.storage.postgres_dsn
+        access_lease.connection_provider
     )
     if args.checkpoint_command == "doctor":
         if args.domain == "transcript":
-            if args.through_sequence is not None:
-                raise ValueError(
-                    "transcript checkpoint doctor always freezes the current "
-                    "high-water; --through-sequence is unsupported"
-                )
             authority_contracts = (
                 build_default_authority_materialization_contract_bundle()
             )
@@ -656,7 +1030,9 @@ def _checkpoint_command(args) -> dict[str, object]:
     raise ValueError(f"unsupported checkpoint command: {args.checkpoint_command}")
 
 
-PLAN_APPROVE_TOKENS = frozenset({"approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"})
+PLAN_APPROVE_TOKENS = frozenset(
+    {"approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"}
+)
 
 
 def _format_plan_question(pending: PendingPlanInteraction) -> str:
@@ -669,9 +1045,16 @@ def _format_plan_question(pending: PendingPlanInteraction) -> str:
             if option.description:
                 lines.append(f"     {option.description}")
     if pending.allow_free_text:
-        lines.extend(["", "Reply with :choose <n|label>, a number/label, or :answer <text>."])
+        lines.extend(
+            ["", "Reply with :choose <n|label>, a number/label, or :answer <text>."]
+        )
     else:
-        lines.extend(["", "Reply with :choose <n|label> or a number/label. Free text is disabled."])
+        lines.extend(
+            [
+                "",
+                "Reply with :choose <n|label> or a number/label. Free text is disabled.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -706,7 +1089,9 @@ def _host_session_status_payload(session) -> dict:
     return {
         "default_mode": default_mode.value if default_mode is not None else None,
         "default_policy": session.default_permission_policy().to_dict(),
-        "effective_next_run_mode": effective_mode.value if effective_mode is not None else None,
+        "effective_next_run_mode": effective_mode.value
+        if effective_mode is not None
+        else None,
         "effective_next_run_policy": session.effective_next_run_permission_policy().to_dict(),
         "plan_active": session.plan_state.active,
         "long_horizon": summary.get("long_horizon"),
@@ -719,7 +1104,9 @@ def _print_pending_plan_interaction(pending: PendingPlanInteraction | None) -> N
         print(_format_pending_plan_interaction(pending))
 
 
-def _select_plan_question_option(pending: PendingPlanInteraction, selector: str) -> str | None:
+def _select_plan_question_option(
+    pending: PendingPlanInteraction, selector: str
+) -> str | None:
     value = selector.strip()
     if not value:
         return None
@@ -734,10 +1121,15 @@ def _select_plan_question_option(pending: PendingPlanInteraction, selector: str)
     return None
 
 
-async def _answer_plan_question(session, pending: PendingPlanInteraction, answer: str) -> None:
+async def _answer_plan_question(
+    session, pending: PendingPlanInteraction, answer: str
+) -> None:
     selected_option = _select_plan_question_option(pending, answer)
     if selected_option is None and not pending.allow_free_text:
-        print("Free text is disabled for this question. Use :choose <n|label>.", file=sys.stderr)
+        print(
+            "Free text is disabled for this question. Use :choose <n|label>.",
+            file=sys.stderr,
+        )
         return
     result = await session.resolve_plan_interaction(
         PlanQuestionResolution(
@@ -750,10 +1142,15 @@ async def _answer_plan_question(session, pending: PendingPlanInteraction, answer
     _print_pending_plan_interaction(session.get_pending_interaction())
 
 
-async def _choose_plan_question_option(session, pending: PendingPlanInteraction, selector: str) -> None:
+async def _choose_plan_question_option(
+    session, pending: PendingPlanInteraction, selector: str
+) -> None:
     selected_option = _select_plan_question_option(pending, selector)
     if selected_option is None:
-        print("No matching plan question option. Use :interaction to see available choices.", file=sys.stderr)
+        print(
+            "No matching plan question option. Use :interaction to see available choices.",
+            file=sys.stderr,
+        )
         return
     await _answer_plan_question(session, pending, selected_option)
 
@@ -822,7 +1219,11 @@ def _format_repl_mcp_startup_notice(session) -> str | None:
     for snapshot in snapshots:
         server_id = snapshot.server_id
         status = snapshot.status.value
-        detail = f"{len(snapshot.tools)} tools" if snapshot.tools else (snapshot.message or "no tools")
+        detail = (
+            f"{len(snapshot.tools)} tools"
+            if snapshot.tools
+            else (snapshot.message or "no tools")
+        )
         if snapshot.diagnostics:
             detail = f"{detail}; {len(snapshot.diagnostics)} diagnostics"
         parts.append(f"{server_id}={status} ({detail})")
@@ -839,10 +1240,20 @@ async def _host_repl(args) -> None:
     )
     try:
         workspace_input = _workspace_input_from_args(args)
-        resume_workspace_input = workspace_input if _has_explicit_workspace_override(args) else None
+        resume_workspace_input = (
+            workspace_input if _has_explicit_workspace_override(args) else None
+        )
         if getattr(args, "list_sessions", False):
-            sessions = await core.list_resumable_sessions(workspace_input=workspace_input)
-            print(json.dumps([summary.to_dict() for summary in sessions], indent=2, ensure_ascii=False))
+            sessions = await core.list_resumable_sessions(
+                workspace_input=workspace_input
+            )
+            print(
+                json.dumps(
+                    [summary.to_dict() for summary in sessions],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
             return
         session = await _open_initial_repl_session(
             core,
@@ -876,11 +1287,19 @@ async def _host_repl(args) -> None:
                 print(_REPL_HELP)
                 continue
             if command == ":sessions":
-                sessions = await core.list_resumable_sessions(workspace_input=workspace_input)
-                print(json.dumps([summary.to_dict() for summary in sessions], indent=2, ensure_ascii=False))
+                sessions = await core.list_resumable_sessions(
+                    workspace_input=workspace_input
+                )
+                print(
+                    json.dumps(
+                        [summary.to_dict() for summary in sessions],
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
                 continue
             if command.startswith(":resume"):
-                runtime_session_id = command[len(":resume"):].strip()
+                runtime_session_id = command[len(":resume") :].strip()
                 if not runtime_session_id:
                     print("Usage: :resume <runtime_session_id>", file=sys.stderr)
                     continue
@@ -904,13 +1323,21 @@ async def _host_repl(args) -> None:
                 continue
             if command == ":continue":
                 try:
-                    summaries = await core.list_resumable_sessions(workspace_input=workspace_input)
+                    summaries = await core.list_resumable_sessions(
+                        workspace_input=workspace_input
+                    )
                     target = next(
-                        (summary for summary in summaries if summary.runtime_session_id != session.runtime_session_id),
+                        (
+                            summary
+                            for summary in summaries
+                            if summary.runtime_session_id != session.runtime_session_id
+                        ),
                         None,
                     )
                     if target is None:
-                        print(f"Already attached to the latest session: {session.runtime_session_id}")
+                        print(
+                            f"Already attached to the latest session: {session.runtime_session_id}"
+                        )
                         continue
                     next_session = await core.resume_session(
                         target.runtime_session_id,
@@ -927,26 +1354,36 @@ async def _host_repl(args) -> None:
                 print(f"Resumed {session.runtime_session_id}")
                 continue
             if command == ":close":
-                await core.close_session(session.host_session_id, close_conversation=True)
+                await core.close_session(
+                    session.host_session_id, close_conversation=True
+                )
                 print(f"Closed {session.runtime_session_id}")
                 break
             if command == ":approval":
                 pending = session.get_pending_approval()
-                print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                print(
+                    json.dumps(
+                        pending.to_dict() if pending is not None else None, indent=2
+                    )
+                )
                 continue
             if command == ":interaction":
                 pending = session.get_pending_interaction()
                 if isinstance(pending, PendingPlanInteraction):
                     print(_format_pending_plan_interaction(pending))
                 else:
-                    print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                    print(
+                        json.dumps(
+                            pending.to_dict() if pending is not None else None, indent=2
+                        )
+                    )
                 continue
             if command.startswith(":mcp-input"):
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingMcpInputRequired):
                     print("No pending MCP input-required interaction.")
                     continue
-                raw = command[len(":mcp-input"):].strip()
+                raw = command[len(":mcp-input") :].strip()
                 if not raw:
                     print(
                         "Usage: :mcp-input <JSON object mapping request keys to response objects>",
@@ -997,22 +1434,36 @@ async def _host_repl(args) -> None:
                 _print_agent_run_result(result)
                 continue
             if command.startswith(":plan"):
-                reason = command[len(":plan"):].strip()
+                reason = command[len(":plan") :].strip()
                 try:
                     policy = session.enter_plan(reason=reason)
-                except (HostSessionBusyError, HostSessionPendingApprovalError, HostSessionPendingInteractionError) as exc:
+                except (
+                    HostSessionBusyError,
+                    HostSessionPendingApprovalError,
+                    HostSessionPendingInteractionError,
+                ) as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
-                print(json.dumps({"plan": session.plan_state.to_dict(), "policy": policy.to_dict()}, indent=2))
+                print(
+                    json.dumps(
+                        {
+                            "plan": session.plan_state.to_dict(),
+                            "policy": policy.to_dict(),
+                        },
+                        indent=2,
+                    )
+                )
                 continue
             if command == ":status":
                 print(json.dumps(_host_session_status_payload(session), indent=2))
                 continue
             if command.startswith(":mode"):
-                requested = command[len(":mode"):].strip()
+                requested = command[len(":mode") :].strip()
                 if not requested:
                     allowed = ", ".join(m.value for m in PermissionMode)
-                    print(f"Usage: :mode <preset>  (one of: {allowed})", file=sys.stderr)
+                    print(
+                        f"Usage: :mode <preset>  (one of: {allowed})", file=sys.stderr
+                    )
                     continue
                 try:
                     policy = session.set_permission_mode(requested)
@@ -1024,7 +1475,11 @@ async def _host_repl(args) -> None:
                 ) as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
-                print(json.dumps({"mode": requested, "policy": policy.to_dict()}, indent=2))
+                print(
+                    json.dumps(
+                        {"mode": requested, "policy": policy.to_dict()}, indent=2
+                    )
+                )
                 continue
             if command == ":stop":
                 result = await session.stop_current_turn()
@@ -1068,10 +1523,13 @@ async def _host_repl(args) -> None:
                 continue
             if command.startswith(":answer"):
                 pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "question":
+                if (
+                    not isinstance(pending, PendingPlanInteraction)
+                    or pending.kind != "question"
+                ):
                     print("No pending plan question.")
                     continue
-                answer = command[len(":answer"):].strip()
+                answer = command[len(":answer") :].strip()
                 if not answer:
                     print("Usage: :answer <text>", file=sys.stderr)
                     continue
@@ -1079,10 +1537,13 @@ async def _host_repl(args) -> None:
                 continue
             if command.startswith(":choose"):
                 pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "question":
+                if (
+                    not isinstance(pending, PendingPlanInteraction)
+                    or pending.kind != "question"
+                ):
                     print("No pending plan question.")
                     continue
-                selector = command[len(":choose"):].strip()
+                selector = command[len(":choose") :].strip()
                 if not selector:
                     print("Usage: :choose <n|label>", file=sys.stderr)
                     continue
@@ -1090,17 +1551,23 @@ async def _host_repl(args) -> None:
                 continue
             if command == ":approve-plan":
                 pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
+                if (
+                    not isinstance(pending, PendingPlanInteraction)
+                    or pending.kind != "exit"
+                ):
                     print("No pending plan exit request.")
                     continue
                 await _approve_pending_plan(session, pending)
                 continue
             if command.startswith(":revise-plan"):
                 pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
+                if (
+                    not isinstance(pending, PendingPlanInteraction)
+                    or pending.kind != "exit"
+                ):
                     print("No pending plan exit request.")
                     continue
-                feedback = command[len(":revise-plan"):].strip()
+                feedback = command[len(":revise-plan") :].strip()
                 result = await session.resolve_plan_interaction(
                     PlanExitResolution(
                         interaction_id=pending.interaction_id,
@@ -1113,8 +1580,14 @@ async def _host_repl(args) -> None:
                 continue
             if command == ":cancel-plan":
                 pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
-                    print("No pending plan exit request. Use :force-exit-plan to leave active plan mode.", file=sys.stderr)
+                if (
+                    not isinstance(pending, PendingPlanInteraction)
+                    or pending.kind != "exit"
+                ):
+                    print(
+                        "No pending plan exit request. Use :force-exit-plan to leave active plan mode.",
+                        file=sys.stderr,
+                    )
                     continue
                 await session.exit_plan_workflow(source="user_cancel")
                 print("Plan workflow cancelled.")
@@ -1125,7 +1598,11 @@ async def _host_repl(args) -> None:
                     continue
                 try:
                     await session.exit_plan_workflow(source="user_force_exit")
-                except (HostSessionBusyError, HostSessionPendingInteractionError, ValueError) as exc:
+                except (
+                    HostSessionBusyError,
+                    HostSessionPendingInteractionError,
+                    ValueError,
+                ) as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
                 print("Plan workflow exited.")
@@ -1152,11 +1629,17 @@ async def _host_repl(args) -> None:
             pending_interaction = session.get_pending_interaction()
             if isinstance(pending_interaction, PendingPlanInteraction):
                 if pending_interaction.kind == "question":
-                    selected_option = _select_plan_question_option(pending_interaction, command)
+                    selected_option = _select_plan_question_option(
+                        pending_interaction, command
+                    )
                     if selected_option is not None:
-                        await _choose_plan_question_option(session, pending_interaction, selected_option)
+                        await _choose_plan_question_option(
+                            session, pending_interaction, selected_option
+                        )
                     elif pending_interaction.allow_free_text:
-                        await _answer_plan_question(session, pending_interaction, command)
+                        await _answer_plan_question(
+                            session, pending_interaction, command
+                        )
                     else:
                         print(
                             "Pending plan question requires one of the listed options. Use :interaction to see choices.",
@@ -1179,7 +1662,9 @@ async def _host_repl(args) -> None:
                     file=sys.stderr,
                 )
                 continue
-            result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
+            result = await session.run_turn(
+                prompt, active_skill_names=_active_skill_names_from_args(args)
+            )
             _print_agent_run_result(result)
             pending = session.get_pending_approval()
             if pending is not None:
@@ -1189,7 +1674,12 @@ async def _host_repl(args) -> None:
                 if isinstance(pending_interaction, PendingPlanInteraction):
                     print(_format_pending_plan_interaction(pending_interaction))
                 else:
-                    print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
+                    print(
+                        json.dumps(
+                            {"pending_interaction": pending_interaction.to_dict()},
+                            indent=2,
+                        )
+                    )
     finally:
         await core.shutdown()
 
@@ -1263,11 +1753,27 @@ Editing: Up/Down history · Ctrl-R search · Ctrl-C clear · Ctrl-Z suspend · C
 
 async def _host_inspect(args) -> dict[str, object]:
     settings = _settings_from_host_args(args)
+    access_lease = await process_postgres_schema_verification_service().acquire(
+        settings.storage.postgres_dsn,
+        deadline_monotonic=monotonic() + 30.0,
+    )
+    try:
+        return _host_inspect_with_access(args, settings, access_lease)
+    finally:
+        access_lease.release()
+
+
+def _host_inspect_with_access(
+    args,
+    settings: PulsaraSettings,
+    access_lease: VerifiedPostgresAccessLease,
+) -> dict[str, object]:
     workspace = resolve_workspace(_workspace_input_from_args(args))
     permission_policy = _permission_policy_from_host_args(args, intent="inspect")
     wiring = build_durable_runtime_wiring(
         settings,
         workspace.workspace_root,
+        postgres_access_lease=access_lease,
         memory_domain=workspace.memory_domain,
     )
     runtime_session = wiring.runtime_session
@@ -1316,7 +1822,9 @@ async def _host_inspect(args) -> dict[str, object]:
             "workspace_scope": workspace.workspace_scope,
             "workspace_key": workspace.workspace_key,
             "read_scopes": sorted(workspace.memory_domain.read_scopes),
-            "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
+            "allowed_write_scopes": sorted(
+                workspace.memory_domain.allowed_write_scopes
+            ),
         },
         "tools": registry.names(),
         "capability_surface": {
@@ -1327,9 +1835,13 @@ async def _host_inspect(args) -> dict[str, object]:
             "callable_names": sorted(exposure.callable_names),
             "descriptors": [
                 descriptor.to_diagnostic_dict()
-                for descriptor in sorted(exposure.descriptors_by_name.values(), key=lambda item: item.name)
+                for descriptor in sorted(
+                    exposure.descriptors_by_name.values(), key=lambda item: item.name
+                )
             ],
-            "diagnostics": [diagnostic.to_dict() for diagnostic in exposure.diagnostics],
+            "diagnostics": [
+                diagnostic.to_dict() for diagnostic in exposure.diagnostics
+            ],
         },
         "permissions": permission_policy.to_dict(),
         "current_mode": (
@@ -1340,10 +1852,14 @@ async def _host_inspect(args) -> dict[str, object]:
         "memory": {
             "graph_id": workspace.memory_domain.graph_id,
             "tools_enabled": sorted(
-                name for name in registry.names() if name.startswith(("memory_", "remember_"))
+                name
+                for name in registry.names()
+                if name.startswith(("memory_", "remember_"))
             ),
             "read_scopes": sorted(workspace.memory_domain.read_scopes),
-            "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
+            "allowed_write_scopes": sorted(
+                workspace.memory_domain.allowed_write_scopes
+            ),
         },
         "skills": [
             {
@@ -1364,7 +1880,9 @@ async def _host_inspect(args) -> dict[str, object]:
             }
             for injection in exposure.active_injections
         ],
-        "capability_diagnostics": [diagnostic.to_dict() for diagnostic in exposure.diagnostics],
+        "capability_diagnostics": [
+            diagnostic.to_dict() for diagnostic in exposure.diagnostics
+        ],
         "bundled_skills": bundled_skills_status().to_dict(),
     }
 
@@ -1401,10 +1919,13 @@ async def _mcp_command(args) -> dict[str, object]:
         )
         return {
             "mcp": "list",
-            "sources": [_mcp_source_to_dict(source) for source in mcp_config_sources(
-                workspace_root=workspace_root,
-                user_config_path=_mcp_user_config_path(args),
-            )],
+            "sources": [
+                _mcp_source_to_dict(source)
+                for source in mcp_config_sources(
+                    workspace_root=workspace_root,
+                    user_config_path=_mcp_user_config_path(args),
+                )
+            ],
             "servers": [_mcp_config_to_dict(config) for config in configs],
         }
     if command == "add":
@@ -1441,13 +1962,22 @@ async def _mcp_command(args) -> dict[str, object]:
             return {
                 "mcp": command,
                 "workspace_root": str(workspace_root),
-                "sources": [_mcp_source_to_dict(source) for source in mcp_config_sources(
-                    workspace_root=workspace_root,
-                    user_config_path=_mcp_user_config_path(args),
-                )],
+                "sources": [
+                    _mcp_source_to_dict(source)
+                    for source in mcp_config_sources(
+                        workspace_root=workspace_root,
+                        user_config_path=_mcp_user_config_path(args),
+                    )
+                ],
                 "servers": [_mcp_snapshot_to_dict(snapshot) for snapshot in snapshots],
-                "ready_count": sum(1 for snapshot in snapshots if snapshot.status.value == "ready"),
-                "failed_count": sum(1 for snapshot in snapshots if snapshot.status.value in {"failed", "needs_auth", "degraded"}),
+                "ready_count": sum(
+                    1 for snapshot in snapshots if snapshot.status.value == "ready"
+                ),
+                "failed_count": sum(
+                    1
+                    for snapshot in snapshots
+                    if snapshot.status.value in {"failed", "needs_auth", "degraded"}
+                ),
                 "cache_policy": {
                     "sdk_cache": False,
                     "snapshot_discovery": "refresh/no-cache",
@@ -1488,7 +2018,9 @@ def _mcp_config_from_add_args(args) -> McpServerConfig:
             url=args.url,
             bearer_token_env_var=args.bearer_token_env_var,
             headers=_parse_key_value_pairs(args.header, option_name="--header"),
-            env_headers=_parse_key_value_pairs(args.env_header, option_name="--env-header"),
+            env_headers=_parse_key_value_pairs(
+                args.env_header, option_name="--env-header"
+            ),
             follow_redirects=bool(args.follow_redirects),
         )
     return McpServerConfig(
@@ -1625,15 +2157,18 @@ def _redact_url(url: str) -> str:
     if parsed.username or parsed.password:
         host = f"<redacted-userinfo>@{host}"
     suffix = "<redacted-query-or-fragment>" if parsed.query or parsed.fragment else ""
-    return urlunsplit(
-        SplitResult(
-            scheme=parsed.scheme,
-            netloc=host,
-            path=parsed.path,
-            query="",
-            fragment="",
+    return (
+        urlunsplit(
+            SplitResult(
+                scheme=parsed.scheme,
+                netloc=host,
+                path=parsed.path,
+                query="",
+                fragment="",
+            )
         )
-    ) + suffix
+        + suffix
+    )
 
 
 def _terminal_path_supplier(runtime_session):
@@ -1739,7 +2274,9 @@ def _has_explicit_workspace_override(args) -> bool:
 
 
 def _active_skill_names_from_args(args) -> frozenset[str]:
-    return frozenset(name.strip() for name in getattr(args, "skill", ()) if name.strip())
+    return frozenset(
+        name.strip() for name in getattr(args, "skill", ()) if name.strip()
+    )
 
 
 def _env_permission_mode(prefix: str) -> str | None:
@@ -1797,4 +2334,6 @@ def _permission_policy_from_host_args(args, *, intent: str):
         )
         raise SystemExit(2)
 
-    return preset_to_policy(PermissionMode.READ_ONLY if intent == "inspect" else DEFAULT_PERMISSION_MODE)
+    return preset_to_policy(
+        PermissionMode.READ_ONLY if intent == "inspect" else DEFAULT_PERMISSION_MODE
+    )

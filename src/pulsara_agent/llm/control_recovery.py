@@ -16,7 +16,6 @@ from pulsara_agent.event_log import (
     EventIdConflict,
     EventLog,
     EventLogWriteConflict,
-    InMemoryEventLog,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm.control import build_model_call_control_disposition_event
@@ -69,18 +68,9 @@ class ModelCallControlDispositionRecoveryService:
         *,
         event_log: EventLog,
         archive: ArtifactStore,
-        allow_unbootstrapped_test_events: bool = False,
     ) -> None:
-        if allow_unbootstrapped_test_events and not isinstance(
-            event_log, InMemoryEventLog
-        ):
-            raise ValueError(
-                "unbootstrapped control recovery is restricted to the in-memory "
-                "pytest event log"
-            )
         self._event_log = event_log
         self._archive = archive
-        self._allow_unbootstrapped_test_events = allow_unbootstrapped_test_events
 
     def repair_missing_dispositions(
         self,
@@ -217,26 +207,9 @@ class ModelCallControlDispositionRecoveryService:
                 raise ModelCallControlRecoveryStructuralError(
                     "model control recovery account outcome is unknown"
                 ) from exc
-        if not self._allow_unbootstrapped_test_events:
-            raise ModelCallControlRecoveryStructuralError(
-                "model control recovery ledger is missing its materialization account"
-            )
-        try:
-            return tuple(
-                self._event_log.extend(
-                    (candidate,),
-                    expected_last_sequence=high_water,
-                )
-            )
-        except BaseException:
-            confirmation = self._event_log.confirm_batch((candidate,))
-            if confirmation.missing_event_ids:
-                if confirmation.committed_events:
-                    raise ModelCallControlRecoveryStructuralError(
-                        "model control recovery committed partially"
-                    )
-                raise
-            return confirmation.committed_events
+        raise ModelCallControlRecoveryStructuralError(
+            "model control recovery ledger is missing its materialization account"
+        )
 
     def _read_snapshot(
         self, deadline_monotonic: float | None

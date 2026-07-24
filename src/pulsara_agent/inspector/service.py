@@ -17,6 +17,7 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionRequestedEvent,
     ContextCompactionStartedEvent,
     ContextWindowClosedEvent,
     ContextWindowCompactionCompletedEvent,
@@ -27,6 +28,10 @@ from pulsara_agent.event import (
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     McpCapabilitySnapshotInstalledEvent,
+    McpInputRequiredInteractionClosedEvent,
+    McpInputRequiredResolutionSubmittedEvent,
+    McpInputRequiredResumeFailedEvent,
+    MidTurnContextCompactionSkippedEvent,
     ModelCallEndEvent,
     ModelCallControlDispositionResolvedEvent,
     ModelCallRejectedEvent,
@@ -46,6 +51,7 @@ from pulsara_agent.event import (
     RolloutBudgetReservationSettledEvent,
     RolloutPhaseTransitionedEvent,
     RunInteractionResumeBoundaryEvent,
+    RunEndEvent,
     RunStartEvent,
     ScopedGenerationPreparationAbandonedEvent,
     SubagentGraphCheckpointCommittedEvent,
@@ -57,6 +63,8 @@ from pulsara_agent.event import (
     TerminalProcessMonitorTerminatedEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
     ToolResultEndEvent,
+    ToolExecutionSuspendedEvent,
+    ToolResultEvidenceProjectionFailedEvent,
     ToolResultTerminalProjectionCommittedEvent,
     TranscriptProjectionCheckpointCancelledEvent,
     TranscriptProjectionCheckpointCommittedEvent,
@@ -70,6 +78,7 @@ from pulsara_agent.event_log import (
 )
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.inspector.diagnostics import (
     outbox_diagnostics,
     permission_snapshot_diagnostics,
@@ -114,6 +123,7 @@ from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_shadow,
 )
 from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
+from pulsara_agent.runtime.mcp.lifecycle import McpInputRequiredLifecycleStore
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
 from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
@@ -208,6 +218,12 @@ class InspectorService:
             runtime_session_id=session_id,
         )
         diagnostics.extend(terminal_monitors["diagnostics"])
+        typed_runtime_events = _typed_runtime_event_vocabulary_projection(
+            events,
+            runtime_session_id=session_id,
+            store=self.store,
+        )
+        diagnostics.extend(typed_runtime_events["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -247,6 +263,7 @@ class InspectorService:
             ],
             "memory_governance": governance_projection,
             "terminal_monitors": terminal_monitors,
+            **typed_runtime_events["projections"],
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
             "events": _event_summaries(
@@ -287,7 +304,7 @@ class InspectorService:
             and prior_boundary is not None
             and event.sequence < prior_boundary
         ]
-        archive = PostgresArtifactStore(self.store.dsn)
+        archive = PostgresArtifactStore(self.store.connection_provider)
         prior_messages = rebuild_prior_messages(
             _BoundedEventLog(prior_events),
             archive=archive,
@@ -368,6 +385,13 @@ class InspectorService:
             run_id=run_id,
         )
         diagnostics.extend(terminal_monitors["diagnostics"])
+        typed_runtime_events = _typed_runtime_event_vocabulary_projection(
+            session_events,
+            runtime_session_id=session_id,
+            store=self.store,
+            run_id=run_id,
+        )
+        diagnostics.extend(typed_runtime_events["diagnostics"])
 
         return {
             "inspect_kind": "run",
@@ -416,6 +440,7 @@ class InspectorService:
             "model_usage_by_run": model_contracts["usage_by_run"],
             "provider_input_generations": provider_input_generations["generations"],
             "terminal_monitors": terminal_monitors,
+            **typed_runtime_events["projections"],
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "subagent_graph": _subagent_graph_projection(
@@ -501,6 +526,7 @@ class InspectorService:
         }
 
     def inspect_health(self) -> dict[str, Any]:
+        schema_binding = self.store.connection_provider.schema_binding
         table_presence = self.store.required_table_presence(_REQUIRED_TABLES)
         recent_session_ids = self.store.recent_session_ids()
         sequence_diagnostics = []
@@ -546,6 +572,21 @@ class InspectorService:
             "inspect_kind": "health",
             "postgres": {
                 "connected": True,
+                "schema": {
+                    "migration_head_version": schema_binding.migration_head_version,
+                    "durable_registry_prefix_fingerprint": (
+                        schema_binding.durable_registry_prefix_fingerprint
+                    ),
+                    "fast_executable_schema_fingerprint": (
+                        schema_binding.fast_executable_schema_fingerprint
+                    ),
+                    "pgvector_extension_version": (
+                        schema_binding.pgvector_extension_version
+                    ),
+                    "last_verified_at_utc": (
+                        self.store.connection_provider.verification_observed_at_utc
+                    ),
+                },
                 "tables": table_presence,
                 "recent_session_count": len(recent_session_ids),
                 "run_projection_stale_count": stale_count,
@@ -641,7 +682,7 @@ class _InspectorEventLogLocator:
         session = self.store.session(runtime_session_id)
         workspace_root = session.get("workspace_root") if session is not None else None
         return PostgresEventLog(
-            dsn=self.store.dsn,
+            connection_provider=self.store.connection_provider,
             runtime_session_id=runtime_session_id,
             workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
@@ -672,6 +713,442 @@ def _memory_governance_projection(
             ),
         },
     }
+
+
+def _typed_runtime_event_vocabulary_projection(
+    events: Iterable[AgentEvent],
+    *,
+    runtime_session_id: str,
+    store: PostgresInspectorStore,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    ordered = tuple(
+        sorted(
+            events,
+            key=lambda event: (
+                event.sequence if event.sequence is not None else 2**63,
+                event.id,
+            ),
+        )
+    )
+    selected = tuple(
+        event for event in ordered if run_id is None or event.run_id == run_id
+    )
+    lifecycle, lifecycle_diagnostics = _mcp_input_required_lifecycle_projection(
+        ordered,
+        runtime_session_id=runtime_session_id,
+        run_id=run_id,
+    )
+    compaction_projection = _compaction_candidate_projection_durable_status(
+        ordered,
+        runtime_session_id=runtime_session_id,
+        store=store,
+        run_id=run_id,
+    )
+    return {
+        "projections": {
+            "mcp_input_required_lifecycle": lifecycle,
+            "context_compaction_requests": [
+                _typed_runtime_event_projection(event, "request")
+                for event in selected
+                if isinstance(event, ContextCompactionRequestedEvent)
+            ],
+            "mid_turn_compaction_skips": [
+                _typed_runtime_event_projection(event, "skip")
+                for event in selected
+                if isinstance(event, MidTurnContextCompactionSkippedEvent)
+            ],
+            "tool_result_evidence_projection_failures": [
+                _typed_runtime_event_projection(event, "failure")
+                for event in selected
+                if isinstance(event, ToolResultEvidenceProjectionFailedEvent)
+            ],
+            "mandatory_runtime_audit_reconciliation": {
+                "historical_status": "not_durably_observable",
+                "reason": (
+                    "mandatory audit retry/reconciliation ownership is process-local; "
+                    "D3 durable job/outbox remains open"
+                ),
+            },
+            "compaction_candidate_projection_durable_status": (
+                compaction_projection
+            ),
+        },
+        "diagnostics": lifecycle_diagnostics,
+    }
+
+
+def _typed_runtime_event_projection(
+    event: AgentEvent,
+    payload_field: str,
+) -> dict[str, Any]:
+    payload = getattr(event, payload_field)
+    return {
+        "event_id": event.id,
+        "event_type": event.type.value,
+        "sequence": event.sequence,
+        "run_id": event.run_id,
+        "turn_id": event.turn_id,
+        "reply_id": event.reply_id,
+        payload_field: payload.model_dump(mode="json"),
+    }
+
+
+def _mcp_input_required_lifecycle_projection(
+    events: tuple[AgentEvent, ...],
+    *,
+    runtime_session_id: str,
+    run_id: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    diagnostics: list[dict[str, Any]] = []
+    try:
+        lifecycle_store = McpInputRequiredLifecycleStore(
+            runtime_session_id=runtime_session_id,
+            events=events,
+            capture_terminal_snapshots=True,
+        )
+    except (TypeError, ValueError) as exc:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "mcp_input_required_lifecycle_invalid",
+                "message": "Typed MCP input-required lifecycle could not be reduced.",
+                "details": {
+                    "error_type": type(exc).__name__,
+                    "error": _truncate(str(exc), 1_024),
+                },
+            }
+        )
+        return [], diagnostics
+
+    events_by_id = {event.id: event for event in events}
+    resolution_events = tuple(
+        event
+        for event in events
+        if isinstance(event, McpInputRequiredResolutionSubmittedEvent)
+    )
+    suspension_events = tuple(
+        event for event in events if isinstance(event, ToolExecutionSuspendedEvent)
+    )
+    projections: list[dict[str, Any]] = []
+    for record in lifecycle_store.records():
+        if run_id is not None and record.run_id != run_id:
+            continue
+        interaction_id = record.interaction_id
+        attempts = tuple(
+            event
+            for event in resolution_events
+            if event.source.interaction.interaction_id == interaction_id
+        )
+        suspensions = tuple(
+            event
+            for event in suspension_events
+            if event.suspension.interaction.interaction_id == interaction_id
+        )
+        terminal = (
+            events_by_id.get(record.terminal_tool_result_event_reference.event_id)
+            if record.terminal_tool_result_event_reference is not None
+            else None
+        )
+        closure = (
+            events_by_id.get(record.closure_event_reference.event_id)
+            if record.closure_event_reference is not None
+            else None
+        )
+        run_end = (
+            events_by_id.get(record.run_end_event_reference.event_id)
+            if record.run_end_event_reference is not None
+            else None
+        )
+        projections.append(
+            {
+                "interaction_id": interaction_id,
+                "run_id": record.run_id,
+                "turn_id": record.turn_id,
+                "reply_id": record.reply_id,
+                "tool_call_id": record.tool_call_id,
+                "tool_name": record.tool_name,
+                "status": record.status,
+                "interaction_remains_open": record.interaction_remains_open,
+                "session_reopen_action": (
+                    "terminalize_lease_unavailable"
+                    if record.interaction_remains_open
+                    else "none"
+                ),
+                "suspension_chain": [
+                    {
+                        "event_id": event.id,
+                        "sequence": event.sequence,
+                        "round_count": event.suspension.interaction.round_count,
+                        "suspension_fact_fingerprint": (
+                            event.suspension.suspension_fact_fingerprint
+                        ),
+                        "predecessor_resolution_submitted_event_reference": (
+                            event.suspension.predecessor_resolution_submitted_event_reference.model_dump(
+                                mode="json"
+                            )
+                            if event.suspension.predecessor_resolution_submitted_event_reference
+                            is not None
+                            else None
+                        ),
+                    }
+                    for event in suspensions
+                ],
+                "resolution_attempt_chain": [
+                    {
+                        "event_id": event.id,
+                        "sequence": event.sequence,
+                        "round_count": event.attempt.round_count,
+                        "attempt_ordinal": event.attempt.attempt_ordinal,
+                        "predecessor_resolution_submitted_event_reference": (
+                            event.attempt.predecessor_resolution_submitted_event_reference.model_dump(
+                                mode="json"
+                            )
+                            if event.attempt.predecessor_resolution_submitted_event_reference
+                            is not None
+                            else None
+                        ),
+                        "predecessor_resume_failed_event_reference": (
+                            event.attempt.predecessor_resume_failed_event_reference.model_dump(
+                                mode="json"
+                            )
+                            if event.attempt.predecessor_resume_failed_event_reference
+                            is not None
+                            else None
+                        ),
+                        "resolution_semantic_fingerprint": (
+                            event.resolution.resolution_semantic_fingerprint
+                        ),
+                    }
+                    for event in attempts
+                ],
+                "resume_failures": [
+                    {
+                        "event_id": event.id,
+                        "sequence": event.sequence,
+                        "resolution_submitted_event_reference": (
+                            event.resolution_submitted_event_reference.model_dump(
+                                mode="json"
+                            )
+                        ),
+                        "failure_reason": event.failure_reason,
+                        "diagnostic": event.diagnostic.model_dump(mode="json"),
+                    }
+                    for event in events
+                    if isinstance(event, McpInputRequiredResumeFailedEvent)
+                    and any(
+                        attempt.id
+                        == event.resolution_submitted_event_reference.event_id
+                        for attempt in attempts
+                    )
+                ],
+                "terminal_tool_result_event_reference": (
+                    record.terminal_tool_result_event_reference.model_dump(mode="json")
+                    if record.terminal_tool_result_event_reference is not None
+                    else None
+                ),
+                "normal_terminal_source_resolution_event_reference": (
+                    terminal.mcp_input_required_terminal_source.source_resolution_submitted_event_reference.model_dump(
+                        mode="json"
+                    )
+                    if isinstance(terminal, ToolResultEndEvent)
+                    and terminal.mcp_input_required_terminal_source is not None
+                    and terminal.mcp_input_required_terminal_source.source_resolution_submitted_event_reference
+                    is not None
+                    else None
+                ),
+                "terminal_disposition_event_reference": (
+                    record.terminal_disposition_event_reference.model_dump(mode="json")
+                    if record.terminal_disposition_event_reference is not None
+                    else None
+                ),
+                "closure": (
+                    {
+                        "event_reference": record.closure_event_reference.model_dump(
+                            mode="json"
+                        ),
+                        "reason": closure.closure_reason,
+                    }
+                    if isinstance(closure, McpInputRequiredInteractionClosedEvent)
+                    and record.closure_event_reference is not None
+                    else None
+                ),
+                "run_end": (
+                    {
+                        "event_reference": record.run_end_event_reference.model_dump(
+                            mode="json"
+                        ),
+                        "closure_event_reference": (
+                            run_end.mcp_input_required_closure_event_reference.model_dump(
+                                mode="json"
+                            )
+                            if run_end.mcp_input_required_closure_event_reference
+                            is not None
+                            else None
+                        ),
+                        "exact_closure_join": (
+                            run_end.mcp_input_required_closure_event_reference
+                            == record.closure_event_reference
+                        ),
+                    }
+                    if isinstance(run_end, RunEndEvent)
+                    and record.run_end_event_reference is not None
+                    else None
+                ),
+            }
+        )
+    return projections, diagnostics
+
+
+def _compaction_candidate_projection_durable_status(
+    events: tuple[AgentEvent, ...],
+    *,
+    runtime_session_id: str,
+    store: PostgresInspectorStore,
+    run_id: str | None,
+) -> list[dict[str, Any]]:
+    completed_events = tuple(
+        event
+        for event in events
+        if isinstance(event, ContextCompactionCompletedEvent)
+        and (run_id is None or event.run_id == run_id)
+    )
+    proposals_by_compaction: dict[
+        str, list[ContextCompactionMemoryCandidatesProposedEvent]
+    ] = {}
+    for event in events:
+        if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
+            proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
+    outbox_rows = store.candidate_projection_outbox_for_session(
+        runtime_session_id,
+        limit=4_096,
+    )
+    rows_by_producer: dict[str, list[dict[str, Any]]] = {}
+    for row in outbox_rows:
+        if row.get("producer_kind") != "compaction":
+            continue
+        rows_by_producer.setdefault(str(row["producer_event_id"]), []).append(row)
+
+    projections: list[dict[str, Any]] = []
+    for completed in completed_events:
+        proposals = proposals_by_compaction.get(completed.compaction_id, [])
+        base = {
+            "compaction_id": completed.compaction_id,
+            "completed_event_id": completed.id,
+            "completed_sequence": completed.sequence,
+            "core_status": "completed",
+        }
+        if len(proposals) != 1:
+            projections.append(
+                {
+                    **base,
+                    "status": (
+                        "not_durably_observable"
+                        if not proposals
+                        else "reconciliation_required"
+                    ),
+                    "producer_event_id": None,
+                    "durable_evidence": [],
+                }
+            )
+            continue
+
+        proposal = proposals[0]
+        completed_identity = stable_event_identity(
+            completed,
+            runtime_session_id=runtime_session_id,
+        )
+        if (
+            proposal.source_event_id != completed.id
+            or proposal.source_event_sequence != completed.sequence
+            or proposal.completed_compaction_event_identity != completed_identity
+        ):
+            projections.append(
+                {
+                    **base,
+                    "status": "reconciliation_required",
+                    "producer_event_id": proposal.id,
+                    "durable_evidence": ["producer_event"],
+                }
+            )
+            continue
+
+        expected_ids = tuple(proposal.candidate_entry_ids)
+        rows = rows_by_producer.get(proposal.id, [])
+        row_ids = tuple(
+            sorted(str(row["candidate_entry_id"]) for row in rows)
+        )
+        proposal_identity = stable_event_identity(
+            proposal,
+            runtime_session_id=runtime_session_id,
+        )
+        producer_identity_valid = all(
+            row.get("producer_payload_fingerprint")
+            == proposal_identity.payload_fingerprint
+            and row.get("producer_event_identity")
+            == proposal_identity.model_dump(mode="json")
+            for row in rows
+        )
+        if not expected_ids:
+            status = "producer_bundle_full"
+            evidence = ["producer_event"]
+        elif row_ids != tuple(sorted(expected_ids)):
+            status = "not_durably_observable"
+            evidence = ["producer_event"]
+        elif not producer_identity_valid:
+            status = "reconciliation_required"
+            evidence = ["producer_event", "projection_outbox"]
+        elif any(row.get("last_stable_failure_code") for row in rows):
+            status = "reconciliation_required"
+            evidence = ["producer_event", "projection_outbox"]
+        elif any(row.get("status") not in {"pending", "applying", "applied"} for row in rows):
+            status = "reconciliation_required"
+            evidence = ["producer_event", "projection_outbox"]
+        elif all(row.get("status") == "applied" for row in rows):
+            candidate_rows = store.memory_candidates_for_compaction(
+                completed.compaction_id
+            )
+            applied_ids = tuple(
+                sorted(
+                    str(row["entry_id"])
+                    for row in candidate_rows
+                    if row.get("source_event_id") == proposal.id
+                )
+            )
+            if applied_ids == tuple(sorted(expected_ids)):
+                status = "projection_applied"
+                evidence = [
+                    "producer_event",
+                    "projection_outbox",
+                    "candidate_pool",
+                ]
+            else:
+                status = "reconciliation_required"
+                evidence = ["producer_event", "projection_outbox"]
+        else:
+            status = "producer_bundle_full"
+            evidence = ["producer_event", "projection_outbox"]
+        projections.append(
+            {
+                **base,
+                "status": status,
+                "producer_event_id": proposal.id,
+                "producer_sequence": proposal.sequence,
+                "expected_candidate_entry_ids": list(expected_ids),
+                "outbox_statuses": [
+                    {
+                        "candidate_entry_id": row["candidate_entry_id"],
+                        "status": row.get("status"),
+                        "last_stable_failure_code": row.get(
+                            "last_stable_failure_code"
+                        ),
+                    }
+                    for row in rows
+                ],
+                "durable_evidence": evidence,
+            }
+        )
+    return projections
 
 
 def _mcp_installation_events_projection(
@@ -2976,7 +3453,7 @@ def _context_input_replay_projection(
         }
 
     audit = event.input_audit
-    archive = PostgresArtifactStore(store.dsn)
+    archive = PostgresArtifactStore(store.connection_provider)
     try:
         manifest = load_context_input_manifest(audit=audit, archive=archive)
         primary = _context_event_slice_for_range(
@@ -2995,7 +3472,7 @@ def _context_input_replay_projection(
             for item in manifest.snapshot.named_event_ranges
         )
         replay_event_log = PostgresEventLog(
-            dsn=store.dsn,
+            connection_provider=store.connection_provider,
             runtime_session_id=audit.source_runtime_session_id,
         )
         replayed = replay_context_input(
@@ -3830,7 +4307,7 @@ def _context_event_slice_for_range(
     through_sequence: int,
 ) -> ContextEventSlice:
     snapshot = PostgresEventLog(
-        dsn=store.dsn,
+        connection_provider=store.connection_provider,
         runtime_session_id=runtime_session_id,
     ).read_raw_range_snapshot(
         minimum_sequence=first_sequence,

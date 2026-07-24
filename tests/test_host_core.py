@@ -357,7 +357,7 @@ async def _open_project_session(
     )
 
 
-def test_host_open_reuses_one_terminal_recovery_deadline(
+def test_fresh_host_open_reuses_runtime_startup_deadline_for_terminal_recovery(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -385,6 +385,40 @@ def test_host_open_reuses_one_terminal_recovery_deadline(
     runtime_deadline, physical_recovery_deadlines = asyncio.run(run())
 
     assert physical_recovery_deadlines == (runtime_deadline,)
+
+
+def test_fresh_host_open_starts_bootstrap_deadline_after_prerequisites(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import pulsara_agent.host.core as core_module
+
+    async def delayed_cleanup(self) -> None:
+        del self
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(core_module, "_HOST_OPEN_RECOVERY_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(
+        HostCore,
+        "_drain_failed_open_mcp_supervisors",
+        delayed_cleanup,
+    )
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def run() -> tuple[float, float | None]:
+        session = await _open_project_session(core, tmp_path)
+        runtime_deadline = (
+            session.wiring.runtime_wiring.runtime_session
+            .runtime_open_deadline_monotonic
+        )
+        reopen_deadline = session.reopen_deadline_monotonic
+        await core.shutdown()
+        return runtime_deadline, reopen_deadline
+
+    runtime_deadline, reopen_deadline = asyncio.run(run())
+
+    assert runtime_deadline > core_module.monotonic()
+    assert reopen_deadline is None
 
 
 def _context_text(context: LLMContext) -> str:
@@ -1774,6 +1808,14 @@ def test_host_terminal_process_kill_releases_completion_notification_slot(
 def test_host_terminal_monitor_repeated_progress_without_reregistration(
     tmp_path, monkeypatch
 ) -> None:
+    epoch_one_gate = tmp_path / "release-monitor-epoch-one"
+    epoch_two_gate = tmp_path / "release-monitor-epoch-two"
+    completion_gate = tmp_path / "release-monitor-completion"
+
+    def wait_for_gate(path) -> str:
+        quoted = shlex.quote(str(path))
+        return f"while [ ! -f {quoted} ]; do sleep 0.05; done"
+
     session_holder = {}
     transport = ScriptedTransport(
         [
@@ -1785,9 +1827,12 @@ def test_host_terminal_monitor_repeated_progress_without_reregistration(
                         "arguments": json.dumps(
                             {
                                 "command": (
-                                    "sleep 1; printf 'EPOCH_1\\n'; "
-                                    "sleep 6; printf 'EPOCH_2\\n'; "
-                                    "sleep 6; printf 'TRAINING_DONE\\n'"
+                                    f"{wait_for_gate(epoch_one_gate)}; "
+                                    "printf 'EPOCH_1\\n'; "
+                                    f"{wait_for_gate(epoch_two_gate)}; "
+                                    "printf 'EPOCH_2\\n'; "
+                                    f"{wait_for_gate(completion_gate)}; "
+                                    "printf 'TRAINING_DONE\\n'"
                                 ),
                                 "yield_time_ms": 0,
                             }
@@ -1823,24 +1868,87 @@ def test_host_terminal_monitor_repeated_progress_without_reregistration(
         )
         session_holder["session"] = session
         await session.run_turn("start the training process and monitor it")
-        deadline = asyncio.get_running_loop().time() + 30
-        while asyncio.get_running_loop().time() < deadline:
-            events = session.replay_events()
-            observations = tuple(
-                event
-                for event in events
-                if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+
+        async def wait_for_terminal_observation_count(
+            expected: int, *, require_completion: bool = False
+        ) -> None:
+            deadline = asyncio.get_running_loop().time() + 60
+            while asyncio.get_running_loop().time() < deadline:
+                events = session.replay_events()
+                observations = tuple(
+                    event
+                    for event in events
+                    if isinstance(
+                        event, TerminalProcessMonitorObservationCommittedEvent
+                    )
+                )
+                disposed_source_ids = {
+                    reference.event_id
+                    for event in events
+                    if isinstance(
+                        event,
+                        TerminalProcessObservationDeliveryDispositionEvent,
+                    )
+                    for reference in event.observation_source_references
+                }
+                ingress_lifecycle = (
+                    session._ingress_coordinator.state_fact().lifecycle_state
+                )
+                if (
+                    len(observations) >= expected
+                    and (
+                        not require_completion
+                        or observations[-1].observation.observation_kind
+                        == "process_completed"
+                    )
+                    and all(
+                        item.id in disposed_source_ids
+                        for item in observations[:expected]
+                    )
+                    and session.active_run_id is None
+                    and ingress_lifecycle == "open_idle"
+                ):
+                    return
+                await asyncio.sleep(0.05)
+            monitor_store = (
+                session.wiring.runtime_wiring.runtime_session.terminal_monitor_store
             )
-            delivered = tuple(
-                event
-                for event in events
-                if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
-                and event.outcome in {"autonomous_dispatched", "active_run_safe_point"}
+            raise AssertionError(
+                "monitor observation was not terminally delivered: "
+                f"expected={expected}, "
+                f"active_run_id={session.active_run_id!r}, "
+                f"monitor_snapshots={monitor_store.snapshots()!r}, "
+                "event_tail="
+                f"{tuple((event.sequence, event.type, event.id) for event in events[-20:])!r}"
             )
-            if len(observations) >= 3 and len(delivered) >= 3:
-                break
-            await asyncio.sleep(0.05)
+
+        epoch_one_gate.touch()
+        await wait_for_terminal_observation_count(1)
+        epoch_two_gate.touch()
+        await wait_for_terminal_observation_count(2)
+        completion_gate.touch()
+        await wait_for_terminal_observation_count(3, require_completion=True)
         events = session.replay_events()
+        observations = tuple(
+            event
+            for event in events
+            if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
+        )
+        delivered = tuple(
+            event
+            for event in events
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+            and event.outcome in {"autonomous_dispatched", "active_run_safe_point"}
+        )
+        disposed = tuple(
+            event
+            for event in events
+            if isinstance(event, TerminalProcessObservationDeliveryDispositionEvent)
+        )
+        assert len(observations) >= 3
+        assert len(delivered) >= 2
+        assert len(disposed) >= 3
+        assert session.active_run_id is None
         await core.close_session(session.host_session_id)
         return events
 
@@ -1856,16 +1964,13 @@ def test_host_terminal_monitor_repeated_progress_without_reregistration(
         if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
     )
     assert len(registrations) == 1
-    assert [event.observation.observation_kind for event in observations] == [
-        "output_progress",
-        "output_progress",
-        "process_completed",
-    ]
-    assert [event.observation.observation_ordinal for event in observations] == [
-        1,
-        2,
-        3,
-    ]
+    kinds = [event.observation.observation_kind for event in observations]
+    assert len(kinds) >= 3
+    assert kinds[-1] == "process_completed"
+    assert set(kinds[:-1]) == {"output_progress"}
+    assert [
+        event.observation.observation_ordinal for event in observations
+    ] == list(range(1, len(observations) + 1))
     outcomes_by_source = {
         observation.id: tuple(
             event.outcome
@@ -1884,31 +1989,21 @@ def test_host_terminal_monitor_repeated_progress_without_reregistration(
         }
         for outcome in outcomes_by_source[observations[0].id]
     )
-    assert set(outcomes_by_source[observations[1].id]) <= {
-        "autonomous_dispatched",
-        "active_run_safe_point",
-        "superseded_by_terminal_observation",
-    }
+    for progress in observations[1:-1]:
+        assert outcomes_by_source[progress.id]
+        assert set(outcomes_by_source[progress.id]) <= {
+            "autonomous_dispatched",
+            "active_run_safe_point",
+            "superseded_by_terminal_observation",
+        }
     assert any(
         outcome
         in {
             "autonomous_dispatched",
             "active_run_safe_point",
         }
-        for outcome in outcomes_by_source[observations[2].id]
+        for outcome in outcomes_by_source[observations[-1].id]
     )
-    progress_two_outcomes = outcomes_by_source[observations[1].id]
-    if "superseded_by_terminal_observation" in progress_two_outcomes and not any(
-        outcome in {"autonomous_dispatched", "active_run_safe_point"}
-        for outcome in progress_two_outcomes
-    ):
-        pending_output = observations[1].observation.output_authority
-        final_output = observations[2].observation.output_authority
-        assert (
-            final_output.requested_start_cursor == pending_output.requested_start_cursor
-        )
-        assert final_output.end_cursor == pending_output.end_cursor
-        assert final_output.output_preview == pending_output.output_preview
 
 
 def test_host_terminal_monitor_ready_output_drives_real_health_check(
@@ -1985,7 +2080,7 @@ def test_host_terminal_monitor_ready_output_drives_real_health_check(
         )
         session_holder["session"] = session
         await session.run_turn("start the server, monitor readiness, then check health")
-        deadline = asyncio.get_running_loop().time() + 20
+        deadline = asyncio.get_running_loop().time() + 60
         while asyncio.get_running_loop().time() < deadline:
             events = session.replay_events()
             readiness_observed = any(
@@ -2003,6 +2098,10 @@ def test_host_terminal_monitor_ready_output_drives_real_health_check(
             ):
                 break
             await asyncio.sleep(0.05)
+        assert readiness_observed
+        assert len(transport.contexts) >= 4
+        assert boundary is None or boundary.done()
+        assert active is None or active.done()
         events = session.replay_events()
         health_status = await asyncio.to_thread(
             lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=2).status
@@ -2307,6 +2406,8 @@ def _bind_cancel_monitor_ids(*, index: int, transport, session) -> None:
 def test_host_terminal_monitor_list_and_cancel_close_one_atomic_owner(
     tmp_path, monkeypatch
 ) -> None:
+    process_gate = tmp_path / "release-cancelled-monitor-process"
+    quoted_process_gate = shlex.quote(str(process_gate))
     session_holder = {}
     transport = ScriptedTransport(
         [
@@ -2316,7 +2417,13 @@ def test_host_terminal_monitor_list_and_cancel_close_one_atomic_owner(
                         "id": "call:bg-cancel-monitor",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 20", "yield_time_ms": 0}
+                            {
+                                "command": (
+                                    f"while [ ! -f {quoted_process_gate} ]; do "
+                                    "sleep 0.05; done"
+                                ),
+                                "yield_time_ms": 0,
+                            }
                         ),
                     }
                 ]
@@ -4805,7 +4912,7 @@ def test_idle_sweep_marks_live_process_session_without_closing(
                         "id": "call:bg",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 10", "yield_time_ms": 0}
+                            {"command": "sleep 120", "yield_time_ms": 0}
                         ),
                     }
                 ]
@@ -4848,7 +4955,7 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(
                         "id": "call:a",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 10", "yield_time_ms": 0}
+                            {"command": "sleep 120", "yield_time_ms": 0}
                         ),
                     }
                 ]

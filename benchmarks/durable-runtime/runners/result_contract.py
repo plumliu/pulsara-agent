@@ -9,13 +9,16 @@ import platform
 from pathlib import Path
 import subprocess
 import sys
+from time import monotonic
 from typing import Literal
 
-import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from network_guard import validate_local_postgres_dsn
+from postgres_sandbox import VerifiedBenchmarkDatabaseLease
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+)
 
 
 class FrozenResultFact(BaseModel):
@@ -38,6 +41,11 @@ class PostgresRuntimeIdentityFact(FrozenResultFact):
     server_version: str = Field(min_length=1, max_length=128)
     configuration_fingerprint: str = Field(min_length=1, max_length=128)
     connection_pool_fingerprint: str = Field(min_length=1, max_length=128)
+    migration_head_version: int = Field(ge=0)
+    durable_registry_prefix_fingerprint: str = Field(min_length=1, max_length=128)
+    deep_catalog_fingerprint: str = Field(min_length=1, max_length=128)
+    pgvector_extension_version: str = Field(min_length=1, max_length=64)
+    template_business_empty: bool
 
 
 class RuntimeCapacityIdentityFact(FrozenResultFact):
@@ -51,7 +59,7 @@ class RuntimeCapacityIdentityFact(FrozenResultFact):
 
 
 class BenchmarkEnvironmentFact(FrozenResultFact):
-    schema_version: Literal["pulsara.durable-runtime.environment.v1"]
+    schema_version: Literal["pulsara.durable-runtime.environment.v2"]
     git: GitBuildIdentityFact
     python: PythonRuntimeIdentityFact
     runner_build_fingerprint: str = Field(min_length=1, max_length=128)
@@ -310,7 +318,7 @@ def capture_benchmark_environment(
     *,
     repo_root: Path,
     runner_build_fingerprint: str,
-    postgres_dsn: str | None = None,
+    postgres_database_lease: VerifiedBenchmarkDatabaseLease | None = None,
 ) -> BenchmarkEnvironmentFact:
     from pulsara_agent.event_log.postgres_pool import (
         postgres_event_pool_capacity,
@@ -333,23 +341,13 @@ def capture_benchmark_environment(
     }
     postgres = (
         None
-        if postgres_dsn is None
+        if postgres_database_lease is None
         else _capture_postgres_identity(
-            postgres_dsn,
-            connection_pool_fingerprint=_fingerprint(
-                {
-                    "max_connections": pool.max_connections,
-                    "critical_write_reserve": pool.critical_write_reserve,
-                    "bounded_read_capacity": pool.bounded_read_capacity,
-                    "default_lease_timeout_seconds": (
-                        pool.default_lease_timeout_seconds
-                    ),
-                }
-            ),
+            postgres_database_lease,
         )
     )
     return BenchmarkEnvironmentFact(
-        schema_version="pulsara.durable-runtime.environment.v1",
+        schema_version="pulsara.durable-runtime.environment.v2",
         git=GitBuildIdentityFact(
             commit=_git_output(repo_root, "rev-parse", "HEAD") or "unknown",
             dirty=bool(_git_output(repo_root, "status", "--porcelain")),
@@ -391,11 +389,8 @@ def _fingerprint(payload: object) -> str:
 
 
 def _capture_postgres_identity(
-    dsn: str,
-    *,
-    connection_pool_fingerprint: str,
+    database_lease: VerifiedBenchmarkDatabaseLease,
 ) -> PostgresRuntimeIdentityFact:
-    validate_local_postgres_dsn(dsn)
     setting_names = (
         "block_size",
         "checkpoint_timeout",
@@ -407,7 +402,11 @@ def _capture_postgres_identity(
         "synchronous_commit",
         "wal_level",
     )
-    with psycopg.connect(dsn, row_factory=dict_row) as connection:
+    with database_lease.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute("show server_version")
             version_row = cursor.fetchone()
@@ -433,5 +432,18 @@ def _capture_postgres_identity(
     return PostgresRuntimeIdentityFact(
         server_version=str(version_row["server_version"]),
         configuration_fingerprint=_fingerprint(settings),
-        connection_pool_fingerprint=connection_pool_fingerprint,
+        connection_pool_fingerprint=(
+            database_lease.connection_pool_policy_fingerprint
+        ),
+        migration_head_version=(
+            database_lease.schema_binding.migration_head_version
+        ),
+        durable_registry_prefix_fingerprint=(
+            database_lease.schema_binding.durable_registry_prefix_fingerprint
+        ),
+        deep_catalog_fingerprint=database_lease.deep_catalog_fingerprint,
+        pgvector_extension_version=(
+            database_lease.schema_binding.pgvector_extension_version
+        ),
+        template_business_empty=database_lease.business_empty,
     )

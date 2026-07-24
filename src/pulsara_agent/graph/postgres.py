@@ -11,9 +11,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Any
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -24,29 +24,27 @@ from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
 from pulsara_agent.ontology.registry import CORE_CONTEXT
 from pulsara_agent.storage.postgres_memory_projection import refresh_document_projection
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(slots=True)
 class PostgresGraphStore:
     """GraphStore backed by Postgres JSONB plus canonical memory projections."""
 
-    dsn: str | None = None
+    connection_provider: VerifiedPostgresConnectionProviderProtocol | None = None
     connection: Connection | None = None
     default_context: dict[str, Any] | None = None
-    initialize_schema: bool = True
 
     def __post_init__(self) -> None:
         if self.default_context is None:
             self.default_context = CORE_CONTEXT
-        if self.dsn is None and self.connection is None:
-            raise ValueError("PostgresGraphStore requires either dsn or connection")
-        if self.initialize_schema:
-            self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with self._cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+        if (self.connection_provider is None) == (self.connection is None):
+            raise ValueError(
+                "PostgresGraphStore requires exactly one verified provider or transaction connection"
+            )
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
         normalized = normalize_jsonld_document(document, self.default_context)
@@ -187,11 +185,11 @@ class PostgresGraphStore:
                 yield cursor
             return
 
-        assert self.dsn is not None
-        connection_context = (
-            psycopg.connect(self.dsn, row_factory=row_factory)
-            if row_factory is not None
-            else psycopg.connect(self.dsn)
+        assert self.connection_provider is not None
+        connection_context = self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_UOW,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
         )
         with connection_context as connection:
             with connection.cursor() as cursor:

@@ -26,6 +26,14 @@ from pulsara_agent.primitives.capability import (
     build_capability_resolve_basis,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.host_ingress import (
+    HostIngressAdmissionProofFact,
+    HostIngressItemPlacementFact,
+    HostRunIngressAttributionFact,
+    HostRunIngressSemanticFact,
+    HumanRunIngressFact,
+)
 from pulsara_agent.primitives.model_call import (
     ResolvedModelTargetFact,
     sha256_fingerprint,
@@ -70,6 +78,7 @@ from pulsara_agent.runtime.run_entry import (
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.llm.resolution import ResolvedModelTarget
+from pulsara_agent.llm.user_carrier import encode_human_input
 
 
 BENCHMARK_OBSERVED_AT_UTC = "2026-01-01T00:00:00.000000Z"
@@ -188,6 +197,67 @@ async def bootstrap_benchmark_root_run(
         capability_basis=capability_basis,
         degraded_reason_codes=(),
     )
+    ingress_id = f"host_ingress:{event_context.run_id}"
+    human_input = encode_human_input(
+        current_user.text,
+        causal_occurrence_semantic_fingerprint=context_fingerprint(
+            "durable-runtime-benchmark-host-ingress-occurrence:v1",
+            (runtime_session.runtime_session_id, event_context.run_id),
+        ),
+    ).semantic_fact
+    ingress_placement = build_frozen_fact(
+        HostIngressItemPlacementFact,
+        schema_version="host_ingress_item_placement.v1",
+        item_kind="human_input",
+        item_semantic_fingerprint=human_input.semantic_fingerprint,
+        accepted_ingress_ordinal=1,
+        item_ordinal=0,
+    )
+    ingress_semantic = build_frozen_fact(
+        HostRunIngressSemanticFact,
+        schema_version="host_run_ingress_semantic.v1",
+        ordered_current_input_semantic_fingerprints=(
+            human_input.semantic_fingerprint,
+        ),
+    )
+    ingress_attribution = build_frozen_fact(
+        HostRunIngressAttributionFact,
+        schema_version="host_run_ingress_attribution.v1",
+        ingress_id=ingress_id,
+        host_session_id=f"host:benchmark:{runtime_session.runtime_session_id}",
+        conversation_id=None,
+        observed_at_utc=BENCHMARK_OBSERVED_AT_UTC,
+        ingress_semantic_fingerprint=(
+            ingress_semantic.ingress_semantic_fingerprint
+        ),
+        ordered_item_placements=(ingress_placement,),
+    )
+    host_run_ingress = build_frozen_fact(
+        HumanRunIngressFact,
+        schema_version="human_run_ingress.v1",
+        semantic_identity=ingress_semantic,
+        attribution=ingress_attribution,
+        human_message=human_input,
+        attached_runtime_notifications=(),
+    )
+    host_ingress_admission_proof = build_frozen_fact(
+        HostIngressAdmissionProofFact,
+        schema_version="host_ingress_admission_proof.v1",
+        admission_id=ingress_id,
+        admission_generation=1,
+        ingress_fact_fingerprint=host_run_ingress.fact_fingerprint,
+        selected_ingress_item_ids=(ingress_id,),
+        selected_notification_head_fingerprints=(),
+        expected_host_state_generation=0,
+        expected_permission_policy_revision=0,
+        expected_permission_policy_fingerprint=context_fingerprint(
+            "durable-runtime-benchmark-host-ingress-permission:v1",
+            permission_snapshot_id,
+        ),
+        expected_close_intent_revision=0,
+        expected_autonomy_chain_state_fingerprint=None,
+        proposed_automatic_delivery_ordinal=None,
+    )
     permission_mode = PermissionMode.BYPASS_PERMISSIONS
     run_start = RunStartEvent(
         id=run_start_event_id,
@@ -208,6 +278,8 @@ async def bootstrap_benchmark_root_run(
         ),
         run_entry_kind="host",
         current_user_message=current_user,
+        host_run_ingress=host_run_ingress,
+        host_ingress_admission_proof=host_ingress_admission_proof,
         run_transcript_seed_semantic=prepared_seed.seed_semantic,
         run_transcript_seed_reference=prepared_seed.seed_reference,
         terminal_run_end_event_id=f"run_end:{event_context.run_id}",

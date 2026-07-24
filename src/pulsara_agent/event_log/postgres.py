@@ -71,7 +71,9 @@ from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationAccountStateFact,
     PhysicalChargeContractFact,
 )
-from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    VerifiedPostgresConnectionProviderProtocol,
+)
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import (
     MessageReducer,
@@ -93,7 +95,7 @@ def _runtime_projection_prefix_payload(
 
 @dataclass(slots=True)
 class PostgresEventLog:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
     runtime_session_id: str
     workspace_root: str | Path | None = None
     write_timeout_seconds: float = 30.0
@@ -107,15 +109,10 @@ class PostgresEventLog:
         default_factory=dict, init=False, repr=False
     )
 
-    def __post_init__(self) -> None:
-        with postgres_event_connection(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
-
     def ensure_runtime_session_owner(self) -> None:
         """Create the session row needed by artifacts produced before RunStart."""
 
-        with postgres_event_connection(self.dsn) as connection:
+        with postgres_event_connection(self.connection_provider) as connection:
             with connection.cursor() as cursor:
                 self._lock_session(cursor)
                 self._ensure_session_row(cursor)
@@ -133,7 +130,7 @@ class PostgresEventLog:
         deadline = self._write_deadline(deadline_monotonic)
         with self._parent_cache_lock:
             with postgres_event_connection(
-                self.dsn,
+                self.connection_provider,
                 lane=PostgresConnectionLane.CRITICAL_WRITE,
                 deadline_monotonic=deadline,
             ) as connection:
@@ -185,7 +182,7 @@ class PostgresEventLog:
 
         with self._parent_cache_lock:
             with postgres_event_connection(
-                self.dsn,
+                self.connection_provider,
                 lane=PostgresConnectionLane.CRITICAL_WRITE,
                 deadline_monotonic=deadline,
             ) as connection:
@@ -231,7 +228,7 @@ class PostgresEventLog:
     ) -> LedgerMaterializationAccountStateFact | None:
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -262,7 +259,7 @@ class PostgresEventLog:
             raise ValueError("runtime projection kind is required")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -308,7 +305,7 @@ class PostgresEventLog:
     ) -> None:
         deadline = self._write_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.CRITICAL_WRITE,
             deadline_monotonic=deadline,
         ) as connection:
@@ -453,7 +450,7 @@ class PostgresEventLog:
         deadline = self._write_deadline(deadline_monotonic)
         with self._parent_cache_lock:
             with postgres_event_connection(
-                self.dsn,
+                self.connection_provider,
                 lane=PostgresConnectionLane.CRITICAL_WRITE,
                 deadline_monotonic=deadline,
             ) as connection:
@@ -601,11 +598,21 @@ class PostgresEventLog:
                     "stored bookkeeping envelope exceeds fixed charge bound"
                 )
 
-    def repair_run_projection(self) -> int:
+    def repair_run_projection(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> int:
         """Rebuild this session's runs summary rows from canonical events."""
 
-        with postgres_event_connection(self.dsn) as connection:
+        deadline = self._write_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.connection_provider,
+            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            deadline_monotonic=deadline,
+        ) as connection:
             with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=True)
                 self._lock_session(cursor)
                 cursor.execute(
                     """
@@ -671,6 +678,7 @@ class PostgresEventLog:
         turn_id: str | None = None,
         reply_id: str | None = None,
         after_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
         predicates = [sql.SQL("session_id = %s")]
         params: list[str] = [self.runtime_session_id]
@@ -701,9 +709,9 @@ class PostgresEventLog:
             """
         ).format(where=sql.SQL(" and ").join(predicates))
 
-        deadline = self._read_deadline(None)
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -715,10 +723,15 @@ class PostgresEventLog:
                     for row in cursor.fetchall()
                 ]
 
-    def get_by_id(self, event_id: str) -> AgentEvent | None:
-        deadline = self._read_deadline(None)
+    def get_by_id(
+        self,
+        event_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> AgentEvent | None:
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -738,7 +751,7 @@ class PostgresEventLog:
             raise ValueError("Confirmed event ids must be unique within one batch")
         deadline = self._write_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.CRITICAL_WRITE,
             deadline_monotonic=deadline,
         ) as connection:
@@ -808,7 +821,7 @@ class PostgresEventLog:
             raise ValueError("event range max_payload_bytes must be positive")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -886,7 +899,7 @@ class PostgresEventLog:
             return ()
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -919,7 +932,7 @@ class PostgresEventLog:
             raise ValueError("raw event ids must be unique")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -970,7 +983,7 @@ class PostgresEventLog:
             raise ValueError("raw event type high-water cannot be negative")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1008,7 +1021,7 @@ class PostgresEventLog:
             raise ValueError("model-call read bounds must be positive")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1067,7 +1080,7 @@ class PostgresEventLog:
             raise ValueError("sparse event read bounds are invalid")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1156,7 +1169,7 @@ class PostgresEventLog:
             raise ValueError("transcript registry contract fingerprint is required")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1278,7 +1291,7 @@ class PostgresEventLog:
         high_water: int | None = None
         ledger_prefix: RawTranscriptDomainPrefixFact | None = None
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1454,7 +1467,7 @@ class PostgresEventLog:
     ) -> RawTranscriptDomainPrefixFact:
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1477,7 +1490,7 @@ class PostgresEventLog:
             raise ValueError("reply event read bounds are invalid")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1526,7 +1539,7 @@ class PostgresEventLog:
         selected: list[RawStoredEventEnvelope] = []
         payload_bytes = 0
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1593,7 +1606,7 @@ class PostgresEventLog:
             raise ValueError("run event read bounds are invalid")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1643,7 +1656,7 @@ class PostgresEventLog:
             raise ValueError("checkpoint read bounds are invalid")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1807,10 +1820,10 @@ class PostgresEventLog:
             reducer.append(event)
         return reducer.message
 
-    def next_sequence(self) -> int:
-        deadline = self._read_deadline(None)
+    def next_sequence(self, *, deadline_monotonic: float | None = None) -> int:
+        deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:
@@ -1827,7 +1840,7 @@ class PostgresEventLog:
 
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
-            self.dsn,
+            self.connection_provider,
             lane=PostgresConnectionLane.BOUNDED_READ,
             deadline_monotonic=deadline,
         ) as connection:

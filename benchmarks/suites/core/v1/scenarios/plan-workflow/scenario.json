@@ -35,7 +35,6 @@
     "max_model_calls": 16,
     "min_tool_calls": 5,
     "max_tool_calls": 32,
-    "max_total_tokens": 260000,
     "event_count_minimums": [
       {"event_type": "PLAN_EXIT_REQUESTED", "minimum": 1},
       {"event_type": "PLAN_EXIT_RESOLVED", "minimum": 1},

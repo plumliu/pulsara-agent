@@ -167,7 +167,7 @@ def test_terminal_runtime_yield_keeps_partial_output_and_does_not_kill(tmp_path)
     result = run(
         session,
         "python -c 'import time; print(\"before\", flush=True); time.sleep(5)'",
-        yield_time_ms=200,
+        yield_time_ms=1_000,
     )
 
     assert result.status is TerminalStatus.RUNNING

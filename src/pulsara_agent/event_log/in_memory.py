@@ -378,7 +378,9 @@ class InMemoryEventLog:
         turn_id: str | None = None,
         reply_id: str | None = None,
         after_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
+        del deadline_monotonic
         with self._lock:
             events = [
                 raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
@@ -396,7 +398,13 @@ class InMemoryEventLog:
             events = [event for event in events if event.reply_id == reply_id]
         return [_owned_event(event) for event in events]
 
-    def get_by_id(self, event_id: str) -> AgentEvent | None:
+    def get_by_id(
+        self,
+        event_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> AgentEvent | None:
+        del deadline_monotonic
         with self._lock:
             raw = next(
                 (event for event in self._raw_events if event.event_id == event_id),
@@ -1040,7 +1048,8 @@ class InMemoryEventLog:
             reducer.append(event)
         return reducer.message
 
-    def next_sequence(self) -> int:
+    def next_sequence(self, *, deadline_monotonic: float | None = None) -> int:
+        del deadline_monotonic
         with self._lock:
             return self._next_sequence
 

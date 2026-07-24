@@ -23,6 +23,16 @@ from pulsara_agent.runtime import (
     PlanQuestionOption,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.context import (
+    ContextEventReferenceFact,
+    context_fingerprint,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.mcp import McpBindingIdentityFact
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredSuspensionFact,
+    prepare_mcp_input_required_suspension,
+)
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
@@ -57,7 +67,41 @@ class _CheckpointReport:
         return dict(self.payload)
 
 
+class _FakePostgresAccessLease:
+    def __init__(self) -> None:
+        self.connection_provider = object()
+        self.released = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        self.released = True
+
+
+class _FakePostgresVerificationService:
+    def __init__(self, lease: _FakePostgresAccessLease) -> None:
+        self.lease = lease
+
+    async def acquire(self, *_args, **_kwargs) -> _FakePostgresAccessLease:
+        return self.lease
+
+
+def _install_checkpoint_access(monkeypatch) -> _FakePostgresAccessLease:
+    lease = _FakePostgresAccessLease()
+    monkeypatch.setattr(
+        cli,
+        "acquire_verified_postgres_access_sync",
+        lambda *_args, **_kwargs: lease,
+    )
+    return lease
+
+
 def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -81,9 +125,9 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: event_log)
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: archive)
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: archive)
     monkeypatch.setattr(
-        cli, "PostgresCheckpointMaintenanceAuthority", lambda _dsn: authority
+        cli, "PostgresCheckpointMaintenanceAuthority", lambda _provider: authority
     )
 
     def doctor(**kwargs):
@@ -107,6 +151,7 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
 def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
     monkeypatch,
 ) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -126,11 +171,13 @@ def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: SimpleNamespace())
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: SimpleNamespace())
+    monkeypatch.setattr(
+        cli, "PostgresArtifactStore", lambda _provider: SimpleNamespace()
+    )
     monkeypatch.setattr(
         cli,
         "PostgresCheckpointMaintenanceAuthority",
-        lambda _dsn: SimpleNamespace(),
+        lambda _provider: SimpleNamespace(),
     )
 
     with pytest.raises(ValueError, match="--through-sequence is unsupported"):
@@ -138,6 +185,7 @@ def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
 
 
 def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> None:
+    _install_checkpoint_access(monkeypatch)
     args = cli.build_parser().parse_args(
         [
             "checkpoint",
@@ -158,11 +206,11 @@ def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> 
         ),
     )
     monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: "event-log")
-    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: "archive")
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: "archive")
     monkeypatch.setattr(
         cli,
         "PostgresCheckpointMaintenanceAuthority",
-        lambda _dsn: "maintenance-authority",
+        lambda _provider: "maintenance-authority",
     )
 
     def gc(**kwargs):
@@ -386,10 +434,22 @@ class FakeCore:
 
 @pytest.fixture
 def inspect_wiring(monkeypatch):
+    lease = _FakePostgresAccessLease()
     monkeypatch.setattr(
         cli.PulsaraSettings,
         "from_env",
-        classmethod(lambda cls, prefix="PULSARA": object()),
+        classmethod(
+            lambda cls, prefix="PULSARA": SimpleNamespace(
+                storage=SimpleNamespace(
+                    postgres_dsn="postgresql://runtime@localhost/test"
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "process_postgres_schema_verification_service",
+        lambda: _FakePostgresVerificationService(lease),
     )
 
     def _build(_settings, workspace_root, **_kwargs):
@@ -730,6 +790,45 @@ def test_repl_prompt_message_stays_in_plan_mode_without_pending_interaction() ->
 
 def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
     session = FakeSession()
+    prepared = prepare_mcp_input_required_suspension(
+        interaction_id="mcp_input_required:test",
+        tool_call_id="call:test",
+        tool_name="mcp__docs__lookup",
+        server_id="docs",
+        round_count=1,
+        binding_identity=McpBindingIdentityFact(
+            server_id="docs",
+            slot_id="slot:docs",
+            snapshot_id="snapshot:docs",
+            discovery_generation=1,
+        ),
+        pending_lease_reservation_id="mcp_pending_lease:test",
+        protocol_version="2026-07-28",
+        input_requests=(),
+        original_request={"source_method": "tools/call"},
+        request_state=None,
+        deadline_monotonic=None,
+    )
+    suspension = build_frozen_fact(
+        McpInputRequiredSuspensionFact,
+        schema_version="mcp_input_required_suspension.v1",
+        interaction=prepared.interaction,
+        binding_identity=prepared.binding_identity,
+        pending_lease_reservation=prepared.pending_lease_reservation,
+        request_envelope=prepared.request_envelope,
+        rollout_reservation_id="rollout_reservation:test",
+        rollout_reservation_fingerprint=context_fingerprint(
+            "test-cli-rollout-reservation:v1",
+            "rollout_reservation:test",
+        ),
+        source_mcp_installation_id="mcp_installation:test",
+        durable_deadline_utc=None,
+        deadline_policy_fingerprint=context_fingerprint(
+            "test-cli-mcp-deadline-policy:v1",
+            "session-reopen-terminalizes",
+        ),
+        predecessor_resolution_submitted_event_reference=None,
+    )
     pending = PendingMcpInputRequired(
         interaction_id="mcp_input_required:test",
         kind="mcp_input_required",
@@ -741,10 +840,19 @@ def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
         tool_call_id="call:test",
         tool_name="mcp__docs__lookup",
         server_id="docs",
-        protocol_version="2026-07-28",
-        request_state=None,
+        source_suspension_event_reference=ContextEventReferenceFact(
+            runtime_session_id=session.runtime_session_id,
+            event_id="tool-execution-suspended:test",
+            sequence=1,
+            event_type="TOOL_EXECUTION_SUSPENDED",
+            payload_fingerprint=context_fingerprint(
+                "test-cli-mcp-suspension-event:v1",
+                "tool-execution-suspended:test",
+            ),
+        ),
+        suspension_fact=suspension,
+        prepared_suspension=prepared,
         input_requests=(),
-        original_request={"source_method": "tools/call"},
     )
     session.get_pending_interaction = lambda: pending
 

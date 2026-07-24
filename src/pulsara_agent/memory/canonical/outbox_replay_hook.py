@@ -8,11 +8,14 @@ from pulsara_agent.event import EventType, RunEndEvent
 from pulsara_agent.graph import OxigraphGraphStore
 from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
 from pulsara_agent.runtime.hooks import HookContext
+from pulsara_agent.storage.postgres_connection_provider import (
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(slots=True)
 class CanonicalMutationOutboxReplayHook:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
     graph_id: str | None
     oxigraph_url: str | None = None
     limit: int = 100
@@ -21,7 +24,7 @@ class CanonicalMutationOutboxReplayHook:
         if not _should_replay(event):
             return
         reconciler = PostgresMemoryReconciler(
-            dsn=self.dsn,
+            connection_provider=self.connection_provider,
             oxigraph=OxigraphGraphStore(self.oxigraph_url) if self.oxigraph_url else None,
         )
         reconciler.replay_outbox(graph_id=self.graph_id, limit=self.limit)

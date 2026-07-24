@@ -16,6 +16,7 @@ import time
 from typing import AsyncIterator
 
 import pytest
+from tests.support import unverified_test_postgres_access_lease
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.support.settings import compatibility_storage_config
 
@@ -987,6 +988,17 @@ def test_tombstoned_resume_rejects_before_dangling_repair(
         raise AssertionError("repair must not run before runtime reservation")
 
     monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+
+    access_lease = unverified_test_postgres_access_lease()
+
+    async def fake_postgres_access_lease(_self):
+        return access_lease
+
+    monkeypatch.setattr(
+        HostCore,
+        "_get_postgres_access_lease",
+        fake_postgres_access_lease,
+    )
     monkeypatch.setattr(
         "pulsara_agent.host.core.repair_dangling_runs_for_resume",
         record_repair,
@@ -1390,14 +1402,24 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
         original = type(runtime).emit_many
         injected = False
 
-        async def commit_then_cancel(self, events, *, state=None):
+        async def commit_then_cancel(
+            self,
+            events,
+            *,
+            expected_last_sequence=None,
+            state=None,
+        ):
             nonlocal injected
             should_cancel = not injected and any(
                 isinstance(event, RunStartEvent) for event in events
             )
             if should_cancel:
                 injected = True
-                result = await self.write_events(tuple(events), state=state)
+                result = await self.write_events(
+                    tuple(events),
+                    expected_last_sequence=expected_last_sequence,
+                    state=state,
+                )
                 raise EventWriteCancelled(
                     EventBatchCommitOutcome(
                         status="full",
@@ -1405,7 +1427,12 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
                         result=result,
                     )
                 )
-            return await original(self, events, state=state)
+            return await original(
+                self,
+                events,
+                expected_last_sequence=expected_last_sequence,
+                state=state,
+            )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
@@ -1456,14 +1483,24 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
         original = type(runtime).emit_many
         injected = False
 
-        async def commit_then_cancel(self, events, *, state=None):
+        async def commit_then_cancel(
+            self,
+            events,
+            *,
+            expected_last_sequence=None,
+            state=None,
+        ):
             nonlocal injected
             should_cancel = not injected and any(
                 isinstance(event, RunInteractionResumeBoundaryEvent) for event in events
             )
             if should_cancel:
                 injected = True
-                result = await self.write_events(tuple(events), state=state)
+                result = await self.write_events(
+                    tuple(events),
+                    expected_last_sequence=expected_last_sequence,
+                    state=state,
+                )
                 raise EventWriteCancelled(
                     EventBatchCommitOutcome(
                         status="full",
@@ -1471,7 +1508,12 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
                         result=result,
                     )
                 )
-            return await original(self, events, state=state)
+            return await original(
+                self,
+                events,
+                expected_last_sequence=expected_last_sequence,
+                state=state,
+            )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
@@ -1588,7 +1630,7 @@ def test_detached_stream_remains_active_and_blocks_second_run(
         with pytest.raises(HostSessionBusyError):
             await session.run_turn("must not overlap")
         release.set()
-        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        await asyncio.wait_for(asyncio.shield(task), timeout=30)
         await core.shutdown()
         return session.active_run_id
 

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
-    CustomEvent,
     EventContext,
     RolloutBudgetAccountOpenedEvent,
     RolloutBudgetReservationCreatedEvent,
@@ -14,6 +13,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultTextDeltaEvent,
 )
+from tests.support.events import typed_non_transcript_event
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.user_carrier import context_source_observation_payload
 from pulsara_agent.primitives.context import context_fingerprint
@@ -122,7 +122,7 @@ def test_non_exploration_candidate_is_required_neutral_and_checkpoint_stable() -
     assert "continue working" not in lowered
     assert "stop working" not in lowered
 
-    checkpoint = CustomEvent(
+    checkpoint = typed_non_transcript_event(
         **CTX.event_fields(),
         id="projection-checkpoint:unrelated",
         sequence=3,

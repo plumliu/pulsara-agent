@@ -427,6 +427,7 @@ def test_durable_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> N
         build_durable_runtime_wiring(
             _settings_for_storage(storage),
             tmp_path,
+            postgres_access_lease=object(),
             runtime_session_id=f"runtime:test:{uuid4().hex}",
             graph_id="graph:user/u_test",
         )

@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+from time import monotonic
 from typing import Literal
 from uuid import uuid4
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -16,7 +16,10 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class GovernanceEventDispatchError(RuntimeError):
@@ -142,19 +145,24 @@ class EphemeralGovernanceEventOutboxRepository:
 
 @dataclass(slots=True)
 class PostgresGovernanceEventOutboxStore:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
     runtime_session_id: str
     claim_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if self.claim_seconds <= 0:
             raise ValueError("governance outbox claim duration must be positive")
-        with psycopg.connect(self.dsn) as connection:
-            connection.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+
+    def _connection(self, *, row_factory: object | None = None):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.GOVERNANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def claim(self, outbox_id: str | None = None) -> _ClaimedGovernanceEventBatch | None:
         claim_token = f"governance-event-claim:{uuid4().hex}"
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 if outbox_id is None:
                     selection = """
@@ -219,7 +227,7 @@ class PostgresGovernanceEventOutboxStore:
     def mark_applied(self, claim: _ClaimedGovernanceEventBatch) -> None:
         if claim.status == "applied":
             return
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             result = connection.execute(
                 """
                 UPDATE memory_governance_event_outbox
@@ -246,7 +254,7 @@ class PostgresGovernanceEventOutboxStore:
         if claim.status == "applied":
             return
         stable_code = error_code[:128] or "governance_event_dispatch_failed"
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 UPDATE memory_governance_event_outbox
@@ -259,7 +267,7 @@ class PostgresGovernanceEventOutboxStore:
             )
 
     def has_pending(self) -> bool:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT EXISTS (

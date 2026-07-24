@@ -26,6 +26,9 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.plan import PlanExitResolution, PlanQuestionResolution
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.storage.schema_verification_service import (
+    acquire_verified_postgres_access_sync,
+)
 
 from benchmarks.suites.contracts import (
     AssertionResultFact,
@@ -150,11 +153,16 @@ class CoreDogfoodRunner:
         root_run_reports: list[dict[str, object]] = []
         inspected_texts: list[str] = []
         if runtime_session_id is not None:
-            inspector = InspectorService(
-                PostgresInspectorStore(self.settings.storage.postgres_dsn),
-                oxigraph_url=self.settings.storage.oxigraph_url,
+            postgres_lease = await asyncio.to_thread(
+                acquire_verified_postgres_access_sync,
+                self.settings.storage.postgres_dsn,
+                deadline_monotonic=time.monotonic() + 30.0,
             )
             try:
+                inspector = InspectorService(
+                    PostgresInspectorStore(postgres_lease.connection_provider),
+                    oxigraph_url=self.settings.storage.oxigraph_url,
+                )
                 session_report = await asyncio.to_thread(
                     inspector.inspect_session,
                     runtime_session_id,
@@ -175,6 +183,8 @@ class CoreDogfoodRunner:
                     if execution_error
                     else f"inspector={inspector_error}"
                 )
+            finally:
+                postgres_lease.release()
 
         graded = grade_durable_evidence(
             scenario=scenario.contract,

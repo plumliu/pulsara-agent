@@ -16,6 +16,9 @@ from pulsara_agent.runtime.subagent.types import (
     SubagentStatus,
     SubagentTaskProjection,
 )
+from pulsara_agent.storage.postgres_connection_provider import (
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 class EventLogLocator(Protocol):
@@ -43,8 +46,13 @@ class InMemoryEventLogLocator:
 class PostgresEventLogLocator:
     """Open child ledgers by runtime-session id over the shared PostgreSQL truth store."""
 
-    def __init__(self, *, dsn: str, workspace_root: str | Path) -> None:
-        self._dsn = dsn
+    def __init__(
+        self,
+        *,
+        connection_provider: VerifiedPostgresConnectionProviderProtocol,
+        workspace_root: str | Path,
+    ) -> None:
+        self._connection_provider = connection_provider
         self._workspace_root = Path(workspace_root).expanduser().resolve()
         self._lock = RLock()
         self._logs: dict[str, EventLog] = {}
@@ -60,7 +68,7 @@ class PostgresEventLogLocator:
             event_log = self._logs.get(runtime_session_id)
             if event_log is None:
                 event_log = PostgresEventLog(
-                    dsn=self._dsn,
+                    connection_provider=self._connection_provider,
                     runtime_session_id=runtime_session_id,
                     workspace_root=self._workspace_root,
                 )

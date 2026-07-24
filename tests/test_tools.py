@@ -37,6 +37,11 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.primitives.terminal_observation import (
     ArtifactTerminalObservationCoverageFact,
 )
+from pulsara_agent.primitives.mcp import McpBindingIdentityFact
+from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    prepare_mcp_input_required_suspension,
+)
 from pulsara_agent.tools import (
     ToolCall,
     ToolExecutionResult,
@@ -103,7 +108,29 @@ class _AsyncSuspendingTool:
             tool_call_id=call.id,
             tool_name=call.name,
             interaction_kind="mcp_input_required",
-            payload={"request_state": "needs-more-input"},
+            prepared_mcp_input_required=prepare_mcp_input_required_suspension(
+                interaction_id=f"mcp_input_required:{call.id}",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                server_id="test-mcp",
+                round_count=1,
+                binding_identity=McpBindingIdentityFact(
+                    server_id="test-mcp",
+                    slot_id="slot:test-mcp",
+                    snapshot_id="snapshot:test-mcp",
+                    discovery_generation=1,
+                ),
+                pending_lease_reservation_id=f"mcp_pending_lease:{call.id}",
+                protocol_version="test",
+                input_requests=(),
+                original_request={
+                    "source_method": "tools/call",
+                    "tool_name": call.name,
+                    "arguments": call.arguments,
+                },
+                request_state="needs-more-input",
+                deadline_monotonic=None,
+            ),
         )
 
 
@@ -231,7 +258,11 @@ def test_async_suspended_tool_payload_gets_observation_timing_seed() -> None:
 
     suspended = asyncio.run(run_probe())
 
-    seed = suspended.payload["tool_observation_timing_seed"]
+    frozen_seed = (
+        suspended.prepared_mcp_input_required.tool_observation_timing_seed
+    )
+    assert frozen_seed is not None
+    seed = thaw_json(frozen_seed)
     assert seed["tool_call_id"] == "call:async-suspend"
     assert seed["tool_name"] == tool.name
     assert seed["tool_origin"] == "unknown"

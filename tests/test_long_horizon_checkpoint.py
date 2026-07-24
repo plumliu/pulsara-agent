@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 import ast
 import json
@@ -152,9 +154,7 @@ def _write_checkpoint_artifact(runtime, prepared) -> None:
             "artifact_kind": "subagent_graph_checkpoint",
             "checkpoint_id": prepared.checkpoint.checkpoint_id,
             "content_sha256": artifact.content_sha256,
-            "semantic_metadata_fingerprint": (
-                artifact.semantic_metadata_fingerprint
-            ),
+            "semantic_metadata_fingerprint": (artifact.semantic_metadata_fingerprint),
         },
     )
 
@@ -219,7 +219,7 @@ def _postgres_log_or_skip(tmp_path: Path):
         runtime_session_id,
         context,
         PostgresEventLog(
-            dsn=dsn,
+            connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,
         ),
@@ -229,9 +229,7 @@ def _postgres_log_or_skip(tmp_path: Path):
 def _cleanup_postgres_session(dsn: str, runtime_session_id: str) -> None:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "delete from sessions where id = %s", (runtime_session_id,)
-            )
+            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 
 def test_checkpoint_export_is_canonical_and_order_independent() -> None:
@@ -296,10 +294,13 @@ def test_checkpoint_artifact_same_id_same_bytes_is_idempotent(tmp_path) -> None:
     _write_checkpoint_artifact(runtime, prepared)
 
     assert tuple(runtime.archive.blobs) == (prepared.artifact.artifact_id,)
-    assert runtime.archive.get_text(
-        prepared.artifact.artifact_id,
-        session_id=RUNTIME_ID,
-    ).encode("utf-8") == prepared.artifact_payload_bytes
+    assert (
+        runtime.archive.get_text(
+            prepared.artifact.artifact_id,
+            session_id=RUNTIME_ID,
+        ).encode("utf-8")
+        == prepared.artifact_payload_bytes
+    )
 
 
 def test_checkpoint_artifact_metadata_only_conflict_fails_closed(tmp_path) -> None:
@@ -396,11 +397,12 @@ def test_checkpoint_restore_matches_full_fold(tmp_path) -> None:
     for envelope in raw:
         full = binding.fold_stored_event(full, envelope)
 
-    assert graph_state_semantic_fingerprint(restored) == graph_state_semantic_fingerprint(
-        full
-    )
-    assert semantic.graph_state_semantic_fingerprint == graph_state_semantic_fingerprint(
-        full
+    assert graph_state_semantic_fingerprint(
+        restored
+    ) == graph_state_semantic_fingerprint(full)
+    assert (
+        semantic.graph_state_semantic_fingerprint
+        == graph_state_semantic_fingerprint(full)
     )
     assert acceleration.checkpoint_id == prepared.checkpoint.checkpoint_id
     assert acceleration.delta_count == 1
@@ -485,7 +487,9 @@ def test_checkpoint_schedule_does_not_change_semantic_source_or_selection_finger
     )
 
 
-def test_graph_semantic_payload_fingerprint_cannot_reuse_storage_payload_with_sequence() -> None:
+def test_graph_semantic_payload_fingerprint_cannot_reuse_storage_payload_with_sequence() -> (
+    None
+):
     binding = build_default_subagent_graph_reducer_binding()
     first_log = InMemoryEventLog(runtime_session_id="runtime:first")
     second_log = InMemoryEventLog(runtime_session_id="runtime:second")
@@ -499,9 +503,7 @@ def test_graph_semantic_payload_fingerprint_cannot_reuse_storage_payload_with_se
     assert first.payload_fingerprint != second.payload_fingerprint
     assert graph_semantic_payload_fingerprint(
         envelope=first, contract=binding.contract
-    ) == graph_semantic_payload_fingerprint(
-        envelope=second, contract=binding.contract
-    )
+    ) == graph_semantic_payload_fingerprint(envelope=second, contract=binding.contract)
 
 
 def test_checkpoint_does_not_include_its_own_materialization_event(tmp_path) -> None:
@@ -574,10 +576,7 @@ def test_checkpoint_delta_bound_blocks_unbounded_full_fold(tmp_path) -> None:
     runtime.event_log.append(_non_graph("event:delta-bound:one"))
     prepared, _stored = _materialize_checkpoint(runtime, 1)
     runtime.event_log.extend(
-        tuple(
-            _non_graph(f"event:delta-bound:{index}")
-            for index in range(3, 8)
-        )
+        tuple(_non_graph(f"event:delta-bound:{index}") for index in range(3, 8))
     )
     service = runtime.subagent_graph_checkpoint_service
     service.policy = service.policy.model_copy(
@@ -611,18 +610,14 @@ def test_graph_checkpoint_delta_bound_uses_shared_ledger_hard_horizon() -> None:
         ),
     )
 
-    assert (
-        policy.checkpoint_max_delta_events
-        == limits.max_unreclaimable_ledger_events
-    )
+    assert policy.checkpoint_max_delta_events == limits.max_unreclaimable_ledger_events
     assert (
         policy.checkpoint_max_delta_bytes
         == limits.max_unreclaimable_charged_payload_bytes
     )
     assert policy.checkpoint_max_delta_events > MAX_MODEL_CALL_MATERIALIZATION_EVENTS
     assert (
-        policy.checkpoint_max_delta_bytes
-        > MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES
+        policy.checkpoint_max_delta_bytes > MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES
     )
 
 
@@ -675,10 +670,13 @@ def test_existing_checkpoint_catalog_with_missing_artifacts_does_not_use_bootstr
                 requested_through_sequence=1
             )
         )
-    assert sum(
-        event.type is EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED
-        for event in runtime.event_log.iter()
-    ) == 1
+    assert (
+        sum(
+            event.type is EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED
+            for event in runtime.event_log.iter()
+        )
+        == 1
+    )
 
 
 def test_checkpoint_writer_cancel_after_commit_confirms_full(
@@ -760,44 +758,42 @@ def test_event_schema_fingerprint_is_canonical_under_schema_key_order() -> None:
 def test_same_event_type_version_with_different_schema_fingerprint_is_registry_conflict() -> (
     None
 ):
-    class FirstCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class FirstProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class ChangedCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class ChangedProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: int
 
     registry = EventSchemaDomainRegistry()
     registry.register(
-        event_model=FirstCustomEvent,
+        event_model=FirstProjectionRequestedEvent,
         event_schema_version="agent-event:custom:test-v1",
     )
     with pytest.raises(EventSchemaRegistryConflict):
         registry.register(
-            event_model=ChangedCustomEvent,
+            event_model=ChangedProjectionRequestedEvent,
             event_schema_version="agent-event:custom:test-v1",
         )
 
 
-def test_event_schema_semantic_change_requires_version_and_fingerprint_change() -> (
-    None
-):
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+def test_event_schema_semantic_change_requires_version_and_fingerprint_change() -> None:
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class ChangedCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class ChangedProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: int
 
     registry = EventSchemaDomainRegistry()
     first = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:semantic-v1",
     )
     second = registry.register(
-        event_model=ChangedCustomEvent,
+        event_model=ChangedProjectionRequestedEvent,
         event_schema_version="agent-event:custom:semantic-v2",
     )
 
@@ -810,37 +806,33 @@ def test_event_schema_semantic_change_requires_version_and_fingerprint_change() 
 
 
 def test_historical_decoder_restores_old_schema_before_current_union() -> None:
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         legacy_value: str
 
     registry = EventSchemaDomainRegistry()
     binding = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:legacy-v0",
     )
     payload = canonical_json_bytes(
-        LegacyCustomEvent(legacy_value="historical").model_dump(mode="json")
+        LegacyProjectionRequestedEvent(legacy_value="historical").model_dump(mode="json")
     )
     resolved = registry.resolve_historical_binding(
-        event_type=str(EventType.CUSTOM),
+        event_type=str(EventType.PROJECTION_REQUESTED),
         event_schema_version=binding.schema_contract.event_schema_version,
-        event_schema_fingerprint=(
-            binding.schema_contract.event_schema_fingerprint
-        ),
+        event_schema_fingerprint=(binding.schema_contract.event_schema_fingerprint),
         event_domain_contract_fingerprint=(
             binding.schema_contract.domain_contract_fingerprint
         ),
     )
 
     decoded = resolved.decode_owned_payload(payload)
-    assert isinstance(decoded, LegacyCustomEvent)
+    assert isinstance(decoded, LegacyProjectionRequestedEvent)
     assert decoded.legacy_value == "historical"
 
 
-def test_historical_decoder_contract_fingerprint_drift_is_contract_mismatch() -> (
-    None
-):
+def test_historical_decoder_contract_fingerprint_drift_is_contract_mismatch() -> None:
     contract = DEFAULT_EVENT_SCHEMA_REGISTRY.latest_contract_for_type(
         str(EventType.TEXT_BLOCK_SEGMENT)
     )
@@ -868,22 +860,22 @@ def test_event_schema_domain_fingerprint_drift_is_contract_mismatch() -> None:
 
 
 def test_historical_event_domain_binding_rebinds_after_registry_upgrade() -> None:
-    class LegacyCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class LegacyProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class CurrentCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class CurrentProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         generation: int
 
     registry = EventSchemaDomainRegistry()
     legacy = registry.register(
-        event_model=LegacyCustomEvent,
+        event_model=LegacyProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-v1",
     )
     registry.register(
-        event_model=CurrentCustomEvent,
+        event_model=CurrentProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-v2",
     )
 
@@ -899,22 +891,22 @@ def test_historical_event_domain_binding_rebinds_after_registry_upgrade() -> Non
 
 
 def test_event_domain_is_immutable_for_event_type_and_schema_version() -> None:
-    class FirstCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class FirstProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
 
-    class NextCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class NextProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         generation: int
 
     registry = EventSchemaDomainRegistry()
     first = registry.register(
-        event_model=FirstCustomEvent,
+        event_model=FirstProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-stable-v1",
     )
     second = registry.register(
-        event_model=NextCustomEvent,
+        event_model=NextProjectionRequestedEvent,
         event_schema_version="agent-event:custom:domain-stable-v2",
     )
 
@@ -922,9 +914,7 @@ def test_event_domain_is_immutable_for_event_type_and_schema_version() -> None:
     assert second.schema_contract.event_domain == first.schema_contract.event_domain
 
 
-def test_new_non_graph_event_does_not_change_existing_graph_reducer_contract() -> (
-    None
-):
+def test_new_non_graph_event_does_not_change_existing_graph_reducer_contract() -> None:
     registry = EventSchemaDomainRegistry()
     for event_model in get_args(AgentEvent):
         event_type = str(event_model.model_fields["type"].default)
@@ -935,13 +925,13 @@ def test_new_non_graph_event_does_not_change_existing_graph_reducer_contract() -
         )
     before = build_default_subagent_graph_reducer_binding(registry).contract
 
-    class AdditionalCustomEvent(BaseModel):
-        type: Literal[EventType.CUSTOM] = EventType.CUSTOM
+    class AdditionalProjectionRequestedEvent(BaseModel):
+        type: Literal[EventType.PROJECTION_REQUESTED] = EventType.PROJECTION_REQUESTED
         value: str
         additional_non_graph_field: bool
 
     registry.register(
-        event_model=AdditionalCustomEvent,
+        event_model=AdditionalProjectionRequestedEvent,
         event_schema_version="agent-event:custom:additional-non-graph-v2",
     )
     after = build_default_subagent_graph_reducer_binding(registry).contract
@@ -1016,9 +1006,7 @@ def test_reducer_semantic_change_requires_version_and_contract_fingerprint_chang
     assert rebound.contract == changed
 
 
-def test_graph_state_semantic_fingerprint_excludes_event_sequence_attribution() -> (
-    None
-):
+def test_graph_state_semantic_fingerprint_excludes_event_sequence_attribution() -> None:
     binding = build_default_subagent_graph_reducer_binding()
     first_log = InMemoryEventLog(runtime_session_id="runtime:first-state")
     second_log = InMemoryEventLog(runtime_session_id="runtime:second-state")
@@ -1234,7 +1222,7 @@ def test_checkpoint_gc_requires_exclusive_postgres_advisory_maintenance_lock(
                 """,
                 (runtime_session_id,),
             )
-    authority = PostgresCheckpointMaintenanceAuthority(dsn)
+    authority = PostgresCheckpointMaintenanceAuthority(verified_postgres_provider(dsn))
     try:
         with authority.acquire_shared(runtime_session_id):
             with pytest.raises(CheckpointMaintenanceLockUnavailable):
@@ -1284,7 +1272,7 @@ def test_checkpoint_maintenance_lock_is_released_when_process_connection_dies(
     event_log.ensure_runtime_session_owner()
     lock_key = f"pulsara:checkpoint-maintenance:{runtime_session_id}"
     owner = psycopg.connect(dsn)
-    authority = PostgresCheckpointMaintenanceAuthority(dsn)
+    authority = PostgresCheckpointMaintenanceAuthority(verified_postgres_provider(dsn))
     try:
         with owner.cursor() as cursor:
             cursor.execute(
@@ -1411,11 +1399,7 @@ def test_compiler_and_live_replay_cannot_import_or_call_offline_repair() -> None
     }
     for path in production_files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        names = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-        }
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         modules = {
             node.module or ""
             for node in ast.walk(tree)
@@ -1490,9 +1474,7 @@ def test_rebase_compares_semantic_source_graph_selection_and_candidates(
     preferred_graph, preferred_semantic, _preferred_acceleration = (
         restore_subagent_graph_from_checkpoint(
             snapshot=preferred_snapshot,
-            reducer_binding=(
-                runtime.subagent_graph_checkpoint_service.reducer_binding
-            ),
+            reducer_binding=(runtime.subagent_graph_checkpoint_service.reducer_binding),
         )
     )
     runtime.archive.blobs.pop(newer.artifact.artifact_id)
@@ -1505,9 +1487,7 @@ def test_rebase_compares_semantic_source_graph_selection_and_candidates(
     rebased_graph, rebased_semantic, rebased_acceleration = (
         restore_subagent_graph_from_checkpoint(
             snapshot=rebased_snapshot,
-            reducer_binding=(
-                runtime.subagent_graph_checkpoint_service.reducer_binding
-            ),
+            reducer_binding=(runtime.subagent_graph_checkpoint_service.reducer_binding),
         )
     )
     policy = resolve_context_compile_policy(LoopBudget()).candidate_collection
@@ -1564,9 +1544,7 @@ def test_readable_preferred_checkpoint_with_oversized_delta_uses_newer_compatibl
     assert len(snapshot.delta_events) == 2
 
 
-def test_checkpoint_unknown_keeps_physical_owner(
-    tmp_path, monkeypatch
-) -> None:
+def test_checkpoint_unknown_keeps_physical_owner(tmp_path, monkeypatch) -> None:
     runtime = in_memory_runtime_session(tmp_path, runtime_session_id=RUNTIME_ID)
     runtime.event_log.append(_non_graph("event:unknown:one"))
 
@@ -1658,10 +1636,13 @@ def test_checkpoint_gc_does_not_pin_historical_manifest_artifact(tmp_path) -> No
     )
     assert report.deleted_checkpoint_ids == (oldest.checkpoint.checkpoint_id,)
     assert oldest.artifact.artifact_id not in runtime.archive.blobs
-    assert sum(
-        isinstance(event, SubagentGraphCheckpointCommittedEvent)
-        for event in runtime.event_log.iter()
-    ) == 3
+    assert (
+        sum(
+            isinstance(event, SubagentGraphCheckpointCommittedEvent)
+            for event in runtime.event_log.iter()
+        )
+        == 3
+    )
 
 
 def test_checkpoint_gc_identity_mismatch_fails_closed(tmp_path) -> None:
@@ -1858,10 +1839,7 @@ def test_checkpoint_delta_snapshot_is_one_database_snapshot(
 
             def fetchone(self):
                 row = self._cursor.fetchone()
-                if (
-                    "as high_water" in self._last_query
-                    and not pause_claimed.is_set()
-                ):
+                if "as high_water" in self._last_query and not pause_claimed.is_set():
                     pause_claimed.set()
                     high_water_read.set()
                     if not late_append_finished.wait(timeout=5):
@@ -1916,9 +1894,7 @@ def test_checkpoint_delta_snapshot_is_one_database_snapshot(
         worker = Thread(target=append_late_checkpoint, daemon=True)
         worker.start()
         snapshot = log.read_raw_checkpoint_ledger_snapshot(
-            checkpoint_event_type=str(
-                EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED
-            ),
+            checkpoint_event_type=str(EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED),
             requested_through_sequence=2,
             graph_reducer_id=binding.contract.graph_reducer_id,
             graph_reducer_version=binding.contract.graph_reducer_version,

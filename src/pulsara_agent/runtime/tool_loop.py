@@ -29,6 +29,9 @@ from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.primitives.tool_result import ToolResultExecutionSemanticsFact
 from pulsara_agent.primitives.tool_result import ToolResultStateFact
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    McpInputRequiredTerminalSourceFact,
+)
 from pulsara_agent.capability.result_semantics import (
     build_unknown_result_semantics,
 )
@@ -72,6 +75,9 @@ def build_tool_result_error_events(
     ]
     | None = None,
     existing_start: ToolResultStartEvent | None = None,
+    mcp_input_required_terminal_source: (
+        McpInputRequiredTerminalSourceFact | None
+    ) = None,
 ) -> list[AgentEvent | ToolResultEndCandidate]:
     if semantics is not None and semantics_factory is not None:
         raise ValueError("tool result semantics and factory are mutually exclusive")
@@ -122,6 +128,7 @@ def build_tool_result_error_events(
         artifacts=(),
         observation_timing=timing,
         execution_semantics=actual_semantics,
+        mcp_input_required_terminal_source=mcp_input_required_terminal_source,
     )
     return [*(() if existing_start is not None else (start,)), text, end]
 

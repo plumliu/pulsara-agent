@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg
-import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
@@ -120,7 +122,9 @@ def test_working_context_store_upserts_domain_latest() -> None:
         stable_project_key=str(project_root),
         workspace_label="test-project",
     )
-    store = PostgresWorkingContextStore(dsn=dsn)
+    store = PostgresWorkingContextStore(
+        connection_provider=verified_postgres_provider(dsn)
+    )
     try:
         first = store.upsert(
             domain=domain,
@@ -151,7 +155,9 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
     domain = MemoryDomainContext(
         memory_domain_id=f"u_{uuid4().hex[:16]}", workspace_kind="transient"
     )
-    store = PostgresWorkingContextStore(dsn=dsn)
+    store = PostgresWorkingContextStore(
+        connection_provider=verified_postgres_provider(dsn)
+    )
     event_log = InMemoryEventLog()
     hooks = DurableMemoryHooks(
         candidate_pool=InMemoryCandidatePool(),
@@ -245,12 +251,6 @@ def _ctx() -> EventContext:
         run_id=f"run:test:{uuid4().hex}", turn_id="turn:test", reply_id="reply:test"
     )
 
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def _delete_working_context(dsn: str, memory_domain_id: str) -> None:

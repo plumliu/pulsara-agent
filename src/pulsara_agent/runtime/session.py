@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import RLock
@@ -18,6 +19,7 @@ from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionRequestedEvent,
     ContextCompactionStartedEvent,
     ContextCompiledEvent,
     ContextWindowClosedEvent,
@@ -28,6 +30,11 @@ from pulsara_agent.event import (
     EventContext,
     ExternalExecutionResultEvent,
     McpCapabilitySnapshotInstalledEvent,
+    McpInputRequiredBindingChangedEvent,
+    McpInputRequiredExpiredEvent,
+    McpInputRequiredInteractionClosedEvent,
+    McpInputRequiredResolutionSubmittedEvent,
+    McpInputRequiredResumeFailedEvent,
     ModelCallEndEvent,
     ModelCallControlDispositionResolvedEvent,
     ModelCallStartEvent,
@@ -53,6 +60,9 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
     ToolResultTerminalProjectionCommittedEvent,
+    ToolExecutionSuspendedEvent,
+    MidTurnContextCompactionSkippedEvent,
+    ToolResultEvidenceProjectionFailedEvent,
 )
 from pulsara_agent.event_log import (
     EventBatchConfirmation,
@@ -109,12 +119,31 @@ from pulsara_agent.runtime.terminal import (
     TerminalRuntimeBinding,
     TerminalSessionManager,
 )
+
+
 from pulsara_agent.runtime.tool_artifacts import (
     ToolResultArtifactIndex,
     ToolResultArtifactService,
 )
 from pulsara_agent.runtime.tool_execution import ToolExecutionTerminalRegistry
+from pulsara_agent.runtime.publication_maintenance import (
+    PublicationTerminalMaintenanceAttempt,
+    PublicationTerminalMaintenanceCoordinator,
+    PublicationTerminalMaintenanceLease,
+    PublicationTerminalMaintenanceOwnerKind,
+    validate_publication_latched_run_termination_authority,
+)
+from pulsara_agent.runtime.mandatory_audit import RuntimeSessionMandatoryAuditOwner
 from pulsara_agent.tools.base import AsyncTool, Tool
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    RuntimeEventOperationDeadlineBudget,
+)
+
+
+_ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID: ContextVar[str | None] = ContextVar(
+    "pulsara_active_publication_maintenance_lease_id",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +489,11 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    mcp_input_required_lifecycle_store: Any = field(init=False, repr=False)
+    mandatory_runtime_audit_owner: RuntimeSessionMandatoryAuditOwner = field(
+        init=False,
+        repr=False,
+    )
     terminal_monitor_store: Any = field(init=False, repr=False)
     terminal_monitor_coordinator: Any = field(init=False, repr=False)
     terminal_monitor_event_channel: Any = field(init=False, repr=False)
@@ -502,6 +536,25 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    _publication_reconciliation_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
+    _mandatory_audit_reconciliation_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
+    _publication_latch_generation: int = field(default=0, init=False, repr=False)
+    _publication_maintenance_lock: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+    )
+    _publication_maintenance_coordinator: (
+        PublicationTerminalMaintenanceCoordinator
+    ) = field(init=False, repr=False)
     mcp_installation_id: str = field(default="mcp_installation:empty", init=False)
     mcp_installation_owner_runtime_session_id: str = field(init=False)
     _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
@@ -564,6 +617,11 @@ class RuntimeSession:
         )
         self.context_input_io_service = ContextInputIoService()
         self.event_write_service = RuntimeEventWriteService()
+        self._publication_maintenance_coordinator = (
+            PublicationTerminalMaintenanceCoordinator(
+                runtime_session_id=self.runtime_session_id
+            )
+        )
         self.context_candidate_lifecycle_cache = InMemoryContextLifecycleCache()
         self.context_authority_slice_cache = InMemoryContextAuthoritySliceCache()
         self.tool_result_render_cache = InMemoryToolResultRenderCache()
@@ -576,6 +634,7 @@ class RuntimeSession:
             SessionModelCallControlDispositionOwner()
         )
         self.tool_execution_terminal_registry = ToolExecutionTerminalRegistry(self)
+        self.mandatory_runtime_audit_owner = RuntimeSessionMandatoryAuditOwner(self)
         from pulsara_agent.llm.terminal_projection import (
             build_default_terminal_projection_contract_bundle,
         )
@@ -787,6 +846,43 @@ class RuntimeSession:
             through_sequence=self.tool_terminal_projection_state_store.through_sequence,
             apply_committed=self.tool_terminal_projection_state_store.apply_committed,
             rebuild_committed=self.tool_terminal_projection_state_store.rebuild,
+        )
+        from pulsara_agent.runtime.mcp.lifecycle import (
+            McpInputRequiredLifecycleStore,
+        )
+
+        mcp_lifecycle_bootstrap = self.event_log.read_raw_events_by_types(
+            (
+                EventType.RUN_START.value,
+                EventType.RUN_END.value,
+                EventType.TOOL_EXECUTION_SUSPENDED.value,
+                EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED.value,
+                EventType.MCP_INPUT_REQUIRED_RESUME_FAILED.value,
+                EventType.MCP_INPUT_REQUIRED_EXPIRED.value,
+                EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED.value,
+                EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED.value,
+                EventType.TOOL_RESULT_END.value,
+            ),
+            active_runs_only=True,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.mcp_input_required_lifecycle_store = (
+            McpInputRequiredLifecycleStore.from_sparse_bootstrap(
+                tuple(
+                    event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for event in mcp_lifecycle_bootstrap.events
+                ),
+                runtime_session_id=self.runtime_session_id,
+                through_sequence=mcp_lifecycle_bootstrap.through_sequence,
+            )
+        )
+        self.register_committed_reducer(
+            reducer_id=f"mcp_input_required_lifecycle:{self.runtime_session_id}",
+            through_sequence=self.mcp_input_required_lifecycle_store.through_sequence,
+            apply_committed=(
+                self.mcp_input_required_lifecycle_store.apply_committed
+            ),
+            rebuild_committed=self.mcp_input_required_lifecycle_store.rebuild,
         )
         from pulsara_agent.primitives.long_horizon import (
             default_subagent_graph_checkpoint_policy,
@@ -1970,6 +2066,8 @@ class RuntimeSession:
             self._ledger_reconciliation_required
             or self._context_input_reconciliation_required
             or self._memory_governance_reconciliation_required
+            or self._publication_reconciliation_required
+            or self._mandatory_audit_reconciliation_required
             or self._reconciliation_required
         )
 
@@ -2012,6 +2110,127 @@ class RuntimeSession:
         with self.write_coordinator.lock:
             self._memory_governance_reconciliation_required = True
 
+    @property
+    def publication_reconciliation_required(self) -> bool:
+        return self._publication_reconciliation_required
+
+    @property
+    def publication_latch_generation(self) -> int:
+        return self._publication_latch_generation
+
+    def latch_publication_reconciliation_required(self) -> int:
+        """Stop ordinary mutation after a critical fact could not be published."""
+
+        with self._publication_maintenance_lock:
+            if not self._publication_reconciliation_required:
+                self._publication_latch_generation += 1
+                self._publication_reconciliation_required = True
+            return self._publication_latch_generation
+
+    def latch_mandatory_audit_reconciliation_required(self) -> None:
+        with self.write_coordinator.lock:
+            self._mandatory_audit_reconciliation_required = True
+
+    def issue_publication_terminal_maintenance_lease(
+        self,
+        *,
+        owner_kind: PublicationTerminalMaintenanceOwnerKind,
+        ordered_events: Sequence[AgentEvent],
+        transaction_companion: EventLogTransactionCompanion | None,
+        deadline_budget: RuntimeEventOperationDeadlineBudget,
+    ) -> PublicationTerminalMaintenanceLease:
+        with self._publication_maintenance_lock:
+            if not self._publication_reconciliation_required:
+                raise PermissionError(
+                    "terminal-maintenance lease requires an active publication latch"
+                )
+            return self._publication_maintenance_coordinator.issue(
+                publication_latch_generation=self._publication_latch_generation,
+                owner_kind=owner_kind,
+                ordered_events=ordered_events,
+                transaction_companion=transaction_companion,
+                terminal_deadline_monotonic=(
+                    deadline_budget.terminal_deadline_monotonic
+                ),
+            )
+
+    def _admit_publication_terminal_maintenance(
+        self,
+        *,
+        events: Sequence[AgentEvent],
+        transaction_companion: EventLogTransactionCompanion | None,
+        deadline_monotonic: float,
+        lease: object | None,
+    ) -> PublicationTerminalMaintenanceAttempt | None:
+        with self._publication_maintenance_lock:
+            if not self._publication_reconciliation_required:
+                if lease is not None:
+                    raise PermissionError(
+                        "publication maintenance lease used without its latch"
+                    )
+                return None
+            if lease is None:
+                raise EventReconciliationRequired(
+                    "publication latch rejects ordinary runtime event mutation"
+                )
+            attempt = self._publication_maintenance_coordinator.admit(
+                handle=lease,
+                publication_latch_generation=self._publication_latch_generation,
+                events=events,
+                transaction_companion=transaction_companion,
+                deadline_monotonic=deadline_monotonic,
+            )
+            _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID.set(attempt.lease_id)
+            return attempt
+
+    def _preflight_publication_terminal_maintenance(
+        self,
+        *,
+        events: Sequence[AgentEvent],
+        transaction_companion: EventLogTransactionCompanion | None,
+        deadline_monotonic: float,
+        lease: object | None,
+    ) -> None:
+        """Reject latched writes before projection/artifact preparation."""
+
+        with self._publication_maintenance_lock:
+            if not self._publication_reconciliation_required:
+                if lease is not None:
+                    raise PermissionError(
+                        "publication maintenance lease used without its latch"
+                    )
+                return
+            if lease is None:
+                raise EventReconciliationRequired(
+                    "publication latch rejects ordinary runtime event mutation"
+                )
+            self._publication_maintenance_coordinator.preflight(
+                handle=lease,
+                publication_latch_generation=self._publication_latch_generation,
+                events=events,
+                transaction_companion=transaction_companion,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+    def _resolve_publication_terminal_maintenance_attempt(
+        self,
+        attempt: PublicationTerminalMaintenanceAttempt | None,
+        *,
+        status: str,
+    ) -> None:
+        if attempt is None:
+            return
+        normalized: Literal["full", "none", "unknown", "partial"]
+        normalized = status if status in {"full", "none", "unknown", "partial"} else "unknown"  # type: ignore[assignment]
+        try:
+            with self._publication_maintenance_lock:
+                self._publication_maintenance_coordinator.resolve(
+                    attempt,
+                    status=normalized,
+                )
+        finally:
+            _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID.set(None)
+
     def record_context_input_cache_diagnostic(
         self,
         *,
@@ -2035,7 +2254,18 @@ class RuntimeSession:
     def require_mutation_allowed(self) -> None:
         """Fail before any safe-point side effect when the ledger is latched."""
 
-        if self.reconciliation_required:
+        hard_reconciliation = (
+            self._ledger_reconciliation_required
+            or self._context_input_reconciliation_required
+            or self._memory_governance_reconciliation_required
+            or self._mandatory_audit_reconciliation_required
+            or self._reconciliation_required
+        )
+        publication_blocked = (
+            self._publication_reconciliation_required
+            and _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID.get() is None
+        )
+        if hard_reconciliation or publication_blocked:
             raise EventReconciliationRequired(
                 "RuntimeSession ledger or committed reducer requires reconciliation"
             )
@@ -2364,6 +2594,25 @@ class RuntimeSession:
             state=state,
         )
 
+    async def write_event_with_deadline(
+        self,
+        event: AgentEvent,
+        *,
+        deadline_monotonic: float,
+        expected_last_sequence: int | None = None,
+        state: LoopState | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
+    ) -> EventWriteResult:
+        return await self.write_events_with_deadline(
+            (event,),
+            deadline_monotonic=deadline_monotonic,
+            expected_last_sequence=expected_last_sequence,
+            state=state,
+            publication_terminal_maintenance_lease=(
+                publication_terminal_maintenance_lease
+            ),
+        )
+
     async def write_events(
         self,
         events: Sequence[AgentEvent],
@@ -2372,8 +2621,39 @@ class RuntimeSession:
         state: LoopState | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
-        self.publisher.bind_running_loop()
         deadline = self.event_write_service.new_deadline_monotonic()
+        return await self.write_events_with_deadline(
+            events,
+            deadline_monotonic=deadline,
+            expected_last_sequence=expected_last_sequence,
+            state=state,
+            transaction_companion=transaction_companion,
+        )
+
+    async def write_events_with_deadline(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        deadline_monotonic: float,
+        expected_last_sequence: int | None = None,
+        state: LoopState | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
+        publication_terminal_maintenance_lease: object | None = None,
+    ) -> EventWriteResult:
+        if deadline_monotonic <= monotonic():
+            raise EventCommitError(
+                "runtime event write deadline expired before admission",
+                commit_outcome="none",
+                deadline_monotonic=deadline_monotonic,
+            )
+        self.publisher.bind_running_loop()
+        deadline = deadline_monotonic
+        self._preflight_publication_terminal_maintenance(
+            events=events,
+            transaction_companion=transaction_companion,
+            deadline_monotonic=deadline,
+            lease=publication_terminal_maintenance_lease,
+        )
         prepared = await self.tool_terminal_projection_service.prepare_batch(
             tuple(events),
             deadline_monotonic=deadline,
@@ -2415,6 +2695,12 @@ class RuntimeSession:
             raise ValueError(
                 "empty ledger first batch must contain exactly one RunStartEvent"
             )
+        maintenance_attempt = self._admit_publication_terminal_maintenance(
+            events=events,
+            transaction_companion=transaction_companion,
+            deadline_monotonic=deadline,
+            lease=publication_terminal_maintenance_lease,
+        )
         try:
             if is_genesis:
                 if expected_last_sequence not in (None, 0):
@@ -2448,10 +2734,17 @@ class RuntimeSession:
                         await_delivery=True,
                         deadline_monotonic=deadline,
                         transaction_companion=transaction_companion,
+                        publication_terminal_maintenance=(
+                            maintenance_attempt is not None
+                        ),
                     ),
                     deadline_monotonic=deadline,
                 )
         except PendingRuntimeEventWriteError as error:
+            self._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status="none",
+            )
             raise EventCommitError(
                 str(error),
                 commit_outcome="none",
@@ -2459,15 +2752,30 @@ class RuntimeSession:
             ) from error
         except RuntimeEventWriteCancelled as cancelled:
             outcome = _cancelled_event_commit_outcome(cancelled)
+            self._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status=outcome.status,
+            )
             if outcome.status == "unknown":
                 self.latch_event_commit_outcome_unknown()
             raise EventWriteCancelled(outcome) from cancelled
+        except BaseException as error:
+            outcome = event_batch_commit_outcome_from_error(error)
+            self._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status=outcome.status if outcome is not None else "unknown",
+            )
+            raise
         try:
             publication_errors = await _await_publication(
                 attempt.published_events,
                 attempt.delivery_futures,
             )
         except asyncio.CancelledError as cancelled:
+            self._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status="full",
+            )
             raise EventWriteCancelled(
                 EventBatchCommitOutcome(
                     status="full",
@@ -2478,7 +2786,13 @@ class RuntimeSession:
                     ),
                 )
             ) from cancelled
-        return replace(
+        except BaseException:
+            self._resolve_publication_terminal_maintenance_attempt(
+                maintenance_attempt,
+                status="full",
+            )
+            raise
+        result = replace(
             attempt.result,
             publication_status=(
                 "completed"
@@ -2489,6 +2803,53 @@ class RuntimeSession:
                 *attempt.result.publication_errors,
                 *publication_errors,
             ),
+        )
+        if (
+            self._batch_requires_critical_publication(tuple(result.committed_events))
+            and (
+                result.publication_status == "unavailable"
+                or bool(result.publication_errors)
+            )
+        ):
+            self.latch_publication_reconciliation_required()
+        self._resolve_publication_terminal_maintenance_attempt(
+            maintenance_attempt,
+            status="full",
+        )
+        return result
+
+    @staticmethod
+    def _batch_requires_critical_publication(
+        events: tuple[AgentEvent, ...],
+    ) -> bool:
+        critical_types = (
+            ToolExecutionSuspendedEvent,
+            McpInputRequiredResolutionSubmittedEvent,
+            McpInputRequiredExpiredEvent,
+            McpInputRequiredBindingChangedEvent,
+            McpInputRequiredResumeFailedEvent,
+            McpInputRequiredInteractionClosedEvent,
+            ContextCompactionRequestedEvent,
+            MidTurnContextCompactionSkippedEvent,
+            ToolResultEvidenceProjectionFailedEvent,
+            ContextCompactionStartedEvent,
+            ContextCompactionCompletedEvent,
+            ContextCompactionFailedEvent,
+        )
+        return any(
+            isinstance(event, critical_types)
+            or (
+                isinstance(event, ToolResultEndEvent)
+                and event.mcp_input_required_terminal_source is not None
+            )
+            or (
+                isinstance(event, RunEndEvent)
+                and (
+                    event.mcp_input_required_closure_event_reference is not None
+                    or event.publication_latched_termination is not None
+                )
+            )
+            for event in events
         )
 
     def write_events_from_thread(
@@ -3092,7 +3453,7 @@ class RuntimeSession:
             raise EventReconciliationRequired(
                 "materialization batch lost one of its business facts"
             ) from exc
-        return _WriteAttempt(
+        attempt = _WriteAttempt(
             result=replace(
                 full_attempt.result,
                 committed_events=committed_business,
@@ -3105,6 +3466,15 @@ class RuntimeSession:
             delivery_futures=full_attempt.delivery_futures,
             published_events=full_attempt.published_events,
         )
+        if (
+            self._batch_requires_critical_publication(committed_business)
+            and (
+                attempt.result.publication_status == "unavailable"
+                or bool(attempt.result.publication_errors)
+            )
+        ):
+            self.latch_publication_reconciliation_required()
+        return attempt
 
     def _raise_materialization_commit_error(
         self,
@@ -3367,6 +3737,7 @@ class RuntimeSession:
     def _validate_run_lifecycle_batch(self, events: tuple[AgentEvent, ...]) -> None:
         """Enforce the stable RunStart-to-RunEnd identity before commit."""
 
+        self.mcp_input_required_lifecycle_store.validate_next_batch(events)
         self._validate_memory_governance_batch(events)
         self._validate_terminal_projection_batch(events)
         self._validate_terminal_monitor_registration_batch(events)
@@ -3456,6 +3827,11 @@ class RuntimeSession:
                 raise ValueError("RunEnd requires exactly one durable RunStart")
             if terminal.id != start.terminal_run_end_event_id:
                 raise ValueError("RunEnd id does not match RunStart terminal contract")
+            validate_publication_latched_run_termination_authority(
+                terminal,
+                runtime_session_id=self.runtime_session_id,
+                resolve_event=self.event_log.get_by_id,
+            )
             existing_end = self.event_log.get_by_id(terminal.id)
             if existing_end is not None and not (
                 isinstance(existing_end, RunEndEvent)
@@ -4083,6 +4459,7 @@ class RuntimeSession:
         deadline_monotonic: float,
         enqueue_publication: bool = True,
         transaction_companion: EventLogTransactionCompanion | None = None,
+        publication_terminal_maintenance: bool = False,
     ) -> _WriteAttempt:
         if not events:
             result = EventWriteResult(
@@ -4101,7 +4478,18 @@ class RuntimeSession:
                 result=result, delivery_futures=(), published_events=()
             )
         with self._host_ingress_commit_guard(events), self.write_coordinator.lock:
-            if self.reconciliation_required:
+            hard_reconciliation = (
+                self._ledger_reconciliation_required
+                or self._context_input_reconciliation_required
+                or self._memory_governance_reconciliation_required
+                or self._mandatory_audit_reconciliation_required
+                or self._reconciliation_required
+            )
+            publication_blocked = (
+                self._publication_reconciliation_required
+                and not publication_terminal_maintenance
+            )
+            if hard_reconciliation or publication_blocked:
                 failed = tuple(
                     f"{item.reducer_id}: {item.last_error or 'reconciliation required'}"
                     for item in self._committed_reducers.values()
@@ -4111,9 +4499,27 @@ class RuntimeSession:
                     "RuntimeSession ledger or committed reducer requires reconciliation"
                     + (f" ({'; '.join(failed)})" if failed else "")
                 )
+            materialization_account = self.materialization_account_store.snapshot()
+            if (
+                materialization_account is not None
+                and expected_last_sequence is not None
+                and expected_last_sequence
+                != materialization_account.ledger_through_sequence
+            ):
+                # A caller may prepare a batch from a reducer snapshot while another
+                # writer advances the ledger. Reject that stale candidate before any
+                # reducer validates its sequence-sensitive fingerprints.
+                raise EventWriteConflict(
+                    runtime_session_id=self.runtime_session_id,
+                    expected_last_sequence=expected_last_sequence,
+                    actual_last_sequence=(
+                        materialization_account.ledger_through_sequence
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
             self._validate_run_lifecycle_batch(events)
             self.long_horizon_state_store.validate_next_batch(events)
-            if self.materialization_account_store.snapshot() is not None:
+            if materialization_account is not None:
                 return self._commit_accounted_one_shot_reduce_enqueue(
                     events,
                     expected_last_sequence=expected_last_sequence,
@@ -4751,7 +5157,12 @@ class RuntimeSession:
         self, event: AgentEvent, *, state: LoopState | None = None
     ) -> AgentEvent:
         result = await self.write_event(event, state=state)
-        if result.publication_errors:
+        if result.publication_errors or (
+            result.publication_status == "unavailable"
+            and self._batch_requires_critical_publication(
+                tuple(result.committed_events)
+            )
+        ):
             raise EventPublicationAfterCommitError(result)
         return next(item for item in result.committed_events if item.id == event.id)
 
@@ -4759,10 +5170,20 @@ class RuntimeSession:
         self,
         events: Iterable[AgentEvent],
         *,
+        expected_last_sequence: int | None = None,
         state: LoopState | None = None,
     ) -> list[AgentEvent]:
-        result = await self.write_events(tuple(events), state=state)
-        if result.publication_errors:
+        result = await self.write_events(
+            tuple(events),
+            expected_last_sequence=expected_last_sequence,
+            state=state,
+        )
+        if result.publication_errors or (
+            result.publication_status == "unavailable"
+            and self._batch_requires_critical_publication(
+                tuple(result.committed_events)
+            )
+        ):
             raise EventPublicationAfterCommitError(result)
         return list(result.committed_events)
 
@@ -4851,6 +5272,7 @@ class RuntimeSession:
         self.tool_result_render_cache.clear()
         self.provider_input_generation_store.clear_resident_cache()
         self.model_call_control_disposition_owner.clear()
+        self.mandatory_runtime_audit_owner.close_if_idle()
         self._context_input_cache_diagnostics.clear()
         subagent_runtime = self.subagent_runtime
         detach = getattr(subagent_runtime, "detach_from_parent_session", None)
@@ -4860,11 +5282,14 @@ class RuntimeSession:
         ):
             detach()
         with self.write_coordinator.lock:
+            self._publication_maintenance_coordinator.invalidate_issued()
             self._committed_reducers.clear()
             self._reconciliation_required = False
             self._ledger_reconciliation_required = False
             self._context_input_reconciliation_required = False
             self._memory_governance_reconciliation_required = False
+            self._publication_reconciliation_required = False
+            self._mandatory_audit_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
 

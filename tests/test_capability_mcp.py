@@ -561,7 +561,9 @@ def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
             runtime_context=_runtime_context(),
         )
         assert isinstance(suspended, ToolExecutionSuspended)
-        reservation_id = suspended.payload["mcp_pending_lease_reservation_id"]
+        reservation_id = (
+            suspended.prepared_mcp_input_required.pending_lease_reservation.reservation_id
+        )
         supervisor.confirm_pending_lease("mcp_input_required:1", reservation_id)
         borrowed = supervisor.borrow_pending_lease(
             "mcp_input_required:1", tool.binding_identity
@@ -616,7 +618,9 @@ def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
         assert "pending input ownership failed" in second.output
         assert slot.borrower_count == 1
 
-        reservation_id = first.payload["mcp_pending_lease_reservation_id"]
+        reservation_id = (
+            first.prepared_mcp_input_required.pending_lease_reservation.reservation_id
+        )
         supervisor.abort_pending_lease(
             "mcp_input_required:duplicate",
             reservation_id,

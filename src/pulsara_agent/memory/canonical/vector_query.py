@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Sequence
 
-import psycopg
 from psycopg.rows import dict_row
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
 from pulsara_agent.ontology import memory
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryVectorQuery:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
     def candidates(
         self,
@@ -45,7 +49,11 @@ class MemoryVectorQuery:
             where.append("node.memory_type = ANY(%s)")
             params.append(list(types))
         vector_literal = "[" + ",".join(format(float(value), ".9g") for value in query_vector) + "]"
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""

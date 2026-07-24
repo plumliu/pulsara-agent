@@ -1,4 +1,4 @@
-"""Process-owned PostgreSQL pool used by runtime event ledgers."""
+"""Bounded EventLog leases backed by verified PostgreSQL connection authority."""
 
 from __future__ import annotations
 
@@ -9,12 +9,16 @@ from threading import BoundedSemaphore, Lock
 from time import monotonic
 from typing import Iterator
 
-import psycopg
-from psycopg_pool import ConnectionPool, PoolTimeout
+from psycopg import Connection
+from psycopg_pool import PoolTimeout
+
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane as PhysicalConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 _POOL_LOCK = Lock()
-_POOLS: dict[str, ConnectionPool] = {}
 _READ_LEASES: dict[str, BoundedSemaphore] = {}
 _MAX_CONNECTIONS = 16
 _CRITICAL_WRITE_RESERVE = 4
@@ -45,49 +49,49 @@ class PostgresConnectionLane(StrEnum):
     BOUNDED_READ = "bounded_read"
 
 
-def postgres_event_pool(dsn: str) -> ConnectionPool:
-    """Return one bounded process-owned pool per canonical connection string."""
+def postgres_event_pool(
+    provider: VerifiedPostgresConnectionProviderProtocol,
+    *,
+    deadline_monotonic: float,
+):
+    """Borrow the provider-owned EventLog pool."""
 
+    return provider.pool(
+        lane=PhysicalConnectionLane.EVENT_LOG,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def close_postgres_event_pool(
+    provider: VerifiedPostgresConnectionProviderProtocol,
+) -> None:
+    """Close one isolated provider's EventLog pool."""
+
+    key = provider.schema_binding.binding_fingerprint
     with _POOL_LOCK:
-        pool = _POOLS.get(dsn)
-        if pool is None:
-            pool = ConnectionPool(
-                conninfo=dsn,
-                min_size=0,
-                max_size=_MAX_CONNECTIONS,
-                timeout=_DEFAULT_LEASE_TIMEOUT_SECONDS,
-                open=True,
-                name="pulsara-event-log",
-            )
-            _POOLS[dsn] = pool
-            _READ_LEASES[dsn] = BoundedSemaphore(
-                _MAX_CONNECTIONS - _CRITICAL_WRITE_RESERVE
-            )
-        return pool
-
-
-def close_postgres_event_pool(dsn: str) -> None:
-    """Close and forget one process-owned pool after an isolated database run."""
-
-    with _POOL_LOCK:
-        pool = _POOLS.pop(dsn, None)
-        _READ_LEASES.pop(dsn, None)
-    if pool is not None:
-        pool.close()
+        _READ_LEASES.pop(key, None)
+    provider.close_pool(PhysicalConnectionLane.EVENT_LOG)
 
 
 @contextmanager
 def postgres_event_connection(
-    dsn: str,
+    provider: VerifiedPostgresConnectionProviderProtocol,
     *,
     lane: PostgresConnectionLane = PostgresConnectionLane.CRITICAL_WRITE,
     deadline_monotonic: float | None = None,
-) -> Iterator[psycopg.Connection]:
+) -> Iterator[Connection]:
     """Lease one connection while preserving capacity for durable writers."""
 
-    pool = postgres_event_pool(dsn)
+    deadline = deadline_monotonic or (monotonic() + _DEFAULT_LEASE_TIMEOUT_SECONDS)
+    pool = postgres_event_pool(provider, deadline_monotonic=deadline)
     remaining = _remaining_seconds(deadline_monotonic)
-    read_lease = _READ_LEASES[dsn] if lane is PostgresConnectionLane.BOUNDED_READ else None
+    key = provider.schema_binding.binding_fingerprint
+    with _POOL_LOCK:
+        read_capacity = _READ_LEASES.setdefault(
+            key,
+            BoundedSemaphore(_MAX_CONNECTIONS - _CRITICAL_WRITE_RESERVE),
+        )
+    read_lease = read_capacity if lane is PostgresConnectionLane.BOUNDED_READ else None
     acquired = False
     try:
         if read_lease is not None:

@@ -11,15 +11,18 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.memory.scope import MemoryDomainContext
-from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.memory.foundation.run_timeline_query import RunTimelineSummary
@@ -49,19 +52,18 @@ class WorkingContextUpdate:
 
 @dataclass(slots=True)
 class PostgresWorkingContextStore:
-    dsn: str
+    connection_provider: VerifiedPostgresConnectionProviderProtocol
 
-    def __post_init__(self) -> None:
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
+    def _connection(self):
+        return self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     def get_latest(self, *, memory_domain_id: str, now: datetime | None = None) -> WorkingContextSummary | None:
         now = now or _utc_now()
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -92,7 +94,7 @@ class PostgresWorkingContextStore:
         expires_at = now + ttl if ttl is not None else None
         summary_id = f"working-context:{domain.memory_domain_id}"
         metadata = metadata or {}
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

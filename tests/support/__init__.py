@@ -22,6 +22,13 @@ from tests.support.model_call import (
     test_resolved_call,
     test_resolved_target_fact,
 )
+from tests.support.postgres import (
+    UnverifiedTestPostgresAccessLease,
+    UnverifiedTestPostgresConnectionProvider,
+    unverified_test_postgres_access_lease,
+    verified_postgres_access_lease,
+    verified_postgres_provider,
+)
 
 __all__ = [
     "bind_test_context",
@@ -44,4 +51,9 @@ __all__ = [
     "test_resolved_call_fact",
     "test_resolved_call",
     "test_resolved_target_fact",
+    "UnverifiedTestPostgresAccessLease",
+    "UnverifiedTestPostgresConnectionProvider",
+    "unverified_test_postgres_access_lease",
+    "verified_postgres_access_lease",
+    "verified_postgres_provider",
 ]

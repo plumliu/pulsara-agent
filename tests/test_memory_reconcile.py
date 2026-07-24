@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 from uuid import uuid4
 
-import psycopg
 import pytest
+
+from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from psycopg.types.json import Jsonb
 import urllib.error
 import urllib.parse
@@ -39,25 +42,36 @@ def test_reconciler_replays_pending_outbox_into_search_index() -> None:
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:reconcile-index"
     outbox_id = f"outbox:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
-    query = PostgresMemoryQuery(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     try:
-        store.put_jsonld(_preference(memory_id, "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference(memory_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         _insert_outbox(dsn, graph_id=graph_id, memory_id=memory_id, outbox_id=outbox_id)
 
-        report = PostgresMemoryReconciler(dsn=dsn).reconcile(graph_id=graph_id)
+        report = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn)
+        ).reconcile(graph_id=graph_id)
 
         assert report.outbox_applied_count == 1
-        assert query.fts_candidates(
-            query_text="concise summaries",
-            scopes=["ctx:user"],
-            types=["Preference"],
-            limit=5,
-            graph_id=graph_id,
-        )[0][0] == memory_id
+        assert (
+            query.fts_candidates(
+                query_text="concise summaries",
+                scopes=["ctx:user"],
+                types=["Preference"],
+                limit=5,
+                graph_id=graph_id,
+            )[0][0]
+            == memory_id
+        )
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT status FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,))
+                cursor.execute(
+                    "SELECT status FROM memory_write_outbox WHERE outbox_id = %s",
+                    (outbox_id,),
+                )
                 assert cursor.fetchone() == ("partial",)
     finally:
         _delete_outbox(dsn, outbox_id)
@@ -69,11 +83,16 @@ def test_reconciler_reports_canonical_node_without_governance_outbox() -> None:
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:damaged-direct"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
-        store.put_jsonld(_preference(memory_id, "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference(memory_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
 
-        damaged = PostgresMemoryReconciler(dsn=dsn).find_damaged_nodes(graph_id=graph_id)
+        damaged = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn)
+        ).find_damaged_nodes(graph_id=graph_id)
 
         assert [(item.graph_id, item.memory_id, item.reason) for item in damaged] == [
             (graph_id, memory_id, "missing_governance_outbox")
@@ -88,12 +107,17 @@ def test_reconciler_does_not_report_node_with_matching_governance_outbox() -> No
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:not-damaged"
     outbox_id = f"outbox:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
-        store.put_jsonld(_preference(memory_id, "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference(memory_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         _insert_outbox(dsn, graph_id=graph_id, memory_id=memory_id, outbox_id=outbox_id)
 
-        damaged = PostgresMemoryReconciler(dsn=dsn).find_damaged_nodes(graph_id=graph_id)
+        damaged = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn)
+        ).find_damaged_nodes(graph_id=graph_id)
 
         assert damaged == ()
     finally:
@@ -107,18 +131,27 @@ def test_postgres_delete_graph_clears_pending_outbox_for_graph() -> None:
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:delete-graph-outbox"
     outbox_id = f"outbox:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     try:
-        store.put_jsonld(_preference(memory_id, "The user prefers concise summaries."), graph_id=graph_id)
+        store.put_jsonld(
+            _preference(memory_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
         _insert_outbox(dsn, graph_id=graph_id, memory_id=memory_id, outbox_id=outbox_id)
 
         store.delete_graph(graph_id)
 
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT count(*) FROM memory_write_outbox WHERE graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "SELECT count(*) FROM memory_write_outbox WHERE graph_id = %s",
+                    (graph_id,),
+                )
                 assert cursor.fetchone() == (0,)
-                cursor.execute("SELECT count(*) FROM memory_search_index WHERE graph_id = %s", (graph_id,))
+                cursor.execute(
+                    "SELECT count(*) FROM memory_search_index WHERE graph_id = %s",
+                    (graph_id,),
+                )
                 assert cursor.fetchone() == (0,)
     finally:
         _delete_outbox(dsn, outbox_id)
@@ -134,14 +167,22 @@ def test_reconciler_can_replay_outbox_into_oxigraph() -> None:
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:reconcile-oxigraph"
     outbox_id = f"outbox:test:{uuid4().hex}"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     oxigraph = OxigraphGraphStore(storage.oxigraph_url)
     try:
         document = _preference(memory_id, "The user prefers concise summaries.")
         store.put_jsonld(document, graph_id=graph_id)
-        _insert_outbox(dsn, graph_id=graph_id, memory_id=memory_id, outbox_id=outbox_id, document=document)
+        _insert_outbox(
+            dsn,
+            graph_id=graph_id,
+            memory_id=memory_id,
+            outbox_id=outbox_id,
+            document=document,
+        )
 
-        report = PostgresMemoryReconciler(dsn=dsn, oxigraph=oxigraph).reconcile(graph_id=graph_id)
+        report = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn), oxigraph=oxigraph
+        ).reconcile(graph_id=graph_id)
 
         assert report.outbox_applied_count == 1
         assert report.oxigraph_gaps == ()
@@ -162,18 +203,20 @@ def test_reconciler_reports_missing_oxigraph_node_as_parity_gap() -> None:
     dsn = storage.postgres_dsn
     graph_id = f"graph:test/{uuid4().hex}"
     memory_id = "preference:parity-gap"
-    store = PostgresGraphStore(dsn=dsn)
+    store = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     oxigraph = OxigraphGraphStore(storage.oxigraph_url)
     try:
         document = _preference(memory_id, "The user prefers concise summaries.")
         store.put_jsonld(document, graph_id=graph_id)
 
-        report = PostgresMemoryReconciler(dsn=dsn, oxigraph=oxigraph).reconcile(graph_id=graph_id, outbox_limit=0)
+        report = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn), oxigraph=oxigraph
+        ).reconcile(graph_id=graph_id, outbox_limit=0)
 
         assert report.outbox_applied_count == 0
-        assert [(gap.graph_id, gap.node_id, gap.reason) for gap in report.oxigraph_gaps] == [
-            (graph_id, memory_id, "missing_in_oxigraph")
-        ]
+        assert [
+            (gap.graph_id, gap.node_id, gap.reason) for gap in report.oxigraph_gaps
+        ] == [(graph_id, memory_id, "missing_in_oxigraph")]
     finally:
         oxigraph.delete_graph(graph_id)
         store.delete_graph(graph_id)
@@ -190,13 +233,18 @@ def test_reconciler_reports_stale_oxigraph_node_as_parity_gap() -> None:
     memory_id = "preference:stale-oxigraph"
     oxigraph = OxigraphGraphStore(storage.oxigraph_url)
     try:
-        oxigraph.put_jsonld(_preference(memory_id, "The user prefers concise summaries."), graph_id=graph_id)
+        oxigraph.put_jsonld(
+            _preference(memory_id, "The user prefers concise summaries."),
+            graph_id=graph_id,
+        )
 
-        report = PostgresMemoryReconciler(dsn=dsn, oxigraph=oxigraph).reconcile(graph_id=graph_id, outbox_limit=0)
+        report = PostgresMemoryReconciler(
+            connection_provider=verified_postgres_provider(dsn), oxigraph=oxigraph
+        ).reconcile(graph_id=graph_id, outbox_limit=0)
 
-        assert [(gap.graph_id, gap.node_id, gap.reason) for gap in report.oxigraph_gaps] == [
-            (graph_id, memory_id, "stale_in_oxigraph")
-        ]
+        assert [
+            (gap.graph_id, gap.node_id, gap.reason) for gap in report.oxigraph_gaps
+        ] == [(graph_id, memory_id, "stale_in_oxigraph")]
     finally:
         oxigraph.delete_graph(graph_id)
 
@@ -235,7 +283,9 @@ def _insert_outbox(
                             "mutation_lane": "governed_memory",
                             "dirty_memory_ids": [memory_id],
                             "documents": (
-                                [{"node_id": memory_id, "document": document}] if document is not None else []
+                                [{"node_id": memory_id, "document": document}]
+                                if document is not None
+                                else []
                             ),
                             "surface_apply_status": {
                                 "search_index": "pending",
@@ -256,7 +306,9 @@ def _insert_outbox(
 def _delete_outbox(dsn: str, outbox_id: str) -> None:
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,))
+            cursor.execute(
+                "DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,)
+            )
 
 
 def _preference(memory_id: str, statement: str) -> dict:
@@ -273,10 +325,3 @@ def _preference(memory_id: str, statement: str) -> dict:
         updated_at=now,
         gate_reason="test",
     ).to_jsonld()
-
-
-def _connect_or_skip(dsn: str):
-    try:
-        return psycopg.connect(dsn, connect_timeout=2)
-    except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres is not available at configured DSN: {exc}")

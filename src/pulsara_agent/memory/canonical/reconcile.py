@@ -10,8 +10,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from time import monotonic
 
-import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -22,7 +22,10 @@ from pulsara_agent.graph.jsonld_codec import iri_token as _iri_token
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory.canonical.index_sync import _outbox_memory_ids
 from pulsara_agent.memory.canonical.oxigraph_materializer import OxigraphMaterializer
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,18 +51,15 @@ class ReconciliationReport:
 
 @dataclass(slots=True)
 class PostgresMemoryReconciler:
-    dsn: str | None = None
+    connection_provider: VerifiedPostgresConnectionProviderProtocol | None = None
     connection: Connection | None = None
     oxigraph: OxigraphGraphStore | None = None
 
     def __post_init__(self) -> None:
-        if self.dsn is None and self.connection is None:
-            raise ValueError("PostgresMemoryReconciler requires either dsn or connection")
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with self._cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
+        if (self.connection_provider is None) == (self.connection is None):
+            raise ValueError(
+                "PostgresMemoryReconciler requires exactly one verified provider or transaction connection"
+            )
 
     def reconcile(
         self,
@@ -80,14 +80,17 @@ class PostgresMemoryReconciler:
         sync = (
             MemorySearchIndexSync(connection=self.connection)
             if self.connection is not None
-            else MemorySearchIndexSync(dsn=self.dsn)
+            else MemorySearchIndexSync(connection_provider=self.connection_provider)
         )
         applied = sync.consume_outbox(graph_id=graph_id, limit=limit)
         if self.oxigraph is not None:
             materializer = (
                 OxigraphMaterializer(oxigraph=self.oxigraph, connection=self.connection)
                 if self.connection is not None
-                else OxigraphMaterializer(oxigraph=self.oxigraph, dsn=self.dsn)
+                else OxigraphMaterializer(
+                    oxigraph=self.oxigraph,
+                    connection_provider=self.connection_provider,
+                )
             )
             materializer.consume_outbox(graph_id=graph_id, limit=limit)
         return applied
@@ -239,11 +242,11 @@ SELECT DISTINCT ?s WHERE {{
                 yield cursor
             return
 
-        assert self.dsn is not None
-        connection_context = (
-            psycopg.connect(self.dsn, row_factory=row_factory)
-            if row_factory is not None
-            else psycopg.connect(self.dsn)
+        assert self.connection_provider is not None
+        connection_context = self.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
+            row_factory=row_factory,
+            deadline_monotonic=monotonic() + 30.0,
         )
         with connection_context as connection:
             with connection.cursor() as cursor:

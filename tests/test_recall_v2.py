@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.support.postgres import verified_postgres_provider
+
 import asyncio
 from uuid import uuid4
 
@@ -21,7 +23,6 @@ from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.retrieval.rerank.protocol import RerankResult
 from pulsara_agent.retrieval.tokenizer.regex_word_split import RegexWordSplitTokenizer
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 class _SemanticEmbeddingProvider:
@@ -58,7 +59,9 @@ class _ReverseReranker:
         if self.fail:
             raise RuntimeError("reranker down")
         return [
-            RerankResult(index=index, score=0.9 if "beta" in document.casefold() else 0.4)
+            RerankResult(
+                index=index, score=0.9 if "beta" in document.casefold() else 0.4
+            )
             for index, document in enumerate(documents)
         ]
 
@@ -84,7 +87,9 @@ class _SlowSparseService:
         raise AssertionError("unreachable")
 
 
-def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_path() -> None:
+def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_path() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     seed_id = _seed_memory(dsn, graph_id, "Blue launch checklist alpha.")
@@ -98,15 +103,19 @@ def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_
                 """,
                 [(graph_id, seed_id), (graph_id, target_id)],
             )
-    query = PostgresMemoryQuery(dsn=dsn)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     service = HybridMemoryRecallService(
         memory_query=query,
-        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
+        sparse=SparseCandidateService(
+            query, RegexWordSplitTokenizer(min_token_length=2)
+        ),
         dense=None,
         reranker=None,
         enable_graph_rerank=False,
         graph_candidates=GraphCandidateService(query),
-        trace_store=PostgresRecallTraceStore(dsn=dsn),
+        trace_store=PostgresRecallTraceStore(
+            connection_provider=verified_postgres_provider(dsn)
+        ),
     )
     try:
         result = asyncio.run(
@@ -153,15 +162,21 @@ def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_
         _delete_graph(dsn, graph_id)
 
 
-def test_hybrid_recall_finds_semantic_only_hit_and_caches_auto_query_embedding() -> None:
+def test_hybrid_recall_finds_semantic_only_hit_and_caches_auto_query_embedding() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     cat_id = _seed_memory(dsn, graph_id, "Cats enjoy warm windowsills.")
     _seed_memory(dsn, graph_id, "Database backups run nightly.")
     provider = _SemanticEmbeddingProvider()
-    vector_sync = MemoryVectorIndexSync(dsn=dsn, provider=provider, provider_name="fake")
+    vector_sync = MemoryVectorIndexSync(
+        connection_provider=verified_postgres_provider(dsn),
+        provider=provider,
+        provider_name="fake",
+    )
     asyncio.run(vector_sync.rebuild(graph_id=graph_id))
-    query = PostgresMemoryQuery(dsn=dsn)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     service = _hybrid(dsn, query, provider=provider)
     recall_query = RecallQuery(
         text="feline resting places",
@@ -195,18 +210,24 @@ def test_hybrid_recall_finds_semantic_only_hit_and_caches_auto_query_embedding()
         _delete_graph(dsn, graph_id)
 
 
-def test_hybrid_recall_dense_failure_falls_back_to_sparse_with_structured_trace() -> None:
+def test_hybrid_recall_dense_failure_falls_back_to_sparse_with_structured_trace() -> (
+    None
+):
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     memory_id = _seed_memory(dsn, graph_id, "The user prefers concise summaries.")
-    MemorySearchIndexSync(dsn=dsn).sync_memory(memory_id, graph_id=graph_id)
+    MemorySearchIndexSync(
+        connection_provider=verified_postgres_provider(dsn)
+    ).sync_memory(memory_id, graph_id=graph_id)
     provider = _SemanticEmbeddingProvider(fail_queries=True)
-    query = PostgresMemoryQuery(dsn=dsn)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     service = _hybrid(
         dsn,
         query,
         provider=provider,
-        trace_store=PostgresRecallTraceStore(dsn=dsn),
+        trace_store=PostgresRecallTraceStore(
+            connection_provider=verified_postgres_provider(dsn)
+        ),
     )
     session_id = f"runtime:{uuid4().hex}"
     recall_query = RecallQuery(
@@ -223,7 +244,10 @@ def test_hybrid_recall_dense_failure_falls_back_to_sparse_with_structured_trace(
 
         assert result.status is RecallStatus.OK
         assert result.items[0].memory_id == memory_id
-        assert any(warning.startswith("dense_degraded:RuntimeError") for warning in result.warnings)
+        assert any(
+            warning.startswith("dense_degraded:RuntimeError")
+            for warning in result.warnings
+        )
         assert result.metadata["dense_query"] == "degraded"
         with psycopg.connect(dsn) as connection:
             with connection.cursor() as cursor:
@@ -243,13 +267,21 @@ def test_cheap_auto_dense_timeout_is_bounded_and_falls_back_to_sparse() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     memory_id = _seed_memory(dsn, graph_id, "The user prefers concise summaries.")
-    MemorySearchIndexSync(dsn=dsn).sync_memory(memory_id, graph_id=graph_id)
-    query = PostgresMemoryQuery(dsn=dsn)
+    MemorySearchIndexSync(
+        connection_provider=verified_postgres_provider(dsn)
+    ).sync_memory(memory_id, graph_id=graph_id)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     provider = _SlowEmbeddingProvider()
     service = HybridMemoryRecallService(
         memory_query=query,
-        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
-        dense=DenseCandidateService(provider, MemoryVectorQuery(dsn), provider_name="fake"),
+        sparse=SparseCandidateService(
+            query, RegexWordSplitTokenizer(min_token_length=2)
+        ),
+        dense=DenseCandidateService(
+            provider,
+            MemoryVectorQuery(verified_postgres_provider(dsn)),
+            provider_name="fake",
+        ),
         reranker=None,
         auto_dense_timeout_seconds=0.01,
     )
@@ -293,11 +325,15 @@ def test_explicit_rerank_timeout_obeys_total_deadline_and_falls_back() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     memory_id = _seed_memory(dsn, graph_id, "Project output alpha")
-    MemorySearchIndexSync(dsn=dsn).sync_memory(memory_id, graph_id=graph_id)
-    query = PostgresMemoryQuery(dsn=dsn)
+    MemorySearchIndexSync(
+        connection_provider=verified_postgres_provider(dsn)
+    ).sync_memory(memory_id, graph_id=graph_id)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     service = HybridMemoryRecallService(
         memory_query=query,
-        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
+        sparse=SparseCandidateService(
+            query, RegexWordSplitTokenizer(min_token_length=2)
+        ),
         dense=None,
         reranker=RecallRerankService(_SlowReranker()),  # type: ignore[arg-type]
         explicit_rerank_timeout_seconds=0.01,
@@ -325,7 +361,9 @@ def test_explicit_rerank_timeout_obeys_total_deadline_and_falls_back() -> None:
 def test_explicit_total_deadline_bounds_slow_candidate_generation() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     service = HybridMemoryRecallService(
-        memory_query=PostgresMemoryQuery(dsn=dsn),
+        memory_query=PostgresMemoryQuery(
+            connection_provider=verified_postgres_provider(dsn)
+        ),
         sparse=_SlowSparseService(),  # type: ignore[arg-type]
         dense=None,
         reranker=None,
@@ -346,14 +384,16 @@ def test_hybrid_preserves_canonical_filter_and_visible_contradiction_pair() -> N
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     active_id = _seed_memory(dsn, graph_id, "The user prefers concise summaries.")
-    conflict_id = _seed_memory(dsn, graph_id, "The user now prefers expansive explanations.")
+    conflict_id = _seed_memory(
+        dsn, graph_id, "The user now prefers expansive explanations."
+    )
     rejected_id = _seed_memory(
         dsn,
         graph_id,
         "Rejected concise summaries duplicate.",
         status="rejected",
     )
-    sync = MemorySearchIndexSync(dsn=dsn)
+    sync = MemorySearchIndexSync(connection_provider=verified_postgres_provider(dsn))
     for memory_id in (active_id, conflict_id, rejected_id):
         sync.sync_memory(memory_id, graph_id=graph_id)
     with psycopg.connect(dsn) as connection:
@@ -365,10 +405,12 @@ def test_hybrid_preserves_canonical_filter_and_visible_contradiction_pair() -> N
                 """,
                 (graph_id, active_id, conflict_id),
             )
-    query = PostgresMemoryQuery(dsn=dsn)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     service = HybridMemoryRecallService(
         memory_query=query,
-        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
+        sparse=SparseCandidateService(
+            query, RegexWordSplitTokenizer(min_token_length=2)
+        ),
         dense=None,
         reranker=None,
         enable_graph_rerank=True,
@@ -400,15 +442,17 @@ def test_hybrid_preserves_canonical_filter_and_visible_contradiction_pair() -> N
 
 
 @pytest.mark.parametrize("rerank_fails", [False, True])
-def test_explicit_rerank_reorders_or_falls_back_without_losing_candidates(rerank_fails: bool) -> None:
+def test_explicit_rerank_reorders_or_falls_back_without_losing_candidates(
+    rerank_fails: bool,
+) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     first_id = _seed_memory(dsn, graph_id, "Project output alpha")
     second_id = _seed_memory(dsn, graph_id, "Project output beta")
-    sync = MemorySearchIndexSync(dsn=dsn)
+    sync = MemorySearchIndexSync(connection_provider=verified_postgres_provider(dsn))
     sync.sync_memory(first_id, graph_id=graph_id)
     sync.sync_memory(second_id, graph_id=graph_id)
-    query = PostgresMemoryQuery(dsn=dsn)
+    query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
     sparse = SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2))
     service = HybridMemoryRecallService(
         memory_query=query,
@@ -432,7 +476,10 @@ def test_explicit_rerank_reorders_or_falls_back_without_losing_candidates(rerank
 
         if rerank_fails:
             assert {item.memory_id for item in result.items} == {first_id, second_id}
-            assert any(warning.startswith("rerank_degraded:RuntimeError") for warning in result.warnings)
+            assert any(
+                warning.startswith("rerank_degraded:RuntimeError")
+                for warning in result.warnings
+            )
         else:
             assert [item.memory_id for item in result.items] == [second_id]
             assert result.items[0].memory_id == second_id
@@ -445,10 +492,12 @@ def test_explicit_rerank_reorders_or_falls_back_without_losing_candidates(rerank
 def _hybrid(dsn, query, *, provider, trace_store=None):
     return HybridMemoryRecallService(
         memory_query=query,
-        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
+        sparse=SparseCandidateService(
+            query, RegexWordSplitTokenizer(min_token_length=2)
+        ),
         dense=DenseCandidateService(
             provider=provider,
-            vector_query=MemoryVectorQuery(dsn),
+            vector_query=MemoryVectorQuery(verified_postgres_provider(dsn)),
             provider_name="fake",
         ),
         reranker=None,
@@ -457,7 +506,9 @@ def _hybrid(dsn, query, *, provider, trace_store=None):
     )
 
 
-def _seed_memory(dsn: str, graph_id: str, statement: str, *, status: str = "active") -> str:
+def _seed_memory(
+    dsn: str, graph_id: str, statement: str, *, status: str = "active"
+) -> str:
     memory_id = f"preference:{uuid4().hex}"
     try:
         connection = psycopg.connect(dsn)
@@ -465,10 +516,19 @@ def _seed_memory(dsn: str, graph_id: str, statement: str, *, status: str = "acti
         pytest.skip(f"PostgreSQL unavailable: {exc}")
     with connection:
         with connection.cursor() as cursor:
-            cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
             cursor.execute(
                 "INSERT INTO graph_documents (graph_id, id, type, payload) VALUES (%s, %s, 'Preference', %s)",
-                (graph_id, memory_id, Jsonb({"@id": memory_id, "@type": ["Preference"], "statement": statement})),
+                (
+                    graph_id,
+                    memory_id,
+                    Jsonb(
+                        {
+                            "@id": memory_id,
+                            "@type": ["Preference"],
+                            "statement": statement,
+                        }
+                    ),
+                ),
             )
             cursor.execute(
                 """
@@ -485,7 +545,13 @@ def _delete_graph(dsn: str, graph_id: str) -> None:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM recall_traces WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
+            cursor.execute(
+                "DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,)
+            )
+            cursor.execute(
+                "DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,)
+            )
+            cursor.execute(
+                "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+            )
             cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))

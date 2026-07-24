@@ -63,7 +63,7 @@ class DatabaseLifecycleContract(ManifestContract):
 
 class BenchmarkResultContract(ManifestContract):
     contract_id: Literal["pulsara.durable-runtime.result"]
-    contract_version: Literal["1"]
+    contract_version: Literal["2"]
     raw_sample_vector_required: Literal[True]
     production_acceptance_excludes_counterfactual: Literal[True]
     production_acceptance_excludes_sensitivity: Literal[True]
@@ -78,6 +78,11 @@ class BenchmarkResultContract(ManifestContract):
             "postgres.server_version",
             "postgres.configuration_fingerprint",
             "postgres.connection_pool_fingerprint",
+            "postgres.migration_head_version",
+            "postgres.durable_registry_prefix_fingerprint",
+            "postgres.deep_catalog_fingerprint",
+            "postgres.pgvector_extension_version",
+            "postgres.template_business_empty",
             "runtime_capacity.configuration_fingerprint",
         ],
         ...,
@@ -94,6 +99,11 @@ class BenchmarkResultContract(ManifestContract):
             "postgres.server_version",
             "postgres.configuration_fingerprint",
             "postgres.connection_pool_fingerprint",
+            "postgres.migration_head_version",
+            "postgres.durable_registry_prefix_fingerprint",
+            "postgres.deep_catalog_fingerprint",
+            "postgres.pgvector_extension_version",
+            "postgres.template_business_empty",
             "runtime_capacity.configuration_fingerprint",
         )
         if self.required_production_environment_fields != expected:
