@@ -80,7 +80,6 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     ToolResultEndEvent,
-    ToolResultEvidenceProjectionFailedEvent,
     ToolResultTerminalProjectionCommittedEvent,
     TerminalProcessCompletedEvent,
     TerminalProcessMonitorObservationCommittedEvent,
@@ -144,8 +143,6 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     PreparedMcpInputRequiredSuspension,
     PublicationLatchedRunTerminationFact,
     RuntimeEventOperationDeadlineBudget,
-    ToolResultEvidenceProjectionFailureFact,
-    ToolResultEvidenceProjectionSourceFact,
     build_bounded_runtime_failure_diagnostic,
     build_runtime_event_deadline_budget,
     ordered_fingerprint_accumulator,
@@ -169,7 +166,6 @@ from pulsara_agent.runtime.compaction.inline import (
 from pulsara_agent.runtime.hooks import (
     MemoryHooks,
     NoopMemoryHooks,
-    ToolResultPersistenceHook,
 )
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
@@ -821,7 +817,6 @@ class AgentRuntime:
         runtime_session: RuntimeSession,
         llm_runtime: LLMRuntime,
         memory_hooks: MemoryHooks | None = None,
-        tool_result_persistence_hook: ToolResultPersistenceHook | None = None,
         permission_gate: PermissionGate | None = None,
         model_role: ModelRole = ModelRole.PRO,
         options: LLMOptions | None = None,
@@ -840,7 +835,6 @@ class AgentRuntime:
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
-        self.tool_result_persistence_hook = tool_result_persistence_hook
         policy = permission_policy or default_permission_policy()
         permission_mode = require_preset_permission_mode_for_policy(
             policy,
@@ -1299,9 +1293,7 @@ class AgentRuntime:
             "live_pending_lease_unavailable",
         }:
             raise RuntimeError("pending MCP closure reason is invalid")
-        deadline_budget = state.scratchpad.get(
-            "publication_terminal_deadline_budget"
-        )
+        deadline_budget = state.scratchpad.get("publication_terminal_deadline_budget")
         if not isinstance(deadline_budget, RuntimeEventOperationDeadlineBudget):
             deadline_budget = build_runtime_event_deadline_budget(
                 admitted_at_monotonic=time.monotonic(),
@@ -1723,7 +1715,6 @@ class AgentRuntime:
             runtime_session=child_session,
             llm_runtime=self.llm_runtime,
             memory_hooks=NoopMemoryHooks(),
-            tool_result_persistence_hook=self.tool_result_persistence_hook,
             model_role=self.model_role,
             options=self.options,
             budget=self.budget,
@@ -2874,9 +2865,7 @@ class AgentRuntime:
                 failure_stage=failure_stage,
                 reason_code=fact.reason_code,
                 tool_observation_timing_seed=tool_observation_timing_seed,
-                mcp_input_required_terminal_source=(
-                    mcp_input_required_terminal_source
-                ),
+                mcp_input_required_terminal_source=(mcp_input_required_terminal_source),
             )
         )
         run_start = _run_start_for_id(
@@ -2914,15 +2903,13 @@ class AgentRuntime:
             rollout_reservation is not None
             or mcp_input_required_terminal_source is not None
         ):
-            write_candidates = (
-                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                    write_candidates,
-                    deadline_monotonic=(
-                        deadline_budget.ordinary_deadline_monotonic
-                        if deadline_budget is not None
-                        else None
-                    ),
-                )
+            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                write_candidates,
+                deadline_monotonic=(
+                    deadline_budget.ordinary_deadline_monotonic
+                    if deadline_budget is not None
+                    else None
+                ),
             )
             write_candidates = self._attach_mcp_terminal_disposition(
                 state,
@@ -2975,9 +2962,7 @@ class AgentRuntime:
                 ).commit_gate_and_denial(
                     gate_candidate=gate_event,
                     denied_terminal_candidates=tuple(
-                        event
-                        for event in write_candidates
-                        if event.id != gate_event.id
+                        event for event in write_candidates if event.id != gate_event.id
                     ),
                     expected_account_state_fingerprint=rollout_state.state_fingerprint,
                     account_id=account_id,
@@ -3222,6 +3207,14 @@ class AgentRuntime:
             if self._apply_stop_request(state):
                 break
 
+            planned_model_call_index = (
+                phase_restart_model_call_index
+                if phase_restart_model_call_index is not None
+                else int(state.scratchpad.get("model_call_index", 0)) + 1
+            )
+            state.scratchpad["working_context_refresh_model_step_key"] = (
+                f"{state.run_id}:{planned_model_call_index}"
+            )
             async for event in self._project_memory(state):
                 yield event
 
@@ -4907,8 +4900,7 @@ class AgentRuntime:
                     "params": thaw_json(item.user_visible_params),
                 }
                 for item in (
-                    prepared_suspension.request_envelope
-                    .ordered_user_visible_input_requests
+                    prepared_suspension.request_envelope.ordered_user_visible_input_requests
                 )
             )
         )
@@ -5099,8 +5091,7 @@ class AgentRuntime:
                             resolution=McpInputRequiredResolution(
                                 interaction_id=resolution.interaction_id,
                                 responses={
-                                    key: dict(value)
-                                    for key, value in responses.items()
+                                    key: dict(value) for key, value in responses.items()
                                 },
                                 cancelled=resolution.cancelled,
                                 tool_call_id=tool_call_id,
@@ -5155,12 +5146,10 @@ class AgentRuntime:
                                 redacted_message=redact_mcp_error_message(exc),
                             ),
                         )
-                        audit_receipt = (
-                            await self.runtime_session.mandatory_runtime_audit_owner.commit(
-                                resume_failed,
-                                deadline_budget=deadline_budget,
-                                state=state,
-                            )
+                        audit_receipt = await self.runtime_session.mandatory_runtime_audit_owner.commit(
+                            resume_failed,
+                            deadline_budget=deadline_budget,
+                            state=state,
                         )
                         if (
                             audit_receipt.status != "full"
@@ -5173,8 +5162,8 @@ class AgentRuntime:
                         working_set.latest_mcp_resume_failure_event_ref = (
                             audit_receipt.committed_event_reference
                         )
-                        stored_resume_failed = (
-                            self.runtime_session.event_log.get_by_id(resume_failed.id)
+                        stored_resume_failed = self.runtime_session.event_log.get_by_id(
+                            resume_failed.id
                         )
                         if not isinstance(
                             stored_resume_failed,
@@ -5189,17 +5178,15 @@ class AgentRuntime:
                             "enqueued",
                         }:
                             state.pending_interaction_kind = "mcp_input_required"
-                            state.pending_interaction_payload = (
-                                original_pending_payload
-                            )
+                            state.pending_interaction_payload = original_pending_payload
                             state.status = LoopStatus.WAITING_USER
                             state.stop_reason = RunStopReason.WAITING_USER
                             state.scratchpad[
                                 "mcp_input_required_publication_closure_reason"
                             ] = "resume_failed_publication_unavailable"
-                            state.scratchpad[
-                                "publication_terminal_deadline_budget"
-                            ] = deadline_budget
+                            state.scratchpad["publication_terminal_deadline_budget"] = (
+                                deadline_budget
+                            )
                             closure_events: tuple[AgentEvent, ...] = ()
                             async for event in self._terminalize_pending_mcp_for_abort(
                                 state,
@@ -5384,9 +5371,7 @@ class AgentRuntime:
                     "mid-turn mandatory audit publication failure lacks "
                     "one committed skip event"
                 )
-            deadline_budget = (
-                compaction_result.mandatory_audit_deadline_budget
-            )
+            deadline_budget = compaction_result.mandatory_audit_deadline_budget
             if not isinstance(
                 deadline_budget,
                 RuntimeEventOperationDeadlineBudget,
@@ -5418,15 +5403,12 @@ class AgentRuntime:
                     ),
                 )
             )
-            if (
-                not references
-                or not isinstance(
-                    publication_failure.terminal_event,
-                    (
-                        ContextCompactionCompletedEvent,
-                        ContextCompactionFailedEvent,
-                    ),
-                )
+            if not references or not isinstance(
+                publication_failure.terminal_event,
+                (
+                    ContextCompactionCompletedEvent,
+                    ContextCompactionFailedEvent,
+                ),
             ):
                 raise RuntimeError(
                     "mid-turn compaction publication failure lacks exact core refs"
@@ -5640,9 +5622,7 @@ class AgentRuntime:
                 and item.tool_call_id == result_block.id
             )
             if len(ends) != 1 or len(projections) != 1:
-                raise RuntimeError(
-                    "current ToolResult durable projection is not exact"
-                )
+                raise RuntimeError("current ToolResult durable projection is not exact")
             end = ends[0]
             projection = projections[0]
             end_ref = event_reference_from_stored(
@@ -5717,15 +5697,6 @@ class AgentRuntime:
             state.consecutive_tool_failures = 0
             state.in_run_recovery = None
 
-        if self.tool_result_persistence_hook is not None:
-            event = await self._run_tool_result_persistence_hook(
-                state,
-                current_receipt=current_receipt,
-            )
-            if event is not None:
-                yield event
-            if state.status is not LoopStatus.RUNNING:
-                return
         ok, hook_events = await self._run_memory_hook_and_emit_events(
             state,
             "after_tool_results",
@@ -5751,8 +5722,7 @@ class AgentRuntime:
                     "compaction request requires the current ToolResult receipt"
                 )
             terminal_refs = tuple(
-                item.tool_result_end_reference
-                for item in current_receipt.ordered_items
+                item.tool_result_end_reference for item in current_receipt.ordered_items
             )
             request = build_frozen_fact(
                 ContextCompactionRequestFact,
@@ -5779,12 +5749,10 @@ class AgentRuntime:
                 total_timeout_seconds=30.0,
                 terminal_reserve_seconds=10.0,
             )
-            receipt = (
-                await self.runtime_session.mandatory_runtime_audit_owner.commit(
-                    candidate,
-                    deadline_budget=deadline_budget,
-                    state=state,
-                )
+            receipt = await self.runtime_session.mandatory_runtime_audit_owner.commit(
+                candidate,
+                deadline_budget=deadline_budget,
+                state=state,
             )
             if receipt.status != "full":
                 raise RuntimeError(
@@ -5803,9 +5771,7 @@ class AgentRuntime:
                 return
         if current_receipt is not None:
             consumed = state.scratchpad["tool_result_audit_consumed_call_ids"]
-            consumed.update(
-                item.tool_call_id for item in current_receipt.ordered_items
-            )
+            consumed.update(item.tool_call_id for item in current_receipt.ordered_items)
 
     def _finish_child_run_after_report_result(self, state: LoopState) -> bool:
         if not self._is_subagent_child or self.subagent_runtime is None:
@@ -5876,9 +5842,7 @@ class AgentRuntime:
                     raise RuntimeError("pending run terminal batch has invalid shape")
                 candidate = candidates[-1]
             elif pending is not None:
-                raise RuntimeError(
-                    "pending run terminal candidates have invalid type"
-                )
+                raise RuntimeError("pending run terminal candidates have invalid type")
             else:
                 candidate = RunEndEvent(
                     id=terminal_event_id,
@@ -5984,9 +5948,7 @@ class AgentRuntime:
         candidates: tuple[AgentEvent, ...],
         expected_last_sequence: int,
     ) -> tuple[AgentEvent, ...]:
-        termination = state.scratchpad.get(
-            "publication_latched_run_termination"
-        )
+        termination = state.scratchpad.get("publication_latched_run_termination")
         if termination is None:
             return tuple(
                 await self.runtime_session.emit_many(
@@ -6211,95 +6173,6 @@ class AgentRuntime:
             )
             return False, emitted_events
         return True, emitted_events
-
-    async def _run_tool_result_persistence_hook(
-        self,
-        state: LoopState,
-        *,
-        current_receipt: CurrentToolResultBatchReceipt | None,
-    ) -> AgentEvent | None:
-        assert self.tool_result_persistence_hook is not None
-        try:
-            await self.tool_result_persistence_hook.after_tool_results(
-                state, state.tool_results
-            )
-            return None
-        except Exception as exc:
-            if current_receipt is None:
-                raise RuntimeError(
-                    "evidence projection failure lacks current ToolResult authority"
-                ) from exc
-            sources = tuple(
-                build_frozen_fact(
-                    ToolResultEvidenceProjectionSourceFact,
-                    schema_version="tool_result_evidence_projection_source.v1",
-                    tool_call_id=item.tool_call_id,
-                    tool_result_end_reference=item.tool_result_end_reference,
-                    terminal_projection_reference=(
-                        item.terminal_projection_reference
-                    ),
-                    result_semantic_fingerprint=(
-                        item.result_semantic_fingerprint
-                    ),
-                )
-                for item in current_receipt.ordered_items
-            )
-            failure = build_frozen_fact(
-                ToolResultEvidenceProjectionFailureFact,
-                schema_version="tool_result_evidence_projection_failure.v1",
-                projection_contract_id="execution_evidence_persistence",
-                projection_contract_version="1",
-                ordered_tool_result_sources=sources,
-                ordered_source_fingerprints_accumulator=(
-                    ordered_fingerprint_accumulator(
-                        "tool-result-evidence-projection-sources:v1",
-                        tuple(item.source_fingerprint for item in sources),
-                    )
-                ),
-                diagnostic=build_bounded_runtime_failure_diagnostic(
-                    error=exc,
-                    redaction_profile_id=(
-                        "execution_evidence_projection_error.v1"
-                    ),
-                ),
-            )
-            candidate = ToolResultEvidenceProjectionFailedEvent(
-                id=stable_runtime_event_id(
-                    "tool-result-evidence-projection-failed-event:v1",
-                    state.run_id,
-                    failure.failure_semantic_fingerprint,
-                ),
-                **self._event_context(state).event_fields(),
-                failure=failure,
-            )
-            deadline_budget = build_runtime_event_deadline_budget(
-                admitted_at_monotonic=time.monotonic(),
-                total_timeout_seconds=30.0,
-                terminal_reserve_seconds=10.0,
-            )
-            receipt = (
-                await self.runtime_session.mandatory_runtime_audit_owner.commit(
-                    candidate,
-                    deadline_budget=deadline_budget,
-                    state=state,
-                )
-            )
-            if receipt.status != "full":
-                raise RuntimeError(
-                    "evidence projection failure audit requires reconciliation"
-                ) from exc
-            stored = self.runtime_session.event_log.get_by_id(candidate.id)
-            if not isinstance(stored, ToolResultEvidenceProjectionFailedEvent):
-                raise RuntimeError(
-                    "evidence projection failure cannot be rebound"
-                ) from exc
-            if receipt.publication_summary not in {"completed", "enqueued"}:
-                self._install_mandatory_audit_publication_latched_termination(
-                    state,
-                    committed_event=stored,
-                    deadline_budget=deadline_budget,
-                )
-            return stored
 
     async def _mark_memory_hook_failed(
         self, state: LoopState, hook_name: str, exc: Exception
@@ -7110,9 +6983,7 @@ class AgentRuntime:
                 key=lambda event: event.sequence or 0,
             )
         )
-        if not references or any(
-            reference.sequence <= 0 for reference in references
-        ):
+        if not references or any(reference.sequence <= 0 for reference in references):
             raise RuntimeError(
                 "MCP publication-latched termination lacks stored source authority"
             )
@@ -7305,9 +7176,7 @@ class AgentRuntime:
                 existing_start=existing_start,
                 semantics=semantics,
                 semantics_factory=semantics_factory,
-                mcp_input_required_terminal_source=(
-                    mcp_input_required_terminal_source
-                ),
+                mcp_input_required_terminal_source=(mcp_input_required_terminal_source),
             )
         )
         terminal_event = next(
@@ -7338,15 +7207,13 @@ class AgentRuntime:
             rollout_reservation is not None
             or mcp_input_required_terminal_source is not None
         ):
-            write_candidates = (
-                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                    write_candidates,
-                    deadline_monotonic=(
-                        deadline_budget.ordinary_deadline_monotonic
-                        if deadline_budget is not None
-                        else None
-                    ),
-                )
+            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                write_candidates,
+                deadline_monotonic=(
+                    deadline_budget.ordinary_deadline_monotonic
+                    if deadline_budget is not None
+                    else None
+                ),
             )
             write_candidates = self._attach_mcp_terminal_disposition(
                 state,
@@ -8685,8 +8552,10 @@ class AgentRuntime:
         if prepared.deadline_monotonic is not None:
             remaining = max(0.0, prepared.deadline_monotonic - time.monotonic())
             deadline_utc = (
-                datetime.now(timezone.utc) + timedelta(seconds=remaining)
-            ).isoformat().replace("+00:00", "Z")
+                (datetime.now(timezone.utc) + timedelta(seconds=remaining))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         predecessor = state.scratchpad.get(
             "latest_mcp_input_required_resolution_reference"
         )
@@ -8824,8 +8693,7 @@ class AgentRuntime:
                     ),
                     result_state=ToolResultState.ERROR,
                     tool_observation_timing_seed=(
-                        dict(payload.get("tool_observation_timing_seed") or {})
-                        or None
+                        dict(payload.get("tool_observation_timing_seed") or {}) or None
                     ),
                     tool_arguments=dict(
                         prepared.thaw_original_request().get("arguments", {})
@@ -8858,12 +8726,10 @@ class AgentRuntime:
             supervisor.confirm_pending_lease(interaction_id, reservation_id)
         yield stored
         if suspension_publication_unavailable:
-            state.scratchpad[
-                "mcp_input_required_publication_closure_reason"
-            ] = "suspension_publication_unavailable"
-            state.scratchpad[
-                "publication_terminal_deadline_budget"
-            ] = deadline_budget
+            state.scratchpad["mcp_input_required_publication_closure_reason"] = (
+                "suspension_publication_unavailable"
+            )
+            state.scratchpad["publication_terminal_deadline_budget"] = deadline_budget
             closure_events: tuple[AgentEvent, ...] = ()
             async for event in self._terminalize_pending_mcp_for_abort(
                 state,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from tests.support.postgres import verified_postgres_provider
+from tests.support.postgres import (
+    guarded_postgres_test_connection,
+    verified_postgres_provider,
+)
 
 import asyncio
 import ast
@@ -214,22 +217,23 @@ def _postgres_log_or_skip(tmp_path: Path):
         turn_id=f"turn:checkpoint:postgres:{suffix}",
         reply_id=f"reply:checkpoint:postgres:{suffix}",
     )
+    event_log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    event_log.ensure_runtime_session_owner()
     return (
         dsn,
         runtime_session_id,
         context,
-        PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn),
-            runtime_session_id=runtime_session_id,
-            workspace_root=tmp_path,
-        ),
+        event_log,
     )
 
 
 def _cleanup_postgres_session(dsn: str, runtime_session_id: str) -> None:
-    with psycopg.connect(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    del dsn, runtime_session_id
+    # Runtime session cutovers are immutable; the fixture database owns cleanup.
 
 
 def test_checkpoint_export_is_canonical_and_order_independent() -> None:
@@ -1211,7 +1215,7 @@ def test_checkpoint_gc_requires_exclusive_postgres_advisory_maintenance_lock(
 ) -> None:
     dsn, runtime_session_id, _context, event_log = _postgres_log_or_skip(tmp_path)
     event_log.ensure_runtime_session_owner()
-    with psycopg.connect(dsn) as connection:
+    with guarded_postgres_test_connection(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1683,7 +1687,7 @@ def test_postgres_raw_snapshot_returns_schema_envelope_without_current_union_dec
         )
         payload = dump_agent_event(stored)
         payload["type"] = "LEGACY_ONLY_EVENT"
-        with psycopg.connect(dsn) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -1765,7 +1769,7 @@ def test_confirm_batch_compares_raw_per_event_schema_identity_and_payload_withou
     )
     try:
         log.append(candidate)
-        with psycopg.connect(dsn) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

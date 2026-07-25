@@ -43,6 +43,12 @@ from pulsara_agent.storage.migrations.runner import (
     PostgresMigrationRunner,
     read_migration_ledger,
 )
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    DurableProjectionKind,
+)
+from pulsara_agent.runtime.projection_jobs.pre_activation import (
+    PostgresProjectionMigrationPreparationCoordinator,
+)
 from pulsara_agent.storage.migrations.verifier import (
     PostgresMigrationHistoryStatus,
     PostgresSchemaVerifier,
@@ -96,6 +102,32 @@ def _deep_fingerprint(database: MigratedPostgresTestDatabase) -> str:
         )
 
 
+def _advance_projection_migrations(
+    *,
+    database: MigratedPostgresTestDatabase,
+    runner: PostgresMigrationRunner,
+):
+    deadline = monotonic() + 180.0
+    coordinator = PostgresProjectionMigrationPreparationCoordinator(
+        admin_dsn=database.admin_dsn,
+        runtime_dsn=database.runtime_dsn,
+    )
+    coordinator.prepare_legacy_surface_bindings(deadline_monotonic=deadline)
+    report = runner.migrate(deadline_monotonic=deadline)
+    assert report.migration_head_version == 6
+    coordinator.drain_pre_activation(
+        kind=DurableProjectionKind.RUN_TIMELINE,
+        deadline_monotonic=deadline,
+    )
+    report = runner.migrate(deadline_monotonic=deadline)
+    assert report.migration_head_version == 7
+    coordinator.drain_pre_activation(
+        kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+        deadline_monotonic=deadline,
+    )
+    return runner.migrate(deadline_monotonic=deadline)
+
+
 def test_canonical_schema_hash_has_stable_golden_vector() -> None:
     value = {"z": None, "a": (True, 7, "文本")}
     assert canonical_json_bytes(value) == '{"a":[true,7,"文本"],"z":null}'.encode()
@@ -143,7 +175,7 @@ def test_registry_validates_resources_and_prefix_recurrence() -> None:
     POSTGRES_MIGRATION_REGISTRY.verify_resources()
     assert tuple(
         definition.version for definition in POSTGRES_MIGRATION_REGISTRY.definitions
-    ) == tuple(range(5))
+    ) == tuple(range(9))
     assert (
         POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         == POSTGRES_MIGRATION_REGISTRY.definitions[-1].registry_prefix_fingerprint
@@ -200,6 +232,26 @@ def test_historical_migration_identity_has_append_only_golden_vectors() -> None:
             "sha256:786879007815a04c9fc68f759f42c9b726073d9ac123fa80a1688c6c140a7069",
             "sha256:15a224ceebb327d24b5f36c38bd9da0305defb71dff98f48aa8223647c8444e1",
         ),
+        (
+            "sha256:5bd653db8cac3df03c016b4a5d89bfb189ad8cf6c17982703e7b5f325f63852a",
+            "sha256:2ba93cc6fc90947c583c9bca8227c0eef196abe286f5ce71a3af40575fe31697",
+            "sha256:5300c97701d3e6d9ccd1b67c5ce4bc3497c7cc21685b37445af6359a84710500",
+        ),
+        (
+            "sha256:f172f247d959ab1fa8d5028882cd92c32dd40bc1fdd4a4f51b77b13350192874",
+            "sha256:557c5a373591eb37e9cf9a6263926a562357c110522a04a0474d36be0da9c61f",
+            "sha256:188c78d4e3e8a828b3a80ec8507a6c1c5f800a61fa7cf6950c2407abb0b48c2f",
+        ),
+        (
+            "sha256:a7689928d14f88a5c08e12ddc1311c86de76befcb1b816b5410526580e484835",
+            "sha256:64dfd448b9c76e9a6e35395c3b3b2854893384afd80e0802fcbeb66fbb540f3c",
+            "sha256:227ac1442218692078a1d7a2e73b434d4c4ed907032b02edfbd22f45e0a3e6fe",
+        ),
+        (
+            "sha256:b591518375945dcb2f8e077a9064e0c2887c358ba1a186a9d8d8cb78c80afd5b",
+            "sha256:52f77c411126306ea35bb6e8753113dfbf3fb7ea28bd5ab0ae3c441afd60e7d6",
+            "sha256:d513c4e4dd549a1ed8810ae4ce4ebf190f984f9a9c97bd1e1b91ff174806d849",
+        ),
     )
     assert tuple(
         len(item.reserved_object_names) for item in POSTGRES_SCHEMA_MANIFESTS
@@ -209,6 +261,10 @@ def test_historical_migration_identity_has_append_only_golden_vectors() -> None:
         11,
         21,
         27,
+        61,
+        61,
+        61,
+        61,
     )
     assert all(
         identity.object_name != "memory_governance_decisions"
@@ -247,11 +303,58 @@ def test_fresh_database_migrates_to_latest_and_second_run_is_noop() -> None:
         )
         first = runner.migrate(deadline_monotonic=monotonic() + 120.0)
         second = runner.migrate(deadline_monotonic=monotonic() + 120.0)
-        assert first.status == "migrated"
-        assert first.applied_versions == (0, 1, 2, 3, 4)
-        assert second.status == "up_to_date"
+        assert first.status == "preparation_required"
+        assert first.applied_versions == (0, 1, 2, 3, 4, 5)
+        assert second.status == "preparation_required"
         assert second.applied_versions == ()
-        assert second.registry_prefix_fingerprint == (
+        assert second.migration_head_version == 5
+        final = _advance_projection_migrations(
+            database=database,
+            runner=runner,
+        )
+        assert final.status == "migrated"
+        assert final.migration_head_version == 8
+        assert final.registry_prefix_fingerprint == (
+            POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
+        )
+        assert _deep_fingerprint(database)
+
+
+def test_final_binary_advances_historical_v4_database_through_all_dpj_gates() -> None:
+    with _fresh_database(migrated=False) as database:
+        historical_definitions = POSTGRES_MIGRATION_REGISTRY.definitions[:5]
+        historical_registry = PostgresMigrationRegistry(
+            definitions=historical_definitions,
+            registry_fingerprint=(
+                historical_definitions[-1].registry_prefix_fingerprint
+            ),
+        )
+        historical = PostgresMigrationRunner(
+            admin_dsn=database.admin_dsn,
+            runtime_dsn=database.runtime_dsn,
+            registry=historical_registry,
+        ).migrate(deadline_monotonic=monotonic() + 120.0)
+        assert historical.status == "migrated"
+        assert historical.applied_versions == (0, 1, 2, 3, 4)
+        assert historical.migration_head_version == 4
+
+        final_runner = PostgresMigrationRunner(
+            admin_dsn=database.admin_dsn,
+            runtime_dsn=database.runtime_dsn,
+        )
+        v5 = final_runner.migrate(deadline_monotonic=monotonic() + 120.0)
+        assert v5.status == "preparation_required"
+        assert v5.applied_versions == (5,)
+        assert v5.migration_head_version == 5
+
+        final = _advance_projection_migrations(
+            database=database,
+            runner=final_runner,
+        )
+        assert final.status == "migrated"
+        assert final.applied_versions == (8,)
+        assert final.migration_head_version == 8
+        assert final.registry_prefix_fingerprint == (
             POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         )
         assert _deep_fingerprint(database)
@@ -268,11 +371,11 @@ def test_concurrent_migrators_serialize_on_database_advisory_lock() -> None:
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             reports = tuple(executor.map(lambda _index: migrate(), range(2)))
-        assert sorted(report.status for report in reports) == [
-            "migrated",
-            "up_to_date",
-        ]
-        assert sum(len(report.applied_versions) for report in reports) == 5
+        assert tuple(report.status for report in reports) == (
+            "preparation_required",
+            "preparation_required",
+        )
+        assert sum(len(report.applied_versions) for report in reports) == 6
 
 
 def test_two_fresh_databases_have_same_logical_catalog_fingerprint() -> None:
@@ -373,7 +476,7 @@ def test_migration_commit_confirmation_has_distinct_full_none_and_conflict() -> 
         )
         outcome, connection = runner._confirm_migration_commit(  # noqa: SLF001
             runtime_identity=identity,
-            definition=POSTGRES_MIGRATION_REGISTRY.definition(4),
+            definition=POSTGRES_MIGRATION_REGISTRY.definition(8),
             deadline_monotonic=monotonic() + 30.0,
         )
         assert outcome is PostgresCommitConfirmation.FULL
@@ -464,7 +567,7 @@ def test_runtime_role_can_read_ledger_but_cannot_create_schema_objects(
         autocommit=True,
     ) as connection:
         rows = read_migration_ledger(connection)
-        assert rows is not None and rows[-1].version == 4
+        assert rows is not None and rows[-1].version == 8
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute(
                 f"CREATE TABLE public.forbidden_{uuid4().hex} (id integer)"
@@ -753,6 +856,101 @@ def test_db_cli_verify_does_not_load_llm_configuration_or_expose_dsn(
     assert "warnings" in report
 
 
+def test_db_projection_status_is_bounded_and_secret_safe(
+    migrated_postgres_database: MigratedPostgresTestDatabase,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "DPJ_CLI_POSTGRES_DSN",
+        migrated_postgres_database.runtime_dsn,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "db",
+            "projections",
+            "status",
+            "--prefix",
+            "DPJ_CLI",
+            "--limit",
+            "2",
+        ]
+    )
+    report = cli._database_command(args)  # noqa: SLF001
+    assert report["job_page"]["limit"] == 2
+    assert len(report["jobs"]) <= 2
+    assert len(report["surface_deliveries"]) <= 2
+    rendered = repr(report)
+    assert "postgresql://" not in rendered
+    assert "password=" not in rendered
+    assert "dsn" not in rendered.lower()
+
+    drain = cli.build_parser().parse_args(
+        [
+            "db",
+            "projections",
+            "drain-pre-activation",
+            "--kind",
+            "run_timeline.v1",
+        ]
+    )
+    assert drain.kind == "run_timeline.v1"
+
+    surface_retry = cli.build_parser().parse_args(
+        [
+            "db",
+            "projections",
+            "surface-retry",
+            "--mutation",
+            "mutation:test",
+            "--surface",
+            "vector_index.v1",
+            "--authority-id",
+            "operator:test",
+        ]
+    )
+    assert surface_retry.db_projection_command == "surface-retry"
+    assert surface_retry.mutation == "mutation:test"
+    assert surface_retry.surface == "vector_index.v1"
+
+    surface_decommission = cli.build_parser().parse_args(
+        [
+            "db",
+            "projections",
+            "surface-decommission",
+            "--mutation",
+            "mutation:test",
+            "--surface",
+            "oxigraph.v1",
+            "--authority-id",
+            "operator:test",
+            "--rebuild-result-receipt",
+            "projection-result-receipt:test",
+        ]
+    )
+    assert surface_decommission.db_projection_command == (
+        "surface-decommission"
+    )
+    assert surface_decommission.rebuild_result_receipt == (
+        "projection-result-receipt:test"
+    )
+
+    seed_repair = cli.build_parser().parse_args(
+        [
+            "db",
+            "projections",
+            "seed-repair",
+            "--failure",
+            "projection-seed-failure:test",
+            "--action",
+            "retry_after_authority_repair",
+            "--authority-id",
+            "operator:test",
+        ]
+    )
+    assert seed_repair.db_projection_command == "seed-repair"
+    assert seed_repair.failure == "projection-seed-failure:test"
+
+
 def test_db_status_reports_old_row_tamper_as_conflict(monkeypatch) -> None:
     with _fresh_database(migrated=True) as database:
         with psycopg.connect(database.admin_dsn, autocommit=True) as connection:
@@ -777,6 +975,10 @@ def test_db_status_reports_old_row_tamper_as_conflict(monkeypatch) -> None:
 
 def test_db_verify_projects_public_schema_create_warning(monkeypatch) -> None:
     with _fresh_database(migrated=True) as database:
+        PostgresMigrationRunner(
+            admin_dsn=database.admin_dsn,
+            runtime_dsn=database.admin_dsn,
+        ).migrate(deadline_monotonic=monotonic() + 120.0)
         monkeypatch.setenv("SCHEMA_DDL_POSTGRES_DSN", database.admin_dsn)
         args = cli.build_parser().parse_args(["db", "verify", "--prefix", "SCHEMA_DDL"])
         report = cli._database_command(args)  # noqa: SLF001

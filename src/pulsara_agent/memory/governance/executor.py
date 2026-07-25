@@ -9,7 +9,11 @@ from functools import partial
 from time import monotonic
 from typing import Any
 
-from pulsara_agent.event import AgentEvent, MemoryWriteFailedEvent, MemoryWriteResultEvent
+from pulsara_agent.event import (
+    AgentEvent,
+    MemoryWriteFailedEvent,
+    MemoryWriteResultEvent,
+)
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
@@ -41,17 +45,19 @@ from pulsara_agent.memory.governance.event_outbox import (
     GovernanceEventDispatchTicket,
     GovernanceEventOutboxDispatcher,
 )
-from pulsara_agent.memory.canonical.mutation_outbox import (
-    CanonicalMutationSurface,
-    governed_memory_mutation_payload,
+from pulsara_agent.memory.canonical.write_service import (
+    MemoryWriteOutcome,
+    MemoryWriteService,
 )
-from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER
 from pulsara_agent.ontology import memory
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
     GovernanceDerivedWriteAttributionFact,
+)
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    CanonicalMutationSurface,
 )
 
 
@@ -107,9 +113,9 @@ class MemoryGovernanceExecutor:
         CanonicalMutationSurface.OXIGRAPH.value,
     )
     event_outbox_dispatcher: GovernanceEventOutboxDispatcher | None = None
-    async_operation_port: Callable[
-        [str, Callable[[], Any], float], Awaitable[Any]
-    ] | None = None
+    async_operation_port: (
+        Callable[[str, Callable[[], Any], float], Awaitable[Any]] | None
+    ) = None
     _event_dispatch_retry_required: bool = field(
         default=False,
         init=False,
@@ -118,7 +124,9 @@ class MemoryGovernanceExecutor:
 
     def __post_init__(self) -> None:
         if self.memory_write_uow_factory is None:
-            raise ValueError("memory_write_uow_factory is required; no storage fallback is allowed")
+            raise ValueError(
+                "memory_write_uow_factory is required; no storage fallback is allowed"
+            )
         if self.event_commit_port is None:
             raise ValueError(
                 "event_commit_port is required; governance cannot append EventLog directly"
@@ -137,9 +145,7 @@ class MemoryGovernanceExecutor:
         target_ids = frozenset(item.entry_id for item in target_entries)
         if not target_ids.issubset(execution_identity.allowed_candidate_entry_ids):
             raise ValueError("governance decision targets candidates outside its batch")
-        if not execution_identity.allowed_scopes.issubset(
-            self.allowed_write_scopes
-        ):
+        if not execution_identity.allowed_scopes.issubset(self.allowed_write_scopes):
             raise ValueError("governance decision input scopes exceed runtime policy")
         return self._apply_decision_with_uow(
             decision,
@@ -297,14 +303,18 @@ class MemoryGovernanceExecutor:
                     relatedness_context=relatedness_context,
                 ) or self._replacement_evidence_block_reason(
                     decision,
-                    target_entry=_single_target_entry(decision.target_entry_id, target_entries),
+                    target_entry=_single_target_entry(
+                        decision.target_entry_id, target_entries
+                    ),
                     relatedness_context=relatedness_context,
                 )
                 if supersede_blocked_reason is None:
-                    valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(
-                        decision,
-                        uow,
-                        relatedness_context=relatedness_context,
+                    valid_old_ids, supersede_blocked_reason = (
+                        self._validate_supersede_targets(
+                            decision,
+                            uow,
+                            relatedness_context=relatedness_context,
+                        )
                     )
             valid_contradicted_ids: tuple[str, ...] = ()
             contradiction_blocked_reason: str | None = None
@@ -371,7 +381,9 @@ class MemoryGovernanceExecutor:
                         supersede_blocked_reason or "write_not_active"
                     ),
                 )
-            elif isinstance(decision, ContradictAndSubmitDecision) and not did_contradict:
+            elif (
+                isinstance(decision, ContradictAndSubmitDecision) and not did_contradict
+            ):
                 effective_decision = _downgrade_contradiction_to_coexist(
                     decision,
                     _lifecycle_downgrade_reason(
@@ -405,19 +417,11 @@ class MemoryGovernanceExecutor:
                 if governance_candidate is not None:
                     uow.decisions.append_candidate(governance_candidate)
             uow.decisions.append_decision(record)
-            mutation_payload = governed_memory_mutation_payload(
-                record=record,
-                graph=uow.graph,
-                graph_id=uow.resolved_graph_id,
-                async_surfaces=self.async_surfaces,
-            )
             uow.outbox.append_decision(
                 record,
                 graph_id=uow.resolved_graph_id,
-                payload=(
-                    mutation_payload.model_dump(mode="json")
-                    if mutation_payload is not None
-                    else None
+                requested_surfaces=tuple(
+                    CanonicalMutationSurface(surface) for surface in self.async_surfaces
                 ),
             )
             event_candidates = tuple(
@@ -436,8 +440,7 @@ class MemoryGovernanceExecutor:
             self._event_dispatch_retry_required = True
             raise
         self._event_dispatch_retry_required = bool(
-            self.event_outbox_dispatcher
-            and self.event_outbox_dispatcher.has_pending()
+            self.event_outbox_dispatcher and self.event_outbox_dispatcher.has_pending()
         )
         diagnostics: list[str] = []
         blocked_reason = supersede_blocked_reason or contradiction_blocked_reason
@@ -547,12 +550,16 @@ class MemoryGovernanceExecutor:
             },
         )
 
-    def _validate_target_entries(self, decision: GovernanceDecision) -> tuple[PooledMemoryCandidate, ...]:
+    def _validate_target_entries(
+        self, decision: GovernanceDecision
+    ) -> tuple[PooledMemoryCandidate, ...]:
         targets: list[PooledMemoryCandidate] = []
         for entry_id in _target_entry_ids(decision):
             target = self.candidate_pool.get_candidate(entry_id)
             if target.source_session_id != self.runtime_session_id:
-                raise ValueError(f"governance decision targets candidate from another runtime: {entry_id}")
+                raise ValueError(
+                    f"governance decision targets candidate from another runtime: {entry_id}"
+                )
             targets.append(target)
         return tuple(targets)
 
@@ -562,9 +569,13 @@ class MemoryGovernanceExecutor:
         *,
         target_entries: tuple[PooledMemoryCandidate, ...],
     ) -> str | None:
-        if not isinstance(decision, (SupersedeAndSubmitDecision, ContradictAndSubmitDecision)):
+        if not isinstance(
+            decision, (SupersedeAndSubmitDecision, ContradictAndSubmitDecision)
+        ):
             return None
-        if any(target.origin is CandidateOrigin.COMPACTION for target in target_entries):
+        if any(
+            target.origin is CandidateOrigin.COMPACTION for target in target_entries
+        ):
             return "compaction_origin_replacement_evidence_unsupported"
         return None
 
@@ -605,7 +616,10 @@ class MemoryGovernanceExecutor:
             if old_scope != candidate.scope:
                 return (), f"supersede_target_scope_mismatch:{old_id}"
             if not (old_types & _SUPERSEDABLE_TYPES):
-                return (), f"supersede_target_type_not_supersedable:{old_id}:{sorted(old_types)}"
+                return (
+                    (),
+                    f"supersede_target_type_not_supersedable:{old_id}:{sorted(old_types)}",
+                )
             valid.append(old_id)
         return tuple(valid), None
 
@@ -688,7 +702,10 @@ class MemoryGovernanceExecutor:
             if old_scope != candidate.scope:
                 return (), f"contradiction_target_scope_mismatch:{old_id}"
             if not (old_types & _CONTRADICTABLE_TYPES):
-                return (), f"contradiction_target_type_not_contradictable:{old_id}:{sorted(old_types)}"
+                return (
+                    (),
+                    f"contradiction_target_type_not_contradictable:{old_id}:{sorted(old_types)}",
+                )
             valid.append(old_id)
         return tuple(valid), None
 
@@ -723,7 +740,9 @@ def _write_outcome(
     contradicted_memory_ids: tuple[str, ...] = (),
 ):
     event_ids = tuple(event.id for event in events)
-    result = next((event for event in events if isinstance(event, MemoryWriteResultEvent)), None)
+    result = next(
+        (event for event in events if isinstance(event, MemoryWriteResultEvent)), None
+    )
     if result is not None:
         return WriteSucceededOutcome(
             memory_id=result.memory_id,
@@ -736,14 +755,18 @@ def _write_outcome(
             superseded_memory_ids=superseded_memory_ids,
             contradicted_memory_ids=contradicted_memory_ids,
         )
-    failed = next((event for event in events if isinstance(event, MemoryWriteFailedEvent)), None)
+    failed = next(
+        (event for event in events if isinstance(event, MemoryWriteFailedEvent)), None
+    )
     if failed is not None:
         return WriteFailedOutcome(
             error_type=failed.error_type,
             message=failed.message,
             write_event_ids=event_ids,
         )
-    raise ValueError(f"MemoryWriteOutcome produced no write result or failure event: {outcome!r}")
+    raise ValueError(
+        f"MemoryWriteOutcome produced no write result or failure event: {outcome!r}"
+    )
 
 
 def _decision_record(
@@ -771,9 +794,7 @@ def _decision_record(
         ),
         governance_model_call_id=execution_identity.governance_model_call_id,
         decision_index=execution_identity.decision_index,
-        requested_decision_payload_fingerprint=(
-            requested_decision_payload_fingerprint
-        ),
+        requested_decision_payload_fingerprint=(requested_decision_payload_fingerprint),
         decision_payload_fingerprint=decision_payload_fingerprint,
         decision=decision,
         write_outcome=write_outcome,
@@ -832,7 +853,9 @@ def _single_target_entry(
     raise KeyError(entry_id)
 
 
-def _downgrade_to_coexist(decision: SupersedeAndSubmitDecision, reason: str) -> CorrectAndSubmitDecision:
+def _downgrade_to_coexist(
+    decision: SupersedeAndSubmitDecision, reason: str
+) -> CorrectAndSubmitDecision:
     return CorrectAndSubmitDecision(
         target_entry_id=decision.target_entry_id,
         candidate=decision.candidate,
@@ -871,7 +894,14 @@ def _lifecycle_downgrade_reason(reason: str) -> str:
 
 
 def _active_memory_id(outcome: MemoryWriteOutcome) -> str | None:
-    result = next((event for event in outcome.events if isinstance(event, MemoryWriteResultEvent)), None)
+    result = next(
+        (
+            event
+            for event in outcome.events
+            if isinstance(event, MemoryWriteResultEvent)
+        ),
+        None,
+    )
     if result is None:
         return None
     if result.status != memory.NodeStatus.ACTIVE:

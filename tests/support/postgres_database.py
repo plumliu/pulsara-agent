@@ -13,6 +13,12 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from pulsara_agent.settings import load_env_file
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    DurableProjectionKind,
+)
+from pulsara_agent.runtime.projection_jobs.pre_activation import (
+    PostgresProjectionMigrationPreparationCoordinator,
+)
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 
 
@@ -26,10 +32,35 @@ class MigratedPostgresTestDatabase:
 def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
     database = create_empty_postgres_test_database()
     try:
-        PostgresMigrationRunner(
+        runner = PostgresMigrationRunner(
             admin_dsn=database.admin_dsn,
             runtime_dsn=database.runtime_dsn,
-        ).migrate(deadline_monotonic=monotonic() + 120.0)
+        )
+        coordinator = PostgresProjectionMigrationPreparationCoordinator(
+            admin_dsn=database.admin_dsn,
+            runtime_dsn=database.runtime_dsn,
+        )
+        deadline = monotonic() + 240.0
+        report = runner.migrate(deadline_monotonic=deadline)
+        if report.migration_head_version == 5:
+            coordinator.prepare_legacy_surface_bindings(deadline_monotonic=deadline)
+            report = runner.migrate(deadline_monotonic=deadline)
+        if report.migration_head_version == 6:
+            coordinator.drain_pre_activation(
+                kind=DurableProjectionKind.RUN_TIMELINE,
+                deadline_monotonic=deadline,
+            )
+            report = runner.migrate(deadline_monotonic=deadline)
+        if report.migration_head_version == 7:
+            coordinator.drain_pre_activation(
+                kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+                deadline_monotonic=deadline,
+            )
+            report = runner.migrate(deadline_monotonic=deadline)
+        if report.migration_head_version != 8:
+            raise RuntimeError(
+                "staged PostgreSQL test migration did not reach version 8"
+            )
     except BaseException:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)
         raise

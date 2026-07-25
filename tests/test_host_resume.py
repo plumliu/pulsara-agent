@@ -142,9 +142,8 @@ def _context_text(context: LLMContext) -> str:
 
 
 def _delete_session(dsn: str, runtime_session_id: str) -> None:
-    with psycopg.connect(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    del dsn, runtime_session_id
+    # Runtime session cutovers are immutable; the fixture database owns cleanup.
 
 
 def _session_row(dsn: str, runtime_session_id: str):

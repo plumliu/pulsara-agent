@@ -1,7 +1,8 @@
-from tests.support.postgres import verified_postgres_provider
-import asyncio
+from tests.support.postgres import (
+    guarded_postgres_test_connection,
+    verified_postgres_provider,
+)
 import hashlib
-import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -10,26 +11,20 @@ from uuid import uuid4
 import pytest
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
-from tests.support.runtime_session import in_memory_runtime_session
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
 )
 
-from pulsara_agent.event import EventContext, ReplyEndEvent
+from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import PostgresEventLog
-from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory import (
     ArtifactContentConflict,
     PostgresArtifactStore,
-    RunTimelinePersistenceHook,
-    load_run_timeline,
 )
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.settings import StorageConfig
-
 
 
 def _runtime_session_id() -> str:
@@ -54,6 +49,7 @@ def _seed_runtime_parent_rows(
         runtime_session_id=session_id,
         workspace_root=tmp_path,
     )
+    event_log.ensure_runtime_session_owner()
     event_log.append(
         make_text_block_segment_event(
             **ctx.event_fields(), block_id="text:parent", delta="parent"
@@ -63,13 +59,12 @@ def _seed_runtime_parent_rows(
 
 
 def _delete_session(dsn: str, runtime_session_id: str) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    # Session cutovers are immutable; the session-scoped fixture database owns cleanup.
+    del dsn, runtime_session_id
 
 
 def _delete_artifact(dsn: str, blob_id: str) -> None:
-    with _connect_or_skip(dsn) as connection:
+    with guarded_postgres_test_connection(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id = %s", (blob_id,))
 
@@ -79,13 +74,6 @@ def _artifact_count(dsn: str, blob_id: str) -> int:
         with connection.cursor() as cursor:
             cursor.execute("select count(*) from artifacts where id = %s", (blob_id,))
             return cursor.fetchone()[0]
-
-
-def _artifact_id_from_node_ref(node_id: str) -> str:
-    prefix = "urn:pulsara:"
-    if node_id.startswith(prefix):
-        return urllib.parse.unquote(node_id[len(prefix) :])
-    return node_id
 
 
 @pytest.fixture
@@ -406,86 +394,3 @@ def test_postgres_deterministic_artifact_concurrent_writers_confirm_identity() -
         assert _artifact_count(dsn, blob_id) == 1
     finally:
         _delete_artifact(dsn, blob_id)
-
-
-def test_run_timeline_persistence_can_use_postgres_artifact_store(
-    tmp_path: Path,
-) -> None:
-    dsn = StorageConfig.from_env().postgres_dsn
-    runtime_session_id = _runtime_session_id()
-    event_log = PostgresEventLog(
-        connection_provider=verified_postgres_provider(dsn),
-        runtime_session_id=runtime_session_id,
-        workspace_root=tmp_path,
-    )
-    event_log.ensure_runtime_session_owner()
-    ctx = _event_context("timeline-artifact")
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "insert into runs (id, session_id) values (%s, %s)",
-                (ctx.run_id, runtime_session_id),
-            )
-            cursor.execute(
-                """
-                insert into turns (id, session_id, run_id, turn_index)
-                values (%s, %s, %s, 0)
-                """,
-                (ctx.turn_id, runtime_session_id, ctx.run_id),
-            )
-    runtime = in_memory_runtime_session(
-        tmp_path,
-        runtime_session_id=runtime_session_id,
-    )
-    archive = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
-    graph_id = f"graph:test:{uuid4().hex}"
-    graph = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
-    runtime.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime.event_log,
-            graph_id=graph_id,
-        ),
-    )
-
-    async def run() -> None:
-        await runtime.emit(
-            make_text_block_segment_event(
-                **ctx.event_fields(), block_id="text:1", delta="hello"
-            )
-        )
-        await runtime.emit(
-            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed")
-        )
-
-    try:
-        asyncio.run(run())
-
-        timeline = load_run_timeline(
-            graph=graph,
-            archive=archive,
-            run_id=ctx.run_id,
-            runtime_session_id=runtime_session_id,
-            graph_id=graph_id,
-        )
-        record = graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)[0]
-        blob_id = _artifact_id_from_node_ref(record[rt.STORED_AS.name]["@id"])
-
-        assert timeline.run_id == ctx.run_id
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select session_id, run_id from artifacts where id = %s", (blob_id,)
-                )
-                assert cursor.fetchone() == (runtime_session_id, ctx.run_id)
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from artifacts where id like %s",
-                    (f"timeline:{runtime_session_id}:{ctx.run_id}:%",),
-                )
-        graph.delete_graph(graph_id)
-        _delete_session(dsn, runtime_session_id)

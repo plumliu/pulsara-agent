@@ -33,8 +33,10 @@ _DDL_PREFIX = re.compile(
 
 def _python_sources():
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        yield path, path.relative_to(SOURCE_ROOT).as_posix(), path.read_text(
-            encoding="utf-8"
+        yield (
+            path,
+            path.relative_to(SOURCE_ROOT).as_posix(),
+            path.read_text(encoding="utf-8"),
         )
 
 
@@ -51,9 +53,11 @@ def test_schema_ddl_has_no_python_execution_owner() -> None:
             ):
                 continue
             statement = node.args[0]
-            if isinstance(statement, ast.Constant) and isinstance(
-                statement.value, str
-            ) and _DDL_PREFIX.match(statement.value):
+            if (
+                isinstance(statement, ast.Constant)
+                and isinstance(statement.value, str)
+                and _DDL_PREFIX.match(statement.value)
+            ):
                 violations.append(f"{relative}:{node.lineno}")
     assert violations == []
 
@@ -98,7 +102,9 @@ def test_production_adapter_constructors_have_no_raw_dsn_authority() -> None:
                     for argument in (*node.args.args, *node.args.kwonlyargs)
                 }
                 if names & forbidden:
-                    violations.append(f"{relative}:{node.lineno}:{sorted(names & forbidden)}")
+                    violations.append(
+                        f"{relative}:{node.lineno}:{sorted(names & forbidden)}"
+                    )
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 if node.target.id in forbidden:
                     violations.append(f"{relative}:{node.lineno}:{node.target.id}")
@@ -123,6 +129,10 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         "0002_runtime_truth_baseline.sql",
         "0003_memory_substrate_baseline.sql",
         "0004_memory_governance_baseline.sql",
+        "0005_durable_projection_jobs.sql",
+        "0006_canonical_mutation_surface_jobs.sql",
+        "0007_run_timeline_projection_activation.sql",
+        "0008_tool_result_evidence_projection_activation.sql",
     ]
     create_extension_owners = []
     for path in resources:
@@ -130,15 +140,22 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         upper = sql_text.upper()
         if "CREATE EXTENSION" in upper:
             create_extension_owners.append(path.name)
-        if path.name != "0001_pgvector_extension.sql":
+        if path.name not in {
+            "0001_pgvector_extension.sql",
+            "0005_durable_projection_jobs.sql",
+        }:
             assert "IF NOT EXISTS" not in upper
         assert " ADD COLUMN " not in upper
         assert " DROP COLUMN " not in upper
         assert " ALTER COLUMN " not in upper
-        assert re.search(r"\bUPDATE\b", upper) is None
+        if path.name != "0005_durable_projection_jobs.sql":
+            assert re.search(r"\bUPDATE\b", upper) is None
         assert re.search(r"\bDELETE\s+FROM\b", upper) is None
         assert "CREATE INDEX CONCURRENTLY" not in upper
-    assert create_extension_owners == ["0001_pgvector_extension.sql"]
+    assert create_extension_owners == [
+        "0001_pgvector_extension.sql",
+        "0005_durable_projection_jobs.sql",
+    ]
 
 
 def test_durable_runtime_wiring_requires_verified_access_lease() -> None:

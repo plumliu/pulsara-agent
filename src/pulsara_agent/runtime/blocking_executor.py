@@ -10,14 +10,17 @@ from threading import Lock
 _EXECUTOR_LOCK = Lock()
 _CRITICAL_LEDGER_EXECUTOR: ThreadPoolExecutor | None = None
 _AUXILIARY_IO_EXECUTOR: ThreadPoolExecutor | None = None
+_PROJECTION_MAINTENANCE_EXECUTOR: ThreadPoolExecutor | None = None
 _MAX_CRITICAL_LEDGER_WORKERS = 4
 _MAX_AUXILIARY_IO_WORKERS = 12
+_MAX_PROJECTION_MAINTENANCE_WORKERS = 9
 
 
 @dataclass(frozen=True, slots=True)
 class BlockingExecutorCapacity:
     critical_ledger_workers: int
     auxiliary_io_workers: int
+    projection_maintenance_workers: int
 
 
 def blocking_executor_capacity() -> BlockingExecutorCapacity:
@@ -26,6 +29,7 @@ def blocking_executor_capacity() -> BlockingExecutorCapacity:
     return BlockingExecutorCapacity(
         critical_ledger_workers=_MAX_CRITICAL_LEDGER_WORKERS,
         auxiliary_io_workers=_MAX_AUXILIARY_IO_WORKERS,
+        projection_maintenance_workers=_MAX_PROJECTION_MAINTENANCE_WORKERS,
     )
 
 
@@ -55,9 +59,23 @@ def auxiliary_io_executor() -> ThreadPoolExecutor:
         return _AUXILIARY_IO_EXECUTOR
 
 
+def projection_maintenance_executor() -> ThreadPoolExecutor:
+    """Return the process-owned lane for derived projection work."""
+
+    global _PROJECTION_MAINTENANCE_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _PROJECTION_MAINTENANCE_EXECUTOR is None:
+            _PROJECTION_MAINTENANCE_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_MAX_PROJECTION_MAINTENANCE_WORKERS,
+                thread_name_prefix="pulsara-projection-maintenance",
+            )
+        return _PROJECTION_MAINTENANCE_EXECUTOR
+
+
 __all__ = [
     "BlockingExecutorCapacity",
     "auxiliary_io_executor",
     "blocking_executor_capacity",
     "critical_ledger_executor",
+    "projection_maintenance_executor",
 ]

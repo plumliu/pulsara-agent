@@ -166,9 +166,9 @@ class McpInputRequiredRequestEnvelopeFact(FrozenFactBase):
         "mcp_input_required_request_envelope.v1"
     )
     protocol_version: str | None
-    ordered_user_visible_input_requests: tuple[
-        McpUserVisibleInputRequestFact, ...
-    ] = Field(max_length=MAX_MCP_INPUT_REQUESTS)
+    ordered_user_visible_input_requests: tuple[McpUserVisibleInputRequestFact, ...] = (
+        Field(max_length=MAX_MCP_INPUT_REQUESTS)
+    )
     original_request_semantic_fingerprint: str
     request_state_semantic_fingerprint: str | None
     request_envelope_semantic_fingerprint: str
@@ -231,9 +231,7 @@ class McpInputRequiredSuspensionFact(FrozenFactBase):
     source_mcp_installation_id: str
     durable_deadline_utc: str | None
     deadline_policy_fingerprint: str
-    predecessor_resolution_submitted_event_reference: (
-        ContextEventReferenceFact | None
-    )
+    predecessor_resolution_submitted_event_reference: ContextEventReferenceFact | None
     suspension_fact_fingerprint: str
 
     @field_validator(
@@ -288,8 +286,7 @@ class PreparedMcpInputRequiredSuspension(FrozenRuntimeStateBase):
         if (
             self.pending_lease_reservation.interaction_id
             != self.interaction.interaction_id
-            or self.pending_lease_reservation.binding_identity
-            != self.binding_identity
+            or self.pending_lease_reservation.binding_identity != self.binding_identity
         ):
             raise ValueError("prepared MCP suspension lease identity mismatch")
         if (
@@ -308,7 +305,10 @@ class PreparedMcpInputRequiredSuspension(FrozenRuntimeStateBase):
             if self.owned_request_state_json_bytes is not None
             else None
         )
-        if state_fingerprint != self.request_envelope.request_state_semantic_fingerprint:
+        if (
+            state_fingerprint
+            != self.request_envelope.request_state_semantic_fingerprint
+        ):
             raise ValueError("prepared MCP request state fingerprint mismatch")
         return self
 
@@ -345,9 +345,7 @@ class McpInputRequiredSourceAuthorityFact(FrozenFactBase):
     source_mcp_installation_id: str
     durable_deadline_utc: str | None
     deadline_policy_fingerprint: str
-    predecessor_resolution_submitted_event_reference: (
-        ContextEventReferenceFact | None
-    )
+    predecessor_resolution_submitted_event_reference: ContextEventReferenceFact | None
     source_suspension_fact_fingerprint: str
     source_suspension_event_reference: ContextEventReferenceFact
     original_run_start_event_reference: ContextEventReferenceFact
@@ -371,8 +369,7 @@ class McpInputRequiredSourceAuthorityFact(FrozenFactBase):
         if (
             self.pending_lease_reservation.interaction_id
             != self.interaction.interaction_id
-            or self.pending_lease_reservation.binding_identity
-            != self.binding_identity
+            or self.pending_lease_reservation.binding_identity != self.binding_identity
         ):
             raise ValueError("MCP source authority pending lease mismatch")
         return self
@@ -394,9 +391,7 @@ class McpInputRequiredResolutionSemanticFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _keys(self) -> "McpInputRequiredResolutionSemanticFact":
-        if self.ordered_response_keys != tuple(
-            sorted(set(self.ordered_response_keys))
-        ):
+        if self.ordered_response_keys != tuple(sorted(set(self.ordered_response_keys))):
             raise ValueError("MCP response keys must be sorted and unique")
         for key in self.ordered_response_keys:
             _bounded_utf8(
@@ -453,9 +448,7 @@ class McpInputRequiredResolutionAttemptFact(FrozenFactBase):
     )
     round_count: int = Field(ge=1)
     attempt_ordinal: int = Field(ge=1)
-    predecessor_resolution_submitted_event_reference: (
-        ContextEventReferenceFact | None
-    )
+    predecessor_resolution_submitted_event_reference: ContextEventReferenceFact | None
     predecessor_resume_failed_event_reference: ContextEventReferenceFact | None
     attempt_fingerprint: str
 
@@ -467,7 +460,9 @@ class McpInputRequiredResolutionAttemptFact(FrozenFactBase):
         )
         if self.attempt_ordinal == 1:
             if any(item is not None for item in predecessors):
-                raise ValueError("first MCP resolution attempt cannot have predecessors")
+                raise ValueError(
+                    "first MCP resolution attempt cannot have predecessors"
+                )
         elif any(item is None for item in predecessors):
             raise ValueError("retried MCP resolution requires both predecessors")
         return self
@@ -503,7 +498,9 @@ class BoundedRuntimeFailureDiagnosticFact(FrozenFactBase):
         if len(value.encode("utf-8")) > MAX_RUNTIME_DIAGNOSTIC_BYTES:
             raise ValueError("runtime diagnostic message exceeds its byte bound")
         if any(ord(char) < 32 and char not in "\n\t" for char in value):
-            raise ValueError("runtime diagnostic contains unsupported control characters")
+            raise ValueError(
+                "runtime diagnostic contains unsupported control characters"
+            )
         return value
 
 
@@ -517,9 +514,7 @@ class McpInputRequiredTerminalSourceFact(FrozenFactBase):
         "mcp_input_required_terminal_source.v1"
     )
     source_suspension_event_reference: ContextEventReferenceFact
-    source_resolution_submitted_event_reference: (
-        ContextEventReferenceFact | None
-    )
+    source_resolution_submitted_event_reference: ContextEventReferenceFact | None
     source_fingerprint: str
 
     @model_validator(mode="after")
@@ -569,9 +564,7 @@ class PublicationLatchedRunTerminationFact(FrozenFactBase):
         sequences = tuple(item.sequence for item in self.source_event_references)
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("publication termination refs must be ordered and unique")
-        runtime_ids = {
-            item.runtime_session_id for item in self.source_event_references
-        }
+        runtime_ids = {item.runtime_session_id for item in self.source_event_references}
         if len(runtime_ids) != 1:
             raise ValueError("publication termination refs cross runtime ledgers")
         expected = ordered_fingerprint_accumulator(
@@ -608,8 +601,7 @@ class ContextCompactionRequestFact(FrozenFactBase):
         ):
             raise ValueError("compaction request basis requires ToolResultEnd refs")
         sequences = tuple(
-            item.sequence
-            for item in self.basis_tool_result_terminal_event_references
+            item.sequence for item in self.basis_tool_result_terminal_event_references
         )
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("compaction request basis refs must be ordered and unique")
@@ -752,9 +744,9 @@ class ToolResultEvidenceProjectionFailureFact(FrozenFactBase):
         "execution_evidence_persistence"
     )
     projection_contract_version: Literal["1"] = "1"
-    ordered_tool_result_sources: tuple[
-        ToolResultEvidenceProjectionSourceFact, ...
-    ] = Field(min_length=1, max_length=MAX_TOOL_RESULT_RECEIPT_ITEMS)
+    ordered_tool_result_sources: tuple[ToolResultEvidenceProjectionSourceFact, ...] = (
+        Field(min_length=1, max_length=MAX_TOOL_RESULT_RECEIPT_ITEMS)
+    )
     ordered_source_fingerprints_accumulator: str
     diagnostic: BoundedRuntimeFailureDiagnosticFact
     failure_semantic_fingerprint: str
@@ -818,7 +810,9 @@ class CompactionPublicationTerminalizationScope(FrozenRuntimeStateBase):
             if any(item is None for item in active):
                 raise ValueError("mid-turn compaction scope requires active identities")
         elif any(item is not None for item in active):
-            raise ValueError("no-active-run compaction scope cannot carry active identities")
+            raise ValueError(
+                "no-active-run compaction scope cannot carry active identities"
+            )
         expected = context_fingerprint(
             "compaction-publication-terminalization-scope:v1",
             self.model_dump(mode="json", exclude={"scope_fingerprint"}),
@@ -916,12 +910,15 @@ class CompactionCandidateProjectionReceipt(FrozenRuntimeStateBase):
     producer_payload_fingerprint: str | None
     producer_event_reference: ContextEventReferenceFact | None
     outbox_item_accumulator: str | None
-    reconciliation_from_status: Literal[
-        "owner_installed",
-        "candidate_frozen",
-        "producer_bundle_full",
-        "projection_applied",
-    ] | None
+    reconciliation_from_status: (
+        Literal[
+            "owner_installed",
+            "candidate_frozen",
+            "producer_bundle_full",
+            "projection_applied",
+        ]
+        | None
+    )
 
     @model_validator(mode="after")
     def _status_matrix(self) -> "CompactionCandidateProjectionReceipt":
@@ -955,8 +952,7 @@ class CompactionCandidateProjectionReceipt(FrozenRuntimeStateBase):
             "reconciliation_required",
         }
         if (self.status in owner_statuses) != (
-            self.owner_id is not None
-            and self.prepared_input_fingerprint is not None
+            self.owner_id is not None and self.prepared_input_fingerprint is not None
         ):
             raise ValueError("compaction projection owner field matrix mismatch")
         producer_frozen = self.status in {
@@ -1160,7 +1156,9 @@ def prepare_mcp_input_required_resolution(
         total_bytes += len(payload)
         if total_bytes > MAX_MCP_PREPARED_RESPONSE_BYTES:
             raise ValueError("prepared MCP responses exceed their byte bound")
-        fingerprint = context_fingerprint("mcp-response-entry:v1", payload.decode("utf-8"))
+        fingerprint = context_fingerprint(
+            "mcp-response-entry:v1", payload.decode("utf-8")
+        )
         entries.append(
             PreparedMcpResponseEntry(
                 key=key,
@@ -1218,6 +1216,22 @@ _DIAGNOSTIC_PROFILE_CONTRACTS: Mapping[str, Mapping[str, object]] = {
     },
     "execution_evidence_projection_error.v1": {
         "default_message": "Tool-result evidence projection failed.",
+        "accepts_explicit_redacted_message": False,
+    },
+    "durable_projection_job_error.v1": {
+        "default_message": "Durable projection job failed.",
+        "accepts_explicit_redacted_message": False,
+    },
+    "durable_projection_seed_error.v1": {
+        "default_message": "Durable projection seed authority failed validation.",
+        "accepts_explicit_redacted_message": False,
+    },
+    "canonical_mutation_surface_delivery_error.v1": {
+        "default_message": "Canonical mutation surface delivery failed.",
+        "accepts_explicit_redacted_message": False,
+    },
+    "runtime_session_bootstrap_error.v1": {
+        "default_message": "Runtime session owner bootstrap failed.",
         "accepts_explicit_redacted_message": False,
     },
     "compaction_candidate_projection_preparation_error.v1": {
@@ -1321,13 +1335,9 @@ def build_runtime_event_deadline_budget(
     payload = {
         "admitted_at_monotonic": admitted_at_monotonic,
         "ordinary_deadline_monotonic": (
-            admitted_at_monotonic
-            + total_timeout_seconds
-            - terminal_reserve_seconds
+            admitted_at_monotonic + total_timeout_seconds - terminal_reserve_seconds
         ),
-        "terminal_deadline_monotonic": (
-            admitted_at_monotonic + total_timeout_seconds
-        ),
+        "terminal_deadline_monotonic": (admitted_at_monotonic + total_timeout_seconds),
         "terminal_reserve_seconds": terminal_reserve_seconds,
     }
     return RuntimeEventOperationDeadlineBudget(

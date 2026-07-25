@@ -9,6 +9,7 @@ from hashlib import sha256
 from time import monotonic
 from psycopg import Connection, sql
 from psycopg.rows import dict_row, tuple_row
+from psycopg.types.json import Jsonb
 
 from pulsara_agent import __version__
 from pulsara_agent.storage.migrations.contracts import (
@@ -41,6 +42,13 @@ from pulsara_agent.storage.migrations.registry import (
 from pulsara_agent.storage.postgres_endpoint import (
     PostgresCanonicalEndpointFact,
     ResolvedPostgresConnectionFactory,
+)
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    PostgresMigrationProgressOutcomeFact,
+)
+from pulsara_agent.runtime.projection_jobs.migration_state import (
+    migration_progress_outcome,
+    next_projection_migration_requirement,
 )
 
 
@@ -79,10 +87,13 @@ class PostgresMigrationReport:
     registry_prefix_fingerprint: str
     runtime_role_can_create_in_public_schema: bool
     warnings: tuple[str, ...]
+    progress_outcome: PostgresMigrationProgressOutcomeFact
     report_fingerprint: str
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["progress_outcome"] = self.progress_outcome.model_dump(mode="json")
+        return payload
 
 
 class PostgresAdminConnectionFactory:
@@ -170,6 +181,7 @@ class PostgresMigrationRunner:
         applied_versions: list[int] = []
         added_grants: tuple[str, ...] = ()
         previous_head: int | None = None
+        preparation_requirement = None
         try:
             admin_identity = _read_identity_from_connection(admin)
             _validate_transaction_domain(admin_identity, runtime_identity)
@@ -187,6 +199,8 @@ class PostgresMigrationRunner:
                 rows_tuple = rows
                 self._validate_applied_history(rows_tuple)
                 previous_head = rows_tuple[-1].version if rows_tuple else None
+                if previous_head is not None:
+                    self._validate_postcondition(admin, previous_head)
             start_version = len(rows_tuple)
             if start_version > len(self._registry.definitions):
                 raise PostgresSchemaError(
@@ -195,6 +209,47 @@ class PostgresMigrationRunner:
                 )
             next_version = start_version
             while next_version < len(self._registry.definitions):
+                current_head_version = next_version - 1
+                if current_head_version >= 5:
+                    from pulsara_agent.runtime.projection_jobs.pre_activation import (
+                        projection_migration_readiness,
+                    )
+
+                    readiness = projection_migration_readiness(
+                        admin,
+                        current_head_version=current_head_version,
+                        database_target_fingerprint=(
+                            self._admin_factory.endpoint.endpoint_fingerprint
+                        ),
+                    )
+                else:
+                    from pulsara_agent.runtime.projection_jobs.pre_activation import (
+                        ProjectionMigrationReadiness,
+                    )
+
+                    readiness = ProjectionMigrationReadiness(False, False, False)
+                current_prefix = (
+                    self._registry.definition(
+                        current_head_version
+                    ).registry_prefix_fingerprint
+                    if current_head_version >= 0
+                    else ""
+                )
+                preparation_requirement = next_projection_migration_requirement(
+                    current_head_version=current_head_version,
+                    target_head_version=self._registry.latest_version,
+                    database_target_fingerprint=(
+                        self._admin_factory.endpoint.endpoint_fingerprint
+                    ),
+                    current_registry_prefix_fingerprint=current_prefix,
+                    legacy_surface_binding_plan_ready=(
+                        readiness.legacy_surface_binding_plan_ready
+                    ),
+                    timeline_coverage_ready=readiness.timeline_coverage_ready,
+                    evidence_coverage_ready=readiness.evidence_coverage_ready,
+                )
+                if preparation_requirement is not None:
+                    break
                 definition = self._registry.definitions[next_version]
                 admin = self._apply_one(
                     admin,
@@ -212,35 +267,47 @@ class PostgresMigrationRunner:
                     )
                 self._validate_applied_history(refreshed_rows)
                 next_version = len(refreshed_rows)
-            admin, added_grants = self._reconcile_privileges(
-                admin,
-                runtime_identity=runtime_identity,
-                runtime_role=runtime_identity.runtime_role,
-                deadline_monotonic=deadline_monotonic,
-            )
             final_rows = read_migration_ledger(admin)
             if final_rows is None:
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.MIGRATION_FAILED,
                     "migration ledger disappeared before final verification",
                 )
-            self._validate_applied_history(final_rows, require_latest=True)
-            from pulsara_agent.storage.migrations.catalog import (
-                PostgresCatalogCanonicalizer,
+            final_head = final_rows[-1].version
+            self._validate_applied_history(
+                final_rows,
+                require_latest=preparation_requirement is None,
             )
-            from pulsara_agent.storage.migrations.verifier import (
-                _load_expected_catalog,
-            )
-
-            observed_catalog = PostgresCatalogCanonicalizer().read_deep(admin)
-            expected_catalog = _load_expected_catalog()
-            if observed_catalog.deep_catalog_fingerprint != str(
-                expected_catalog["deep_catalog_fingerprint"]
-            ):
-                raise PostgresSchemaError(
-                    PostgresSchemaFailureCode.CATALOG_DRIFT,
-                    "final migrated catalog differs from the packaged deep manifest",
+            self._validate_postcondition(admin, final_head)
+            if preparation_requirement is None:
+                admin, added_grants = self._reconcile_privileges(
+                    admin,
+                    runtime_identity=runtime_identity,
+                    runtime_role=runtime_identity.runtime_role,
+                    deadline_monotonic=deadline_monotonic,
                 )
+                from pulsara_agent.storage.migrations.catalog import (
+                    PostgresCatalogCanonicalizer,
+                )
+                from pulsara_agent.storage.migrations.verifier import (
+                    _load_expected_catalog,
+                )
+
+                expected_catalog = _load_expected_catalog(through_version=final_head)
+                observed_catalog = PostgresCatalogCanonicalizer().read_deep(
+                    admin,
+                    relation_names=tuple(
+                        str(item["relation_name"])
+                        for item in expected_catalog["relation_execution_shapes"]
+                    ),
+                )
+                if observed_catalog.deep_catalog_fingerprint != str(
+                    expected_catalog["deep_catalog_fingerprint"]
+                ):
+                    raise PostgresSchemaError(
+                        PostgresSchemaFailureCode.CATALOG_DRIFT,
+                        "final migrated catalog differs from the packaged deep manifest",
+                    )
             runtime_can_create_in_public = _runtime_role_can_create_in_public_schema(
                 admin, runtime_identity.runtime_role
             )
@@ -249,24 +316,49 @@ class PostgresMigrationRunner:
                 if runtime_can_create_in_public
                 else ()
             )
+            progress = migration_progress_outcome(
+                initial_head_version=previous_head,
+                resulting_head_version=final_head,
+                target_head_version=self._registry.latest_version,
+                applied_versions=tuple(applied_versions),
+                requirement=preparation_requirement,
+                resulting_registry_prefix_fingerprint=(
+                    final_rows[-1].registry_prefix_fingerprint
+                ),
+            )
             payload = {
-                "status": "migrated" if applied_versions else "up_to_date",
+                "status": (
+                    "preparation_required"
+                    if preparation_requirement is not None
+                    else ("migrated" if applied_versions else "up_to_date")
+                ),
                 "database_name": runtime_identity.database_name,
                 "runtime_role": runtime_identity.runtime_role,
                 "previous_head_version": previous_head,
-                "migration_head_version": self._registry.latest_version,
+                "migration_head_version": final_head,
                 "applied_versions": tuple(applied_versions),
                 "added_grant_fingerprints": added_grants,
-                "registry_prefix_fingerprint": self._registry.registry_fingerprint,
+                "registry_prefix_fingerprint": (
+                    final_rows[-1].registry_prefix_fingerprint
+                ),
                 "runtime_role_can_create_in_public_schema": (
                     runtime_can_create_in_public
                 ),
                 "warnings": warnings,
+                "progress_outcome": progress,
             }
             return PostgresMigrationReport(
                 **payload,
                 report_fingerprint=postgres_schema_fingerprint(
-                    "pulsara:postgres-migration-report:v1", payload
+                    "pulsara:postgres-migration-report:v1",
+                    {
+                        **{
+                            key: value
+                            for key, value in payload.items()
+                            if key != "progress_outcome"
+                        },
+                        "progress_outcome_fingerprint": (progress.outcome_fingerprint),
+                    },
                 ),
             )
         finally:
@@ -316,7 +408,90 @@ class PostgresMigrationRunner:
             try:
                 with connection.transaction():
                     _apply_local_deadline(connection, deadline_monotonic)
+                    maintenance_epoch = None
+                    if definition.version >= 6:
+                        from pulsara_agent.storage.runtime_write_admission import (
+                            acquire_maintenance_runtime_write_guard,
+                            read_runtime_write_epoch,
+                        )
+
+                        maintenance_epoch = read_runtime_write_epoch(
+                            connection,
+                            privileged=True,
+                        )
+                        if (
+                            maintenance_epoch.mode.value != "maintenance"
+                            or maintenance_epoch.target_migration_version
+                            != definition.version
+                        ):
+                            raise PostgresSchemaError(
+                                PostgresSchemaFailureCode.MIGRATION_FAILED,
+                                f"migration {definition.version} requires its "
+                                "prepared maintenance epoch",
+                            )
+                        acquire_maintenance_runtime_write_guard(
+                            connection,
+                            expected_epoch=maintenance_epoch,
+                            transaction_owner_id=(
+                                "schema-migration:"
+                                + str(definition.version)
+                                + ":"
+                                + str(maintenance_epoch.maintenance_operation_id)
+                            ),
+                        )
+                        from pulsara_agent.runtime.projection_jobs.migration_transform import (
+                            apply_projection_migration_transform,
+                        )
+
+                        apply_projection_migration_transform(
+                            connection,
+                            version=definition.version,
+                            maintenance_epoch=maintenance_epoch,
+                            resulting_registry_prefix_fingerprint=(
+                                definition.registry_prefix_fingerprint
+                            ),
+                        )
                     connection.execute(definition.resource_text(), prepare=False)
+                    if definition.version == 5:
+                        from pulsara_agent.storage.runtime_write_admission import (
+                            install_runtime_write_admission_v5,
+                        )
+
+                        install_runtime_write_admission_v5(
+                            connection,
+                            database_target_fingerprint=(
+                                self._runtime_factory.endpoint.endpoint_fingerprint
+                            ),
+                            runtime_role=runtime_role,
+                            resulting_registry_prefix_fingerprint=(
+                                definition.registry_prefix_fingerprint
+                            ),
+                        )
+                    elif definition.version >= 6:
+                        assert maintenance_epoch is not None
+                        from pulsara_agent.runtime.projection_jobs.migration_transform import (
+                            protected_relation_resource_for_version,
+                        )
+                        from pulsara_agent.storage.runtime_write_admission import (
+                            install_runtime_write_normal_epoch,
+                            replace_runtime_write_protected_relation_registry,
+                        )
+
+                        resource_name = protected_relation_resource_for_version(
+                            definition.version
+                        )
+                        replace_runtime_write_protected_relation_registry(
+                            connection,
+                            resource_name=resource_name,
+                        )
+                        install_runtime_write_normal_epoch(
+                            connection,
+                            maintenance_epoch=maintenance_epoch,
+                            resulting_registry_prefix_fingerprint=(
+                                definition.registry_prefix_fingerprint
+                            ),
+                            protected_relation_resource_name=resource_name,
+                        )
                     policy = build_postgres_runtime_grant_policy(definition.version)
                     for requirement in policy.requirements:
                         self._grant_executor.apply_requirement(
@@ -481,6 +656,50 @@ class PostgresMigrationRunner:
                         PostgresSchemaFailureCode.EXTENSION_TOO_OLD,
                         "pgvector extension must be >= 0.5.0",
                     )
+            if through_version >= 5:
+                cursor.execute(
+                    "SELECT extversion FROM pg_catalog.pg_extension "
+                    "WHERE extname = 'pgcrypto'"
+                )
+                if cursor.fetchone() is None:
+                    raise PostgresSchemaError(
+                        PostgresSchemaFailureCode.EXTENSION_MISSING,
+                        "pgcrypto extension is absent after migration 0005",
+                    )
+                from pulsara_agent.storage.runtime_write_admission import (
+                    build_runtime_write_protected_relation_registry,
+                )
+
+                registry = build_runtime_write_protected_relation_registry(
+                    resource_name=(
+                        "0005_runtime_write_protected_relations_v1.json"
+                        if through_version == 5
+                        else "0006_runtime_write_protected_relations_v2.json"
+                    )
+                )
+                cursor.execute(
+                    """
+                    SELECT schema_name, relation_name, relation_fingerprint,
+                           registry_fingerprint
+                    FROM public.runtime_write_protected_relations
+                    ORDER BY schema_name, relation_name
+                    """
+                )
+                observed = tuple(cursor.fetchall())
+                expected = tuple(
+                    (
+                        item.schema_name,
+                        item.relation_name,
+                        item.relation_fingerprint,
+                        registry.registry_fingerprint,
+                    )
+                    for item in registry.ordered_relations
+                )
+                if observed != expected:
+                    raise PostgresSchemaError(
+                        PostgresSchemaFailureCode.CATALOG_DRIFT,
+                        "runtime write protected-relation registry drifted",
+                    )
 
     def _validate_applied_history(
         self,
@@ -537,12 +756,17 @@ class PostgresMigrationRunner:
     ) -> tuple[Connection, tuple[str, ...]]:
         policy = build_postgres_runtime_grant_policy(self._registry.latest_version)
         while True:
+            epoch_role_rebind_required = _runtime_epoch_role_rebind_required(
+                connection,
+                runtime_role=runtime_role,
+                latest_version=self._registry.latest_version,
+            )
             missing = tuple(
                 requirement
                 for requirement in policy.requirements
                 if not requirement_satisfied(connection, runtime_role, requirement)
             )
-            if not missing:
+            if not missing and not epoch_role_rebind_required:
                 return connection, ()
             body_completed = False
             try:
@@ -561,6 +785,11 @@ class PostgresMigrationRunner:
                             connection,
                             runtime_role=runtime_role,
                             requirement=requirement,
+                        )
+                    if epoch_role_rebind_required:
+                        _rebind_runtime_write_epoch_role(
+                            connection,
+                            runtime_role=runtime_role,
                         )
                     unresolved = tuple(
                         requirement.requirement_fingerprint
@@ -591,6 +820,7 @@ class PostgresMigrationRunner:
                     runtime_identity=runtime_identity,
                     runtime_role=runtime_role,
                     pre_state_missing=missing,
+                    pre_epoch_role_rebind_required=(epoch_role_rebind_required),
                     deadline_monotonic=deadline_monotonic,
                 )
                 if confirmation is PostgresCommitConfirmation.FULL:
@@ -621,6 +851,7 @@ class PostgresMigrationRunner:
         runtime_identity: PostgresDatabaseIdentity,
         runtime_role: str,
         pre_state_missing: tuple[PostgresRuntimeGrantRequirementFact, ...],
+        pre_epoch_role_rebind_required: bool,
         deadline_monotonic: float,
     ) -> tuple[PostgresCommitConfirmation, Connection | None]:
         connection: Connection | None = None
@@ -646,6 +877,11 @@ class PostgresMigrationRunner:
                 for requirement in policy.requirements
                 if not requirement_satisfied(connection, runtime_role, requirement)
             )
+            observed_epoch_rebind_required = _runtime_epoch_role_rebind_required(
+                connection,
+                runtime_role=runtime_role,
+                latest_version=self._registry.latest_version,
+            )
         except PostgresSchemaError as exc:
             if exc.code in {
                 PostgresSchemaFailureCode.CONNECTION_FAILED,
@@ -660,10 +896,12 @@ class PostgresMigrationRunner:
                 connection.close()
             return PostgresCommitConfirmation.UNRESOLVED, None
 
-        if not observed_missing:
+        if not observed_missing and not observed_epoch_rebind_required:
             return PostgresCommitConfirmation.FULL, connection
-        if tuple(item.requirement_fingerprint for item in observed_missing) == tuple(
-            item.requirement_fingerprint for item in pre_state_missing
+        if (
+            tuple(item.requirement_fingerprint for item in observed_missing)
+            == tuple(item.requirement_fingerprint for item in pre_state_missing)
+            and observed_epoch_rebind_required == pre_epoch_role_rebind_required
         ):
             return PostgresCommitConfirmation.NONE, connection
         return PostgresCommitConfirmation.CONFLICT, connection
@@ -754,6 +992,99 @@ def requirement_satisfied(
             if cursor.fetchone()[0] is not True:
                 return False
     return True
+
+
+def _runtime_epoch_role_rebind_required(
+    connection: Connection,
+    *,
+    runtime_role: str,
+    latest_version: int,
+) -> bool:
+    if latest_version < 5:
+        return False
+    from pulsara_agent.storage.runtime_write_admission import (
+        read_runtime_write_epoch,
+    )
+
+    epoch = read_runtime_write_epoch(connection, privileged=True)
+    return epoch.authorized_runtime_role != runtime_role
+
+
+def _rebind_runtime_write_epoch_role(
+    connection: Connection,
+    *,
+    runtime_role: str,
+) -> None:
+    from pulsara_agent.runtime.projection_jobs.contracts import (
+        RuntimeWriteAdmissionMode,
+    )
+    from pulsara_agent.storage.runtime_write_admission import (
+        build_runtime_write_epoch,
+        read_runtime_write_epoch,
+    )
+
+    current = read_runtime_write_epoch(connection, privileged=True)
+    if current.mode is not RuntimeWriteAdmissionMode.NORMAL:
+        raise PostgresSchemaError(
+            PostgresSchemaFailureCode.PRIVILEGE_RECONCILIATION_FAILED,
+            "runtime role cannot be rebound while write admission is in maintenance",
+        )
+    if current.authorized_runtime_role == runtime_role:
+        return
+    resulting = build_runtime_write_epoch(
+        database_target_fingerprint=current.database_target_fingerprint,
+        epoch_number=current.epoch_number + 1,
+        mode=RuntimeWriteAdmissionMode.NORMAL,
+        authorized_runtime_role=runtime_role,
+        active_migration_registry_prefix_fingerprint=(
+            current.active_migration_registry_prefix_fingerprint
+        ),
+        protected_relation_registry_fingerprint=(
+            current.protected_relation_registry_fingerprint
+        ),
+        maintenance_operation_id=None,
+        target_migration_version=None,
+        state_revision=current.state_revision + 1,
+    )
+    connection.execute(
+        """
+        UPDATE runtime_write_guard_secrets
+        SET authorized_runtime_role = %s
+        WHERE singleton
+        """,
+        (runtime_role,),
+    )
+    connection.execute(
+        """
+        UPDATE runtime_write_admission_epochs
+        SET epoch_number = %s,
+            authorized_runtime_role = %s,
+            state_revision = %s,
+            epoch_payload = %s,
+            epoch_fingerprint = %s,
+            updated_at = now()
+        WHERE singleton
+          AND epoch_fingerprint = %s
+        """,
+        (
+            resulting.epoch_number,
+            runtime_role,
+            resulting.state_revision,
+            Jsonb(resulting.model_dump(mode="json")),
+            resulting.epoch_fingerprint,
+            current.epoch_fingerprint,
+        ),
+    )
+    if (
+        connection.execute(
+            "SELECT epoch_fingerprint FROM runtime_write_admission_epochs WHERE singleton"
+        ).fetchone()[0]
+        != resulting.epoch_fingerprint
+    ):
+        raise PostgresSchemaError(
+            PostgresSchemaFailureCode.PRIVILEGE_RECONCILIATION_FAILED,
+            "runtime write admission role rebind compare-and-set failed",
+        )
 
 
 def _candidate_row_is_full(

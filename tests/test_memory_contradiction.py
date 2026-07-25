@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.support.postgres import verified_postgres_provider
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import MappingProxyType
 from uuid import uuid4
@@ -29,7 +30,6 @@ from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import (
     ContradictAndSubmitDecision,
     CorrectAndSubmitDecision,
-    InMemoryArchiveStore,
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
     MemoryWriteUnitOfWork,
@@ -40,11 +40,8 @@ from pulsara_agent.memory import (
     WriteSucceededOutcome,
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
-from pulsara_agent.memory.canonical.index_sync import (
-    MemorySearchIndexSync,
-    _outbox_memory_ids,
-)
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.canonical.query import CanonicalNodeView
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
@@ -101,6 +98,7 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -158,7 +156,13 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
             EventType.MEMORY_CONTRADICTION_LINKED,
             EventType.MEMORY_CONTRADICTION_LINKED,
         ]
-        assert _governance_candidate_count(pool) == 0
+        assert (
+            _governance_candidate_count(
+                pool,
+                runtime_session_id=runtime_session_id,
+            )
+            == 0
+        )
 
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
         new_doc = store.get_jsonld(new_id, graph_id=graph_id)
@@ -176,12 +180,17 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
         assert (memory.CONTRADICTS.name, new_id) in fetched[old_id].outgoing
         assert (memory.CONTRADICTS.name, old_id) in fetched[new_id].outgoing
         with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select payload from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                payload = cursor.fetchone()[0]
+            row = connection.execute(
+                """
+                SELECT mutation_payload
+                FROM canonical_mutations_v2
+                WHERE graph_id = %s
+                """,
+                (graph_id,),
+            ).fetchone()
+        assert row is not None
+        carrier = row[0]["candidate"]["mutation_semantic"]["mutation_payload"]
+        payload = json.loads(carrier["canonical_json_utf8"])
         documents = {item["node_id"]: item["document"] for item in payload["documents"]}
         assert set(documents) == {old_id, new_id}
         assert {"@id": new_id} in documents[old_id][memory.CONTRADICTS.name]
@@ -280,6 +289,7 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -399,7 +409,13 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
                 result.decision_record.write_outcome, WriteSucceededOutcome
             )
             assert result.decision_record.write_outcome.contradicted_memory_ids == ()
-            assert _governance_candidate_count(pool) == 0
+            assert (
+                _governance_candidate_count(
+                    pool,
+                    runtime_session_id=runtime_session_id,
+                )
+                == 0
+            )
 
         assert (
             store.get_jsonld(active_old, graph_id=graph_id)[memory.STATUS.name]
@@ -442,6 +458,7 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -523,6 +540,7 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -573,14 +591,23 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
         assert old_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
         assert memory.CONTRADICTS.name not in old_doc
-        assert _governance_candidate_count(pool) == 0
+        assert (
+            _governance_candidate_count(
+                pool,
+                runtime_session_id=runtime_session_id,
+            )
+            == 0
+        )
         with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                assert cursor.fetchone() == (0,)
+            mutation_count = connection.execute(
+                """
+                SELECT count(*)
+                FROM canonical_mutations_v2
+                WHERE graph_id = %s
+                """,
+                (graph_id,),
+            ).fetchone()
+        assert mutation_count == (0,)
     finally:
         _cleanup_postgres(
             dsn,
@@ -606,6 +633,7 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -1073,16 +1101,6 @@ def test_merge_projection_preserves_conflict_groups() -> None:
     ]
 
 
-def test_outbox_memory_ids_ignores_contradicted_memory_ids() -> None:
-    assert _outbox_memory_ids(
-        {
-            "kind": "canonical_mutation",
-            "mutation_lane": "governed_memory",
-            "dirty_memory_ids": ["preference:new", "preference:old"],
-        }
-    ) == ("preference:new", "preference:old")
-
-
 def _postgres_executor(
     *,
     dsn: str,
@@ -1113,9 +1131,8 @@ def _postgres_executor(
 
 def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
     return MemoryWriteService(
-        ledger=ExecutionEvidenceLedger(
+        ledger=CanonicalMemoryLedger(
             graph=graph,
-            archive=InMemoryArchiveStore(),
             gate=MemoryWriteGate(),
         )
     )
@@ -1312,13 +1329,20 @@ def _relatedness_context(
     )
 
 
-def _governance_candidate_count(pool) -> int:
+def _governance_candidate_count(
+    pool,
+    *,
+    runtime_session_id: str | None = None,
+) -> int:
     return sum(
         1
         for candidate in pool.list_candidates()
         if candidate.origin is CandidateOrigin.GOVERNANCE
+        and (
+            runtime_session_id is None
+            or candidate.source_session_id == runtime_session_id
+        )
     )
-
 
 
 def _cleanup_postgres(
@@ -1328,26 +1352,6 @@ def _cleanup_postgres(
     runtime_session_id: str,
     governance_batch_id: str | None,
 ) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "delete from memory_write_outbox where graph_id = %s", (graph_id,)
-            )
-            if governance_batch_id is None:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id like %s",
-                    ("governance:test:contradiction%",),
-                )
-            else:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (governance_batch_id,),
-                )
-            cursor.execute(
-                "delete from graph_documents where graph_id = %s", (graph_id,)
-            )
-            cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
-            cursor.execute(
-                "delete from memory_relations where graph_id = %s", (graph_id,)
-            )
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    # Database teardown belongs to the fixture; direct product-table cleanup
+    # would bypass the runtime admission guard.
+    del dsn, graph_id, runtime_session_id, governance_batch_id

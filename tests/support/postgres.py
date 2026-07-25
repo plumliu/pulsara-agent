@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import atexit
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from functools import lru_cache
 from time import monotonic
-from typing import NoReturn
+from typing import Iterator, NoReturn
 
 import psycopg
+from psycopg import Connection
 
 from pulsara_agent.storage.postgres_connection_provider import (
     BorrowedVerifiedPostgresConnectionProvider,
+    PostgresConnectionLane,
 )
 from pulsara_agent.storage.schema_verification_service import (
     VerifiedPostgresAccessLease,
@@ -82,6 +84,21 @@ def verified_postgres_provider(dsn: str) -> BorrowedVerifiedPostgresConnectionPr
     return verified_postgres_access_lease(dsn).connection_provider
 
 
+@contextmanager
+def guarded_postgres_test_connection(
+    dsn: str,
+    *,
+    lane: PostgresConnectionLane = PostgresConnectionLane.MEMORY_MAINTENANCE,
+) -> Iterator[Connection]:
+    """Open an explicit test mutation transaction with runtime admission."""
+
+    with verified_postgres_provider(dsn).connection(
+        lane=lane,
+        deadline_monotonic=monotonic() + 30.0,
+    ) as connection:
+        yield connection
+
+
 def connect_postgres_test_database(
     dsn: str,
     *,
@@ -105,6 +122,7 @@ __all__ = [
     "UnverifiedTestPostgresAccessLease",
     "UnverifiedTestPostgresConnectionProvider",
     "connect_postgres_test_database",
+    "guarded_postgres_test_connection",
     "unverified_test_postgres_access_lease",
     "verified_postgres_access_lease",
     "verified_postgres_provider",

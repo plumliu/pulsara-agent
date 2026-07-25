@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.support.postgres import verified_postgres_provider
 
 import asyncio
+import json
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -26,7 +27,6 @@ from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import (
-    InMemoryArchiveStore,
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
     MemoryWriteUnitOfWork,
@@ -43,7 +43,7 @@ from pulsara_agent.memory.candidates.pool import (
     PooledMemoryCandidate,
 )
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.governance.dedupe import already_exists
@@ -161,6 +161,7 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -224,7 +225,13 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
         new_doc = store.get_jsonld(new_id, graph_id=graph_id)
         assert old_doc[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
         assert {"@id": old_id} in new_doc[memory.SUPERSEDES.name]
-        assert _governance_candidate_count(pool) == 0
+        assert (
+            _governance_candidate_count(
+                pool,
+                runtime_session_id=runtime_session_id,
+            )
+            == 0
+        )
         assert [
             candidate
             for candidate in pool.list_pending()
@@ -242,12 +249,17 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
             claim.kind is ClaimKind.SUPERSEDED_BY for claim in old_explanation.claims
         )
         with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select payload from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                payload = cursor.fetchone()[0]
+            row = connection.execute(
+                """
+                SELECT mutation_payload
+                FROM canonical_mutations_v2
+                WHERE graph_id = %s
+                """,
+                (graph_id,),
+            ).fetchone()
+        assert row is not None
+        carrier = row[0]["candidate"]["mutation_semantic"]["mutation_payload"]
+        payload = json.loads(carrier["canonical_json_utf8"])
         documents = {item["node_id"]: item["document"] for item in payload["documents"]}
         assert set(documents) == {old_id, new_id}
         assert (
@@ -277,6 +289,7 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -368,6 +381,7 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="replace it"
@@ -498,6 +512,7 @@ def test_executor_transactionally_rereads_drifted_target_and_requests_regovernan
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="replace it"
@@ -586,6 +601,7 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -653,7 +669,13 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
             result.decision_record.write_outcome.memory_id, graph_id=graph_id
         )
         assert memory.SUPERSEDES.name not in new_doc
-        assert _governance_candidate_count(pool) == 0
+        assert (
+            _governance_candidate_count(
+                pool,
+                runtime_session_id=runtime_session_id,
+            )
+            == 0
+        )
     finally:
         _cleanup_postgres(
             dsn,
@@ -678,6 +700,7 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -814,6 +837,7 @@ def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> 
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -897,6 +921,7 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -949,14 +974,23 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
             store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name]
             == memory.NodeStatus.ACTIVE.value
         )
-        assert _governance_candidate_count(pool) == 0
+        assert (
+            _governance_candidate_count(
+                pool,
+                runtime_session_id=runtime_session_id,
+            )
+            == 0
+        )
         with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                assert cursor.fetchone() == (0,)
+            mutation_count = connection.execute(
+                """
+                SELECT count(*)
+                FROM canonical_mutations_v2
+                WHERE graph_id = %s
+                """,
+                (graph_id,),
+            ).fetchone()
+        assert mutation_count == (0,)
     finally:
         _cleanup_postgres(
             dsn,
@@ -982,6 +1016,7 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -1073,6 +1108,7 @@ def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> N
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -1302,9 +1338,8 @@ def _postgres_executor(
 
 def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
     return MemoryWriteService(
-        ledger=ExecutionEvidenceLedger(
+        ledger=CanonicalMemoryLedger(
             graph=graph,
-            archive=InMemoryArchiveStore(),
             gate=MemoryWriteGate(),
         )
     )
@@ -1405,13 +1440,20 @@ def _source_context(label: str) -> EventContext:
     )
 
 
-def _governance_candidate_count(pool) -> int:
+def _governance_candidate_count(
+    pool,
+    *,
+    runtime_session_id: str | None = None,
+) -> int:
     return sum(
         1
         for candidate in pool.list_candidates()
         if candidate.origin is CandidateOrigin.GOVERNANCE
+        and (
+            runtime_session_id is None
+            or candidate.source_session_id == runtime_session_id
+        )
     )
-
 
 
 def _cleanup_postgres(
@@ -1421,26 +1463,6 @@ def _cleanup_postgres(
     runtime_session_id: str,
     governance_batch_id: str | None,
 ) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "delete from memory_write_outbox where graph_id = %s", (graph_id,)
-            )
-            if governance_batch_id is None:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id like %s",
-                    ("governance:test:%",),
-                )
-            else:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (governance_batch_id,),
-                )
-            cursor.execute(
-                "delete from graph_documents where graph_id = %s", (graph_id,)
-            )
-            cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
-            cursor.execute(
-                "delete from memory_relations where graph_id = %s", (graph_id,)
-            )
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    # The database fixture owns teardown. Direct cleanup would bypass the
+    # runtime admission guard that production writes are required to hold.
+    del dsn, graph_id, runtime_session_id, governance_batch_id

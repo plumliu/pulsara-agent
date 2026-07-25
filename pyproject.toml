@@ -32,6 +32,7 @@ packages = ["src/pulsara_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "postgres: integration tests that require a fresh migrated PostgreSQL database",
     "retrieval_live: opt-in tests that call live retrieval-side model APIs",
 ]
 

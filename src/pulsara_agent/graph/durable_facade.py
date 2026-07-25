@@ -4,34 +4,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import logging
-import traceback
+from time import monotonic
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+)
 
 if TYPE_CHECKING:
-    from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
-
-
-LOGGER = logging.getLogger(__name__)
+    from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+        CanonicalMutationV2Writer,
+    )
 
 
 @dataclass(slots=True)
 class DurableGraphFacade:
-    """Use Postgres for truth/hot-path reads and mirror graph deletion to Oxigraph.
-
-    Phase 2 still routes all normal writes through Postgres plus async outbox
-    materialization. The only direct Oxigraph side effect here is explicit graph
-    reset/delete, so named graphs do not linger after Postgres cleanup.
-    """
+    """Use PostgreSQL as truth and emit external projections in the same UOW."""
 
     postgres: PostgresGraphStore
-    oxigraph: OxigraphGraphStore | None = None
-    mutation_outbox: "MutationOutboxWriter | None" = None
+    mutation_writer: "CanonicalMutationV2Writer | None" = None
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
         self.postgres.put_jsonld(document, graph_id=graph_id)
@@ -42,10 +37,14 @@ class DurableGraphFacade:
     def has_jsonld(self, node_id: str, graph_id: str | None = None) -> bool:
         return self.postgres.has_jsonld(node_id, graph_id=graph_id)
 
-    def find_by_type(self, type_name: Term, graph_id: str | None = None) -> list[dict[str, Any]]:
+    def find_by_type(
+        self, type_name: Term, graph_id: str | None = None
+    ) -> list[dict[str, Any]]:
         return self.postgres.find_by_type(type_name, graph_id=graph_id)
 
-    def query(self, sparql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def query(
+        self, sparql: str, bindings: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         return self.postgres.query(sparql, bindings=bindings)
 
     def update(self, sparql: str) -> None:
@@ -59,36 +58,34 @@ class DurableGraphFacade:
         updated_at: datetime,
         graph_id: str | None = None,
     ) -> None:
-        self.postgres.set_status(node_id, status, updated_at=updated_at, graph_id=graph_id)
-
-    def delete_graph(self, graph_id: str) -> None:
-        from pulsara_agent.memory.canonical.mutation_outbox import (
-            CanonicalMutationSurface,
-            graph_reset_mutation_payload,
+        self.postgres.set_status(
+            node_id, status, updated_at=updated_at, graph_id=graph_id
         )
 
-        self.postgres.delete_graph(graph_id)
-        reset_outbox_id: str | None = None
-        if self.oxigraph is not None and self.mutation_outbox is not None:
-            reset_outbox_id = self.mutation_outbox.append_payload(
-                graph_reset_mutation_payload(),
+    def delete_graph(self, graph_id: str) -> None:
+        from pulsara_agent.runtime.projection_jobs.contracts import (
+            CanonicalMutationSurface,
+        )
+        from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+            CanonicalMutationV2Writer,
+        )
+
+        writer = self.mutation_writer
+        provider = self.postgres.connection_provider
+        if writer is None or provider is None:
+            self.postgres.delete_graph(graph_id)
+            return
+        with provider.connection(
+            lane=PostgresConnectionLane.MEMORY_UOW,
+            deadline_monotonic=monotonic() + 30.0,
+        ) as connection:
+            PostgresGraphStore(connection=connection).delete_graph(graph_id)
+            CanonicalMutationV2Writer(
+                connection=connection,
+                surface_plan=writer.surface_plan,
+            ).append_graph_maintenance_mutation(
                 graph_id=graph_id,
-                target_entry_key=f"graph-reset:{graph_id}",
-                sequence_key=graph_id,
+                maintenance_operation_id=f"graph-delete:{uuid4().hex}",
+                maintenance_kind="graph_delete",
+                requested_surfaces=(CanonicalMutationSurface.OXIGRAPH,),
             )
-        if self.oxigraph is not None:
-            try:
-                self.oxigraph.delete_graph(graph_id)
-                if reset_outbox_id is not None and self.mutation_outbox is not None:
-                    self.mutation_outbox.mark_surface_applied(
-                        reset_outbox_id,
-                        CanonicalMutationSurface.OXIGRAPH.value,
-                    )
-            except Exception:
-                if reset_outbox_id is not None and self.mutation_outbox is not None:
-                    self.mutation_outbox.mark_surface_failed(
-                        reset_outbox_id,
-                        CanonicalMutationSurface.OXIGRAPH.value,
-                        error_text="".join(traceback.format_exc()).strip(),
-                    )
-                LOGGER.warning("Failed to delete Oxigraph mirror graph %s", graph_id, exc_info=True)

@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -296,17 +297,148 @@ def build_parser() -> argparse.ArgumentParser:
         ("verify", "Verify the exact runtime schema without changing it."),
     ):
         command = database_subcommands.add_parser(command_name, help=help_text)
-        command.add_argument("--env-file", default=None)
-        command.add_argument("--override-env", action="store_true")
-        command.add_argument("--prefix", default="PULSARA")
-        command.add_argument(
-            "--deadline-seconds",
-            type=float,
-            default=300.0 if command_name == "migrate" else 10.0,
+        _add_database_common_args(
+            command,
+            default_deadline_seconds=(300.0 if command_name == "migrate" else 10.0),
         )
-        command.add_argument("--format", choices=("json",), default="json")
         if command_name == "verify":
             command.add_argument("--deep", action="store_true")
+    projections = database_subcommands.add_parser(
+        "projections",
+        help="Inspect and repair durable projection jobs.",
+    )
+    projection_subcommands = projections.add_subparsers(dest="db_projection_command")
+    projection_status = projection_subcommands.add_parser(
+        "status",
+        help="List bounded durable projection authority.",
+    )
+    projection_dead_letters = projection_subcommands.add_parser(
+        "dead-letters",
+        help="List bounded dead-letter projection jobs.",
+    )
+    for command in (projection_status, projection_dead_letters):
+        _add_database_common_args(command, default_deadline_seconds=30.0)
+        command.add_argument("--session", default=None)
+        command.add_argument("--run", default=None)
+        command.add_argument("--after-job-id", default=None)
+        command.add_argument("--limit", type=int, default=100)
+    projection_surfaces = projection_subcommands.add_parser(
+        "surfaces",
+        help="List bounded canonical mutation surface deliveries.",
+    )
+    _add_database_common_args(
+        projection_surfaces,
+        default_deadline_seconds=30.0,
+    )
+    projection_surfaces.add_argument("--after-mutation-id", default=None)
+    projection_surfaces.add_argument("--after-surface", default=None)
+    projection_surfaces.add_argument("--limit", type=int, default=100)
+    projection_surface_retry = projection_subcommands.add_parser(
+        "surface-retry",
+        help="Retry one exact dead-letter canonical mutation surface delivery.",
+    )
+    projection_surface_decommission = projection_subcommands.add_parser(
+        "surface-decommission",
+        help="Terminally decommission one exact dead-letter surface delivery.",
+    )
+    for command in (
+        projection_surface_retry,
+        projection_surface_decommission,
+    ):
+        _add_database_common_args(command, default_deadline_seconds=30.0)
+        command.add_argument("--mutation", required=True)
+        command.add_argument(
+            "--surface",
+            required=True,
+            choices=(
+                "search_index.v1",
+                "vector_index.v1",
+                "oxigraph.v1",
+            ),
+        )
+        command.add_argument("--authority-id", required=True)
+    projection_surface_decommission.add_argument(
+        "--rebuild-result-receipt",
+        default=None,
+        help=(
+            "Use one durable FULL projection result receipt as exact rebuild "
+            "authority."
+        ),
+    )
+    projection_retry = projection_subcommands.add_parser(
+        "retry",
+        help="Install one typed CAS repair for a dead-letter job.",
+    )
+    _add_database_common_args(projection_retry, default_deadline_seconds=30.0)
+    projection_retry.add_argument("--job", required=True)
+    projection_retry.add_argument(
+        "--reason-code",
+        required=True,
+        choices=(
+            "transient_dependency_restored",
+            "source_authority_repaired",
+            "target_authority_repaired",
+        ),
+    )
+    projection_retry.add_argument("--authority-id", default=None)
+    projection_seed_repair = projection_subcommands.add_parser(
+        "seed-repair",
+        help="Install typed authority to release one exact seed failure latch.",
+    )
+    _add_database_common_args(
+        projection_seed_repair,
+        default_deadline_seconds=30.0,
+    )
+    projection_seed_repair.add_argument("--failure", required=True)
+    projection_seed_repair.add_argument(
+        "--action",
+        required=True,
+        choices=(
+            "retry_after_authority_repair",
+            "reverify_after_schema_repair",
+        ),
+    )
+    projection_seed_repair.add_argument("--authority-id", required=True)
+    projection_plan = projection_subcommands.add_parser(
+        "plan-legacy-surface-bindings",
+        help="Prepare the immutable v5 to v6 legacy binding plan.",
+    )
+    _add_database_common_args(projection_plan, default_deadline_seconds=300.0)
+    projection_drain = projection_subcommands.add_parser(
+        "drain-pre-activation",
+        help="Prepare immutable per-session coverage for v7 or v8.",
+    )
+    _add_database_common_args(projection_drain, default_deadline_seconds=300.0)
+    projection_drain.add_argument(
+        "--kind",
+        required=True,
+        choices=(
+            "run_timeline.v1",
+            "tool_result_execution_evidence.v1",
+        ),
+    )
+    maintenance = database_subcommands.add_parser(
+        "maintenance",
+        help="Inspect or abort a durable database maintenance epoch.",
+    )
+    maintenance_subcommands = maintenance.add_subparsers(dest="db_maintenance_command")
+    maintenance_status = maintenance_subcommands.add_parser(
+        "status",
+        help="Read the current runtime-write admission epoch.",
+    )
+    _add_database_common_args(
+        maintenance_status,
+        default_deadline_seconds=30.0,
+    )
+    maintenance_abort = maintenance_subcommands.add_parser(
+        "abort",
+        help="Abort a maintenance epoch only when its target migration is NONE.",
+    )
+    _add_database_common_args(
+        maintenance_abort,
+        default_deadline_seconds=30.0,
+    )
+    maintenance_abort.add_argument("--operation", required=True)
     config_check = subcommands.add_parser(
         "config-check",
         help=(
@@ -425,6 +557,23 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         choices=(ModelRole.PRO.value, ModelRole.FLASH.value),
         help="Model role to use.",
     )
+    return parser
+
+
+def _add_database_common_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_deadline_seconds: float,
+) -> argparse.ArgumentParser:
+    parser.add_argument("--env-file", default=None)
+    parser.add_argument("--override-env", action="store_true")
+    parser.add_argument("--prefix", default="PULSARA")
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=default_deadline_seconds,
+    )
+    parser.add_argument("--format", choices=("json",), default="json")
     return parser
 
 
@@ -650,6 +799,8 @@ def main() -> None:
             )
             raise SystemExit(2) from exc
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        if report.get("status") == "preparation_required":
+            raise SystemExit(3)
         return
 
     if args.command == "host":
@@ -755,6 +906,230 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
     )
 
     factory = PostgresRuntimeConnectionFactory(runtime_dsn)
+    if args.db_command == "projections":
+        if args.db_projection_command is None:
+            raise ValueError("db projections requires a subcommand")
+        if args.db_projection_command in {
+            "plan-legacy-surface-bindings",
+            "drain-pre-activation",
+        }:
+            admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
+            if not admin_dsn:
+                from pulsara_agent.storage.migrations.errors import (
+                    PostgresSchemaError,
+                    PostgresSchemaFailureCode,
+                )
+
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
+                    "PULSARA_POSTGRES_ADMIN_DSN is required for projection preparation",
+                )
+            from pulsara_agent.runtime.projection_jobs.contracts import (
+                DurableProjectionKind,
+            )
+            from pulsara_agent.runtime.projection_jobs.pre_activation import (
+                PostgresProjectionMigrationPreparationCoordinator,
+            )
+
+            coordinator = PostgresProjectionMigrationPreparationCoordinator(
+                admin_dsn=admin_dsn,
+                runtime_dsn=runtime_dsn,
+            )
+            if args.db_projection_command == "plan-legacy-surface-bindings":
+                preparation = coordinator.prepare_legacy_surface_bindings(
+                    deadline_monotonic=deadline
+                )
+            else:
+                preparation = coordinator.drain_pre_activation(
+                    kind=DurableProjectionKind(args.kind),
+                    deadline_monotonic=deadline,
+                )
+            return {
+                "status": "prepared",
+                **asdict(preparation),
+            }
+
+        from pulsara_agent.runtime.projection_jobs.contracts import (
+            CanonicalMutationSurface,
+            DurableProjectionRepairReason,
+        )
+        from pulsara_agent.runtime.projection_jobs.inspection import (
+            inspect_durable_projection_state,
+        )
+        from pulsara_agent.runtime.projection_jobs.postgres_repository import (
+            PostgresDurableProjectionRepository,
+        )
+        from pulsara_agent.runtime.projection_jobs.surface import (
+            PostgresCanonicalMutationSurfaceRepository,
+        )
+
+        with acquire_verified_postgres_access_sync(
+            runtime_dsn,
+            deadline_monotonic=deadline,
+        ) as access_lease:
+            store = PostgresInspectorStore(access_lease.connection_provider)
+            if args.db_projection_command in {"status", "dead-letters"}:
+                return inspect_durable_projection_state(
+                    store,
+                    session_id=args.session,
+                    run_id=args.run,
+                    after_job_id=args.after_job_id,
+                    limit=args.limit,
+                    job_statuses=(
+                        ("dead_letter",)
+                        if args.db_projection_command == "dead-letters"
+                        else None
+                    ),
+                )
+            if args.db_projection_command == "surfaces":
+                if (args.after_mutation_id is None) != (args.after_surface is None):
+                    raise ValueError(
+                        "--after-mutation-id and --after-surface must be supplied together"
+                    )
+                snapshot = inspect_durable_projection_state(
+                    store,
+                    after_surface_key=(
+                        (args.after_mutation_id, args.after_surface)
+                        if args.after_mutation_id is not None
+                        else None
+                    ),
+                    limit=args.limit,
+                )
+                return {
+                    "status": snapshot["status"],
+                    "runtime_write_admission_epoch": snapshot[
+                        "runtime_write_admission_epoch"
+                    ],
+                    "surface_deliveries": snapshot["surface_deliveries"],
+                    "surface_page": snapshot["surface_page"],
+                    "diagnostics": snapshot["diagnostics"],
+                }
+            if args.db_projection_command == "retry":
+                authority_id = args.authority_id or (
+                    "pulsara-cli:" + args.job + ":" + args.reason_code
+                )
+                action = PostgresDurableProjectionRepository(
+                    access_lease.connection_provider
+                ).repair_dead_letter(
+                    job_id=args.job,
+                    reason=DurableProjectionRepairReason(args.reason_code),
+                    operator_authority_id=authority_id,
+                    deadline_monotonic=deadline,
+                )
+                return {
+                    "status": "repair_installed",
+                    "repair_action": action.model_dump(mode="json"),
+                }
+            if args.db_projection_command == "seed-repair":
+                action = PostgresDurableProjectionRepository(
+                    access_lease.connection_provider
+                ).repair_seed_failure(
+                    failure_id=args.failure,
+                    action=args.action,
+                    operator_authority_id=args.authority_id,
+                    deadline_monotonic=deadline,
+                )
+                return {
+                    "status": "seed_repair_installed",
+                    "repair_action": action.model_dump(mode="json"),
+                }
+            if args.db_projection_command in {
+                "surface-retry",
+                "surface-decommission",
+            }:
+                decommission = (
+                    args.db_projection_command == "surface-decommission"
+                )
+                replacement = (
+                    args.rebuild_result_receipt
+                    if decommission
+                    else None
+                )
+                action_name = (
+                    "retry_same_contract"
+                    if not decommission
+                    else (
+                        "decommission_after_rebuild"
+                        if replacement is not None
+                        else "decommission_with_authority"
+                    )
+                )
+                action = PostgresCanonicalMutationSurfaceRepository(
+                    access_lease.connection_provider
+                ).repair_dead_letter(
+                    mutation_id=args.mutation,
+                    surface=CanonicalMutationSurface(args.surface),
+                    action=action_name,
+                    operator_authority_id=args.authority_id,
+                    rebuild_result_receipt_id=replacement,
+                    deadline_monotonic=deadline,
+                )
+                return {
+                    "status": "surface_repair_installed",
+                    "repair_action": action.model_dump(mode="json"),
+                }
+        raise ValueError(
+            f"unsupported db projections command: {args.db_projection_command}"
+        )
+    if args.db_command == "maintenance":
+        if args.db_maintenance_command is None:
+            raise ValueError("db maintenance requires a subcommand")
+        from pulsara_agent.storage.runtime_write_admission import (
+            abort_runtime_write_maintenance,
+            read_runtime_write_epoch,
+        )
+
+        if args.db_maintenance_command == "status":
+            with factory.connect(
+                deadline_monotonic=deadline,
+                autocommit=True,
+            ) as connection:
+                epoch = read_runtime_write_epoch(connection)
+            return {
+                "status": epoch.mode.value,
+                "runtime_write_admission_epoch": epoch.model_dump(mode="json"),
+            }
+        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
+        if not admin_dsn:
+            from pulsara_agent.storage.migrations.errors import (
+                PostgresSchemaError,
+                PostgresSchemaFailureCode,
+            )
+
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
+                "PULSARA_POSTGRES_ADMIN_DSN is required for maintenance abort",
+            )
+        from pulsara_agent.storage.migrations.runner import (
+            PostgresAdminConnectionFactory,
+        )
+
+        admin_factory = PostgresAdminConnectionFactory(admin_dsn)
+        with admin_factory.connect(deadline_monotonic=deadline) as connection:
+            epoch = read_runtime_write_epoch(connection, privileged=True)
+            if epoch.maintenance_operation_id != args.operation:
+                raise ValueError("maintenance operation identity mismatch")
+            target_version = epoch.target_migration_version
+            if target_version is None:
+                raise ValueError("maintenance epoch has no target migration")
+            target_exists = connection.execute(
+                """
+                SELECT 1 FROM pulsara_schema_migrations
+                WHERE version = %s
+                """,
+                (target_version,),
+            ).fetchone()
+            if target_exists is not None:
+                raise ValueError("maintenance target migration is already committed")
+            with connection.transaction():
+                resulting = abort_runtime_write_maintenance(
+                    connection,
+                    maintenance_epoch=epoch,
+                )
+        return {
+            "status": "aborted",
+            "runtime_write_admission_epoch": resulting.model_dump(mode="json"),
+        }
     if args.db_command == "status":
         with factory.connect(
             deadline_monotonic=deadline,
@@ -788,8 +1163,10 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
             admin_dsn=admin_dsn,
             runtime_dsn=runtime_dsn,
         ).migrate(deadline_monotonic=deadline)
-        verification = factory.verify_deep(deadline_monotonic=deadline)
         payload = report.to_dict()
+        if report.status == "preparation_required":
+            return payload
+        verification = factory.verify_deep(deadline_monotonic=deadline)
         payload["deep_verification_result_fingerprint"] = (
             verification.result.result_fingerprint
         )

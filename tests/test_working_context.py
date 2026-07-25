@@ -17,6 +17,7 @@ from tests.support.model_stream import (
 from pulsara_agent.event import (
     EventContext,
     ReplyEndEvent,
+    RunEndEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -33,6 +34,7 @@ from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.memory.foundation.run_timeline_query import summarize_run_timeline
+from pulsara_agent.memory.foundation.run_timeline_query import RunTimelineSummary
 from pulsara_agent.settings import StorageConfig
 from tests.conftest import tool_result_end_contract_fields
 
@@ -149,7 +151,7 @@ def test_working_context_store_upserts_domain_latest() -> None:
         _delete_working_context(dsn, domain.memory_domain_id)
 
 
-def test_durable_hook_injects_and_updates_working_context() -> None:
+def test_durable_hook_does_not_reconstruct_working_context_without_projection() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     domain = MemoryDomainContext(
@@ -208,14 +210,114 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
         asyncio.run(hooks.on_session_end(state))
         projection = asyncio.run(hooks.project(state, token_budget=120))
 
-        latest = store.get_latest(memory_domain_id=domain.memory_domain_id)
-        assert latest is not None
-        assert "Recent run used tools" in latest.summary
-        # ROAC V1 keeps recent working context operational, but refuses to infer a
-        # provider-visible typed fact from the legacy summary prose.
+        assert store.get_latest(memory_domain_id=domain.memory_domain_id) is None
+        # DPJ hard-cut: the hook may consume an already durable timeline
+        # projection, but it must not reconstruct one from EventLog callbacks.
         assert projection is None
     finally:
         _delete_working_context(dsn, domain.memory_domain_id)
+
+
+def test_durable_hook_lazily_refreshes_after_timeline_projection_arrives(
+    monkeypatch,
+) -> None:
+    domain = MemoryDomainContext(
+        memory_domain_id="u_lazy_projection",
+        workspace_kind="transient",
+    )
+
+    class WorkingStore:
+        latest = None
+
+        def get_latest(self, *, memory_domain_id):
+            assert memory_domain_id == domain.memory_domain_id
+            return self.latest
+
+        def upsert(
+            self,
+            *,
+            domain,
+            source_session_id,
+            source_run_id,
+            summary,
+            metadata,
+            ttl,
+        ):
+            self.latest = type(
+                "Summary",
+                (),
+                {
+                    "summary": summary,
+                    "source_run_id": source_run_id,
+                    "source_session_id": source_session_id,
+                },
+            )()
+            return self.latest
+
+    event_log = InMemoryEventLog(runtime_session_id="runtime:lazy")
+    prior = EventContext("run:prior", "turn:prior", "reply:prior")
+    event_log.append(
+        RunEndEvent(
+            **prior.event_fields(),
+            status="finished",
+            stop_reason="final",
+            terminalization_kind="normal",
+        )
+    )
+    observed: list[tuple[str, str]] = []
+
+    def summarize(**kwargs):
+        observed.append(
+            (kwargs["runtime_session_id"], kwargs["run_id"])
+        )
+        return RunTimelineSummary(
+            runtime_session_id=kwargs["runtime_session_id"],
+            run_id=kwargs["run_id"],
+            status="finished",
+            item_count=2,
+            assistant_text=(
+                "Validated the durable projection worker and recorded a "
+                "substantive implementation result for the next turn."
+            ),
+        )
+
+    monkeypatch.setattr(
+        "pulsara_agent.memory.foundation.run_timeline_query."
+        "summarize_persisted_run_timeline",
+        summarize,
+    )
+    store = WorkingStore()
+    operation_names: list[str] = []
+
+    async def run_owned(operation_name, operation, deadline_monotonic):
+        assert deadline_monotonic > 0
+        operation_names.append(operation_name)
+        return operation()
+
+    hooks = DurableMemoryHooks(
+        candidate_pool=InMemoryCandidatePool(),
+        sink=MemoryProposalSink(),
+        event_store=event_log,
+        timeline_graph=object(),
+        timeline_archive=object(),
+        working_context_store=store,  # type: ignore[arg-type]
+        working_context_domain=domain,
+        working_context_async_operation_port=run_owned,
+    )
+    state = LoopState(session_id="runtime:lazy")
+    state.scratchpad["working_context_refresh_model_step_key"] = "run:new:1"
+    assert hooks.baseline_projection(state, token_budget=120) is None
+    assert observed == []
+
+    async def exercise() -> None:
+        assert await hooks.project(state, token_budget=120) is None
+        assert await hooks.project(state, token_budget=120) is None
+
+    asyncio.run(exercise())
+    assert operation_names == ["working-context-lazy-refresh"]
+    assert observed == [("runtime:lazy", "run:prior")]
+    assert store.latest is not None
+    assert store.latest.source_run_id == "run:prior"
 
 
 def test_merge_projection_preserves_mixed_projection_metadata() -> None:
@@ -254,9 +356,5 @@ def _ctx() -> EventContext:
 
 
 def _delete_working_context(dsn: str, memory_domain_id: str) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM working_context_summaries WHERE memory_domain_id = %s",
-                (memory_domain_id,),
-            )
+    del dsn, memory_domain_id
+    # The fixture-owned database owns cleanup.

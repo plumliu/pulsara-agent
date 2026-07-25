@@ -23,7 +23,7 @@ from pulsara_agent.storage.migrations.errors import (
 )
 from pulsara_agent.storage.migrations.grants import build_postgres_runtime_grant_policy
 from pulsara_agent.storage.migrations.manifest import (
-    POSTGRES_LATEST_SCHEMA_MANIFEST,
+    POSTGRES_SCHEMA_MANIFESTS,
 )
 from pulsara_agent.storage.migrations.registry import (
     POSTGRES_MIGRATION_REGISTRY,
@@ -39,6 +39,9 @@ from pulsara_agent.storage.migrations.runner import (
 from pulsara_agent.storage.schema_contract import (
     VerifiedPostgresSchemaBinding,
     build_verified_postgres_schema_binding,
+)
+from pulsara_agent.storage.runtime_write_admission import (
+    require_runtime_write_epoch_matches_registry,
 )
 
 
@@ -71,7 +74,11 @@ class PostgresSchemaVerifier:
     ) -> None:
         self._registry = registry
         self._canonicalizer = canonicalizer or PostgresCatalogCanonicalizer()
-        self._expected = _load_expected_catalog()
+        self._expected = _load_expected_catalog(through_version=registry.latest_version)
+        self._expected_relation_names = tuple(
+            str(item["relation_name"])
+            for item in self._expected["relation_execution_shapes"]
+        )
 
     def verify_fast_connection(
         self,
@@ -95,7 +102,10 @@ class PostgresSchemaVerifier:
                 "database is not migrated; run pulsara db migrate",
             )
         _validate_latest_history(rows, self._registry)
-        observed = self._canonicalizer.read_fast(connection)
+        observed = self._canonicalizer.read_fast(
+            connection,
+            relation_names=self._expected_relation_names,
+        )
         expected_fast = str(self._expected["fast_executable_schema_fingerprint"])
         if observed.fast_executable_schema_fingerprint != expected_fast:
             raise PostgresSchemaError(
@@ -135,12 +145,20 @@ class PostgresSchemaVerifier:
                 PostgresSchemaFailureCode.PRIVILEGE_MISSING,
                 f"runtime role lacks {len(missing)} required privileges",
             )
+        runtime_write_epoch = require_runtime_write_epoch_matches_registry(
+            connection,
+            database_target_fingerprint=database_target_fingerprint,
+            expected_registry_prefix_fingerprint=(self._registry.registry_fingerprint),
+        )
         verification_contract = postgres_schema_fingerprint(
             "pulsara:postgres-fast-verification-contract:v1",
             {
                 "registry_prefix_fingerprint": self._registry.registry_fingerprint,
                 "expected_fast_executable_schema_fingerprint": expected_fast,
                 "grant_policy_fingerprint": policy.policy_fingerprint,
+                "runtime_write_admission_epoch_fingerprint": (
+                    runtime_write_epoch.epoch_fingerprint
+                ),
             },
         )
         binding = build_verified_postgres_schema_binding(
@@ -153,6 +171,9 @@ class PostgresSchemaVerifier:
             pgvector_extension_version=extension_version,
             migration_head_version=self._registry.latest_version,
             durable_registry_prefix_fingerprint=rows[-1].registry_prefix_fingerprint,
+            runtime_write_admission_epoch_fingerprint=(
+                runtime_write_epoch.epoch_fingerprint
+            ),
             fast_executable_schema_fingerprint=observed.fast_executable_schema_fingerprint,
             verification_contract_fingerprint=verification_contract,
         )
@@ -188,7 +209,10 @@ class PostgresSchemaVerifier:
             database_target_fingerprint=database_target_fingerprint,
             deadline_monotonic=deadline_monotonic,
         )
-        observed = self._canonicalizer.read_deep(connection)
+        observed = self._canonicalizer.read_deep(
+            connection,
+            relation_names=self._expected_relation_names,
+        )
         expected_deep = str(self._expected["deep_catalog_fingerprint"])
         if observed.deep_catalog_fingerprint != expected_deep:
             raise PostgresSchemaError(
@@ -198,7 +222,9 @@ class PostgresSchemaVerifier:
         payload = {
             "nested_fast_result_fingerprint": fast.result.result_fingerprint,
             "expected_object_manifest_fingerprint": (
-                POSTGRES_LATEST_SCHEMA_MANIFEST.manifest_fingerprint
+                POSTGRES_SCHEMA_MANIFESTS[
+                    self._registry.latest_version
+                ].manifest_fingerprint
             ),
             "expected_deep_catalog_fingerprint": expected_deep,
             "observed_deep_catalog_fingerprint": observed.deep_catalog_fingerprint,
@@ -281,15 +307,39 @@ def _validate_latest_history(
         )
 
 
-def _load_expected_catalog() -> dict[str, object]:
+def _load_expected_catalog(
+    *,
+    through_version: int | None = None,
+) -> dict[str, object]:
+    requested_version = (
+        POSTGRES_MIGRATION_REGISTRY.latest_version
+        if through_version is None
+        else through_version
+    )
+    catalog_version = requested_version
+    expected_manifest = POSTGRES_SCHEMA_MANIFESTS[catalog_version]
     resource = files("pulsara_agent.storage.migrations").joinpath(
-        "expected_catalog_v4.json"
+        f"expected_catalog_v{catalog_version}.json"
     )
     payload = json.loads(resource.read_text(encoding="utf-8"))
     expected_fast = postgres_schema_fingerprint(
         "pulsara:postgres-fast-executable-schema:v1",
         {
-            "extensions": ({"schema_name": "public", "extension_name": "vector"},),
+            "extensions": tuple(
+                sorted(
+                    (
+                        {
+                            "schema_name": item["schema_name"],
+                            "extension_name": item["extension_name"],
+                        }
+                        for item in expected_manifest.required_extensions
+                    ),
+                    key=lambda item: (
+                        str(item["schema_name"]),
+                        str(item["extension_name"]),
+                    ),
+                )
+            ),
             "types": _freeze(payload["types"]),
             "relation_execution_shapes": _freeze(payload["relation_execution_shapes"]),
             "function_execution_shapes": _freeze(payload["function_execution_shapes"]),

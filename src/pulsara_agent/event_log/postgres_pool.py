@@ -9,7 +9,7 @@ from threading import BoundedSemaphore, Lock
 from time import monotonic
 from typing import Iterator
 
-from psycopg import Connection
+from psycopg import Connection, IsolationLevel
 from psycopg_pool import PoolTimeout
 
 from pulsara_agent.storage.postgres_connection_provider import (
@@ -100,7 +100,14 @@ def postgres_event_connection(
                 raise TimeoutError("PostgreSQL bounded-read lease deadline exceeded")
             remaining = _remaining_seconds(deadline_monotonic)
         try:
-            with pool.connection(timeout=remaining) as connection:
+            with pool.connection(
+                timeout=remaining,
+                isolation_level=(
+                    IsolationLevel.REPEATABLE_READ
+                    if lane is PostgresConnectionLane.BOUNDED_READ
+                    else IsolationLevel.READ_COMMITTED
+                ),
+            ) as connection:
                 yield connection
         except PoolTimeout as exc:
             raise TimeoutError("PostgreSQL connection lease deadline exceeded") from exc

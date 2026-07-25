@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
+
 from tests.support.postgres import verified_postgres_provider
 
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
@@ -25,7 +26,6 @@ from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.message.assembler import BlockAssembler
 from pulsara_agent.message.reducer import MessageReplayControlError
 from pulsara_agent.memory import (
-    InMemoryArchiveStore,
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
     MemoryWriteUnitOfWork,
@@ -56,7 +56,7 @@ from pulsara_agent.memory.governance.event_outbox import (
     GovernanceEventOutboxDispatcher,
     PostgresGovernanceEventOutboxStore,
 )
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
@@ -344,22 +344,21 @@ def test_postgres_governance_claims_are_all_or_none_under_concurrency() -> None:
         }
     )
 
-    with psycopg.connect(dsn) as connection:
-        connection.execute(
-            "insert into sessions(id, workspace_root) values (%s, %s)",
-            (runtime_session_id, "."),
+    log = PostgresEventLog(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        workspace_root=".",
+    )
+    log.ensure_runtime_session_owner()
+    log.append(
+        make_text_block_segment_event(
+            run_id=run_id,
+            turn_id=turn_id,
+            reply_id=reply_id,
+            block_id="text:claim-source",
+            delta="seed",
         )
-        connection.execute(
-            "insert into runs(id, session_id) values (%s, %s)",
-            (run_id, runtime_session_id),
-        )
-        connection.execute(
-            """
-            insert into turns(id, session_id, run_id, turn_index)
-            values (%s, %s, %s, 0)
-            """,
-            (turn_id, runtime_session_id, run_id),
-        )
+    )
 
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
     pool.append_candidate(candidate)
@@ -379,24 +378,18 @@ def test_postgres_governance_claims_are_all_or_none_under_concurrency() -> None:
             limit=1,
         )
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            claimed = tuple(executor.map(claim, (0, 1)))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = tuple(executor.map(claim, (0, 1)))
 
-        assert sorted(len(batch.claims) for batch in claimed) == [0, 1]
-        assert (
-            sum(
-                claim.candidate_entry_id == candidate.entry_id
-                for batch in claimed
-                for claim in batch.claims
-            )
-            == 1
+    assert sorted(len(batch.claims) for batch in claimed) == [0, 1]
+    assert (
+        sum(
+            claim.candidate_entry_id == candidate.entry_id
+            for batch in claimed
+            for claim in batch.claims
         )
-    finally:
-        with psycopg.connect(dsn) as connection:
-            connection.execute(
-                "delete from sessions where id = %s", (runtime_session_id,)
-            )
+        == 1
+    )
 
 
 def test_governance_skips_candidate_outside_allowed_write_scopes() -> None:
@@ -501,6 +494,7 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -508,101 +502,71 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
     )
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
     graph = InMemoryGraphStore()
-    try:
-        invalid = pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=InvalidAttemptPayload(
-                    attempted_tool_name="remember_action_boundary",
-                    attempted_kind="ActionBoundary",
-                    raw_arguments={
-                        "statement": "Never commit unless explicitly asked."
-                    },
-                    validation_error="missing do_not_apply_when",
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=source_ctx.run_id,
-                source_turn_id=source_ctx.turn_id,
-                source_reply_id=source_ctx.reply_id,
-            )
+    invalid = pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=InvalidAttemptPayload(
+                attempted_tool_name="remember_action_boundary",
+                attempted_kind="ActionBoundary",
+                raw_arguments={"statement": "Never commit unless explicitly asked."},
+                validation_error="missing do_not_apply_when",
+            ),
+            origin=CandidateOrigin.MAIN_AGENT_TOOL,
+            source_session_id=runtime_session_id,
+            source_run_id=source_ctx.run_id,
+            source_turn_id=source_ctx.turn_id,
+            source_reply_id=source_ctx.reply_id,
         )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=pool,
-            memory_write_service=_service_on(graph),
-            event_log=log,
-            event_commit_port=log.extend,
-            graph=graph,
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=_service_on(graph),
+        event_log=log,
+        event_commit_port=log.extend,
+        graph=graph,
+        runtime_session_id=runtime_session_id,
+        event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+            dsn=dsn,
             runtime_session_id=runtime_session_id,
-            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                event_commit_port=log.extend,
+            event_commit_port=log.extend,
+        ),
+        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
             ),
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                connection_provider=verified_postgres_provider(dsn),
-                runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(
-                    connection_provider=verified_postgres_provider(dsn)
-                ),
-                graph_id=graph_id,
-                workspace_root=tmp_path,
-            ),
-        )
+            graph_id=graph_id,
+            workspace_root=tmp_path,
+        ),
+    )
 
-        result = _apply_decision(
-            executor,
-            CorrectAndSubmitDecision(
-                target_entry_id=invalid.entry_id,
-                candidate=_preference("candidate:postgres-corrected"),
-                reason="Correct invalid attempt from user quote.",
-            ),
-            governance_batch_id=batch_id,
-        )
+    result = _apply_decision(
+        executor,
+        CorrectAndSubmitDecision(
+            target_entry_id=invalid.entry_id,
+            candidate=_preference("candidate:postgres-corrected"),
+            reason="Correct invalid attempt from user quote.",
+        ),
+        governance_batch_id=batch_id,
+    )
 
-        assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
-        governance_candidates = [
-            candidate
-            for candidate in pool.list_candidates()
-            if candidate.origin is CandidateOrigin.GOVERNANCE
-            and candidate.source_session_id == runtime_session_id
-        ]
-        assert len(governance_candidates) == 1
-        assert governance_candidates[0].source_session_id == runtime_session_id
-        assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
-        assert governance_candidates[0].source_turn_id == f"turn:governance/{batch_id}"
-        assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
-        assert [
-            candidate
-            for candidate in pool.list_pending()
-            if candidate.source_session_id == runtime_session_id
-        ] == []
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+    assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+    governance_candidates = [
+        candidate
+        for candidate in pool.list_candidates()
+        if candidate.origin is CandidateOrigin.GOVERNANCE
+        and candidate.source_session_id == runtime_session_id
+    ]
+    assert len(governance_candidates) == 1
+    assert governance_candidates[0].source_session_id == runtime_session_id
+    assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
+    assert governance_candidates[0].source_turn_id == f"turn:governance/{batch_id}"
+    assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
+    assert [
+        candidate
+        for candidate in pool.list_pending()
+        if candidate.source_session_id == runtime_session_id
+    ] == []
 
 
 def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidate(
@@ -623,6 +587,7 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **source_ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -630,132 +595,108 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
     )
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
     query = PostgresMemoryQuery(connection_provider=verified_postgres_provider(dsn))
-    try:
-        invalid = pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=InvalidAttemptPayload(
-                    attempted_tool_name="remember_action_boundary",
-                    attempted_kind="ActionBoundary",
-                    raw_arguments={
-                        "statement": "Never commit unless explicitly asked."
-                    },
-                    validation_error="missing do_not_apply_when",
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=source_ctx.run_id,
-                source_turn_id=source_ctx.turn_id,
-                source_reply_id=source_ctx.reply_id,
-            )
+    invalid = pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=InvalidAttemptPayload(
+                attempted_tool_name="remember_action_boundary",
+                attempted_kind="ActionBoundary",
+                raw_arguments={"statement": "Never commit unless explicitly asked."},
+                validation_error="missing do_not_apply_when",
+            ),
+            origin=CandidateOrigin.MAIN_AGENT_TOOL,
+            source_session_id=runtime_session_id,
+            source_run_id=source_ctx.run_id,
+            source_turn_id=source_ctx.turn_id,
+            source_reply_id=source_ctx.reply_id,
         )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=pool,
-            memory_write_service=_service_on(InMemoryGraphStore()),
-            event_log=log,
-            event_commit_port=log.extend,
-            graph=InMemoryGraphStore(),
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=_service_on(InMemoryGraphStore()),
+        event_log=log,
+        event_commit_port=log.extend,
+        graph=InMemoryGraphStore(),
+        runtime_session_id=runtime_session_id,
+        event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+            dsn=dsn,
             runtime_session_id=runtime_session_id,
-            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                event_commit_port=log.extend,
+            event_commit_port=log.extend,
+        ),
+        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
             ),
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                connection_provider=verified_postgres_provider(dsn),
-                runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(
-                    connection_provider=verified_postgres_provider(dsn)
-                ),
-                graph_id=graph_id,
-                workspace_root=tmp_path,
-            ),
-        )
+            graph_id=graph_id,
+            workspace_root=tmp_path,
+        ),
+    )
 
-        result = _apply_decision(
-            executor,
-            CorrectAndSubmitDecision(
-                target_entry_id=invalid.entry_id,
-                candidate=_preference("candidate:uow-corrected"),
-                reason="Correct invalid attempt.",
-            ),
-            governance_batch_id=batch_id,
-        )
+    result = _apply_decision(
+        executor,
+        CorrectAndSubmitDecision(
+            target_entry_id=invalid.entry_id,
+            candidate=_preference("candidate:uow-corrected"),
+            reason="Correct invalid attempt.",
+        ),
+        governance_batch_id=batch_id,
+    )
 
-        assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
-        memory_id = result.decision_record.write_outcome.memory_id
-        fetched = query.fetch_nodes([memory_id], graph_id=graph_id)
-        assert len(fetched) == 1
-        assert fetched[0].statement == "The user prefers concise summaries."
-        governance_candidates = [
-            candidate
-            for candidate in pool.list_candidates()
-            if candidate.origin is CandidateOrigin.GOVERNANCE
-        ]
-        assert len(governance_candidates) == 1
-        assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
-        assert len(pool.list_decisions()) == 1
-        assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    select decision_id, target_entry_key, status, mutation_lane, sequence_key, dirty_memory_ids, payload
-                    from memory_write_outbox
-                    where governance_batch_id = %s
-                    """,
-                    (batch_id,),
-                )
-                rows = cursor.fetchall()
-        assert len(rows) == 1
-        (
-            decision_id,
-            target_entry_key,
-            status,
-            mutation_lane,
-            sequence_key,
-            dirty_memory_ids,
-            payload,
-        ) = rows[0]
-        assert decision_id == result.decision_record.decision_id
-        assert target_entry_key == invalid.entry_id
-        assert status == "pending"
-        assert mutation_lane == "governed_memory"
-        assert sequence_key == graph_id
-        assert isinstance(dirty_memory_ids, list) and len(dirty_memory_ids) == 1
-        assert payload["kind"] == "canonical_mutation"
-        assert payload["mutation_lane"] == "governed_memory"
-        assert payload["surface_apply_status"] == {
-            "search_index": "pending",
-            "oxigraph": "pending",
-        }
-        assert isinstance(payload["documents"], list) and len(payload["documents"]) == 1
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+    assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+    memory_id = result.decision_record.write_outcome.memory_id
+    fetched = query.fetch_nodes([memory_id], graph_id=graph_id)
+    assert len(fetched) == 1
+    assert fetched[0].statement == "The user prefers concise summaries."
+    governance_candidates = [
+        candidate
+        for candidate in pool.list_candidates()
+        if candidate.origin is CandidateOrigin.GOVERNANCE
+        and candidate.source_session_id == runtime_session_id
+    ]
+    assert len(governance_candidates) == 1
+    assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
+    persisted_decisions = [
+        decision
+        for decision in pool.list_decisions()
+        if decision.governance_batch_id == batch_id
+    ]
+    assert len(persisted_decisions) == 1
+    assert persisted_decisions[0].decision_id == result.decision_record.decision_id
+    assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
+    with _connect_or_skip(dsn) as connection:
+        rows = connection.execute(
+            """
+            SELECT mutation_id, mutation_payload
+            FROM canonical_mutations_v2
+            WHERE graph_id = %s
+            """,
+            (graph_id,),
+        ).fetchall()
+        deliveries = connection.execute(
+            """
+            SELECT surface, status
+            FROM canonical_mutation_surface_deliveries
+            WHERE mutation_id = %s
+            ORDER BY surface
+            """,
+            (rows[0][0],),
+        ).fetchall()
+    assert len(rows) == 1
+    mutation = rows[0][1]
+    carrier = mutation["candidate"]["mutation_semantic"]["mutation_payload"]
+    payload = json.loads(carrier["canonical_json_utf8"])
+    assert payload["mutation_lane"] == "governed_memory"
+    assert payload["decision_record"]["decision_id"] == (
+        result.decision_record.decision_id
+    )
+    assert payload["decision_record"]["decision"]["target_entry_id"] == invalid.entry_id
+    assert len(payload["dirty_memory_ids"]) == 1
+    assert len(payload["documents"]) == 1
+    assert deliveries == [
+        ("oxigraph.v1", "pending"),
+        ("search_index.v1", "pending"),
+    ]
 
 
 def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_outbox(
@@ -776,96 +717,76 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
-    try:
-        log.append(
-            make_text_block_segment_event(
-                **source_ctx.event_fields(), block_id="text:seed", delta="seed"
-            )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(), block_id="text:seed", delta="seed"
         )
-        candidate = pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=ValidCandidatePayload(
-                    candidate=_preference(
-                        f"candidate:failed:{uuid4().hex}",
-                        evidence_ids=("evidence:missing",),
-                    )
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=source_ctx.run_id,
-                source_turn_id=source_ctx.turn_id,
-                source_reply_id=source_ctx.reply_id,
-            )
+    )
+    candidate = pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=ValidCandidatePayload(
+                candidate=_preference(
+                    f"candidate:failed:{uuid4().hex}",
+                    evidence_ids=("evidence:missing",),
+                )
+            ),
+            origin=CandidateOrigin.MAIN_AGENT_TOOL,
+            source_session_id=runtime_session_id,
+            source_run_id=source_ctx.run_id,
+            source_turn_id=source_ctx.turn_id,
+            source_reply_id=source_ctx.reply_id,
         )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=pool,
-            memory_write_service=_service_on(InMemoryGraphStore()),
-            event_log=log,
-            event_commit_port=log.extend,
-            graph=InMemoryGraphStore(),
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=_service_on(InMemoryGraphStore()),
+        event_log=log,
+        event_commit_port=log.extend,
+        graph=InMemoryGraphStore(),
+        runtime_session_id=runtime_session_id,
+        event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+            dsn=dsn,
             runtime_session_id=runtime_session_id,
-            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                event_commit_port=log.extend,
+            event_commit_port=log.extend,
+        ),
+        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
             ),
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                connection_provider=verified_postgres_provider(dsn),
-                runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(
-                    connection_provider=verified_postgres_provider(dsn)
-                ),
-                graph_id=graph_id,
-                workspace_root=tmp_path,
-            ),
-        )
+            graph_id=graph_id,
+            workspace_root=tmp_path,
+        ),
+    )
 
-        result = _apply_decision(
-            executor,
-            SubmitAsIsDecision(
-                target_entry_id=candidate.entry_id,
-                reason="missing evidence should fail",
-            ),
-            governance_batch_id=batch_id,
-        )
+    result = _apply_decision(
+        executor,
+        SubmitAsIsDecision(
+            target_entry_id=candidate.entry_id,
+            reason="missing evidence should fail",
+        ),
+        governance_batch_id=batch_id,
+    )
 
-        assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "select count(*) from memory_governance_decisions where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                assert cursor.fetchone() == (1,)
-                cursor.execute(
-                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                assert cursor.fetchone() == (0,)
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+    assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
+    with _connect_or_skip(dsn) as connection:
+        decision_count = connection.execute(
+            """
+            SELECT count(*)
+            FROM memory_governance_decisions
+            WHERE governance_batch_id = %s
+            """,
+            (batch_id,),
+        ).fetchone()
+        mutation_count = connection.execute(
+            "SELECT count(*) FROM canonical_mutations_v2 WHERE graph_id = %s",
+            (graph_id,),
+        ).fetchone()
+    assert decision_count == (1,)
+    assert mutation_count == (0,)
 
 
 def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) -> None:
@@ -878,42 +799,25 @@ def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) ->
         turn_id=f"turn:governance/test-uow-dedupe/{uuid4().hex}",
         reply_id=f"reply:governance/test-uow-dedupe/{uuid4().hex}",
     )
-    try:
-        with MemoryWriteUnitOfWork(
-            connection_provider=verified_postgres_provider(dsn),
-            runtime_session_id=runtime_session_id,
-            archive=PostgresArtifactStore(
-                connection_provider=verified_postgres_provider(dsn)
-            ),
-            graph_id=graph_id,
-            workspace_root=tmp_path,
-        ) as uow:
-            outcome = uow.memory_write_service.submit(
-                _preference("candidate:uow-dedupe-original"),
-                event_context=context,
-            )
-            duplicate = _preference("candidate:uow-dedupe-duplicate")
+    with MemoryWriteUnitOfWork(
+        connection_provider=verified_postgres_provider(dsn),
+        runtime_session_id=runtime_session_id,
+        archive=PostgresArtifactStore(
+            connection_provider=verified_postgres_provider(dsn)
+        ),
+        graph_id=graph_id,
+        workspace_root=tmp_path,
+    ) as uow:
+        outcome = uow.memory_write_service.submit(
+            _preference("candidate:uow-dedupe-original"),
+            event_context=context,
+        )
+        duplicate = _preference("candidate:uow-dedupe-duplicate")
 
-            assert outcome.record is not None
-            assert (
-                already_exists(duplicate, uow.graph, graph_id=uow.resolved_graph_id)
-                is True
-            )
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+        assert outcome.record is not None
+        assert (
+            already_exists(duplicate, uow.graph, graph_id=uow.resolved_graph_id) is True
+        )
 
 
 def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
@@ -934,6 +838,7 @@ def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
     attempts = 0
 
@@ -944,116 +849,88 @@ def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
             raise RuntimeError("synthetic ledger outage after memory commit")
         return log.extend(events)
 
-    try:
-        log.append(
-            make_text_block_segment_event(
-                **source_ctx.event_fields(),
-                block_id="text:seed",
-                delta="seed",
-            )
+    log.append(
+        make_text_block_segment_event(
+            **source_ctx.event_fields(),
+            block_id="text:seed",
+            delta="seed",
         )
-        candidate = pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=ValidCandidatePayload(
-                    candidate=_preference(f"candidate:event-outbox:{uuid4().hex}")
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=source_ctx.run_id,
-                source_turn_id=source_ctx.turn_id,
-                source_reply_id=source_ctx.reply_id,
-            )
-        )
-        dispatcher = _postgres_governance_event_dispatcher(
-            dsn=dsn,
-            runtime_session_id=runtime_session_id,
-            event_commit_port=fail_once_then_commit,
-        )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=pool,
-            memory_write_service=_service_on(InMemoryGraphStore()),
-            event_log=log,
-            event_commit_port=fail_once_then_commit,
-            event_outbox_dispatcher=dispatcher,
-            graph=InMemoryGraphStore(),
-            runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                connection_provider=verified_postgres_provider(dsn),
-                runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(
-                    connection_provider=verified_postgres_provider(dsn)
-                ),
-                graph_id=graph_id,
-                workspace_root=tmp_path,
+    )
+    candidate = pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=ValidCandidatePayload(
+                candidate=_preference(f"candidate:event-outbox:{uuid4().hex}")
             ),
+            origin=CandidateOrigin.MAIN_AGENT_TOOL,
+            source_session_id=runtime_session_id,
+            source_run_id=source_ctx.run_id,
+            source_turn_id=source_ctx.turn_id,
+            source_reply_id=source_ctx.reply_id,
+        )
+    )
+    dispatcher = _postgres_governance_event_dispatcher(
+        dsn=dsn,
+        runtime_session_id=runtime_session_id,
+        event_commit_port=fail_once_then_commit,
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=_service_on(InMemoryGraphStore()),
+        event_log=log,
+        event_commit_port=fail_once_then_commit,
+        event_outbox_dispatcher=dispatcher,
+        graph=InMemoryGraphStore(),
+        runtime_session_id=runtime_session_id,
+        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(
+                connection_provider=verified_postgres_provider(dsn)
+            ),
+            graph_id=graph_id,
+            workspace_root=tmp_path,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic ledger outage"):
+        _apply_decision(
+            executor,
+            SubmitAsIsDecision(
+                target_entry_id=candidate.entry_id,
+                reason="Exercise durable event handoff.",
+            ),
+            governance_batch_id=batch_id,
         )
 
-        with pytest.raises(RuntimeError, match="synthetic ledger outage"):
-            _apply_decision(
-                executor,
-                SubmitAsIsDecision(
-                    target_entry_id=candidate.entry_id,
-                    reason="Exercise durable event handoff.",
-                ),
-                governance_batch_id=batch_id,
-            )
+    assert [
+        item
+        for item in pool.list_pending()
+        if item.source_session_id == runtime_session_id
+    ] == []
+    assert not log.iter(run_id=f"run:governance/{batch_id}")
+    with _connect_or_skip(dsn) as connection:
+        decision_count = connection.execute(
+            "select count(*) from memory_governance_decisions where governance_batch_id = %s",
+            (batch_id,),
+        ).fetchone()
+        outbox_status = connection.execute(
+            "select status from memory_governance_event_outbox where governance_batch_id = %s",
+            (batch_id,),
+        ).fetchone()
+    assert decision_count == (1,)
+    assert outbox_status == ("pending",)
 
-        assert [
-            item
-            for item in pool.list_pending()
-            if item.source_session_id == runtime_session_id
-        ] == []
-        assert not log.iter(run_id=f"run:governance/{batch_id}")
-        with _connect_or_skip(dsn) as connection:
-            decision_count = connection.execute(
-                "select count(*) from memory_governance_decisions where governance_batch_id = %s",
-                (batch_id,),
-            ).fetchone()
-            outbox_status = connection.execute(
-                "select status from memory_governance_event_outbox where governance_batch_id = %s",
-                (batch_id,),
-            ).fetchone()
-        assert decision_count == (1,)
-        assert outbox_status == ("pending",)
+    committed = executor.flush_pending_event_outbox()
 
-        committed = executor.flush_pending_event_outbox()
-
-        assert len(committed) == 2
-        assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
-        with _connect_or_skip(dsn) as connection:
-            outbox_status = connection.execute(
-                "select status from memory_governance_event_outbox where governance_batch_id = %s",
-                (batch_id,),
-            ).fetchone()
-        assert outbox_status == ("applied",)
-        assert executor.event_dispatch_retry_required is False
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_write_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id = %s",
-                    (batch_id,),
-                )
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+    assert len(committed) == 2
+    assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
+    with _connect_or_skip(dsn) as connection:
+        outbox_status = connection.execute(
+            "select status from memory_governance_event_outbox where governance_batch_id = %s",
+            (batch_id,),
+        ).fetchone()
+    assert outbox_status == ("applied",)
+    assert executor.event_dispatch_retry_required is False
 
 
 def _executor(
@@ -1118,9 +995,8 @@ def _postgres_governance_event_dispatcher(
 
 
 def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
-    ledger = ExecutionEvidenceLedger(
+    ledger = CanonicalMemoryLedger(
         graph=graph,
-        archive=InMemoryArchiveStore(),
         gate=MemoryWriteGate(),
     )
     return MemoryWriteService(ledger=ledger)

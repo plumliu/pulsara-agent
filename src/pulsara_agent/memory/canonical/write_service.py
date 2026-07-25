@@ -1,6 +1,6 @@
 """Runtime-agnostic durable memory write service.
 
-Wraps ``ExecutionEvidenceLedger.submit_*`` behind a single path: a typed
+Wraps ``CanonicalMemoryLedger.submit_*`` behind a single path: a typed
 ``MemoryCandidate`` in, a gate-evaluated ledger record plus the events to emit
 out. The service stays pure -- it writes the node (the gate runs once inside the
 ledger) and *returns* events; it never emits. The producer emits them at an
@@ -36,7 +36,7 @@ from pulsara_agent.event.candidates import (
     ObservationCandidate,
     PreferenceCandidate,
 )
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.foundation.records import ClaimRecord, MemoryWriteRecord
 
 
@@ -51,7 +51,7 @@ class MemoryWriteOutcome:
 
 @dataclass(frozen=True, slots=True)
 class MemoryWriteService:
-    ledger: ExecutionEvidenceLedger
+    ledger: CanonicalMemoryLedger
 
     def submit(
         self,
@@ -160,7 +160,9 @@ def _memory_id(record: ClaimRecord | MemoryWriteRecord) -> str:
     return record.memory_id
 
 
-def _candidate_field(candidate: MemoryCandidate | Mapping[str, Any], name: str) -> str | None:
+def _candidate_field(
+    candidate: MemoryCandidate | Mapping[str, Any], name: str
+) -> str | None:
     if isinstance(candidate, Mapping):
         value = candidate.get(name)
     else:

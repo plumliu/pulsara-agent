@@ -59,6 +59,7 @@ def pool_case(request, tmp_path) -> _PoolCase:
         runtime_session_id=session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **ctx.event_fields(), block_id="text:parent", delta="seed"
@@ -66,16 +67,7 @@ def pool_case(request, tmp_path) -> _PoolCase:
     )
     pool = PostgresCandidatePool(connection_provider=verified_postgres_provider(dsn))
 
-    def cleanup() -> None:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_governance_decisions where governance_batch_id like %s",
-                    ("governance:test:%",),
-                )
-                cursor.execute("delete from sessions where id = %s", (session_id,))
-
-    request.addfinalizer(cleanup)
+    request.addfinalizer(lambda: None)
     return _PoolCase(pool=pool, session_id=session_id, ctx=ctx)
 
 
@@ -305,6 +297,7 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    log.ensure_runtime_session_owner()
     log.append(
         make_text_block_segment_event(
             **ctx.event_fields(), block_id="text:seed", delta="seed"
@@ -333,6 +326,7 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(
         with MemoryWriteUnitOfWork(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
             archive=PostgresArtifactStore(verified_postgres_provider(dsn)),
         ) as uow:
             uow.decisions.append_candidate(candidate)
@@ -347,15 +341,7 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(
         assert fetched.intent_fingerprint == candidate.intent_fingerprint
         assert fetched.metadata == candidate.metadata
     finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_candidates where entry_id = %s",
-                    (candidate.entry_id,),
-                )
-                cursor.execute(
-                    "delete from sessions where id = %s", (runtime_session_id,)
-                )
+        pass
 
 
 def _preference(candidate_id: str) -> PreferenceCandidate:

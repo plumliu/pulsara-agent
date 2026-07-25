@@ -1,0 +1,144 @@
+{
+  "activation_semantic": {
+    "activation_id": "pulsara.activation.run_timeline.v1",
+    "activation_policy": "post_cutover_events_only",
+    "activation_semantic_fingerprint": "sha256:542ee774bfe24919a5f95816dcd78275c04b4fc468f3157238ed282f6956c9c3",
+    "projection_kind": "run_timeline.v1",
+    "schema_version": "durable_projection_kind_activation_semantic.v1",
+    "seed_contract": {
+      "candidate_factory_contract_fingerprint": "sha256:3788bc1c7bde07bf017eef39ac1c706cd11618f6f2a033140ab78d8685b2f6f5",
+      "canonical_mutation_surface_plan": {
+        "composition_fingerprint": "sha256:dad1f8931e4466dff05d6afdbf3c2d44ab6838a82cfa748dad698d9529bfb577",
+        "ordered_surfaces": [
+          {
+            "delivery_policy": {
+              "delivery_policy_fingerprint": "sha256:1953a263c9f6c70bd1a6cd439c6199b39872c20fd2d38e6a4983442197168fcf",
+              "physical_policy": {
+                "database_operation_timeout_seconds": 10,
+                "external_surface_attempt_timeout_seconds": 60,
+                "handler_compute_timeout_seconds": 30,
+                "maximum_physical_attempt_seconds": 120,
+                "policy_fingerprint": "sha256:9fae81db4170265625664b7b691316e5766ff676c4e0acd52d9b8b71b4f6b2a7",
+                "result_commit_timeout_seconds": 20,
+                "schema_version": "durable_projection_physical_policy.v1",
+                "source_hydration_timeout_seconds": 20
+              },
+              "retry_policy": {
+                "base_delay_milliseconds": 1000,
+                "claim_batch_size": 32,
+                "lease_duration_seconds": 180,
+                "maximum_attempts": 12,
+                "maximum_delay_milliseconds": 300000,
+                "policy_fingerprint": "sha256:6e03118f277036b3c10da820fc999bcba1baea6bcde94e55bd1af8edbb9e2285",
+                "schema_version": "durable_projection_retry_policy.v1"
+              },
+              "schema_version": "durable_projection_delivery_policy.v1"
+            },
+            "handler_contract": {
+              "accepted_mutation_kinds": [
+                "governed_memory.v2",
+                "runtime_semantic.v2",
+                "graph_reset.v2",
+                "graph_delete.v2"
+              ],
+              "contract_fingerprint": "sha256:0a5542af26a298d2358b8d9af2a1c9a0a93c719b679991eb2bd59a99fda654e3",
+              "handler_id": "pulsara.oxigraph-materializer",
+              "handler_version": "2",
+              "idempotency_contract_fingerprint": "sha256:fef492fd6ead67041a63f9d5e76a773c61f28da0d19f49e026918f1b8eee845e",
+              "payload_codec_fingerprint": "sha256:949f1fe7f68719d9293e962efc1460898b8215b89daf0fba388aa173d69f5cdb",
+              "schema_version": "canonical_mutation_surface_handler_contract.v1",
+              "surface": "oxigraph.v1",
+              "target_compatibility_fingerprint": "sha256:6b44b2b9d37df46cd73c030b3a47af6e45d75da1c1909f61b4c83b8e3e61475c"
+            },
+            "planned_surface_fingerprint": "sha256:3b38a01b72031825e596618ae90382c647adcd8a9bb0c3394a0a4ce401642a6a",
+            "schema_version": "canonical_mutation_planned_surface.v1"
+          }
+        ],
+        "plan_fingerprint": "sha256:93ca1e8e137447f89ba58a119192cad79746978e3ad6b65fbfa2759bc1679646",
+        "schema_version": "canonical_mutation_surface_plan.v1"
+      },
+      "delivery_policy": {
+        "delivery_policy_fingerprint": "sha256:1953a263c9f6c70bd1a6cd439c6199b39872c20fd2d38e6a4983442197168fcf",
+        "physical_policy": {
+          "database_operation_timeout_seconds": 10,
+          "external_surface_attempt_timeout_seconds": 60,
+          "handler_compute_timeout_seconds": 30,
+          "maximum_physical_attempt_seconds": 120,
+          "policy_fingerprint": "sha256:9fae81db4170265625664b7b691316e5766ff676c4e0acd52d9b8b71b4f6b2a7",
+          "result_commit_timeout_seconds": 20,
+          "schema_version": "durable_projection_physical_policy.v1",
+          "source_hydration_timeout_seconds": 20
+        },
+        "retry_policy": {
+          "base_delay_milliseconds": 1000,
+          "claim_batch_size": 32,
+          "lease_duration_seconds": 180,
+          "maximum_attempts": 12,
+          "maximum_delay_milliseconds": 300000,
+          "policy_fingerprint": "sha256:6e03118f277036b3c10da820fc999bcba1baea6bcde94e55bd1af8edbb9e2285",
+          "schema_version": "durable_projection_retry_policy.v1"
+        },
+        "schema_version": "durable_projection_delivery_policy.v1"
+      },
+      "handler_contract": {
+        "accepted_source_event_types": [
+          "REPLY_END",
+          "RUN_ERROR",
+          "RUN_END"
+        ],
+        "accepted_source_schema_bindings_fingerprint": "sha256:3e5b900aa00c38ef81527353b8d3d9d6c7b435c55feaf0cb6a7b83db0bdb7c15",
+        "contract_fingerprint": "sha256:f5b1344c2aedf35a501dc60c1f558aabb2bfdab89c59962472f3faca661ce086",
+        "handler_id": "pulsara.run_timeline.v1",
+        "handler_version": "1",
+        "idempotency_contract_fingerprint": "sha256:145656134d4f91c8ad65114f8da255c6f65c07d4b83e3ed48a30bf5f1b86395b",
+        "projection_kind": "run_timeline.v1",
+        "result_schema_fingerprint": "sha256:a51c2b84e3dc3456ebc3556d357496121d3ebbe7636678994682bdc6542cd147",
+        "schema_version": "durable_projection_handler_contract.v1",
+        "target_update_policy": "full_replacement"
+      },
+      "ordered_trigger_bindings": [
+        {
+          "accepted_event_schema_fingerprints": [
+            "sha256:367a47fcc8212838d96ece6e90b1f91e5599abaa4a99f49be7a29e4cff787a71"
+          ],
+          "binding_fingerprint": "sha256:7ebbb4111cc999719a69dd9c4bf0bc2ce305145491d8268b72f223c2d4b9a96c",
+          "projection_kind": "run_timeline.v1",
+          "schema_version": "durable_projection_trigger_binding.v1",
+          "target_resolver_contract_fingerprint": "sha256:aa583d318e794105b8980dafe268cc58bd038abb349ea4e69a68c675144b7911",
+          "target_resolver_id": "run-target",
+          "target_resolver_version": "1",
+          "trigger_event_type": "REPLY_END"
+        },
+        {
+          "accepted_event_schema_fingerprints": [
+            "sha256:feeb52e1240b181824b86fb36f962df7821d287bfc9169741615306a674e0a79"
+          ],
+          "binding_fingerprint": "sha256:f47e0b2f94b97471d32038959c3c23e9b73fc41c9fd936a18a60e17e43d80988",
+          "projection_kind": "run_timeline.v1",
+          "schema_version": "durable_projection_trigger_binding.v1",
+          "target_resolver_contract_fingerprint": "sha256:cec65990a778d5eeeaef0e58c92a37613b425470994a7493d36ff23c3ecc7b3c",
+          "target_resolver_id": "run-target",
+          "target_resolver_version": "1",
+          "trigger_event_type": "RUN_ERROR"
+        },
+        {
+          "accepted_event_schema_fingerprints": [
+            "sha256:dced1b9dd9da5290a92388a597e37db163edce70e870830d63b208a2cb0d610d"
+          ],
+          "binding_fingerprint": "sha256:d799a1948cbb2bcae6fa098985a27c8ef0050857a39df35c9b3fa587dbd17cba",
+          "projection_kind": "run_timeline.v1",
+          "schema_version": "durable_projection_trigger_binding.v1",
+          "target_resolver_contract_fingerprint": "sha256:d82b06f27b8356c0c647533605f35cb6544f71e4c95bc38442c3f43576d3a23a",
+          "target_resolver_id": "run-target",
+          "target_resolver_version": "1",
+          "trigger_event_type": "RUN_END"
+        }
+      ],
+      "projection_kind": "run_timeline.v1",
+      "schema_version": "durable_projection_seed_contract.v1",
+      "seed_contract_fingerprint": "sha256:53534185445bb633285f29f9ed5894d8d755d7fe9e6b71e0fa3399eff77775c4",
+      "source_query_contract_fingerprint": "sha256:531ba3f3aae98e5cc5d325df93d27b631622feac4d61066a2c51e7f10a9cd1b8"
+    }
+  },
+  "schema_version": "durable_projection_activation_resource.v1"
+}

@@ -10,7 +10,7 @@ from threading import RLock, Thread
 from time import monotonic
 from typing import Callable, ContextManager, Iterator, Protocol
 
-from psycopg import Connection
+from psycopg import Connection, IsolationLevel
 from psycopg_pool import ConnectionPool
 
 from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
@@ -37,6 +37,10 @@ from pulsara_agent.storage.postgres_endpoint import (
     classify_postgres_physical_failure,
 )
 from pulsara_agent.storage.schema_contract import VerifiedPostgresSchemaBinding
+from pulsara_agent.storage.runtime_write_admission import (
+    acquire_normal_runtime_write_guard,
+    read_runtime_write_epoch,
+)
 
 
 class PostgresConnectionLane(StrEnum):
@@ -49,6 +53,7 @@ class PostgresConnectionLane(StrEnum):
     GOVERNANCE = "governance"
     INSPECTOR = "inspector"
     CHECKPOINT_MAINTENANCE = "checkpoint_maintenance"
+    PROJECTION_MAINTENANCE = "projection_maintenance"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,12 @@ POSTGRES_POOL_POLICIES = {
         min_size=0,
         max_size=2,
         max_waiting=8,
+    ),
+    PostgresConnectionLane.PROJECTION_MAINTENANCE: _pool_policy(
+        PostgresConnectionLane.PROJECTION_MAINTENANCE,
+        min_size=0,
+        max_size=8,
+        max_waiting=32,
     ),
 }
 
@@ -286,6 +297,7 @@ class VerifiedPostgresConnectionProviderProtocol(Protocol):
         lane: PostgresConnectionLane,
         row_factory: object | None = None,
         deadline_monotonic: float,
+        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
     ) -> ContextManager[Connection]: ...
 
     def pool(
@@ -305,15 +317,24 @@ class VerifiedPostgresPoolLease:
         pool: ConnectionPool,
         policy: PostgresPoolPolicyFact,
         usability_guard: Callable[[], None],
+        checkout_guard: Callable[[Connection], None],
     ) -> None:
         self._pool = pool
         self.policy = policy
         self._usability_guard = usability_guard
+        self._checkout_guard = checkout_guard
 
     @contextmanager
-    def connection(self, *, timeout: float) -> Iterator[Connection]:
+    def connection(
+        self,
+        *,
+        timeout: float,
+        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
+    ) -> Iterator[Connection]:
         self._usability_guard()
         with self._pool.connection(timeout=timeout) as connection:
+            connection.isolation_level = isolation_level
+            self._checkout_guard(connection)
             yield connection
 
     def scoped_to(
@@ -327,6 +348,7 @@ class VerifiedPostgresPoolLease:
             pool=self._pool,
             policy=self.policy,
             usability_guard=combined_guard,
+            checkout_guard=self._checkout_guard,
         )
 
 
@@ -356,12 +378,14 @@ class BorrowedVerifiedPostgresConnectionProvider:
         lane: PostgresConnectionLane,
         row_factory: object | None = None,
         deadline_monotonic: float,
+        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
     ) -> Iterator[Connection]:
         self._require_active()
         with self._provider.connection(
             lane=lane,
             row_factory=row_factory,
             deadline_monotonic=deadline_monotonic,
+            isolation_level=isolation_level,
         ) as connection:
             yield connection
 
@@ -462,6 +486,7 @@ class VerifiedPostgresConnectionProvider:
         lane: PostgresConnectionLane,
         row_factory: object | None = None,
         deadline_monotonic: float,
+        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
     ) -> Iterator[Connection]:
         del lane
         with self._lock:
@@ -480,6 +505,8 @@ class VerifiedPostgresConnectionProvider:
                 connection,
                 deadline_monotonic=deadline_monotonic,
             )
+            connection.isolation_level = isolation_level
+            self._admit_runtime_transaction(connection)
             yield connection
             if (
                 not connection.closed
@@ -526,6 +553,7 @@ class VerifiedPostgresConnectionProvider:
                 pool=pool,
                 policy=policy,
                 usability_guard=self._require_usable,
+                checkout_guard=self._admit_runtime_transaction,
             )
 
     def close_pool(self, lane: PostgresConnectionLane) -> None:
@@ -574,6 +602,17 @@ class VerifiedPostgresConnectionProvider:
                     PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
                     "physical PostgreSQL connection does not match verified binding",
                 )
+            epoch = read_runtime_write_epoch(connection)
+            if (
+                epoch.epoch_fingerprint
+                != self._binding.runtime_write_admission_epoch_fingerprint
+                or epoch.active_migration_registry_prefix_fingerprint
+                != self._binding.durable_registry_prefix_fingerprint
+            ):
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
+                    "physical PostgreSQL connection has a stale runtime write epoch",
+                )
             if connection.info.transaction_status.name != "IDLE":
                 connection.rollback()
         except PostgresSchemaError as exc:
@@ -597,6 +636,28 @@ class VerifiedPostgresConnectionProvider:
                 deadline_monotonic=deadline_monotonic,
                 operation_control=None,
             ) from exc
+
+    def _admit_runtime_transaction(self, connection: Connection) -> None:
+        epoch = read_runtime_write_epoch(connection)
+        if (
+            epoch.epoch_fingerprint
+            != self._binding.runtime_write_admission_epoch_fingerprint
+            or epoch.active_migration_registry_prefix_fingerprint
+            != self._binding.durable_registry_prefix_fingerprint
+        ):
+            if connection.info.transaction_status.name != "IDLE":
+                connection.rollback()
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
+                "runtime write admission epoch changed after schema verification",
+            )
+        acquire_normal_runtime_write_guard(
+            connection,
+            expected_epoch=epoch,
+            transaction_owner_id=(
+                f"postgres:{connection.info.backend_pid}:{epoch.epoch_fingerprint}"
+            ),
+        )
 
     def _invalidate_confirmed_physical_binding(self) -> None:
         with self._lock:

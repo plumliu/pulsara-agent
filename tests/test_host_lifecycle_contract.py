@@ -994,10 +994,24 @@ def test_tombstoned_resume_rejects_before_dangling_repair(
     async def fake_postgres_access_lease(_self):
         return access_lease
 
+    async def no_projection_service(
+        _self,
+        _access_lease,
+        *,
+        retrieval_resources,
+    ):
+        del retrieval_resources
+        return None
+
     monkeypatch.setattr(
         HostCore,
         "_get_postgres_access_lease",
         fake_postgres_access_lease,
+    )
+    monkeypatch.setattr(
+        HostCore,
+        "_get_projection_service",
+        no_projection_service,
     )
     monkeypatch.setattr(
         "pulsara_agent.host.core.repair_dangling_runs_for_resume",
@@ -1806,6 +1820,51 @@ def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(
         return core.lifecycle
 
     assert asyncio.run(run()) is HostCoreLifecycle.CLOSED
+
+
+def test_projection_close_block_retains_retrieval_dependencies(monkeypatch) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    class ProjectionService:
+        blocked = True
+
+        async def aclose(self):
+            if self.blocked:
+                raise RuntimeError("projection physical owner still active")
+
+    class RetrievalResources:
+        close_count = 0
+
+        async def aclose(self):
+            self.close_count += 1
+
+    projection = ProjectionService()
+    resources = RetrievalResources()
+    core._projection_service = projection  # type: ignore[assignment]
+    core._retrieval_resources = resources  # type: ignore[assignment]
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="projection physical owner still active",
+        ):
+            await core.shutdown()
+        assert core.lifecycle is HostCoreLifecycle.CLOSING
+        assert core._projection_service is projection
+        assert core._retrieval_resources is resources
+        assert resources.close_count == 0
+        with pytest.raises(RuntimeError, match="HostCore is closing"):
+            await core._get_projection_service(  # type: ignore[arg-type]
+                object(),
+                retrieval_resources=resources,
+            )
+
+        projection.blocked = False
+        await core.shutdown()
+        assert core.lifecycle is HostCoreLifecycle.CLOSED
+        assert resources.close_count == 1
+
+    asyncio.run(run())
 
 
 def test_open_parked_at_attach_then_shutdown_leaves_no_session(

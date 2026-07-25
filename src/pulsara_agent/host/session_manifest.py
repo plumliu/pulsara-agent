@@ -32,6 +32,9 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.storage.session_bootstrap import (
+    PostgresRuntimeSessionOwnerBootstrapPort,
+)
 
 
 RESUME_SCHEMA_VERSION = 1
@@ -117,9 +120,16 @@ class SessionManifestStore:
     """Read/write facade for the V1 resume manifest in Postgres."""
 
     def __init__(
-        self, connection_provider: VerifiedPostgresConnectionProviderProtocol
+        self,
+        connection_provider: VerifiedPostgresConnectionProviderProtocol,
+        *,
+        session_bootstrap: PostgresRuntimeSessionOwnerBootstrapPort | None = None,
     ) -> None:
         self.connection_provider = connection_provider
+        self.session_bootstrap = (
+            session_bootstrap
+            or PostgresRuntimeSessionOwnerBootstrapPort(connection_provider)
+        )
 
     def _connection(self, *, row_factory: object | None = None):
         return self.connection_provider.connection(
@@ -139,6 +149,19 @@ class SessionManifestStore:
         created_by: str,
     ) -> SessionManifest:
         now = utc_now_iso()
+        bootstrap_candidate = self.session_bootstrap.candidate(
+            runtime_session_id=runtime_session_id,
+            workspace_root=str(workspace.workspace_root),
+        )
+        bootstrap_outcome = self.session_bootstrap.bootstrap(
+            candidate=bootstrap_candidate,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        if bootstrap_outcome.confirmation.value != "full":
+            raise RuntimeError(
+                "runtime session owner bootstrap did not reach FULL: "
+                f"{bootstrap_outcome.confirmation.value}"
+            )
         existing = self.get(runtime_session_id)
         existing_metadata = existing.metadata if existing is not None else {}
         created_at = existing.created_at if existing is not None else now
@@ -163,14 +186,20 @@ class SessionManifestStore:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    insert into sessions (id, workspace_root, metadata)
-                    values (%s, %s, %s)
-                    on conflict (id) do update
-                    set workspace_root = excluded.workspace_root,
-                        metadata = excluded.metadata
+                    update sessions
+                    set metadata = %s
+                    where id = %s and workspace_root = %s
                     """,
-                    (runtime_session_id, str(workspace.workspace_root), Jsonb(metadata)),
+                    (
+                        Jsonb(metadata),
+                        runtime_session_id,
+                        str(workspace.workspace_root),
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "session manifest update lost its bootstrapped owner"
+                    )
         manifest = self.get(runtime_session_id)
         assert manifest is not None
         return manifest
@@ -232,14 +261,18 @@ class SessionManifestStore:
         predicates = ["true"]
         params: list[object] = []
         if workspace_root is not None:
-            predicates.append("coalesce(metadata #>> '{workspace,workspace_root}', workspace_root) = %s")
+            predicates.append(
+                "coalesce(metadata #>> '{workspace,workspace_root}', workspace_root) = %s"
+            )
             params.append(str(Path(workspace_root).expanduser().resolve()))
         if memory_domain_id is not None:
             predicates.append("metadata #>> '{workspace,memory_domain_id}' = %s")
             params.append(memory_domain_id)
         if not include_closed:
             predicates.append("metadata #>> '{lifecycle,closed_at}' is null")
-            predicates.append("coalesce((metadata #>> '{lifecycle,archived}')::boolean, false) = false")
+            predicates.append(
+                "coalesce((metadata #>> '{lifecycle,archived}')::boolean, false) = false"
+            )
         params.append(limit)
         with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
@@ -275,7 +308,7 @@ class SessionManifestStore:
                     from sessions
                     left join latest_run on latest_run.session_id = sessions.id
                     left join latest_event on latest_event.session_id = sessions.id
-                    where {' and '.join(predicates)}
+                    where {" and ".join(predicates)}
                     order by
                         greatest(
                             sessions.created_at,
@@ -331,14 +364,18 @@ def _merged_manifest_metadata(
     return metadata
 
 
-def permission_policy_from_manifest(manifest: SessionManifest) -> EffectivePermissionPolicy:
+def permission_policy_from_manifest(
+    manifest: SessionManifest,
+) -> EffectivePermissionPolicy:
     if manifest.permission_mode is None:
         if not manifest.permission_policy:
             raise ValueError(
                 "session manifest permission_mode and permission_policy are required "
                 "under the run-bound permission hard-cut"
             )
-        raise ValueError("session manifest permission_mode is required when permission_policy is present")
+        raise ValueError(
+            "session manifest permission_mode is required when permission_policy is present"
+        )
     if manifest.permission_policy:
         validate_preset_policy_payload(
             manifest.permission_mode,
@@ -355,19 +392,30 @@ def _manifest_from_row(row: dict[str, Any]) -> SessionManifest:
     workspace = _dict(metadata.get("workspace"))
     runtime = _dict(metadata.get("runtime"))
     lifecycle = _dict(metadata.get("lifecycle"))
-    workspace_root = str(workspace.get("workspace_root") or row.get("workspace_root") or ".")
+    workspace_root = str(
+        workspace.get("workspace_root") or row.get("workspace_root") or "."
+    )
     return SessionManifest(
         runtime_session_id=str(row["id"]),
-        conversation_id=str(metadata.get("conversation_id") or f"conversation:{row['id']}"),
+        conversation_id=str(
+            metadata.get("conversation_id") or f"conversation:{row['id']}"
+        ),
         workspace_kind=str(workspace.get("workspace_kind") or "project"),
         workspace_root=workspace_root,
-        display_label=str(workspace.get("display_label") or Path(workspace_root).name or workspace_root),
+        display_label=str(
+            workspace.get("display_label")
+            or Path(workspace_root).name
+            or workspace_root
+        ),
         memory_domain_id=str(workspace.get("memory_domain_id") or "u_local"),
         model_role=str(runtime.get("model_role") or ModelRole.PRO.value),
-        permission_mode=runtime.get("permission_mode") if isinstance(runtime.get("permission_mode"), str) else None,
+        permission_mode=runtime.get("permission_mode")
+        if isinstance(runtime.get("permission_mode"), str)
+        else None,
         permission_policy=_dict(runtime.get("permission_policy")),
         created_by=str(lifecycle.get("created_by") or "unknown"),
-        created_at=_str_or_none(lifecycle.get("created_at")) or _str_or_none(row.get("created_at")),
+        created_at=_str_or_none(lifecycle.get("created_at"))
+        or _str_or_none(row.get("created_at")),
         last_active_at=_str_or_none(lifecycle.get("last_active_at")),
         closed_at=_str_or_none(lifecycle.get("closed_at")),
         archived=bool(lifecycle.get("archived", False)),

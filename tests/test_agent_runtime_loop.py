@@ -63,7 +63,6 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
-    ToolResultEvidenceProjectionFailedEvent,
     ToolExecutionSuspendedEvent,
     UserConfirmResultEvent,
 )
@@ -118,19 +117,12 @@ from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory import (
-    ExecutionEvidenceLedger,
-    ExecutionEvidencePersistenceHook,
-    InMemoryArchiveStore,
-)
 from pulsara_agent.message import (
     AssistantMsg,
     Base64Source,
     DataBlock,
     Msg,
     TextBlock,
-    ToolCallBlock,
     ToolCallState,
     ToolResultBlock,
     ToolResultState,
@@ -178,19 +170,15 @@ from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
-from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactRecord
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.runtime.tool_action import fixed_tool_action_policy
 from pulsara_agent.runtime.tool_execution import (
     RuntimeSessionToolExecutionEventCommitPort,
-    build_tool_result_terminal_event,
 )
 from pulsara_agent.runtime.long_horizon.run_contract import (
     empty_projection_state_fingerprint,
     prepare_root_long_horizon_run,
 )
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.tools.base import (
     ToolCall,
     ToolExecutionResult,
@@ -446,7 +434,9 @@ def test_provider_input_session_generation_survives_runtime_session_restart(
         if isinstance(event, ProviderInputGenerationStartedEvent)
     )
     appends = tuple(
-        event for event in events if isinstance(event, ProviderInputAppendCommittedEvent)
+        event
+        for event in events
+        if isinstance(event, ProviderInputAppendCommittedEvent)
     )
     assert len(starts) == 1
     assert len(appends) == 2
@@ -455,8 +445,7 @@ def test_provider_input_session_generation_survives_runtime_session_restart(
         for event in events
     )
     assert all(
-        event.generation_id == starts[0].generation.generation_id
-        for event in appends
+        event.generation_id == starts[0].generation.generation_id for event in appends
     )
     assert tuple(event.resulting_revision for event in appends) == (1, 2)
     assert appends[1].append_batch_reference.predecessor_prefix_fingerprint == (
@@ -1665,9 +1654,9 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
         terminal_result,
     )
     committed = asyncio.Event()
-    original_write_events_with_deadline = (
-        type(runtime_session).write_events_with_deadline
-    )
+    original_write_events_with_deadline = type(
+        runtime_session
+    ).write_events_with_deadline
 
     if failure_mode == "precommit":
 
@@ -2357,10 +2346,7 @@ def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
     assert emitted == [stored]
     assert state.status is LoopStatus.ABORTED
     termination = state.scratchpad["publication_latched_run_termination"]
-    assert (
-        termination.reason
-        == "mandatory_runtime_audit_publication_unavailable"
-    )
+    assert termination.reason == "mandatory_runtime_audit_publication_unavailable"
     assert termination.source_event_references[0].event_id == stored.id
 
 
@@ -4104,13 +4090,6 @@ class LegacyShapeMemoryHook:
         return []
 
 
-class FailingPersistenceHook:
-    async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
-    ) -> None:
-        raise RuntimeError("persist boom")
-
-
 def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> None:
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     error = next(event for event in events if isinstance(event, RunErrorEvent))
@@ -4221,167 +4200,6 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
     assert len(transport.contexts) == 1
 
 
-def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> None:
-    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    graph = InMemoryGraphStore()
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=InMemoryArchiveStore(),
-        gate=MemoryWriteGate(),
-    )
-    transport = ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:read",
-                        "name": "read_file",
-                        "arguments": json.dumps({"path": "note.txt"}),
-                    }
-                ]
-            },
-            {"text": "done"},
-        ]
-    )
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=in_memory_runtime_session(tmp_path),
-        llm_runtime=make_llm_runtime(transport),
-        tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger),
-    )
-
-    result = asyncio.run(run_agent_task(agent, "read"))
-
-    assert result.status is LoopStatus.FINISHED
-    tool_results = graph.find_by_type(rt.TOOL_RESULT)
-    assert len(tool_results) == 1
-    assert graph.find_by_type(rt.EVIDENCE) == []
-    assert graph.find_by_type(memory.CLAIM) == []
-    span = tool_results[0][rt.EVENT_SPAN_PROPERTY.name]
-    assert span[rt.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
-
-
-def test_tool_result_persistence_hook_rejects_large_external_result_without_artifact_ref(
-    tmp_path,
-) -> None:
-    graph = InMemoryGraphStore()
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=InMemoryArchiveStore(),
-        gate=MemoryWriteGate(),
-    )
-    hook = ExecutionEvidencePersistenceHook(ledger)
-    state = LoopState(session_id="runtime:test")
-    state.current_scope = "ctx:workspace/test_project"
-    state.pending_tool_calls = [
-        ToolCallBlock(
-            id="call:external", name="external_tool", input='{"mode":"external"}'
-        )
-    ]
-    result = ToolResultBlock(
-        id="call:external",
-        name="external_tool",
-        output=[TextBlock(text="x" * 8_100)],
-        state=ToolResultState.SUCCESS,
-    )
-
-    with pytest.raises(ValueError, match="but no artifact ref"):
-        asyncio.run(hook.after_tool_results(state, [result]))
-
-    assert graph.find_by_type(rt.TOOL_RESULT) == []
-    assert graph.find_by_type(rt.ARTIFACT) == []
-
-
-def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_ref(
-    tmp_path,
-) -> None:
-    runtime_session = in_memory_runtime_session(tmp_path)
-    artifact_id = "artifact:tool-result:run-source:call-large:output:0"
-    write = runtime_session.archive.put_text(
-        artifact_id,
-        "SOURCE_HEAD\n" + ("x" * 12_000) + "\nSOURCE_TAIL",
-        session_id=runtime_session.runtime_session_id,
-        run_id="run:source",
-        media_type="text/plain; charset=utf-8",
-    )
-    runtime_session.tool_result_artifacts.put(
-        ToolResultArtifactRecord(
-            id="tool-result-artifact:run-source:call-large:output:0",
-            session_id=runtime_session.runtime_session_id,
-            run_id="run:source",
-            turn_id="turn:source",
-            reply_id="reply:source",
-            tool_call_id="call:large",
-            tool_name="terminal",
-            artifact_id=write.id,
-            role="output",
-            ordinal=0,
-            media_type="text/plain; charset=utf-8",
-            size_bytes=write.size_bytes,
-        )
-    )
-    context = EventContext(
-        run_id="run:read", turn_id="turn:read", reply_id="reply:read"
-    )
-    executor = runtime_session.create_tool_executor(
-        record_event=runtime_session.make_thread_recorder()
-    )
-    result = executor.execute(
-        ToolCall(
-            id="call:artifact-read",
-            name="artifact_read",
-            arguments={"artifact_id": artifact_id, "max_chars": 20_000},
-        ),
-        event_context=context,
-    )
-    prepared_terminal = result.prepared_terminal_result
-    assert prepared_terminal is not None
-    asyncio.run(
-        runtime_session.emit_many(
-            (
-                build_tool_result_terminal_event(
-                    event_context=context,
-                    prepared=prepared_terminal,
-                ),
-            )
-        )
-    )
-    replayed = AssistantMsg(name="assistant", id="reply:read", content=[])
-    reducer = MessageReducer(replayed)
-    for event in runtime_session.event_log.iter():
-        if event.reply_id == "reply:read":
-            reducer.append(event)
-    block = replayed.content[0]
-    assert result.status is ToolResultState.SUCCESS
-    assert isinstance(block, ToolResultBlock)
-    assert block.artifacts and block.artifacts[0].artifact_id == artifact_id
-
-    graph = InMemoryGraphStore()
-    hook = ExecutionEvidencePersistenceHook(
-        ExecutionEvidenceLedger(
-            graph=graph,
-            archive=runtime_session.archive,
-            gate=MemoryWriteGate(),
-        )
-    )
-    state = LoopState(
-        session_id=runtime_session.runtime_session_id, turn_id="turn:read"
-    )
-    state.current_scope = "ctx:workspace/test_project"
-    state.pending_tool_calls = [
-        ToolCallBlock(
-            id="call:artifact-read",
-            name="artifact_read",
-            input=json.dumps({"artifact_id": artifact_id}),
-        )
-    ]
-
-    asyncio.run(hook.after_tool_results(state, [block]))
-
-    assert graph.find_by_type(rt.TOOL_RESULT)
-    assert graph.find_by_type(rt.ARTIFACT)
-
-
 def test_terminal_large_output_followup_context_preserves_exact_artifact_id(
     tmp_path,
 ) -> None:
@@ -4428,97 +4246,6 @@ def test_terminal_large_output_followup_context_preserves_exact_artifact_id(
         text for message in transport.contexts[1].messages for text in message.content
     )
     assert artifact_id in followup_text
-
-
-def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> None:
-    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    transport = ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:read",
-                        "name": "read_file",
-                        "arguments": json.dumps({"path": "note.txt"}),
-                    }
-                ]
-            },
-            {"text": "done"},
-        ]
-    )
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=in_memory_runtime_session(tmp_path),
-        llm_runtime=make_llm_runtime(transport),
-        tool_result_persistence_hook=FailingPersistenceHook(),
-    )
-
-    result = asyncio.run(run_agent_task(agent, "read"))
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
-
-    assert result.status is LoopStatus.FINISHED
-    assert result.stop_reason == "final"
-    assert any(
-        isinstance(event, ToolResultEvidenceProjectionFailedEvent)
-        for event in events
-    )
-    assert not any(
-        isinstance(event, RunErrorEvent) and event.code == "memory_persistence_error"
-        for event in events
-    )
-    assert any(
-        isinstance(event, RunEndEvent) and event.status == "finished"
-        for event in events
-    )
-
-
-def test_evidence_projection_publication_failure_aborts_with_typed_run_end(
-    tmp_path,
-) -> None:
-    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    runtime_session = in_memory_runtime_session(tmp_path)
-
-    class FailEvidenceFailurePublication:
-        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
-            if isinstance(
-                published.event,
-                ToolResultEvidenceProjectionFailedEvent,
-            ):
-                raise RuntimeError("synthetic evidence audit publication failure")
-
-    runtime_session.publisher.subscribe(FailEvidenceFailurePublication())
-    transport = ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:read",
-                        "name": "read_file",
-                        "arguments": json.dumps({"path": "note.txt"}),
-                    }
-                ]
-            },
-            {"text": "must not be sampled"},
-        ]
-    )
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_session,
-        llm_runtime=make_llm_runtime(transport),
-        tool_result_persistence_hook=FailingPersistenceHook(),
-    )
-
-    result = asyncio.run(run_agent_task(agent, "read"))
-    events = runtime_session.event_log.iter(run_id=result.state.run_id)
-    run_end = next(event for event in events if isinstance(event, RunEndEvent))
-
-    assert result.status is LoopStatus.ABORTED
-    assert len(transport.contexts) == 1
-    assert run_end.publication_latched_termination is not None
-    assert (
-        run_end.publication_latched_termination.reason
-        == "mandatory_runtime_audit_publication_unavailable"
-    )
 
 
 def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> None:

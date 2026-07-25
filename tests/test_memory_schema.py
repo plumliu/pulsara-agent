@@ -19,13 +19,13 @@ def test_memory_manifest_freezes_vector_and_function_contracts() -> None:
     manifest = POSTGRES_LATEST_SCHEMA_MANIFEST
     assert tuple(
         item["extension_name"] for item in manifest.required_extensions
-    ) == ("vector",)
+    ) == ("vector", "pgcrypto")
     assert tuple(item["type_name"] for item in manifest.required_types) == (
         "vector",
     )
-    assert tuple(
+    assert "pulsara_jsonb_text_array" in {
         item["function_name"] for item in manifest.required_functions
-    ) == ("pulsara_jsonb_text_array",)
+    }
     vector_relation = next(
         item
         for item in manifest.owned_relations

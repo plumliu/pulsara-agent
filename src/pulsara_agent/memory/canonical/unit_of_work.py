@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -26,11 +24,19 @@ from pulsara_agent.memory.candidates.pool import (
     GovernanceWriteOutcome,
     MemoryGovernanceDecisionRecord,
     PooledMemoryCandidate,
+    WriteSucceededOutcome,
     decision_target_entry_ids,
 )
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    CanonicalMutationSurface,
+    CanonicalMutationSurfacePlanFact,
+)
+from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+    CanonicalMutationV2Writer,
+    build_surface_plan,
+)
 from pulsara_agent.memory.governance.event_outbox import (
     EphemeralGovernanceEventOutboxRepository,
     GovernanceEventDispatchTicket,
@@ -43,10 +49,15 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.storage.session_bootstrap import (
+    PostgresRuntimeSessionOwnerBootstrapPort,
+)
 
 
 class GovernanceDecisionRepository(Protocol):
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate: ...
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate: ...
 
     def append_decision(
         self, record: MemoryGovernanceDecisionRecord
@@ -59,8 +70,7 @@ class GovernanceOutboxRepository(Protocol):
         record: MemoryGovernanceDecisionRecord,
         *,
         graph_id: str,
-        target_entry_key: str | None = None,
-        payload: dict[str, Any] | None = None,
+        requested_surfaces: tuple[CanonicalMutationSurface, ...],
     ) -> str | None: ...
 
 
@@ -113,6 +123,15 @@ class MemoryWriteUnitOfWork:
     graph_id: str | None = None
     workspace_root: str | Path | None = None
     gate: MemoryWriteGate = field(default_factory=MemoryWriteGate)
+    session_bootstrap: PostgresRuntimeSessionOwnerBootstrapPort | None = None
+    canonical_mutation_surface_plan: CanonicalMutationSurfacePlanFact = field(
+        default_factory=lambda: build_surface_plan(
+            (
+                CanonicalMutationSurface.SEARCH_INDEX,
+                CanonicalMutationSurface.OXIGRAPH,
+            )
+        )
+    )
 
     connection: Connection | None = field(init=False, default=None)
     _connection_owner: ContextManager[Connection] | None = field(
@@ -128,6 +147,24 @@ class MemoryWriteUnitOfWork:
     memory_write_service: MemoryWriteService = field(init=False)
 
     def __enter__(self) -> "MemoryWriteUnitOfWork":
+        bootstrap = self.session_bootstrap or PostgresRuntimeSessionOwnerBootstrapPort(
+            self.connection_provider
+        )
+        candidate = bootstrap.candidate(
+            runtime_session_id=self.runtime_session_id,
+            workspace_root=(
+                str(self.workspace_root) if self.workspace_root is not None else None
+            ),
+        )
+        outcome = bootstrap.bootstrap(
+            candidate=candidate,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        if outcome.confirmation.value != "full":
+            raise RuntimeError(
+                "runtime session owner bootstrap did not reach FULL: "
+                f"{outcome.confirmation.value}"
+            )
         self._connection_owner = self.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_UOW,
             deadline_monotonic=monotonic() + 30.0,
@@ -136,15 +173,17 @@ class MemoryWriteUnitOfWork:
         resolved_graph_id = self.graph_id or DEFAULT_GRAPH_ID
         self.graph = PostgresGraphStore(connection=self.connection)
         self.decisions = CandidateDecisionRepository(self.connection)
-        self.outbox = OutboxRepository(self.connection)
+        self.outbox = OutboxRepository(
+            self.connection,
+            surface_plan=self.canonical_mutation_surface_plan,
+        )
         self.runtime_events = GovernanceEventOutboxRepository(
             self.connection,
             runtime_session_id=self.runtime_session_id,
         )
         self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
-        ledger = ExecutionEvidenceLedger(
+        ledger = CanonicalMemoryLedger(
             graph=self.graph,
-            archive=self.archive,
             gate=self.gate,
             graph_id=resolved_graph_id,
         )
@@ -179,16 +218,17 @@ class MemoryWriteUnitOfWork:
         assert self.connection is not None
         with self.connection.cursor() as cursor:
             cursor.execute(
-                """
-                INSERT INTO sessions (id, workspace_root)
-                VALUES (%s, %s)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                (
-                    self.runtime_session_id,
-                    str(self.workspace_root) if self.workspace_root is not None else None,
-                ),
+                "SELECT workspace_root FROM sessions WHERE id = %s",
+                (self.runtime_session_id,),
             )
+            session_row = cursor.fetchone()
+            expected_workspace = (
+                str(self.workspace_root) if self.workspace_root is not None else None
+            )
+            if session_row is None or session_row[0] != expected_workspace:
+                raise RuntimeError(
+                    "memory UOW requires an exact bootstrapped session owner"
+                )
             cursor.execute(
                 """
                 INSERT INTO runs (id, session_id)
@@ -197,7 +237,9 @@ class MemoryWriteUnitOfWork:
                 """,
                 (context.run_id, self.runtime_session_id),
             )
-            cursor.execute("SELECT session_id FROM runs WHERE id = %s", (context.run_id,))
+            cursor.execute(
+                "SELECT session_id FROM runs WHERE id = %s", (context.run_id,)
+            )
             row = cursor.fetchone()
             if row is not None and row[0] != self.runtime_session_id:
                 raise ValueError(
@@ -211,9 +253,16 @@ class MemoryWriteUnitOfWork:
                 WHERE run_id = %s
                 ON CONFLICT (id) DO NOTHING
                 """,
-                (context.turn_id, self.runtime_session_id, context.run_id, context.run_id),
+                (
+                    context.turn_id,
+                    self.runtime_session_id,
+                    context.run_id,
+                    context.run_id,
+                ),
             )
-            cursor.execute("SELECT session_id, run_id FROM turns WHERE id = %s", (context.turn_id,))
+            cursor.execute(
+                "SELECT session_id, run_id FROM turns WHERE id = %s", (context.turn_id,)
+            )
             row = cursor.fetchone()
             if row is None:
                 return
@@ -272,10 +321,14 @@ class _PoolDecisionRepository:
 
     candidate_pool: CandidatePool
 
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate:
         return self.candidate_pool.append_candidate(candidate)
 
-    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord:
         return self.candidate_pool.append_decision(record)
 
 
@@ -288,8 +341,7 @@ class _NoopOutboxRepository:
         record: MemoryGovernanceDecisionRecord,
         *,
         graph_id: str,
-        target_entry_key: str | None = None,
-        payload: dict[str, Any] | None = None,
+        requested_surfaces: tuple[CanonicalMutationSurface, ...],
     ) -> str | None:
         return None
 
@@ -355,7 +407,9 @@ class InMemoryMemoryWriteUnitOfWork:
 class CandidateDecisionRepository:
     connection: Connection
 
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate:
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -402,7 +456,9 @@ class CandidateDecisionRepository:
             )
         return candidate
 
-    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord:
         self._validate_decision_targets(record)
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -432,13 +488,17 @@ class CandidateDecisionRepository:
                     record.requested_decision_payload_fingerprint,
                     record.decision_payload_fingerprint,
                     Jsonb(_decision_adapter.dump_python(record.decision, mode="json")),
-                    Jsonb(_outcome_adapter.dump_python(record.write_outcome, mode="json")),
+                    Jsonb(
+                        _outcome_adapter.dump_python(record.write_outcome, mode="json")
+                    ),
                     record.created_at,
                 ),
             )
         return record
 
-    def _validate_decision_targets(self, record: MemoryGovernanceDecisionRecord) -> None:
+    def _validate_decision_targets(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> None:
         target_ids = decision_target_entry_ids(record.decision)
         if not target_ids:
             return
@@ -454,41 +514,64 @@ class CandidateDecisionRepository:
             existing = {row["entry_id"] for row in cursor.fetchall()}
         missing = [entry_id for entry_id in target_ids if entry_id not in existing]
         if missing:
-            raise KeyError(f"governance decision references missing candidate entries: {missing}")
+            raise KeyError(
+                f"governance decision references missing candidate entries: {missing}"
+            )
 
 
 @dataclass(slots=True)
 class OutboxRepository:
     connection: Connection
+    surface_plan: CanonicalMutationSurfacePlanFact
 
     def append_decision(
         self,
         record: MemoryGovernanceDecisionRecord,
         *,
         graph_id: str,
-        target_entry_key: str | None = None,
-        payload: dict[str, Any] | None = None,
+        requested_surfaces: tuple[CanonicalMutationSurface, ...],
     ) -> str | None:
-        if payload is None:
+        if not isinstance(record.write_outcome, WriteSucceededOutcome):
             return None
-        target_key = target_entry_key or target_entry_key_for_decision(record.decision)
-        writer = MutationOutboxWriter(connection=self.connection)
-        return writer.append_payload(
-            payload,
-            graph_id=graph_id,
-            target_entry_key=target_key,
-            governance_batch_id=record.governance_batch_id,
-            decision_id=record.decision_id,
-            sequence_key=graph_id,
+        affected_ids = tuple(
+            dict.fromkeys(
+                (
+                    record.write_outcome.memory_id,
+                    *record.write_outcome.superseded_memory_ids,
+                    *record.write_outcome.contradicted_memory_ids,
+                )
+            )
         )
-
-
-def target_entry_key_for_decision(decision: GovernanceDecision) -> str:
-    target_ids = decision_target_entry_ids(decision)
-    if len(target_ids) == 1:
-        return target_ids[0]
-    encoded = json.dumps(sorted(target_ids), ensure_ascii=True, separators=(",", ":"))
-    return "merge:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        documents = tuple(
+            {
+                "node_id": node_id,
+                "document": PostgresGraphStore(connection=self.connection).get_jsonld(
+                    node_id, graph_id=graph_id
+                ),
+            }
+            for node_id in affected_ids
+        )
+        payload = {
+            "schema_version": "governed-memory-mutation-payload.v2",
+            "mutation_lane": "governed_memory",
+            "decision_record": record.model_dump(mode="json"),
+            "dirty_memory_ids": affected_ids,
+            "documents": documents,
+        }
+        writer = CanonicalMutationV2Writer(
+            connection=self.connection,
+            surface_plan=self.surface_plan,
+        )
+        return writer.append_governance_mutation(
+            payload=payload,
+            graph_id=graph_id,
+            governance_batch_id=record.governance_batch_id,
+            governance_batch_input_fingerprint=(record.batch_input_fingerprint),
+            decision_id=record.decision_id,
+            decision_semantic_fingerprint=(record.decision_payload_fingerprint),
+            source_authority_fingerprints=(record.write_outcome.write_event_ids),
+            requested_surfaces=requested_surfaces,
+        )
 
 
 _payload_adapter = TypeAdapter(CandidatePayload)

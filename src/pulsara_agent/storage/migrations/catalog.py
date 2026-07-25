@@ -39,7 +39,9 @@ class PostgresCatalogCanonicalizer:
         )
         extensions = self._extensions(connection)
         types = self._types(connection)
-        relations = tuple(self._relation_execution_shape(connection, name) for name in names)
+        relations = tuple(
+            self._relation_execution_shape(connection, name) for name in names
+        )
         functions = self._function_execution_shapes(connection)
         payload = {
             "schema_version": "postgres_fast_observed_catalog.v1",
@@ -75,15 +77,21 @@ class PostgresCatalogCanonicalizer:
         relation_names: Iterable[str] | None = None,
     ) -> PostgresDeepObservedCatalogFact:
         fast = self.read_fast(connection, relation_names=relation_names)
-        relations = tuple(
-            {
+        relations_list: list[dict[str, object]] = []
+        for shape in fast.relation_execution_shapes:
+            relation_name = str(shape["relation_name"])
+            relation = {
                 **shape,
                 "indexes": self._indexes(
-                    connection, relation_name=str(shape["relation_name"])
+                    connection,
+                    relation_name=relation_name,
                 ),
             }
-            for shape in fast.relation_execution_shapes
-        )
+            triggers = self._triggers(connection, relation_name=relation_name)
+            if triggers:
+                relation["triggers"] = triggers
+            relations_list.append(relation)
+        relations = tuple(relations_list)
         functions = self._functions(connection)
         payload = {
             "schema_version": "postgres_deep_observed_catalog.v1",
@@ -117,7 +125,7 @@ class PostgresCatalogCanonicalizer:
                        e.extversion AS extension_version
                 FROM pg_catalog.pg_extension e
                 JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-                WHERE e.extname = 'vector'
+                WHERE e.extname IN ('vector', 'pgcrypto')
                 ORDER BY n.nspname, e.extname
                 """
             )
@@ -264,6 +272,34 @@ class PostgresCatalogCanonicalizer:
             return tuple(_canonical_row(row) for row in cursor.fetchall())
 
     @staticmethod
+    def _triggers(
+        connection: Connection,
+        *,
+        relation_name: str,
+    ) -> tuple[dict[str, object], ...]:
+        with connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT t.tgname AS trigger_name,
+                       pns.nspname AS function_schema,
+                       p.proname AS function_name,
+                       pg_catalog.pg_get_triggerdef(t.oid, true) AS definition,
+                       t.tgenabled AS enabled
+                FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+                JOIN pg_catalog.pg_namespace pns ON pns.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND c.relname = %s
+                  AND NOT t.tgisinternal
+                ORDER BY t.tgname
+                """,
+                (relation_name,),
+            )
+            return tuple(_canonical_row(row) for row in cursor.fetchall())
+
+    @staticmethod
     def _function_rows(connection: Connection) -> tuple[dict[str, object], ...]:
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -284,7 +320,17 @@ class PostgresCatalogCanonicalizer:
                 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
                 JOIN pg_catalog.pg_language l ON l.oid = p.prolang
                 WHERE n.nspname = 'public'
-                  AND p.proname = 'pulsara_jsonb_text_array'
+                  AND p.proname IN (
+                      'pulsara_jsonb_text_array',
+                      'pulsara_runtime_write_lock_key',
+                      'pulsara_acquire_normal_runtime_write_guard',
+                      'pulsara_read_runtime_write_admission_epoch',
+                      'pulsara_acquire_maintenance_runtime_write_guard',
+                      'pulsara_enter_runtime_write_maintenance',
+                      'pulsara_install_runtime_write_normal_epoch',
+                      'pulsara_abort_runtime_write_maintenance',
+                      'pulsara_assert_runtime_write_guard'
+                  )
                 ORDER BY n.nspname, p.proname,
                          pg_catalog.pg_get_function_identity_arguments(p.oid)
                 """

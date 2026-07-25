@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from tests.support.postgres import verified_postgres_provider
+from tests.support.postgres import (
+    guarded_postgres_test_connection,
+    verified_postgres_provider,
+)
 
 import asyncio
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
@@ -58,9 +60,8 @@ class _FailingObserver:
 
 
 def _delete_sessions(dsn: str, session_ids: list[str]) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("delete from sessions where id = any(%s)", (session_ids,))
+    del dsn, session_ids
+    # Runtime session cutovers are immutable; the fixture database owns cleanup.
 
 
 def _durable_runtime(tmp_path: Path):
@@ -297,6 +298,7 @@ def test_event_log_deterministic_contract_matches_in_memory_and_postgres(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    postgres.ensure_runtime_session_owner()
     memory = InMemoryEventLog()
     context = EventContext(
         run_id=f"run:event-log-parity:{uuid4().hex}",
@@ -582,7 +584,7 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
         invalid_payload["id"] = f"event:invalid-old-subagent:{uuid4().hex}"
         invalid_payload["sequence"] = parent.event_log.next_sequence()
         schema = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(valid).schema_contract
-        with psycopg.connect(dsn) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

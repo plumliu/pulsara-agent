@@ -86,6 +86,7 @@ class _FakeFactory:
                     retryable=True,
                 )
             if monotonic() >= deadline_monotonic:
+                self.control.physical_cancelled.set()
                 raise TimeoutError("fake verification deadline")
         if self.control.fail:
             raise RuntimeError("stable verification failure")
@@ -112,6 +113,12 @@ class _FakeFactory:
             ),
             verification_contract_fingerprint=postgres_schema_fingerprint(
                 "pulsara:test-verification-contract:v1", 1
+            ),
+            runtime_write_admission_epoch_fingerprint=(
+                postgres_schema_fingerprint(
+                    "pulsara:test-runtime-write-epoch:v1",
+                    self.resolved_database_oid,
+                )
             ),
         )
         return SimpleNamespace(binding=binding)

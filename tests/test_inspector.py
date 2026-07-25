@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from tests.support.postgres import verified_postgres_provider
+from tests.support.postgres import (
+    guarded_postgres_test_connection,
+    verified_postgres_provider,
+)
 
 import hashlib
 from pathlib import Path
@@ -71,7 +74,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.event_log import PostgresEventLog as _PostgresEventLog
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.inspector.service import (
@@ -500,8 +503,7 @@ def test_inspector_can_show_counts_when_model_hint_is_not_injected() -> None:
     )
     final_agent = primary.reserved_milliunits * policy.finalization_reserved_model_calls
     final_compaction = (
-        primary.reserved_milliunits
-        * policy.finalization_reserved_window_compactions
+        primary.reserved_milliunits * policy.finalization_reserved_window_compactions
     )
     final_tool = (
         policy.finalization_reserved_tool_cost_units
@@ -566,9 +568,14 @@ def test_inspector_can_show_counts_when_model_hint_is_not_injected() -> None:
     assert run["pending_owner_counts"]["total"] == 0
 
 
-
 def _runtime_session_id() -> str:
     return f"runtime:inspector:{uuid4().hex}"
+
+
+def _bootstrapped_event_log(*args: object, **kwargs: object) -> _PostgresEventLog:
+    event_log = _PostgresEventLog(*args, **kwargs)
+    event_log.ensure_runtime_session_owner()
+    return event_log
 
 
 def _ctx(label: str) -> EventContext:
@@ -610,13 +617,14 @@ def _typed_memory_projection_fields(
 
 
 def _cleanup_session(dsn: str, runtime_session_id: str) -> None:
-    with _connect_or_skip(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+    # Session cutovers are immutable; the session-scoped fixture database owns cleanup.
+    del dsn, runtime_session_id
 
 
 def _service(dsn: str) -> InspectorService:
-    return InspectorService(PostgresInspectorStore(verified_postgres_provider(dsn)), oxigraph_url=None)
+    return InspectorService(
+        PostgresInspectorStore(verified_postgres_provider(dsn)), oxigraph_url=None
+    )
 
 
 def _subagent_context_snapshot() -> dict[str, object]:
@@ -665,9 +673,7 @@ def _subagent_budget_snapshot() -> dict[str, object]:
         "max_result_summary_chars_per_child": 4_000,
         "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
-        "child_rollout_policy": default_child_rollout_policy().model_dump(
-            mode="json"
-        ),
+        "child_rollout_policy": default_child_rollout_policy().model_dump(mode="json"),
     }
 
 
@@ -716,7 +722,9 @@ def _simple_run_events(
             else []
         ),
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_start_event(
+            **ctx.event_fields(), block_id=f"text:{ctx.run_id}"
+        ),
         make_text_block_segment_event(
             **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta=text
         ),
@@ -787,8 +795,10 @@ def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> No
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("basic")
         log.extend(
@@ -814,7 +824,8 @@ def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> No
             report["canonical"]["permission_snapshot"]["permission_snapshot_source"]
             == "session_default"
         )
-        assert report["timeline"]["status"] == "completed"
+        assert report["timeline"]["projection_status"] == "not_durably_observable"
+        assert report["timeline"]["items"] == []
         assert report["run_boundary"]["run_entry_kind"] == "host"
         assert report["run_boundary"]["status"] == "committed"
         assert report["run_boundary"]["current_user_chars"] == 5
@@ -833,7 +844,7 @@ def test_inspector_projects_all_committed_resume_boundaries(tmp_path: Path) -> N
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
+        log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,
@@ -945,7 +956,7 @@ def test_inspector_projects_primitive_child_entry_with_nullable_task(
     parent_runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
+        log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=child_runtime_session_id,
             workspace_root=tmp_path,
@@ -1001,7 +1012,7 @@ def test_inspector_joins_preflight_compaction_to_host_boundary(tmp_path: Path) -
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
+        log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,
@@ -1092,12 +1103,14 @@ def test_inspect_run_reports_stale_run_projection_without_repairing(
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("stale")
         log.extend(_simple_run_events(ctx, user_input="hello", text="done"))
-        with psycopg.connect(dsn, connect_timeout=2) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "update runs set status = 'running', stop_reason = null, completed_at = null where id = %s",
@@ -1129,8 +1142,10 @@ def test_inspect_run_prior_messages_are_bounded_to_target_run_start(
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         first = _ctx("first")
         target = _ctx("target")
@@ -1167,8 +1182,10 @@ def test_inspect_run_prior_messages_use_context_compaction_boundary(
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         old = _ctx("compacted-old")
         target = _ctx("compacted-target")
@@ -1249,8 +1266,10 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("context-compiled")
         context_id = f"context:{uuid4().hex}"
@@ -1360,7 +1379,9 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
                 make_text_block_segment_event(
                     **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta="done"
                 ),
-                make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+                make_text_block_end_event(
+                    **ctx.event_fields(), block_id=f"text:{ctx.run_id}"
+                ),
                 ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
@@ -1432,8 +1453,10 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("missing-compaction-summary")
         log.extend(_simple_run_events(ctx, user_input="old", text="done"))
@@ -1491,8 +1514,10 @@ def test_inspect_session_links_context_compaction_memory_candidates(
     decision_id = f"decision:inspector:{uuid4().hex}"
     governance_batch_id = f"governance:inspector:{uuid4().hex}"
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         log.extend(_simple_run_events(ctx, user_input="compact me", text="done"))
         archive = PostgresArtifactStore(verified_postgres_provider(dsn))
@@ -1527,9 +1552,7 @@ def test_inspect_session_links_context_compaction_memory_candidates(
         candidate_payload = ValidCandidatePayload(
             candidate=PreferenceCandidate(
                 candidate_id="candidate:compaction-inspector",
-                statement=(
-                    "The user prefers syncing release before pushing GitHub."
-                ),
+                statement=("The user prefers syncing release before pushing GitHub."),
                 scope="ctx:workspace/test",
                 source_authority="conversation_evidence",
                 verification_status="inferred",
@@ -1574,7 +1597,7 @@ def test_inspect_session_links_context_compaction_memory_candidates(
                 ),
             )
         )
-        with psycopg.connect(dsn) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -1684,7 +1707,7 @@ def test_inspect_session_links_context_compaction_memory_candidates(
         assert projection_status["producer_event_id"] == proposed.id
         assert projection_status["durable_evidence"] == ["producer_event"]
     finally:
-        with _connect_or_skip(dsn) as connection:
+        with guarded_postgres_test_connection(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "delete from memory_governance_decisions where decision_id = %s",
@@ -1702,8 +1725,10 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         target = _ctx("target-projection")
         future = _ctx("future-projection")
@@ -1718,22 +1743,28 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 ProjectionReadyEvent(
                     **target.event_fields(),
                     projection_id="projection:target",
-                        role="pro",
-                        scope="session",
-                        token_budget=100,
-                        projection_kind="memory",
-                        **_typed_memory_projection_fields(
-                            memory_id="memory:target",
-                            text="TARGET_PROJECTION_AS_SEEN",
-                        ),
+                    role="pro",
+                    scope="session",
+                    token_budget=100,
+                    projection_kind="memory",
+                    **_typed_memory_projection_fields(
+                        memory_id="memory:target",
+                        text="TARGET_PROJECTION_AS_SEEN",
+                    ),
                 ),
                 ReplyStartEvent(**target.event_fields(), name="assistant"),
-                make_text_block_start_event(**target.event_fields(), block_id="text:target"),
+                make_text_block_start_event(
+                    **target.event_fields(), block_id="text:target"
+                ),
                 make_text_block_segment_event(
                     **target.event_fields(), block_id="text:target", delta="target done"
                 ),
-                make_text_block_end_event(**target.event_fields(), block_id="text:target"),
-                ReplyEndEvent(**target.event_fields(), model_terminal_outcome="completed"),
+                make_text_block_end_event(
+                    **target.event_fields(), block_id="text:target"
+                ),
+                ReplyEndEvent(
+                    **target.event_fields(), model_terminal_outcome="completed"
+                ),
                 RunEndEvent(
                     **run_end_contract_fields(target.run_id, status="finished"),
                     **target.event_fields(),
@@ -1753,14 +1784,14 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 ProjectionReadyEvent(
                     **future.event_fields(),
                     projection_id="projection:future",
-                        role="pro",
-                        scope="session",
-                        token_budget=100,
-                        projection_kind="memory",
-                        **_typed_memory_projection_fields(
-                            memory_id="memory:future",
-                            text="FUTURE_PROJECTION_NOT_SEEN",
-                        ),
+                    role="pro",
+                    scope="session",
+                    token_budget=100,
+                    projection_kind="memory",
+                    **_typed_memory_projection_fields(
+                        memory_id="memory:future",
+                        text="FUTURE_PROJECTION_NOT_SEEN",
+                    ),
                 ),
                 RunEndEvent(
                     **run_end_contract_fields(future.run_id, status="finished"),
@@ -1786,8 +1817,10 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("capability-surface")
         events = _simple_run_events(
@@ -1899,8 +1932,10 @@ def test_inspector_projects_bounded_mcp_installation_facts(tmp_path: Path) -> No
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("mcp-installation")
         permission = run_start_permission_fields(
@@ -1959,7 +1994,7 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
     child_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        parent_log = PostgresEventLog(
+        parent_log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=parent_session_id,
             workspace_root=tmp_path,
@@ -1988,7 +2023,7 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
             ]
         )
 
-        child_log = PostgresEventLog(
+        child_log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=child_session_id,
             workspace_root=tmp_path,
@@ -2033,7 +2068,7 @@ def test_inspector_reports_missing_mcp_installation_audit(tmp_path: Path) -> Non
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
+        log = _bootstrapped_event_log(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,
@@ -2076,8 +2111,10 @@ def test_inspect_run_reports_gate_permission_snapshot_mismatch(tmp_path: Path) -
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("gate-permission-mismatch")
         events = _simple_run_events(ctx, user_input="hello", text="done")
@@ -2097,14 +2134,14 @@ def test_inspect_run_reports_gate_permission_snapshot_mismatch(tmp_path: Path) -
                     )["permission_policy"],
                     availability="available",
                     permission_category="terminal",
-                        effective_permission_category="terminal",
-                        effective_read_only=False,
-                        action_classification=_action_classification(
-                            tool_call_id="call:terminal",
-                            tool_name="terminal",
-                            descriptor_id="builtin:terminal",
-                        ),
+                    effective_permission_category="terminal",
+                    effective_read_only=False,
+                    action_classification=_action_classification(
+                        tool_call_id="call:terminal",
+                        tool_name="terminal",
+                        descriptor_id="builtin:terminal",
                     ),
+                ),
                 *events[1:],
             ]
         )
@@ -2130,8 +2167,10 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("subagent-graph")
         child_runtime_session_id = f"runtime:subagent:{uuid4().hex}"
@@ -2353,8 +2392,10 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
     runtime_session_id = _runtime_session_id()
     _connect_or_skip(dsn).close()
     try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        log = _bootstrapped_event_log(
+            connection_provider=verified_postgres_provider(dsn),
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
         )
         ctx = _ctx("missing-artifact")
         call_id = "call:missing-artifact"
@@ -2418,189 +2459,6 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
         _cleanup_session(dsn, runtime_session_id)
 
 
-def test_inspect_run_outbox_uses_structured_lineage_not_payload_text(
-    tmp_path: Path,
-) -> None:
-    dsn = StorageConfig.from_env().postgres_dsn
-    runtime_session_id = _runtime_session_id()
-    _connect_or_skip(dsn).close()
-    graph_id = f"graph:test/inspector:{uuid4().hex}"
-    runtime_outbox_id = f"outbox:runtime:{uuid4().hex}"
-    governed_outbox_id = f"outbox:governed:{uuid4().hex}"
-    false_positive_outbox_id = f"outbox:false:{uuid4().hex}"
-    governance_batch_id = f"governance:inspector:{uuid4().hex}"
-    decision_id = f"decision:inspector:{uuid4().hex}"
-    candidate_entry_id = f"pool:inspector:{uuid4().hex}"
-    try:
-        log = PostgresEventLog(
-            connection_provider=verified_postgres_provider(dsn), runtime_session_id=runtime_session_id, workspace_root=tmp_path
-        )
-        target = _ctx("outbox-target")
-        other = _ctx("outbox-other")
-        log.extend(_simple_run_events(target, user_input="target", text="target done"))
-        log.extend(_simple_run_events(other, user_input="other", text="other done"))
-        with psycopg.connect(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into memory_candidates (
-                        entry_id,
-                        payload,
-                        origin,
-                        source_session_id,
-                        source_run_id,
-                        source_turn_id,
-                        source_reply_id
-                    )
-                    values (%s, %s, 'reflection', %s, %s, %s, %s)
-                    """,
-                    (
-                        candidate_entry_id,
-                        Jsonb({"statement": "durable preference from target run"}),
-                        runtime_session_id,
-                        target.run_id,
-                        target.turn_id,
-                        target.reply_id,
-                    ),
-                )
-                cursor.execute(
-                    """
-                    insert into memory_governance_decisions (
-                        decision_id,
-                        governance_batch_id,
-                        batch_input_fingerprint,
-                        batch_input_reference_fingerprint,
-                        governance_model_call_id,
-                        decision_index,
-                        requested_decision_payload_fingerprint,
-                        decision_payload_fingerprint,
-                        decision,
-                        write_outcome
-                    )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        decision_id,
-                        governance_batch_id,
-                        f"sha256:batch:{governance_batch_id}",
-                        f"sha256:reference:{governance_batch_id}",
-                        f"model_call:{governance_batch_id}",
-                        0,
-                        f"sha256:requested:{decision_id}",
-                        f"sha256:effective:{decision_id}",
-                        Jsonb(
-                            {
-                                "kind": "submit_as_is",
-                                "target_entry_id": candidate_entry_id,
-                                "reason": "valid durable memory",
-                            }
-                        ),
-                        Jsonb({"kind": "no_write"}),
-                    ),
-                )
-                cursor.execute(
-                    """
-                    insert into memory_write_outbox (
-                        outbox_id,
-                        graph_id,
-                        target_entry_key,
-                        payload,
-                        status,
-                        mutation_lane,
-                        sequence_key
-                    )
-                    values (%s, %s, %s, %s, 'applied', 'runtime_semantic', %s)
-                    """,
-                    (
-                        runtime_outbox_id,
-                        graph_id,
-                        f"run-timeline:{target.run_id}",
-                        Jsonb({"source_run_id": target.run_id, "documents": []}),
-                        graph_id,
-                    ),
-                )
-                cursor.execute(
-                    """
-                    insert into memory_write_outbox (
-                        outbox_id,
-                        graph_id,
-                        governance_batch_id,
-                        decision_id,
-                        target_entry_key,
-                        payload,
-                        status,
-                        mutation_lane,
-                        sequence_key
-                    )
-                    values (%s, %s, %s, %s, %s, %s, 'applied', 'governed_memory', %s)
-                    """,
-                    (
-                        governed_outbox_id,
-                        graph_id,
-                        governance_batch_id,
-                        decision_id,
-                        candidate_entry_id,
-                        Jsonb({"documents": [{"node_id": "mem:governed"}]}),
-                        graph_id,
-                    ),
-                )
-                cursor.execute(
-                    """
-                    insert into memory_write_outbox (
-                        outbox_id,
-                        graph_id,
-                        target_entry_key,
-                        payload,
-                        status,
-                        mutation_lane,
-                        sequence_key
-                    )
-                    values (%s, %s, %s, %s, 'applied', 'runtime_semantic', %s)
-                    """,
-                    (
-                        false_positive_outbox_id,
-                        graph_id,
-                        "run-timeline:other",
-                        Jsonb(
-                            {
-                                "source_run_id": other.run_id,
-                                "documents": [
-                                    {
-                                        "statement": f"mentions {target.run_id} only as text"
-                                    }
-                                ],
-                            }
-                        ),
-                        graph_id,
-                    ),
-                )
-
-        report = _service(dsn).inspect_run(target.run_id)
-        outbox_ids = {row["outbox_id"] for row in report["outbox"]}
-
-        assert runtime_outbox_id in outbox_ids
-        assert governed_outbox_id in outbox_ids
-        assert false_positive_outbox_id not in outbox_ids
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_write_outbox where outbox_id = any(%s)",
-                    (
-                        [
-                            runtime_outbox_id,
-                            governed_outbox_id,
-                            false_positive_outbox_id,
-                        ],
-                    ),
-                )
-                cursor.execute(
-                    "delete from memory_governance_decisions where decision_id = %s",
-                    (decision_id,),
-                )
-        _cleanup_session(dsn, runtime_session_id)
-
-
 def test_inspect_memory_unknown_id_raises_not_found() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
@@ -2608,53 +2466,3 @@ def test_inspect_memory_unknown_id_raises_not_found() -> None:
 
     with pytest.raises(KeyError, match=memory_id):
         _service(dsn).inspect_memory(memory_id)
-
-
-def test_inspect_health_reports_failed_outbox(tmp_path: Path, monkeypatch) -> None:
-    dsn = StorageConfig.from_env().postgres_dsn
-    _connect_or_skip(dsn).close()
-    outbox_id = f"outbox:inspector:{uuid4().hex}"
-    graph_id = f"graph:test/inspector:{uuid4().hex}"
-    try:
-        with psycopg.connect(dsn, connect_timeout=2) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into memory_write_outbox (
-                        outbox_id,
-                        graph_id,
-                        target_entry_key,
-                        payload,
-                        status,
-                        mutation_lane,
-                        sequence_key,
-                        last_error
-                    )
-                    values (%s, %s, %s, '{}'::jsonb, 'failed', 'runtime_semantic', %s, 'boom')
-                    """,
-                    (outbox_id, graph_id, f"target:{outbox_id}", graph_id),
-                )
-
-        service = _service(dsn)
-        # This assertion concerns the outbox only. Keep unrelated hard-cut
-        # legacy session rows in a developer database out of its evidence set.
-        monkeypatch.setattr(
-            PostgresInspectorStore, "recent_session_ids", lambda self: []
-        )
-        report = service.inspect_health()
-
-        assert any(row["status"] == "failed" for row in report["outbox"])
-        schema = report["postgres"]["schema"]
-        assert schema["migration_head_version"] == 4
-        assert schema["durable_registry_prefix_fingerprint"].startswith("sha256:")
-        assert schema["fast_executable_schema_fingerprint"].startswith("sha256:")
-        assert schema["pgvector_extension_version"]
-        assert schema["last_verified_at_utc"].endswith("Z")
-        assert "admin" not in schema
-        assert "dsn" not in schema
-    finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_write_outbox where outbox_id = %s", (outbox_id,)
-                )

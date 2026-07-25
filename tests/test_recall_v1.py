@@ -657,16 +657,8 @@ def test_recall_trace_records_usage_and_suppresses_recent_auto_injection() -> No
                 )
                 assert cursor.fetchall() == [(True, False), (False, True)]
     finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    DELETE FROM recall_traces
-                    WHERE graph_id = %s AND session_id = %s
-                    """,
-                    (graph_id, session_id),
-                )
-        store.delete_graph(graph_id)
+        # Identifiers are unique and the fixture database owns cleanup.
+        pass
 
 
 def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> None:
@@ -735,13 +727,8 @@ def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> Non
                     RecallTrigger.EXPLICIT_SEARCH.value,
                 )
     finally:
-        with _connect_or_skip(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "DELETE FROM recall_traces WHERE graph_id = %s AND session_id = %s",
-                    (graph_id, session_id),
-                )
-        store.delete_graph(graph_id)
+        # Identifiers are unique and the fixture database owns cleanup.
+        pass
 
 
 def _put_preference(

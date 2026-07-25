@@ -14,11 +14,11 @@ from tests.support.postgres import verified_postgres_provider
 from pulsara_agent.entities.memory import Decision
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory, runtime as rt
+from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+from tests.support.memory import seed_tool_evidence
 
 
 @pytest.fixture
@@ -33,35 +33,21 @@ def graph_store() -> Iterator[tuple[object, str]]:
         store.delete_graph(graph_id)
 
 
-def _ledger(store: object, graph_id: str) -> ExecutionEvidenceLedger:
-    return ExecutionEvidenceLedger(
+def _ledger(store: object, graph_id: str) -> CanonicalMemoryLedger:
+    return CanonicalMemoryLedger(
         graph=store,
-        archive=PostgresArtifactStore(
-            connection_provider=verified_postgres_provider(
-                StorageConfig.from_env().postgres_dsn
-            )
-        ),
         gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
 
 
-def _seed_evidence(ledger: ExecutionEvidenceLedger, *, scope: str) -> str:
-    result = ledger.record_tool_result(
-        turn_id=f"turn:{uuid4().hex}",
-        tool_name="rg",
-        status=rt.ToolExecutionStatus.SUCCESS,
-        input_summary="search",
-        output="match found",
+def _seed_evidence(ledger: CanonicalMemoryLedger, *, scope: str) -> str:
+    return seed_tool_evidence(
+        ledger.graph,
+        graph_id=ledger.graph_id,
         scope=scope,
-    )
-    evidence = ledger.create_evidence_from_tool_result(
-        result.tool_result_id,
         statement="The search found a match.",
-        scope=scope,
     )
-    return evidence.evidence_id
-
 
 
 def test_decision_single_element_edges_round_trip(graph_store) -> None:

@@ -9,9 +9,9 @@ from tests.support.postgres import connect_postgres_test_database as _connect_or
 from pulsara_agent.entities.memory import ActionBoundary
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
-from pulsara_agent.memory import InMemoryArchiveStore, PostgresMemoryQuery
+from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
@@ -56,9 +56,8 @@ def test_remember_action_boundary_preserves_structured_trigger_fields() -> None:
 def test_action_boundary_triggers_are_written_to_jsonld() -> None:
     graph = InMemoryGraphStore()
     service = MemoryWriteService(
-        ledger=ExecutionEvidenceLedger(
+        ledger=CanonicalMemoryLedger(
             graph=graph,
-            archive=InMemoryArchiveStore(),
             gate=MemoryWriteGate(),
         )
     )

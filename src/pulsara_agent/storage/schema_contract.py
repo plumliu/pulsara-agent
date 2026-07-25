@@ -25,6 +25,7 @@ class VerifiedPostgresSchemaBinding:
     pgvector_extension_version: str
     migration_head_version: int
     durable_registry_prefix_fingerprint: str
+    runtime_write_admission_epoch_fingerprint: str
     fast_executable_schema_fingerprint: str
     verification_contract_fingerprint: str
     binding_fingerprint: str
@@ -36,6 +37,7 @@ class VerifiedPostgresSchemaBinding:
         for name in (
             "database_target_fingerprint",
             "durable_registry_prefix_fingerprint",
+            "runtime_write_admission_epoch_fingerprint",
             "fast_executable_schema_fingerprint",
             "verification_contract_fingerprint",
             "binding_fingerprint",
@@ -53,7 +55,9 @@ class VerifiedPostgresSchemaBinding:
             raise ValueError("verified PostgreSQL binding fingerprint mismatch")
 
     def __reduce__(self) -> Any:
-        raise TypeError("VerifiedPostgresSchemaBinding is process-local and not picklable")
+        raise TypeError(
+            "VerifiedPostgresSchemaBinding is process-local and not picklable"
+        )
 
     def __copy__(self) -> Any:
         raise TypeError("VerifiedPostgresSchemaBinding cannot be copied")
@@ -74,6 +78,7 @@ def build_verified_postgres_schema_binding(
     pgvector_extension_version: str,
     migration_head_version: int,
     durable_registry_prefix_fingerprint: str,
+    runtime_write_admission_epoch_fingerprint: str,
     fast_executable_schema_fingerprint: str,
     verification_contract_fingerprint: str,
 ) -> VerifiedPostgresSchemaBinding:
@@ -87,6 +92,9 @@ def build_verified_postgres_schema_binding(
         "pgvector_extension_version": pgvector_extension_version,
         "migration_head_version": migration_head_version,
         "durable_registry_prefix_fingerprint": durable_registry_prefix_fingerprint,
+        "runtime_write_admission_epoch_fingerprint": (
+            runtime_write_admission_epoch_fingerprint
+        ),
         "fast_executable_schema_fingerprint": fast_executable_schema_fingerprint,
         "verification_contract_fingerprint": verification_contract_fingerprint,
     }
@@ -110,6 +118,9 @@ def _binding_payload(binding: VerifiedPostgresSchemaBinding) -> dict[str, object
         "pgvector_extension_version": binding.pgvector_extension_version,
         "migration_head_version": binding.migration_head_version,
         "durable_registry_prefix_fingerprint": binding.durable_registry_prefix_fingerprint,
+        "runtime_write_admission_epoch_fingerprint": (
+            binding.runtime_write_admission_epoch_fingerprint
+        ),
         "fast_executable_schema_fingerprint": binding.fast_executable_schema_fingerprint,
         "verification_contract_fingerprint": binding.verification_contract_fingerprint,
     }
