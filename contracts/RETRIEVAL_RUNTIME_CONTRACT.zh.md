@@ -107,15 +107,21 @@ HostCore 可以 attach：
 
 ---
 
-## 6. Worker wake-up
+## 6. Vector surface delivery
 
-Retrieval worker 必须实现：
+Vector materialization由process-owned durable projection service中的canonical mutation V2
+surface handler拥有，不再有retrieval-private vector worker或outbox claim。
 
-- `run()`
-- `wake()`
-- `aclose()`
-
-Governance commit 后若 vector worker 存在，coordinator `on_commit` 必须唤醒 vector worker。没有 embedding provider 时不得 attach vector worker，也不得产生 VECTOR_INDEX surface pending。
+- Governance UOW只在resolved surface plan包含vector时创建delivery state；
+- handler从HostCore-owned embedding provider借用调用能力；
+- external embedding I/O期间不持PostgreSQL row lock；
+- wake只唤醒durable projection service；
+- 没有embedding provider时surface plan不得产生vector delivery。
+- HostCore close必须先停止projection admission并drain tracked physical operations；close deadline
+  到期但operation仍持有dependency时，Host保持`CLOSING`/`CLOSE_BLOCKED`并保留
+  PostgreSQL/embedding/Oxigraph/retrieval leases；它必须拒绝新session与新borrower，不能恢复
+  `OPEN`，也不能先释放provider再让后台operation继续。Physical owner收口后，显式重试close才可
+  完成资源释放。
 
 ---
 
@@ -124,9 +130,10 @@ Governance commit 后若 vector worker 存在，coordinator `on_commit` 必须�
 - 不允许每个 tool call 创建/关闭 embedding client。
 - 不允许 HostSession close 关闭 HostCore-owned retrieval providers。
 - 不允许 provider 在 worker 关闭前被关闭。
+- 不允许projection close只记录timeout diagnostic后继续释放dependency。
 - 不允许 closed resources 接受新 task。
 - 不允许缺少 reranker 时把整个 recall/governance relatedness 判为 fatal。
-- 不允许在没有 embedding provider 时声明 vector worker 已接线。
+- 不允许在没有embedding provider时产生vector surface delivery。
 
 ---
 
@@ -139,5 +146,5 @@ Governance commit 后若 vector worker 存在，coordinator `on_commit` 必须�
 - hung tasks are cancelled with bounded shutdown。
 - workers must be attached before start。
 - create_task after close fails and closes coroutine。
-- HostCore shares one vector worker and materializes woken outbox。
+- HostCore shares one durable projection service and one embedding provider across sessions。
 - missing provider degrades dense/rerank path without breaking sparse path。

@@ -77,10 +77,10 @@ from pulsara_agent.event_log import (
     dump_agent_event,
 )
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
+from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.inspector.diagnostics import (
-    outbox_diagnostics,
     permission_snapshot_diagnostics,
     run_projection_diagnostics,
     sequence_gap_diagnostics,
@@ -88,6 +88,9 @@ from pulsara_agent.inspector.diagnostics import (
 )
 from pulsara_agent.inspector.store import PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
+from pulsara_agent.memory.foundation.run_timeline_query import (
+    load_run_timeline_page,
+)
 from pulsara_agent.message import AssistantMsg, Msg
 from pulsara_agent.message.blocks import (
     DataBlock,
@@ -96,7 +99,6 @@ from pulsara_agent.message.blocks import (
     ToolResultBlock,
 )
 from pulsara_agent.message.reducer import MessageReducer
-from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
 from pulsara_agent.runtime.context_input.replay import (
     ContextInputReplayError,
@@ -124,6 +126,9 @@ from pulsara_agent.runtime.long_horizon.status import (
 )
 from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.runtime.mcp.lifecycle import McpInputRequiredLifecycleStore
+from pulsara_agent.runtime.projection_jobs.inspection import (
+    inspect_durable_projection_state,
+)
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
 from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
@@ -141,7 +146,6 @@ _REQUIRED_TABLES = (
     "memory_nodes",
     "memory_search_index",
     "memory_vector_index",
-    "memory_write_outbox",
     "memory_candidates",
     "memory_governance_decisions",
     "memory_governance_candidate_claims",
@@ -150,6 +154,27 @@ _REQUIRED_TABLES = (
     "memory_candidate_projection_outbox",
     "recall_traces",
     "recall_usages",
+    "runtime_write_admission_epochs",
+    "durable_projection_kind_activations",
+    "durable_projection_pre_activation_contracts",
+    "durable_projection_pre_activation_session_cutovers",
+    "durable_projection_pre_activation_coverage_pages",
+    "durable_projection_pre_activation_coverage_receipts",
+    "durable_projection_session_cutovers",
+    "durable_projection_seed_failures",
+    "durable_projection_seed_failure_resolutions",
+    "durable_projection_jobs",
+    "durable_projection_result_receipts",
+    "durable_projection_target_heads",
+    "durable_projection_target_authority_conflicts",
+    "durable_projection_target_execution_leases",
+    "graph_relation_facts",
+    "canonical_mutations_v2",
+    "canonical_mutation_sequence_heads",
+    "canonical_mutation_surface_deliveries",
+    "canonical_mutation_surface_sequence_heads",
+    "canonical_mutation_surface_target_heads",
+    "durable_projection_repair_actions",
 )
 
 
@@ -224,6 +249,12 @@ class InspectorService:
             store=self.store,
         )
         diagnostics.extend(typed_runtime_events["diagnostics"])
+        durable_projections = inspect_durable_projection_state(
+            self.store,
+            session_id=session_id,
+            limit=min(max(1, limit_events), 256),
+        )
+        diagnostics.extend(durable_projections["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -263,6 +294,7 @@ class InspectorService:
             ],
             "memory_governance": governance_projection,
             "terminal_monitors": terminal_monitors,
+            "durable_projections": durable_projections,
             **typed_runtime_events["projections"],
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
@@ -311,8 +343,12 @@ class InspectorService:
             session_id=session_id,
         )
         compaction_boundary = _latest_compaction_window(prior_events, self.store)
-        timeline = build_run_timeline(
-            run_events, runtime_session_id=session_id, run_id=run_id
+        timeline_projection = _persistent_timeline_projection(
+            graph=PostgresGraphStore(self.store.connection_provider),
+            archive=archive,
+            run_id=run_id,
+            runtime_session_id=session_id,
+            maximum_items=min(max(1, limit_events), 256),
         )
         tool_artifacts = self.store.tool_result_artifacts_for_run(run_id)
         indexed_artifact_ids = {str(row["artifact_id"]) for row in tool_artifacts}
@@ -323,7 +359,6 @@ class InspectorService:
         diagnostics.extend(
             tool_flow_diagnostics(run_events, known_artifact_ids=indexed_artifact_ids)
         )
-        diagnostics.extend(outbox_diagnostics(self.store.outbox_for_run(run_id)))
         model_contracts = _model_contract_projection(run_events)
         diagnostics.extend(model_contracts["diagnostics"])
         provider_input_generations = _provider_input_generation_projection(
@@ -392,6 +427,13 @@ class InspectorService:
             run_id=run_id,
         )
         diagnostics.extend(typed_runtime_events["diagnostics"])
+        durable_projections = inspect_durable_projection_state(
+            self.store,
+            session_id=session_id,
+            run_id=run_id,
+            limit=min(max(1, limit_events), 256),
+        )
+        diagnostics.extend(durable_projections["diagnostics"])
 
         return {
             "inspect_kind": "run",
@@ -421,7 +463,7 @@ class InspectorService:
             ),
             "rollout_status_shadows": rollout_status["shadows"],
             "long_horizon": (long_horizon["runs"][0] if long_horizon["runs"] else None),
-            "timeline": timeline.to_dict(),
+            "timeline": timeline_projection,
             "compaction_boundary_as_seen": compaction_boundary,
             "context_windows": context_windows["windows"],
             "context_window_compactions": context_windows["compactions"],
@@ -440,6 +482,7 @@ class InspectorService:
             "model_usage_by_run": model_contracts["usage_by_run"],
             "provider_input_generations": provider_input_generations["generations"],
             "terminal_monitors": terminal_monitors,
+            "durable_projections": durable_projections,
             **typed_runtime_events["projections"],
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
@@ -454,7 +497,6 @@ class InspectorService:
             "recall_traces": [
                 _json_safe(row) for row in self.store.recall_traces_for_run(run_id)
             ],
-            "outbox": [_json_safe(row) for row in self.store.outbox_for_run(run_id)],
             "events": _event_summaries(
                 run_events[:limit_events], include_payload=include_payload
             ),
@@ -534,10 +576,15 @@ class InspectorService:
             events = self.store.events_for_session(session_id)
             sequence_diagnostics.extend(sequence_gap_diagnostics(events))
             sequence_diagnostics.extend(_compaction_diagnostics(events, self.store))
-        outbox_counts = self.store.outbox_status_counts()
+        projection_counts = self.store.durable_projection_status_counts()
+        durable_projections = inspect_durable_projection_state(
+            self.store,
+            limit=128,
+        )
         oxigraph = self._inspect_oxigraph()
         diagnostics = []
         diagnostics.extend(sequence_diagnostics)
+        diagnostics.extend(durable_projections["diagnostics"])
         diagnostics.extend(
             {
                 "code": "missing_table",
@@ -592,7 +639,17 @@ class InspectorService:
                 "run_projection_stale_count": stale_count,
                 "tool_result_index_missing_artifact_count": missing_artifact_count,
             },
-            "outbox": [_json_safe(row) for row in outbox_counts],
+            "durable_projections": {
+                "status": durable_projections["status"],
+                "status_counts": [_json_safe(row) for row in projection_counts],
+                "runtime_write_admission_epoch": durable_projections[
+                    "runtime_write_admission_epoch"
+                ],
+                "target_authority_conflicts": durable_projections[
+                    "target_authority_conflicts"
+                ],
+                "diagnostics": durable_projections["diagnostics"],
+            },
             "oxigraph": oxigraph,
             "diagnostics": diagnostics,
         }
@@ -619,6 +676,47 @@ class InspectorService:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         return {"configured": True, "connected": True, "graphs": rows}
+
+
+def _persistent_timeline_projection(
+    *,
+    graph: PostgresGraphStore,
+    archive: PostgresArtifactStore,
+    run_id: str,
+    runtime_session_id: str,
+    maximum_items: int,
+) -> dict[str, Any]:
+    try:
+        page = load_run_timeline_page(
+            graph=graph,
+            archive=archive,
+            run_id=run_id,
+            runtime_session_id=runtime_session_id,
+            graph_id="graph:default",
+            max_items=maximum_items,
+        )
+    except KeyError:
+        return {
+            "projection_status": "not_durably_observable",
+            "run_id": run_id,
+            "runtime_session_id": runtime_session_id,
+            "items": [],
+            "open_items": [],
+            "items_truncated": False,
+        }
+    return {
+        "projection_status": "applied",
+        "run_id": page.run_id,
+        "runtime_session_id": page.runtime_session_id,
+        "status": page.status,
+        "item_count": page.total_completed_items + len(page.open_items),
+        "items": [item.to_dict() for item in page.items],
+        "open_items": [item.to_dict() for item in page.open_items],
+        "items_truncated": page.next_cursor is not None,
+        "next_cursor": (
+            asdict(page.next_cursor) if page.next_cursor is not None else None
+        ),
+    }
 
 
 class _BoundedEventLog:
@@ -770,9 +868,7 @@ def _typed_runtime_event_vocabulary_projection(
                     "D3 durable job/outbox remains open"
                 ),
             },
-            "compaction_candidate_projection_durable_status": (
-                compaction_projection
-            ),
+            "compaction_candidate_projection_durable_status": (compaction_projection),
         },
         "diagnostics": lifecycle_diagnostics,
     }
@@ -1075,9 +1171,7 @@ def _compaction_candidate_projection_durable_status(
 
         expected_ids = tuple(proposal.candidate_entry_ids)
         rows = rows_by_producer.get(proposal.id, [])
-        row_ids = tuple(
-            sorted(str(row["candidate_entry_id"]) for row in rows)
-        )
+        row_ids = tuple(sorted(str(row["candidate_entry_id"]) for row in rows))
         proposal_identity = stable_event_identity(
             proposal,
             runtime_session_id=runtime_session_id,
@@ -1101,7 +1195,9 @@ def _compaction_candidate_projection_durable_status(
         elif any(row.get("last_stable_failure_code") for row in rows):
             status = "reconciliation_required"
             evidence = ["producer_event", "projection_outbox"]
-        elif any(row.get("status") not in {"pending", "applying", "applied"} for row in rows):
+        elif any(
+            row.get("status") not in {"pending", "applying", "applied"} for row in rows
+        ):
             status = "reconciliation_required"
             evidence = ["producer_event", "projection_outbox"]
         elif all(row.get("status") == "applied" for row in rows):
@@ -1139,9 +1235,7 @@ def _compaction_candidate_projection_durable_status(
                     {
                         "candidate_entry_id": row["candidate_entry_id"],
                         "status": row.get("status"),
-                        "last_stable_failure_code": row.get(
-                            "last_stable_failure_code"
-                        ),
+                        "last_stable_failure_code": row.get("last_stable_failure_code"),
                     }
                     for row in rows
                 ],
@@ -2879,12 +2973,8 @@ def _provider_input_generation_projection(
             entry["source_semantic_heads"] = [
                 {
                     "source_id": item.effective_snapshot.source_id.value,
-                    "source_instance_id": (
-                        item.effective_snapshot.source_instance_id
-                    ),
-                    "lifecycle_class": (
-                        item.effective_snapshot.lifecycle_class
-                    ),
+                    "source_instance_id": (item.effective_snapshot.source_instance_id),
+                    "lifecycle_class": (item.effective_snapshot.lifecycle_class),
                     "committed_source_revision": (
                         item.effective_snapshot.committed_revision
                     ),

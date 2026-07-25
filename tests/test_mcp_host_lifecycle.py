@@ -102,6 +102,15 @@ def _enable_fake_durable_manifest(
     async def no_retrieval_resources(_self):
         return None
 
+    async def no_projection_service(
+        _self,
+        _access_lease,
+        *,
+        retrieval_resources,
+    ):
+        del retrieval_resources
+        return None
+
     access_lease = unverified_test_postgres_access_lease()
 
     async def fake_postgres_access_lease(_self):
@@ -117,6 +126,11 @@ def _enable_fake_durable_manifest(
         HostCore,
         "_get_retrieval_resources",
         no_retrieval_resources,
+    )
+    monkeypatch.setattr(
+        HostCore,
+        "_get_projection_service",
+        no_projection_service,
     )
     monkeypatch.setattr(
         HostCore,

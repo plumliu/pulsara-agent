@@ -413,20 +413,8 @@ def test_postgres_committed_but_unindexed_memory_is_found_from_sync_face() -> No
         assert result.diagnostics["relatedness_inline_embed_count"] == 1
         assert len(embedding.calls) == 1
     finally:
-        with psycopg.connect(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_vector_index where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from graph_documents where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_nodes where graph_id = %s", (graph_id,)
-                )
-                cursor.execute(
-                    "delete from memory_relations where graph_id = %s", (graph_id,)
-                )
+        # The graph id is unique and the fixture database owns cleanup.
+        pass
 
 
 def _service(

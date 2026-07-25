@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -23,11 +23,17 @@ from pulsara_agent.graph.jsonld_codec import normalize_jsonld_document
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
 from pulsara_agent.ontology.registry import CORE_CONTEXT
+from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.storage.postgres_memory_projection import refresh_document_projection
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.projection_jobs.contracts import (
+        CanonicalGraphNodeReadViewFact,
+    )
 
 
 @dataclass(slots=True)
@@ -47,6 +53,11 @@ class PostgresGraphStore:
             )
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
+        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+            reject_owned_relation_predicates,
+        )
+
+        reject_owned_relation_predicates(document)
         normalized = normalize_jsonld_document(document, self.default_context)
         node_id = normalized["@id"]
         if not isinstance(node_id, str) or not node_id:
@@ -66,9 +77,61 @@ class PostgresGraphStore:
                 """,
                 (graph, node_id, first_type, Jsonb(normalized)),
             )
-            refresh_document_projection(cursor, graph_id=graph, node_id=node_id, document=normalized)
+            refresh_document_projection(
+                cursor, graph_id=graph, node_id=node_id, document=normalized
+            )
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
+        payload = self._get_base_jsonld(node_id, graph_id=graph_id)
+        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+            PostgresCanonicalGraphRelationRepository,
+        )
+
+        repository = (
+            PostgresCanonicalGraphRelationRepository(connection=self.connection)
+            if self.connection is not None
+            else PostgresCanonicalGraphRelationRepository(
+                connection_provider=self.connection_provider
+            )
+        )
+        return repository.merge_jsonld(
+            graph_id=_graph_key(graph_id),
+            node_id=node_id,
+            base_document=payload,
+        )
+
+    def get_jsonld_read_view(
+        self,
+        node_id: str,
+        graph_id: str | None = None,
+    ) -> CanonicalGraphNodeReadViewFact:
+        payload = self._get_base_jsonld(node_id, graph_id=graph_id)
+        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+            PostgresCanonicalGraphRelationRepository,
+        )
+
+        repository = (
+            PostgresCanonicalGraphRelationRepository(connection=self.connection)
+            if self.connection is not None
+            else PostgresCanonicalGraphRelationRepository(
+                connection_provider=self.connection_provider
+            )
+        )
+        return repository.merge_read_view(
+            graph_id=_graph_key(graph_id),
+            node_id=node_id,
+            base_document=payload,
+            base_document_semantic_fingerprint=context_fingerprint(
+                "canonical-graph-base-document:v1", payload
+            ),
+        )
+
+    def _get_base_jsonld(
+        self,
+        node_id: str,
+        *,
+        graph_id: str | None,
+    ) -> dict[str, Any]:
         with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
@@ -98,7 +161,9 @@ class PostgresGraphStore:
             )
             return cursor.fetchone() is not None
 
-    def find_by_type(self, type_name: Term, graph_id: str | None = None) -> list[dict[str, Any]]:
+    def find_by_type(
+        self, type_name: Term, graph_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
@@ -136,7 +201,9 @@ class PostgresGraphStore:
                 raise KeyError(node_id)
             payload = row["payload"]
             if not isinstance(payload, dict):
-                raise TypeError(f"Stored JSON-LD payload is not an object for {node_id}")
+                raise TypeError(
+                    f"Stored JSON-LD payload is not an object for {node_id}"
+                )
             payload[memory.STATUS.name] = status.value
             payload[memory.UPDATED_AT.name] = updated_at.isoformat()
             normalized = normalize_jsonld_document(payload, self.default_context)
@@ -150,7 +217,9 @@ class PostgresGraphStore:
             )
             if memory.STATUS.name not in normalized:
                 raise ValueError(f"node is not a canonical memory node: {node_id}")
-            refresh_document_projection(cursor, graph_id=graph, node_id=node_id, document=normalized)
+            refresh_document_projection(
+                cursor, graph_id=graph, node_id=node_id, document=normalized
+            )
             cursor.execute(
                 "SELECT 1 FROM memory_nodes WHERE graph_id = %s AND id = %s",
                 (graph, node_id),
@@ -158,17 +227,30 @@ class PostgresGraphStore:
             if cursor.rowcount == 0:
                 raise KeyError(node_id)
 
-    def query(self, sparql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        raise NotImplementedError("PostgresGraphStore exposes typed reads via MemoryQuery, not raw SPARQL")
+    def query(
+        self, sparql: str, bindings: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError(
+            "PostgresGraphStore exposes typed reads via MemoryQuery, not raw SPARQL"
+        )
 
     def update(self, sparql: str) -> None:
-        raise NotImplementedError("PostgresGraphStore uses typed mutations, not raw SPARQL")
+        raise NotImplementedError(
+            "PostgresGraphStore uses typed mutations, not raw SPARQL"
+        )
 
     def delete_graph(self, graph_id: str) -> None:
         graph = _graph_key(graph_id)
         with self._cursor() as cursor:
-            cursor.execute("DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph,))
-            cursor.execute("DELETE FROM memory_search_index WHERE graph_id = %s", (graph,))
+            # Immutable relation facts are audit history and are never deleted by
+            # the runtime role. Once their source document is absent they are no
+            # longer reachable from a relation-aware graph read.
+            cursor.execute(
+                "DELETE FROM memory_vector_index WHERE graph_id = %s", (graph,)
+            )
+            cursor.execute(
+                "DELETE FROM memory_search_index WHERE graph_id = %s", (graph,)
+            )
             cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph,))
             cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph,))
             cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph,))

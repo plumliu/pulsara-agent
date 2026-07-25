@@ -36,7 +36,7 @@
 | Async LiveRuntimeEventWriter | `CLOSED` + `PERF-GATED` | session-owned writer correctness与compaction唯一写入/发布边界已闭环；原生 async PostgreSQL只由 profiling决定 | 无 correctness hard cut |
 | Governance events 同 UOW | `SUPERSEDED` | 已由 memory UOW 内 durable stable-candidate outbox + session-owned accounted dispatcher 闭环，不应改回直接跨 owner 写 ledger | 无新 hard cut |
 | CustomEvent typed 化 | `CLOSED` | 7 个 production事实及 MCP closure已 typed；`CustomEvent`/`EventType.CUSTOM`与旧 decoder已物理删除 | 已完成 |
-| Hook/outbox 重构 | `OPEN` | hook 失败仍只在内存，且部分 async hook 直接执行同步存储 I/O | 高，依赖 migration runner |
+| Hook/outbox 重构 | `CLOSED` | timeline/evidence、canonical mutation surfaces、seed repair、shutdown physical owner与eventual working-context均由durable owner闭环 | 已完成 |
 | Runtime dependency-cycle cleanup | `OPEN` | lazy facade、local import 与 runtime/tools 双向依赖仍是生产结构 | 高但需分步 |
 | AgentRuntime coordinator 拆分 | `OPEN`，已有基础 | `RunWorkingSet` 与若干 coordinator 已出现，但 production scratchpad 和大范围 orchestration 仍集中 | 中后期 |
 | 删除 legacy MCP / in-memory product mode | `PARTIAL` | 手写 MCP transport 已删除；mock MCP 与 `durable=False` 产品分支仍在生产包 | 中 |
@@ -203,62 +203,49 @@ Event schema generation已 bump，采用 reset-only PostgreSQL/Oxigraph event-wo
 CUSTOM decoder。MCP lifecycle、Inspector、recovery与 transcript-domain classification均已
 同步。结论：D2 vocabulary债务 `CLOSED`。
 
-## 8. Hook/outbox 重构
+## 8. Durable hook/projection jobs（`CLOSED`）
 
-### 8.1 当前代码真值
+状态：**CLOSED（2026-07-25，DPJ0–DPJ5）**。
 
-`runtime/hooks.py::RuntimeHookManager` 当前：
+生产路径现已按语义拆分：
 
-- 顺序执行所有匹配 hook；
-- 没有 criticality、delivery mode 或 idempotency contract；
-- exception 只写入 process-local `errors: list[HookDispatchError]`。
-
-`runtime/publisher.py::RuntimeEventPublisher` 也按 subscriber 顺序等待，并只在内存保存 subscriber errors。
-
-两个典型 production hook 仍有同步存储工作：
-
-- `RunTimelinePersistenceHook` 在 async `__call__` 中读取 EventLog、写 artifact、写 graph、写 mutation outbox；
-- `CanonicalMutationOutboxReplayHook` 在 async `__call__` 中直接构造同步 reconciler 并 replay PostgreSQL/Oxigraph outbox。
-
-writer 现在能正确报告 publication error，但 hook failure 本身仍没有 durable job、lease、retry schedule 或 dead-letter owner。进程退出后，`hook_manager.errors` 无法恢复。
-
-### 8.2 应怎样重构
-
-首先按语义拆分：
-
-| 类型 | 正确 owner |
+| 类型 | 唯一 owner |
 |---|---|
-| canonical invariant / committed reducer | RuntimeSession writer transaction/reducer，不应注册成 hook |
-| durable derived projection | content-addressed/idempotent projection job outbox |
-| UI/CLI 当前进程观察 | lightweight best-effort publisher subscriber |
-| maintenance wake signal | 只唤醒 durable worker，不在 subscriber 内完成完整 I/O |
+| canonical invariant / committed reducer | RuntimeSession writer transaction/reducer |
+| timeline / tool-result evidence | EventLog-driven durable projection jobs |
+| search / vector / Oxigraph | canonical mutation V2 surface delivery |
+| UI/CLI 当前进程观察 | lightweight best-effort subscriber |
+| publisher integration | O(1) coalesced wake only |
 
-推荐建立通用但不过度抽象的 projection-job schema：
+已完成的主体：
 
-- stable job key / projection kind；
-- source runtime/session/event high-water；
-- payload/reference fingerprint；
-- status、attempt、lease owner、lease expiry；
-- next retry、last bounded error；
-- dead-letter/repair disposition。
+- migration v5-v8冻结job、receipt、target head、lease、surface delivery与activation/cutover；
+- per-trigger source horizon严格等于trigger sequence，seed checkpoint与jobs同transaction；
+- timeline使用incremental paged persistent reducer，evidence使用single-assignment exact join；
+- applied/superseded result均有immutable receipt，restart可恢复pending/retry/expired lease；
+- job dead-letter与typed repair CAS进入Inspector/CLI；
+- canonical mutation V2统一search/vector/Oxigraph，不再有replay hook或surface-specific worker；
+- `RunTimelinePersistenceHook`、`ExecutionEvidencePersistenceHook`、
+  `CanonicalMutationOutboxReplayHook`和旧execution-evidence writer已物理删除；
+- publisher subscriber不执行DB/archive/Oxigraph/embedding I/O；
+- Host run不等待projection，restart dogfood证明普通backlog最终完成。
 
-不要通过“hook 失败后再向同一 ledger 写 `RuntimeObserverFailedEvent`”形成递归 publication。health table 或独立 durable job state更合适。
+最终复核补齐：
 
-### 8.3 前置依赖
+- seeder按events/bytes选择最长非空前缀，failure/repair/resolution为同transaction exact chain；
+- stable authority keyset分页、bounded dirty session/kind hint与满页立即续扫共同保证恢复与低延迟；
+- projection close timeout使Host保持`CLOSING/CLOSE_BLOCKED`并保留dependency lease；
+- working-context每个planned model step至多一个session-owned bounded async operation；
+- rebuild decommission exact-read durable FULL receipt并重验surface/target/handler；
+- malformed arguments使用strict parser与递归不可变carrier；
+- canonical mutation sequence在首次head尚不存在时也由transaction advisory lock串行分配。
 
-- writer correctness 已经满足，不再是 blocker；
-- **migration runner 仍是 blocker**，因为 job/lease/dead-letter table 不能继续由 hook constructor 热创建；
-- projection handler 必须有 idempotency contract。
+完整bootstrap cutover、Turn/Artifact base document、global-limit前过滤leased/conflicted target、
+restart Host dogfood与结构 benchmark均已通过。
 
-### 8.4 完成门槛
-
-1. async publisher loop 中不直接执行同步 DB/archive/Oxigraph I/O。
-2. timeline 与 canonical mutation replay 要么成为 durable job，要么由现有 canonical outbox worker明确拥有。
-3. restart 后 pending/failed projection job 可恢复。
-4. best-effort subscriber failure 不影响 canonical commit，也不被误报为 durable projection已完成。
-5. `RuntimeHookManager.errors` 只用于短期 diagnostics，不再是唯一 failure record。
-
-结论：**仍是 OPEN；在 schema migration hard cut 后实施。**
+关闭范围只限D3 derived projection ownership。RuntimeHookManager仍可承载best-effort
+operational callbacks；它们的process-local diagnostic不是durable job，也不需要升级。
+Compaction candidate projection outbox属于D5，不因D3关闭而自动关闭。
 
 ## 9. Runtime dependency-cycle cleanup
 
@@ -539,8 +526,8 @@ extension parse failure继续是 best-effort，不得让已经合法的 summary�
 原依赖表把大多数工作都挂在“尚未完成的 LiveRuntimeEventWriter”上，这已经过时。当前更准确的依赖是：
 
 ```text
-Schema migration runner + verify-only startup
-    ├─ Durable hook/projection job outbox
+Schema migration runner + verify-only startup（已完成）
+    ├─ Durable projection jobs v5-v8（已完成）
     └─ 后续所有新增 PostgreSQL schema
 
 Current RuntimeSession writer（已完成主体）
@@ -582,11 +569,15 @@ Migration ledger/runner/CLI、verify-only startup、verified connection provider
 关闭范围只限上述四项。Typed failure audit不等于 durable projection retry job；compaction
 candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 
-### D3：Durable hook/projection jobs（`OPEN`）
+### D3：Durable hook/projection jobs（`CLOSED`）
 
-- timeline与canonical mutation replay脱离publisher critical path；
-- durable lease/retry/dead-letter；
-- UI/CLI subscriber保持轻量 best-effort。
+- [x] timeline/evidence脱离publisher critical path；
+- [x] canonical mutation V2统一surface delivery；
+- [x] seeder分页/failure隔离与fair claim；
+- [x] evidence malformed arguments与base-document authority；
+- [x] surface repair/decommission与Host close physical-owner safety；
+- [x] exact bootstrap confirmation与eventual working-context；
+- [x] Inspector/CLI、restart/final migration/Host dogfood最终复核。
 
 ### D4：依赖规则与 test-support hard cut
 
@@ -649,10 +640,11 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 - **1 项已被更合适的方案替代并闭环**：Governance events 同 UOW；
 - **1 项 correctness 已完成，仅保留独立性能门控**：Async LiveRuntimeEventWriter；
 - **1 项应拆成已完成与未完成两部分**：legacy MCP 已删除，in-memory product mode仍在；
-- **4 项仍是有效债务**：hooks、dependency cycles、AgentRuntime ownership、compaction-memory ownership。
+- **3 项仍是有效债务**：dependency cycles、AgentRuntime ownership、compaction-memory ownership。
 
-Schema hot-path与 D2 event vocabulary/writer尾巴已经完成。下一步应实施 durable hook jobs与
-依赖方向治理；D3与D5继续保持 `OPEN`，不要把本次 typed failure audit或 process-local
-projection receipt误报为 durable outbox correctness。
+Schema hot-path、D2 event vocabulary/writer尾巴与D3 durable projection jobs已经完成。
+下一项可进入D4 dependency/ports hard cut。D5继续保持`OPEN`，不能把D3的runtime semantic
+projection receipt误报为
+compaction candidate crash ownership已经闭环。
 
 这份重基线的目的不是减少债务数量，而是把工程投入重新对准仍然存在的风险。

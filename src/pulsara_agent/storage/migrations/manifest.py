@@ -26,7 +26,7 @@ _RUNTIME_RELATIONS = (
     "working_context_summaries",
 )
 
-_MEMORY_RELATIONS = (
+_MEMORY_RELATIONS_V3 = (
     "graph_documents",
     "memory_governance_event_outbox",
     "memory_nodes",
@@ -36,6 +36,9 @@ _MEMORY_RELATIONS = (
     "memory_write_outbox",
     "recall_traces",
     "recall_usages",
+)
+_MEMORY_RELATIONS_V6 = tuple(
+    name for name in _MEMORY_RELATIONS_V3 if name != "memory_write_outbox"
 )
 
 _GOVERNANCE_RELATIONS = (
@@ -47,12 +50,45 @@ _GOVERNANCE_RELATIONS = (
     "memory_governance_decisions",
 )
 
+_DURABLE_PROJECTION_RELATIONS = (
+    "runtime_write_guard_secrets",
+    "runtime_write_admission_epochs",
+    "runtime_write_protected_relations",
+    "durable_projection_kind_activations",
+    "durable_projection_pre_activation_contracts",
+    "durable_projection_pre_activation_session_cutovers",
+    "durable_projection_pre_activation_coverage_pages",
+    "durable_projection_pre_activation_coverage_receipts",
+    "durable_projection_session_cutovers",
+    "durable_projection_seed_failures",
+    "durable_projection_seed_failure_resolutions",
+    "durable_projection_jobs",
+    "durable_projection_result_receipts",
+    "durable_projection_target_heads",
+    "durable_projection_target_authority_conflicts",
+    "durable_projection_target_execution_leases",
+    "graph_relation_facts",
+    "canonical_mutations_v2",
+    "canonical_mutation_sequence_heads",
+    "canonical_mutation_surface_deliveries",
+    "canonical_mutation_surface_sequence_heads",
+    "canonical_mutation_surface_target_heads",
+    "canonical_mutation_v2_migration_binding_plan_pages",
+    "canonical_mutation_v2_migration_binding_plans",
+    "canonical_mutation_v2_migration_binding_receipts",
+    "durable_projection_repair_actions",
+)
+
 _RELATIONS_INTRODUCED_BY_VERSION = (
     ("pulsara_schema_migrations",),
     (),
     _RUNTIME_RELATIONS,
-    _MEMORY_RELATIONS,
+    _MEMORY_RELATIONS_V3,
     _GOVERNANCE_RELATIONS,
+    _DURABLE_PROJECTION_RELATIONS,
+    (),
+    (),
+    (),
 )
 _ALL_RELATIONS = tuple(
     name
@@ -61,13 +97,17 @@ _ALL_RELATIONS = tuple(
 )
 
 RUNTIME_TRUTH_TABLES = _RUNTIME_RELATIONS
-MEMORY_SUBSTRATE_TABLES = _MEMORY_RELATIONS
+MEMORY_SUBSTRATE_TABLES = _MEMORY_RELATIONS_V6
 
 
-@lru_cache(maxsize=1)
-def _packaged_expected_catalog() -> dict[str, object]:
+@lru_cache(maxsize=None)
+def _packaged_expected_catalog(version: int) -> dict[str, object]:
+    if version <= 4:
+        catalog_version = 4
+    else:
+        catalog_version = version
     resource = files("pulsara_agent.storage.migrations").joinpath(
-        "expected_catalog_v4.json"
+        f"expected_catalog_v{catalog_version}.json"
     )
     return json.loads(resource.read_text(encoding="utf-8"))
 
@@ -80,8 +120,14 @@ def _freeze(value: object) -> object:
     return value
 
 
-def _relation(name: str, *, writable: bool) -> dict[str, object]:
-    expected = _packaged_expected_catalog()
+def _relation(
+    name: str,
+    *,
+    writable: bool,
+    through_version: int,
+    runtime_privileges: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    expected = _packaged_expected_catalog(through_version)
     matches = tuple(
         relation
         for relation in expected["relations"]
@@ -89,46 +135,176 @@ def _relation(name: str, *, writable: bool) -> dict[str, object]:
     )
     if len(matches) != 1:
         raise RuntimeError(f"packaged catalog is missing exact relation {name}")
-    return {
+    result = {
         **_freeze(matches[0]),
         "runtime_writable": writable,
     }
+    if runtime_privileges is not None:
+        result["runtime_privileges"] = runtime_privileges
+    return result
+
+
+_V5_RUNTIME_RELATION_PRIVILEGES: dict[str, tuple[str, ...]] = {
+    "runtime_write_guard_secrets": (),
+    "runtime_write_admission_epochs": ("SELECT",),
+    "runtime_write_protected_relations": (),
+    "durable_projection_kind_activations": ("SELECT",),
+    "durable_projection_pre_activation_contracts": ("SELECT",),
+    "durable_projection_pre_activation_session_cutovers": ("SELECT", "INSERT"),
+    "durable_projection_pre_activation_coverage_pages": ("SELECT",),
+    "durable_projection_pre_activation_coverage_receipts": ("SELECT",),
+    "durable_projection_session_cutovers": ("SELECT", "INSERT"),
+    "durable_projection_seed_failures": ("SELECT", "INSERT"),
+    "durable_projection_seed_failure_resolutions": ("SELECT", "INSERT"),
+    "durable_projection_jobs": ("SELECT", "INSERT", "UPDATE"),
+    "durable_projection_result_receipts": ("SELECT", "INSERT"),
+    "durable_projection_target_heads": ("SELECT", "INSERT", "UPDATE"),
+    "durable_projection_target_authority_conflicts": ("SELECT", "INSERT"),
+    "durable_projection_target_execution_leases": ("SELECT", "INSERT", "UPDATE"),
+    "graph_relation_facts": ("SELECT", "INSERT"),
+    "canonical_mutations_v2": ("SELECT", "INSERT"),
+    "canonical_mutation_sequence_heads": ("SELECT", "INSERT", "UPDATE"),
+    "canonical_mutation_surface_deliveries": ("SELECT", "INSERT", "UPDATE"),
+    "canonical_mutation_surface_sequence_heads": ("SELECT", "INSERT", "UPDATE"),
+    "canonical_mutation_surface_target_heads": ("SELECT", "INSERT", "UPDATE"),
+    "canonical_mutation_v2_migration_binding_plan_pages": ("SELECT",),
+    "canonical_mutation_v2_migration_binding_plans": ("SELECT",),
+    "canonical_mutation_v2_migration_binding_receipts": ("SELECT",),
+    "durable_projection_repair_actions": ("SELECT", "INSERT"),
+}
+
+_V5_FUNCTION_ARGUMENT_TYPES: dict[str, tuple[str, ...]] = {
+    "pulsara_jsonb_text_array": ("pg_catalog.jsonb",),
+    "pulsara_runtime_write_lock_key": ("pg_catalog.text", "pg_catalog.jsonb"),
+    "pulsara_acquire_normal_runtime_write_guard": (
+        "pg_catalog.text",
+        "pg_catalog.text",
+    ),
+    "pulsara_read_runtime_write_admission_epoch": (),
+    "pulsara_acquire_maintenance_runtime_write_guard": (
+        "pg_catalog.text",
+        "pg_catalog.text",
+    ),
+    "pulsara_enter_runtime_write_maintenance": (
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.int4",
+        "pg_catalog.jsonb",
+        "pg_catalog.text",
+    ),
+    "pulsara_install_runtime_write_normal_epoch": (
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.jsonb",
+        "pg_catalog.text",
+    ),
+    "pulsara_abort_runtime_write_maintenance": (
+        "pg_catalog.text",
+        "pg_catalog.text",
+        "pg_catalog.jsonb",
+        "pg_catalog.text",
+    ),
+    "pulsara_assert_runtime_write_guard": (),
+}
+
+_V5_RUNTIME_EXECUTABLE_FUNCTIONS = {
+    "pulsara_jsonb_text_array",
+    "pulsara_acquire_normal_runtime_write_guard",
+    "pulsara_read_runtime_write_admission_epoch",
+}
 
 
 def _manifest_payload(through_version: int) -> dict[str, object]:
-    if through_version < 0 or through_version > 4:
+    if through_version < 0 or through_version > 8:
         raise ValueError("unsupported manifest version")
     relations: list[dict[str, object]] = [
-        _relation("pulsara_schema_migrations", writable=False)
+        _relation(
+            "pulsara_schema_migrations",
+            writable=False,
+            through_version=through_version,
+        )
     ]
     if through_version >= 2:
-        relations.extend(_relation(name, writable=True) for name in _RUNTIME_RELATIONS)
+        relations.extend(
+            _relation(name, writable=True, through_version=through_version)
+            for name in _RUNTIME_RELATIONS
+        )
     if through_version >= 3:
-        relations.extend(_relation(name, writable=True) for name in _MEMORY_RELATIONS)
+        memory_relations = (
+            _MEMORY_RELATIONS_V3 if through_version <= 5 else _MEMORY_RELATIONS_V6
+        )
+        relations.extend(
+            _relation(name, writable=True, through_version=through_version)
+            for name in memory_relations
+        )
     if through_version >= 4:
-        relations.extend(_relation(name, writable=True) for name in _GOVERNANCE_RELATIONS)
-    extensions = (
-        ({"schema_name": "public", "extension_name": "vector", "minimum_version": "0.5.0"},)
-        if through_version >= 1
-        else ()
-    )
-    expected = _packaged_expected_catalog()
+        relations.extend(
+            _relation(name, writable=True, through_version=through_version)
+            for name in _GOVERNANCE_RELATIONS
+        )
+    if through_version >= 5:
+        relations.extend(
+            _relation(
+                name,
+                writable=any(
+                    privilege in {"INSERT", "UPDATE", "DELETE"}
+                    for privilege in _V5_RUNTIME_RELATION_PRIVILEGES[name]
+                ),
+                through_version=through_version,
+                runtime_privileges=_V5_RUNTIME_RELATION_PRIVILEGES[name],
+            )
+            for name in _DURABLE_PROJECTION_RELATIONS
+        )
+    extensions: tuple[dict[str, object], ...] = ()
+    if through_version >= 1:
+        extensions += (
+            {
+                "schema_name": "public",
+                "extension_name": "vector",
+                "minimum_version": "0.5.0",
+            },
+        )
+    if through_version >= 5:
+        extensions += (
+            {
+                "schema_name": "public",
+                "extension_name": "pgcrypto",
+                "minimum_version": "1.0",
+            },
+        )
+    expected = _packaged_expected_catalog(through_version)
     required_types = (
         tuple(_freeze(item) for item in expected["types"])
         if through_version >= 1
         else ()
     )
-    functions = (
-        tuple(
-            {
-                **_freeze(item),
-                "ordered_argument_types": ("pg_catalog.jsonb",),
-            }
-            for item in expected["functions"]
-        )
-        if through_version >= 3
-        else ()
-    )
+    functions: tuple[dict[str, object], ...] = ()
+    if through_version >= 3:
+        if through_version <= 4:
+            functions = tuple(
+                {
+                    **_freeze(item),
+                    "ordered_argument_types": ("pg_catalog.jsonb",),
+                }
+                for item in expected["functions"]
+            )
+        else:
+            functions = tuple(
+                {
+                    **_freeze(item),
+                    "ordered_argument_types": _V5_FUNCTION_ARGUMENT_TYPES[
+                        str(item["function_name"])
+                    ],
+                    "runtime_executable": (
+                        str(item["function_name"]) in _V5_RUNTIME_EXECUTABLE_FUNCTIONS
+                    ),
+                }
+                for item in expected["functions"]
+            )
     historical_relation_names = tuple(
         name
         for introduced_relations in _RELATIONS_INTRODUCED_BY_VERSION[
@@ -143,12 +319,17 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
         for name in historical_relation_names
     )
     if through_version >= 3:
-        reserved_names += (
+        reserved_names += tuple(
             PostgresObjectIdentityFact.build(
                 object_kind="function",
-                schema_name="public",
-                object_name="pulsara_jsonb_text_array(pg_catalog.jsonb)",
-            ),
+                schema_name=str(function["schema_name"]),
+                object_name=(
+                    f"{function['function_name']}("
+                    + ",".join(function["ordered_argument_types"])
+                    + ")"
+                ),
+            )
+            for function in functions
         )
     return {
         "schema_version": "postgres_schema_object_manifest.v1",
@@ -161,7 +342,9 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
     }
 
 
-def build_postgres_schema_manifest(through_version: int) -> PostgresSchemaObjectManifest:
+def build_postgres_schema_manifest(
+    through_version: int,
+) -> PostgresSchemaObjectManifest:
     payload = _manifest_payload(through_version)
     fingerprint = postgres_schema_fingerprint(
         "pulsara:postgres-schema-object-manifest:v1", payload
@@ -173,7 +356,7 @@ def build_postgres_schema_manifest(through_version: int) -> PostgresSchemaObject
 
 
 POSTGRES_SCHEMA_MANIFESTS = tuple(
-    build_postgres_schema_manifest(version) for version in range(5)
+    build_postgres_schema_manifest(version) for version in range(9)
 )
 POSTGRES_LATEST_SCHEMA_MANIFEST = POSTGRES_SCHEMA_MANIFESTS[-1]
 PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)

@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-from tests.support.postgres import verified_postgres_provider
-
 import asyncio
 from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.types.json import Jsonb
 
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from tests.support import test_llm_config
-from pulsara_agent.memory.canonical.mutation_outbox import (
-    CanonicalMutationLane,
-    CanonicalMutationPayload,
+from pulsara_agent.entities.memory import Preference
+from pulsara_agent.graph.durable_facade import DurableGraphFacade
+from pulsara_agent.jsonld import utc_now
+from pulsara_agent.ontology import memory
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    CanonicalMemoryMutationOperationKind,
     CanonicalMutationSurface,
-    CanonicalMutationSurfaceState,
-    MutationOutboxWriter,
 )
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
@@ -108,7 +106,7 @@ def test_retrieval_resources_cancel_hung_tasks_with_bounded_shutdown() -> None:
     asyncio.run(scenario())
 
 
-def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
+def test_hostcore_shares_one_projection_service_and_materializes_vector_delivery(
     tmp_path, monkeypatch
 ) -> None:
     async def scenario() -> None:
@@ -150,50 +148,40 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
         )
         graph_id = first.workspace.memory_domain.graph_id
         memory_id = f"preference:{uuid4().hex}"
-        outbox_id = ""
         try:
             assert first.wiring.runtime_wiring.retrieval_resources is resources
             assert second.wiring.runtime_wiring.retrieval_resources is resources
-            with psycopg.connect(storage.postgres_dsn) as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO graph_documents (graph_id, id, type, payload) VALUES (%s, %s, 'Preference', %s)",
-                        (
-                            graph_id,
-                            memory_id,
-                            Jsonb(
-                                {
-                                    "@id": memory_id,
-                                    "statement": "Worker materialization",
-                                }
-                            ),
-                        ),
-                    )
-                    cursor.execute(
-                        """
-                        INSERT INTO memory_nodes (
-                            graph_id, id, memory_type, scope, status, statement, created_at, updated_at
-                        ) VALUES (%s, %s, 'Preference', 'ctx:user', 'active', 'Worker materialization', now(), now())
-                        """,
-                        (graph_id, memory_id),
-                    )
-            outbox_id = MutationOutboxWriter(
-                connection_provider=verified_postgres_provider(storage.postgres_dsn)
-            ).append_payload(
-                CanonicalMutationPayload(
-                    mutation_lane=CanonicalMutationLane.GOVERNED_MEMORY,
-                    dirty_memory_ids=(memory_id,),
-                    surface_apply_status={
-                        CanonicalMutationSurface.VECTOR_INDEX.value: CanonicalMutationSurfaceState.PENDING.value
-                    },
-                ),
+            graph = first.wiring.runtime_wiring.graph
+            assert isinstance(graph, DurableGraphFacade)
+            graph.put_jsonld(
+                Preference(
+                    id=memory_id,
+                    statement="Worker materialization",
+                    scope="ctx:user",
+                    status=memory.NodeStatus.ACTIVE,
+                    confidence_level=memory.ConfidenceLevel.HIGH,
+                    verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                    source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                    created_at=utc_now(),
+                    updated_at=utc_now(),
+                    gate_reason="projection service integration test",
+                ).to_jsonld(),
                 graph_id=graph_id,
-                target_entry_key="pool:worker-integration",
-                governance_batch_id=f"governance:{uuid4().hex}",
-                decision_id=f"decision:{uuid4().hex}",
             )
-            resources.wake_workers()
-            deadline = asyncio.get_running_loop().time() + 2.0
+            assert graph.mutation_writer is not None
+            graph.mutation_writer.append_canonical_memory_write_mutation(
+                payload={
+                    "schema_version": "canonical-memory-write-payload.v2",
+                    "mutation_lane": "governed_memory",
+                    "dirty_memory_ids": [memory_id],
+                    "documents": [],
+                },
+                graph_id=graph_id,
+                operation_id=f"vector-delivery:{uuid4().hex}",
+                operation_kind=CanonicalMemoryMutationOperationKind.PREFERENCE,
+                requested_surfaces=(CanonicalMutationSurface.VECTOR_INDEX,),
+            )
+            deadline = asyncio.get_running_loop().time() + 10.0
             while asyncio.get_running_loop().time() < deadline:
                 with psycopg.connect(storage.postgres_dsn) as connection:
                     with connection.cursor() as cursor:
@@ -206,23 +194,10 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
                 await asyncio.sleep(0.02)
             else:
                 raise AssertionError(
-                    "HostCore vector worker did not materialize the outbox mutation"
+                    "HostCore projection service did not materialize vector delivery"
                 )
         finally:
             await core.shutdown()
-            with psycopg.connect(storage.postgres_dsn) as connection:
-                with connection.cursor() as cursor:
-                    if outbox_id:
-                        cursor.execute(
-                            "DELETE FROM memory_write_outbox WHERE outbox_id = %s",
-                            (outbox_id,),
-                        )
-                    cursor.execute(
-                        "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
-                    )
-                    cursor.execute(
-                        "DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,)
-                    )
         assert resources.closed is True
         assert provider.close_calls == 1
 

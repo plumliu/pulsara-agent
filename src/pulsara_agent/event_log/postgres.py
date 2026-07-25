@@ -74,6 +74,9 @@ from pulsara_agent.primitives.authority_materialization import (
 from pulsara_agent.storage.postgres_connection_provider import (
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.storage.session_bootstrap import (
+    PostgresRuntimeSessionOwnerBootstrapPort,
+)
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import (
     MessageReducer,
@@ -100,6 +103,7 @@ class PostgresEventLog:
     workspace_root: str | Path | None = None
     write_timeout_seconds: float = 30.0
     read_timeout_seconds: float = 30.0
+    session_bootstrap: PostgresRuntimeSessionOwnerBootstrapPort | None = None
     _parent_cache_lock: RLock = field(default_factory=RLock, init=False, repr=False)
     _session_parent_confirmed: bool = field(default=False, init=False, repr=False)
     _confirmed_parent_run_ids: set[str] = field(
@@ -112,10 +116,24 @@ class PostgresEventLog:
     def ensure_runtime_session_owner(self) -> None:
         """Create the session row needed by artifacts produced before RunStart."""
 
-        with postgres_event_connection(self.connection_provider) as connection:
-            with connection.cursor() as cursor:
-                self._lock_session(cursor)
-                self._ensure_session_row(cursor)
+        bootstrap = self.session_bootstrap or PostgresRuntimeSessionOwnerBootstrapPort(
+            self.connection_provider
+        )
+        candidate = bootstrap.candidate(
+            runtime_session_id=self.runtime_session_id,
+            workspace_root=(
+                str(self.workspace_root) if self.workspace_root is not None else None
+            ),
+        )
+        outcome = bootstrap.bootstrap(
+            candidate=candidate,
+            deadline_monotonic=monotonic() + self.write_timeout_seconds,
+        )
+        if outcome.confirmation.value != "full":
+            raise RuntimeError(
+                "runtime session owner bootstrap did not reach FULL: "
+                f"{outcome.confirmation.value}"
+            )
         with self._parent_cache_lock:
             self._session_parent_confirmed = True
 
@@ -284,15 +302,11 @@ class PostgresEventLog:
             projection_kind=str(row["projection_kind"]),
             through_sequence=int(row["through_sequence"]),
             projection_schema_version=str(row["projection_schema_version"]),
-            ledger_prefix=RawTranscriptDomainPrefixFact(
-                **dict(row["ledger_prefix"])
-            ),
+            ledger_prefix=RawTranscriptDomainPrefixFact(**dict(row["ledger_prefix"])),
             validation_base_through_sequence=int(
                 row["validation_base_through_sequence"]
             ),
-            validation_base_state_payload=dict(
-                row["validation_base_state_payload"]
-            ),
+            validation_base_state_payload=dict(row["validation_base_state_payload"]),
             state_payload=dict(row["state_payload"]),
             payload_fingerprint=str(row["payload_fingerprint"]),
         )
@@ -348,23 +362,22 @@ class PostgresEventLog:
                     raise ValueError(
                         "runtime projection checkpoint cannot move backwards"
                     )
-                if existing is not None and int(
-                    existing["through_sequence"]
-                ) == checkpoint.through_sequence:
+                if (
+                    existing is not None
+                    and int(existing["through_sequence"]) == checkpoint.through_sequence
+                ):
                     expected_prefix_payload = _runtime_projection_prefix_payload(
                         checkpoint.ledger_prefix
                     )
                     if (
                         str(existing["projection_schema_version"])
                         != checkpoint.projection_schema_version
-                        or dict(existing["ledger_prefix"])
-                        != expected_prefix_payload
+                        or dict(existing["ledger_prefix"]) != expected_prefix_payload
                         or int(existing["validation_base_through_sequence"])
                         != checkpoint.validation_base_through_sequence
                         or dict(existing["validation_base_state_payload"])
                         != checkpoint.validation_base_state_payload
-                        or dict(existing["state_payload"])
-                        != checkpoint.state_payload
+                        or dict(existing["state_payload"]) != checkpoint.state_payload
                         or str(existing["payload_fingerprint"])
                         != checkpoint.payload_fingerprint
                     ):
@@ -373,8 +386,7 @@ class PostgresEventLog:
                         )
                 if (
                     existing is not None
-                    and checkpoint.through_sequence
-                    > int(existing["through_sequence"])
+                    and checkpoint.through_sequence > int(existing["through_sequence"])
                     and (
                         checkpoint.validation_base_through_sequence
                         != int(existing["through_sequence"])
@@ -421,9 +433,7 @@ class PostgresEventLog:
                         checkpoint.through_sequence,
                         checkpoint.projection_schema_version,
                         Jsonb(
-                            _runtime_projection_prefix_payload(
-                                checkpoint.ledger_prefix
-                            )
+                            _runtime_projection_prefix_payload(checkpoint.ledger_prefix)
                         ),
                         checkpoint.validation_base_through_sequence,
                         Jsonb(checkpoint.validation_base_state_payload),
@@ -826,7 +836,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
-                cursor.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     "select coalesce(max(sequence), 0) as high_water "
@@ -937,7 +946,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
-                cursor.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     "select coalesce(max(sequence), 0) as high_water "
@@ -1085,7 +1093,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
-                cursor.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     "select coalesce(max(sequence), 0) as high_water "
@@ -1174,7 +1181,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as control:
-                control.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(
                     control,
                     deadline,
@@ -1296,7 +1302,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as control:
-                control.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(control, deadline, include_lock=False)
             with connection.cursor(
                 name="pulsara_context_authority_bundle",
@@ -1544,7 +1549,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as control:
-                control.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(control, deadline, include_lock=False)
             with connection.cursor(
                 name="pulsara_reply_snapshot",
@@ -1661,7 +1665,6 @@ class PostgresEventLog:
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
-                cursor.execute("set transaction isolation level repeatable read")
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     "select coalesce(max(sequence), 0) as high_water "
@@ -1977,15 +1980,25 @@ class PostgresEventLog:
     def _ensure_session_row(self, cursor) -> None:
         cursor.execute(
             """
-            insert into sessions (id, workspace_root)
-            values (%s, %s)
-            on conflict (id) do nothing
+            select workspace_root
+            from sessions
+            where id = %s
             """,
-            (
-                self.runtime_session_id,
-                str(self.workspace_root) if self.workspace_root is not None else None,
-            ),
+            (self.runtime_session_id,),
         )
+        row = cursor.fetchone()
+        expected_workspace = (
+            str(self.workspace_root) if self.workspace_root is not None else None
+        )
+        observed_workspace = (
+            (row["workspace_root"] if isinstance(row, dict) else row[0])
+            if row is not None
+            else None
+        )
+        if row is None or observed_workspace != expected_workspace:
+            raise RuntimeError(
+                "runtime session owner must be bootstrapped before EventLog writes"
+            )
 
     def _ensure_run_belongs_to_session(self, cursor, event: AgentEvent) -> None:
         cursor.execute("select session_id from runs where id = %s", (event.run_id,))

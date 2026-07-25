@@ -1,5 +1,15 @@
 # Pulsara Core Dogfood Suites
 
+The durable projection hard-cut also has a deterministic structural benchmark:
+
+```bash
+uv run python -m benchmarks.suites.durable_projection_pipeline
+uv run python -m benchmarks.suites.durable_projection_pipeline --postgres --env-file .env
+```
+
+The first command is offline. The second additionally saturates the projection
+PostgreSQL lane and verifies that the separate EventLog lane remains available.
+
 `benchmarks/suites` contains the small, frozen set of expensive real-provider
 trajectories used as release evidence. It is intentionally separate from
 `evals/`: deterministic model-quality datasets belong in `evals`, while these

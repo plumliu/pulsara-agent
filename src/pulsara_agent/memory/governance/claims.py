@@ -8,6 +8,7 @@ from time import monotonic
 from typing import Protocol, Sequence
 
 import psycopg
+from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -126,9 +127,7 @@ class GovernanceClaimTransitionCompanion:
         else:
             raise ValueError("unsupported claim transition target")
 
-    def apply_postgres(
-        self, cursor, stored_events: Sequence[AgentEvent]
-    ) -> None:
+    def apply_postgres(self, cursor, stored_events: Sequence[AgentEvent]) -> None:
         if not isinstance(
             self.repository, PostgresMemoryGovernanceCandidateClaimRepository
         ):
@@ -182,9 +181,7 @@ class GovernanceClaimTransitionCompanion:
 @dataclass(slots=True)
 class InMemoryMemoryGovernanceCandidateClaimRepository:
     candidate_pool: CandidatePool
-    _claims: dict[str, MemoryGovernanceCandidateClaimFact] = field(
-        default_factory=dict
-    )
+    _claims: dict[str, MemoryGovernanceCandidateClaimFact] = field(default_factory=dict)
     _rejections: dict[tuple[str, int], MemoryCandidateEvidenceRejectedEvent] = field(
         default_factory=dict
     )
@@ -207,7 +204,9 @@ class InMemoryMemoryGovernanceCandidateClaimRepository:
                 and claim.status is GovernanceCandidateClaimStatus.PREPARING
             )
             if existing:
-                ordered = tuple(sorted(existing, key=lambda item: item.candidate_entry_id))
+                ordered = tuple(
+                    sorted(existing, key=lambda item: item.candidate_entry_id)
+                )
                 candidates = tuple(
                     self.candidate_pool.get_candidate(item.candidate_entry_id)
                     for item in ordered
@@ -232,7 +231,9 @@ class InMemoryMemoryGovernanceCandidateClaimRepository:
                 sorted(selected_candidates, key=lambda item: item.entry_id)
             )
             claims = tuple(
-                _new_claim(candidate, governance_batch_id, self._claims.get(candidate.entry_id))
+                _new_claim(
+                    candidate, governance_batch_id, self._claims.get(candidate.entry_id)
+                )
                 for candidate in candidates
             )
             for claim in claims:
@@ -326,10 +327,8 @@ class InMemoryMemoryGovernanceCandidateClaimRepository:
                 existing = self._rejections.get(rejection_key)
                 if existing is not None and existing != rejection_event:
                     raise ValueError("governance evidence rejection conflict")
-                candidate_rejection = (
-                    self.candidate_pool.evidence_rejection_event_id(
-                        rejection_claim.candidate_entry_id
-                    )
+                candidate_rejection = self.candidate_pool.evidence_rejection_event_id(
+                    rejection_claim.candidate_entry_id
                 )
                 if (
                     candidate_rejection is not None
@@ -380,6 +379,7 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
             lane=PostgresConnectionLane.GOVERNANCE,
             row_factory=row_factory,
             deadline_monotonic=monotonic() + 30.0,
+            isolation_level=IsolationLevel.SERIALIZABLE,
         )
 
     def claim_pending_batch(
@@ -415,7 +415,6 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
             raise ValueError("governance claim limit must be positive")
         with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("set transaction isolation level serializable")
                 cursor.execute(
                     """
                     select claim_payload
@@ -475,7 +474,9 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
                     (runtime_session_id,),
                 )
                 selected: list[
-                    tuple[PooledMemoryCandidate, MemoryGovernanceCandidateClaimFact | None]
+                    tuple[
+                        PooledMemoryCandidate, MemoryGovernanceCandidateClaimFact | None
+                    ]
                 ] = []
                 for row in cursor.fetchall():
                     candidate = candidate_from_storage_row(row)
@@ -579,7 +580,9 @@ class PostgresMemoryGovernanceCandidateClaimRepository:
                     """,
                     (runtime_session_id,),
                 )
-                return tuple(str(row["governance_batch_id"]) for row in cursor.fetchall())
+                return tuple(
+                    str(row["governance_batch_id"]) for row in cursor.fetchall()
+                )
 
     def transition_companion(
         self,
@@ -697,7 +700,10 @@ def _new_claim(
     governance_batch_id: str,
     previous: MemoryGovernanceCandidateClaimFact | None,
 ) -> MemoryGovernanceCandidateClaimFact:
-    if previous is not None and previous.status is not GovernanceCandidateClaimStatus.RELEASED:
+    if (
+        previous is not None
+        and previous.status is not GovernanceCandidateClaimStatus.RELEASED
+    ):
         raise ValueError("only released claims may be reclaimed")
     return build_frozen_fact(
         MemoryGovernanceCandidateClaimFact,
@@ -778,11 +784,12 @@ def _terminal_candidate_ids(
 ) -> set[str]:
     result: set[str] = set()
     for record in decisions:
-        if record.decision.kind == "skip" or record.write_outcome.kind == "write_succeeded":
+        if (
+            record.decision.kind == "skip"
+            or record.write_outcome.kind == "write_succeeded"
+        ):
             result.update(decision_target_entry_ids(record.decision))
     return result
-
-
 
 
 def _claim_for_candidate(

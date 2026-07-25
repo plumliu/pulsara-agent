@@ -191,3 +191,30 @@ Migration head只证明PostgreSQL physical schema。它不证明以下内容兼�
 - migration SQL中使用`IF NOT EXISTS`掩盖baseline drift（canonical genesis判定除外）；
 - checksum/catalog conflict降级为warning；
 - 将UNRESOLVED误报为confirmed structural conflict。
+
+---
+
+## 12. Durable projection staged migrations
+
+Registry v5-v8是D3 hard cut的immutable历史：
+
+- v5：job/receipt/head/lease、runtime write admission与immutable relation tables；
+- v6：canonical mutation V2、legacy binding plan应用与timeline/evidence pre-activation contracts；
+- v7：timeline activation/cutover；
+- v8：tool-result evidence activation/cutover。
+
+Runner是prerequisite-aware state machine。v5后缺binding plan、v6后缺timeline coverage、v7后缺
+evidence coverage时，`db migrate`返回typed `PREPARATION_REQUIRED`并保持当前head；不得继续
+apply later migration。Final v8 binary必须保留historical expected catalogs、decoder/factory与
+maintenance commands，使v4 database可依次推进到v8。
+
+V6 legacy surface binding只能来自durable typed plan。Applied vector必须证明historical
+embedding/build identity；pending可由显式migration rebind authority绑定；无法证明的
+applied/delete只允许decommission+rebuild receipt或reset。
+
+V7/V8 activation使用database maintenance epoch与immutable per-session coverage
+pages/receipts。Activation transaction只验证frozen head、coverage count/root与cutover aggregate，
+不重扫全部EventLog/targets。Normal production write持current epoch guard；migration maintenance
+guard由database trigger/advisory lock强制，不依赖人工停止Host。
+
+每次追加migration必须有golden测试证明所有历史definition/registry prefix不变。

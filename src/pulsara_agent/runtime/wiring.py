@@ -20,6 +20,7 @@ from pulsara_agent.capability.providers.mcp import (
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
+from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.graph import (
     DEFAULT_GRAPH_ID,
     GraphStore,
@@ -27,7 +28,6 @@ from pulsara_agent.graph import (
     PostgresGraphStore,
 )
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
-from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.llm import ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import (
@@ -49,20 +49,11 @@ from pulsara_agent.memory.recall.sparse import SparseCandidateService
 from pulsara_agent.memory.recall.dense import DenseCandidateService
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
 from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
-from pulsara_agent.memory.canonical.outbox_replay_hook import (
-    CanonicalMutationOutboxReplayHook,
-)
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks, ReflectiveMemoryHooks
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionEngine,
     MemoryReflectionOptions,
-)
-from pulsara_agent.memory.hooks.run_timeline_persistence import (
-    RunTimelinePersistenceHook,
-)
-from pulsara_agent.memory.hooks.runtime_persistence import (
-    ExecutionEvidencePersistenceHook,
 )
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
@@ -93,9 +84,13 @@ from pulsara_agent.memory.canonical.unit_of_work import (
     InMemoryMemoryWriteUnitOfWork,
     MemoryWriteUnitOfWork,
 )
-from pulsara_agent.memory.canonical.mutation_outbox import (
+from pulsara_agent.runtime.projection_jobs.contracts import (
     CanonicalMutationSurface,
-    MutationOutboxWriter,
+    CanonicalMutationSurfacePlanFact,
+)
+from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+    CanonicalMutationV2Writer,
+    build_surface_plan,
 )
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -137,6 +132,9 @@ from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.storage.schema_verification_service import (
     VerifiedPostgresAccessLease,
 )
+from pulsara_agent.storage.session_bootstrap import (
+    PostgresRuntimeSessionOwnerBootstrapPort,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +144,7 @@ class RuntimeWiring:
     graph: GraphStore
     archive: ArtifactStore
     graph_id: str | None
-    ledger: ExecutionEvidenceLedger
+    ledger: CanonicalMemoryLedger
     candidate_pool: CandidatePool
     memory_governance_executor: MemoryGovernanceExecutor
     memory_governance_claim_repository: MemoryGovernanceCandidateClaimRepository
@@ -223,18 +221,9 @@ def build_in_memory_runtime_wiring(
         repository=candidate_projection_outbox,
         dispatcher=candidate_projection_dispatcher,
     )
-    _register_timeline_hook(
-        runtime_session=runtime_session,
-        graph=graph,
-        archive=archive,
-        graph_id=resolved_graph_id,
-        mutation_outbox=None,
-    )
     ledger, memory_write_service = _build_ledger_and_service(
         graph,
-        archive,
         resolved_graph_id,
-        mutation_outbox=None,
     )
     memory_governance_executor = _build_memory_governance_executor(
         candidate_pool=candidate_pool,
@@ -314,15 +303,15 @@ def build_durable_runtime_wiring(
     )
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     connection_provider = postgres_access_lease.connection_provider
+    session_bootstrap = PostgresRuntimeSessionOwnerBootstrapPort(connection_provider)
     event_log = PostgresEventLog(
         connection_provider=connection_provider,
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
+        session_bootstrap=session_bootstrap,
     )
     archive = PostgresArtifactStore(connection_provider)
-    tool_result_artifacts = PostgresToolResultArtifactIndex(
-        connection_provider
-    )
+    tool_result_artifacts = PostgresToolResultArtifactIndex(connection_provider)
     runtime_session = RuntimeSession(
         workspace_root,
         runtime_session_id=event_log.runtime_session_id,
@@ -334,21 +323,22 @@ def build_durable_runtime_wiring(
         extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
     )
     postgres_graph = PostgresGraphStore(connection_provider)
-    mutation_outbox = MutationOutboxWriter(
-        connection_provider=connection_provider
+    mutation_surface_plan = _resolved_mutation_surface_plan(
+        settings,
+        retrieval_resources=retrieval_resources,
+    )
+    mutation_writer = CanonicalMutationV2Writer(
+        connection_provider=connection_provider,
+        surface_plan=mutation_surface_plan,
     )
     if not settings.storage.oxigraph_url.strip():
         raise ValueError("durable runtime wiring requires a non-empty Oxigraph URL")
-    oxigraph_graph = OxigraphGraphStore(settings.storage.oxigraph_url)
     graph: GraphStore = DurableGraphFacade(
         postgres=postgres_graph,
-        oxigraph=oxigraph_graph,
-        mutation_outbox=mutation_outbox,
+        mutation_writer=mutation_writer,
     )
     candidate_pool = PostgresCandidatePool(connection_provider)
-    candidate_projection_outbox = PostgresCandidateProjectionOutbox(
-        connection_provider
-    )
+    candidate_projection_outbox = PostgresCandidateProjectionOutbox(connection_provider)
     candidate_projection_dispatcher = CandidateProjectionOutboxDispatcher(
         runtime_session_id=runtime_session.runtime_session_id,
         repository=candidate_projection_outbox,
@@ -422,26 +412,9 @@ def build_durable_runtime_wiring(
         trace_store=PostgresRecallTraceStore(connection_provider=connection_provider),
         graph_candidates=GraphCandidateService(memory_query=memory_query),
     )
-    _register_timeline_hook(
-        runtime_session=runtime_session,
-        graph=graph,
-        archive=archive,
-        graph_id=resolved_graph_id,
-        mutation_outbox=mutation_outbox,
-    )
-    runtime_session.hook_manager.register_event(
-        None,
-        CanonicalMutationOutboxReplayHook(
-            connection_provider=connection_provider,
-            graph_id=resolved_graph_id,
-            oxigraph_url=settings.storage.oxigraph_url,
-        ),
-    )
     ledger, memory_write_service = _build_ledger_and_service(
         graph,
-        archive,
         resolved_graph_id,
-        mutation_outbox=mutation_outbox,
     )
 
     def governance_event_commit_port(events):
@@ -470,6 +443,8 @@ def build_durable_runtime_wiring(
             graph_id=resolved_graph_id,
             archive=archive,
             workspace_root=workspace_root,
+            session_bootstrap=session_bootstrap,
+            canonical_mutation_surface_plan=mutation_surface_plan,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
         async_surfaces=(
@@ -611,9 +586,6 @@ def build_agent_runtime_wiring(
             llm_runtime=llm_runtime,
             memory_reflection=memory_reflection,
             memory_reflection_options=memory_reflection_options,
-        ),
-        tool_result_persistence_hook=ExecutionEvidencePersistenceHook(
-            ledger=runtime_wiring.ledger
         ),
         model_role=model_role,
         options=options,
@@ -766,12 +738,19 @@ def _build_memory_hooks(
             candidate_pool=runtime_wiring.candidate_pool,
             sink=runtime_wiring.runtime_session.memory_proposal_sink,
             event_store=runtime_wiring.event_log,
+            timeline_graph=runtime_wiring.graph,
+            timeline_archive=runtime_wiring.archive,
             recall=runtime_wiring.memory_recall_service,
             memory_query=runtime_wiring.memory_query,
             graph_id=runtime_wiring.graph_id,
             read_scopes=_read_scopes(runtime_wiring.memory_domain),
             working_context_store=runtime_wiring.working_context_store,
             working_context_domain=runtime_wiring.memory_domain,
+            working_context_async_operation_port=(
+                _governance_async_operation_port(
+                    runtime_wiring.runtime_session
+                )
+            ),
         )
     reflection = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
@@ -789,28 +768,29 @@ def _build_memory_hooks(
         candidate_pool=runtime_wiring.candidate_pool,
         sink=runtime_wiring.runtime_session.memory_proposal_sink,
         event_store=runtime_wiring.event_log,
+        timeline_graph=runtime_wiring.graph,
+        timeline_archive=runtime_wiring.archive,
         recall=runtime_wiring.memory_recall_service,
         memory_query=runtime_wiring.memory_query,
         graph_id=runtime_wiring.graph_id,
         read_scopes=_read_scopes(runtime_wiring.memory_domain),
         working_context_store=runtime_wiring.working_context_store,
         working_context_domain=runtime_wiring.memory_domain,
+        working_context_async_operation_port=_governance_async_operation_port(
+            runtime_wiring.runtime_session
+        ),
         reflection=reflection,
     )
 
 
 def _build_ledger_and_service(
     graph: GraphStore,
-    archive: ArtifactStore,
     graph_id: str | None,
-    mutation_outbox: MutationOutboxWriter | None = None,
-) -> tuple[ExecutionEvidenceLedger, MemoryWriteService]:
-    ledger = ExecutionEvidenceLedger(
+) -> tuple[CanonicalMemoryLedger, MemoryWriteService]:
+    ledger = CanonicalMemoryLedger(
         graph=graph,
-        archive=archive,
         gate=MemoryWriteGate(),
         graph_id=graph_id or DEFAULT_GRAPH_ID,
-        mutation_outbox=mutation_outbox,
     )
     return ledger, MemoryWriteService(ledger=ledger)
 
@@ -867,23 +847,31 @@ def _governance_async_operation_port(runtime_session: RuntimeSession):
     return execute
 
 
-def _register_timeline_hook(
+def _resolved_mutation_surface_plan(
+    settings: PulsaraSettings,
     *,
-    runtime_session: RuntimeSession,
-    graph: GraphStore,
-    archive: ArtifactStore,
-    graph_id: str | None,
-    mutation_outbox: MutationOutboxWriter | None = None,
-) -> None:
-    runtime_session.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime_session.event_log,
-            graph_id=graph_id,
-            mutation_outbox=mutation_outbox,
-        ),
+    retrieval_resources: RetrievalRuntimeResources | None,
+) -> CanonicalMutationSurfacePlanFact:
+    surfaces = [
+        CanonicalMutationSurface.SEARCH_INDEX,
+    ]
+    compatibilities: dict[CanonicalMutationSurface, str] = {}
+    if retrieval_resources is not None and retrieval_resources.embedding is not None:
+        embedding = retrieval_resources.embedding
+        surfaces.append(CanonicalMutationSurface.VECTOR_INDEX)
+        compatibilities[CanonicalMutationSurface.VECTOR_INDEX] = context_fingerprint(
+            "canonical-mutation-vector-target-compatibility:v1",
+            {
+                "provider": settings.retrieval.embedding.provider,
+                "model_id": embedding.model_id,
+                "dimensions": embedding.dimensions,
+                "builder": "embedded-memory-text.v1",
+            },
+        )
+    surfaces.append(CanonicalMutationSurface.OXIGRAPH)
+    return build_surface_plan(
+        tuple(surfaces),
+        target_compatibility_fingerprints=compatibilities,
     )
 
 
@@ -897,7 +885,9 @@ def _required_postgres_access_lease(
     lease: VerifiedPostgresAccessLease | None,
 ) -> VerifiedPostgresAccessLease:
     if lease is None:
-        raise ValueError("durable runtime wiring requires a verified PostgreSQL access lease")
+        raise ValueError(
+            "durable runtime wiring requires a verified PostgreSQL access lease"
+        )
     return lease
 
 

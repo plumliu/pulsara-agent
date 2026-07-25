@@ -8,8 +8,6 @@ contract: a landed node -> [proposed, result] with a memory_id; a write failure
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
 from pydantic import ValidationError
 
@@ -27,41 +25,32 @@ from pulsara_agent.event.candidates import (
     PreferenceCandidate,
 )
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.ontology import memory, runtime as rt
+from pulsara_agent.ontology import memory
+from tests.support.memory import seed_tool_evidence
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
 
 
-def _service() -> tuple[MemoryWriteService, ExecutionEvidenceLedger, InMemoryGraphStore]:
+def _service() -> tuple[MemoryWriteService, CanonicalMemoryLedger, InMemoryGraphStore]:
     graph = InMemoryGraphStore()
-    ledger = ExecutionEvidenceLedger(
+    ledger = CanonicalMemoryLedger(
         graph=graph,
-        archive=InMemoryArchiveStore(),
         gate=MemoryWriteGate(),
     )
     return MemoryWriteService(ledger=ledger), ledger, graph
 
 
-def _seed_evidence(ledger: ExecutionEvidenceLedger, *, scope: str) -> str:
-    result = ledger.record_tool_result(
-        turn_id=f"turn:{uuid4().hex}",
-        tool_name="rg",
-        status=rt.ToolExecutionStatus.SUCCESS,
-        input_summary="search",
-        output="match found",
+def _seed_evidence(ledger: CanonicalMemoryLedger, *, scope: str) -> str:
+    return seed_tool_evidence(
+        ledger.graph,
+        graph_id=ledger.graph_id,
         scope=scope,
-    )
-    evidence = ledger.create_evidence_from_tool_result(
-        result.tool_result_id,
         statement="The search found a match.",
-        scope=scope,
     )
-    return evidence.evidence_id
 
 
 def test_submit_claim_candidate_active_emits_proposed_and_result() -> None:
@@ -117,7 +106,9 @@ def test_submit_decision_candidate_without_authority_lands_needs_review() -> Non
     assert result.memory_type == "Decision"
 
 
-def test_submit_preference_candidate_empty_scope_lands_rejected_with_memory_id() -> None:
+def test_submit_preference_candidate_empty_scope_lands_rejected_with_memory_id() -> (
+    None
+):
     service, _, graph = _service()
     candidate = PreferenceCandidate(
         candidate_id="candidate:pref",
@@ -137,7 +128,9 @@ def test_submit_preference_candidate_empty_scope_lands_rejected_with_memory_id()
     assert graph.has_jsonld(result.memory_id)
 
 
-def test_submit_observation_with_missing_evidence_emits_failed_and_writes_no_node() -> None:
+def test_submit_observation_with_missing_evidence_emits_failed_and_writes_no_node() -> (
+    None
+):
     service, _, graph = _service()
     candidate = ObservationCandidate(
         candidate_id="candidate:obs",
@@ -304,7 +297,9 @@ def test_submit_raw_action_boundary_payload_normalizes_candidate() -> None:
     assert graph.has_jsonld(result.memory_id)
 
 
-def test_submit_raw_preference_payload_with_extra_field_fails_without_proposal() -> None:
+def test_submit_raw_preference_payload_with_extra_field_fails_without_proposal() -> (
+    None
+):
     service, _, graph = _service()
 
     outcome = service.submit(

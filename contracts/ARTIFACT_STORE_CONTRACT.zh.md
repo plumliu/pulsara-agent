@@ -265,3 +265,29 @@ hydrator必须验证document contract、SHA、bytes、wire hash与semantic mater
 Runtime-observation stable/partition/projection pages使用稳定ID与canonical bytes。所有pages/root在引用它们的rollover batch之前必须FULL confirmed；同ID不同body/metadata冲突。
 Successor rewrite FULL前旧stable-state、proof和projection artifacts持续pinned，FULL reducer fold后才切换reachable roots。Event payload只携带bounded roots/counts/accumulators，禁止
 内嵌O(history) member tuple。
+
+---
+
+## 15. Durable projection artifacts
+
+Timeline pages/manifest与evidence artifact documents使用deterministic content-addressed IDs。
+Prepared result只可引用strict union中的artifact branch，且必须冻结：
+
+- media type；
+- versioned content codec；
+- metadata contract；
+- canonical bytes/digest；
+- runtime session/run ownership；
+- artifact semantic reference fingerprint。
+
+Artifact、graph document、immutable relation、canonical mutation、result receipt、target head与job
+settlement必须在一个projection settlement UOW内达到一致结果。Artifact body已FULL而数据库
+settlement丢失时，retry使用相同ID/bytes/metadata exact-confirm；不得生成第二份artifact。
+
+Timeline合法history可以拥有任意数量paged artifacts。Bound只约束单page、单leaf与一次resident
+materialization，不得把整个run大小变成semantic hard cap。Target head保存persistent root与
+frontier，不内嵌O(history) ordered item列表。
+
+Superseded result receipt引用effective applied receipt；它不复制或重写effective artifacts。
+Target conflict、missing artifact或digest/codec drift必须显示authority diagnostic并停止推进
+target。

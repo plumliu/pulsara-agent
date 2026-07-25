@@ -380,9 +380,10 @@ yielded/background terminal 的路径不同：
 
 以下路径应被视为 legacy / prohibited：
 
-1. **Memory ledger 直接归档 terminal 输出**
+1. **Memory/evidence projector 直接归档 terminal 输出**
 
-   `ExecutionEvidenceLedger` 不应再对长输出调用 `archive.put_text()`。它只能消费 executor / artifact service 已经产生的 artifact refs。
+   旧`ExecutionEvidenceLedger`已删除。Durable evidence handler只能引用executor /
+   `ToolResultArtifactService`已经确认的artifact semantic refs，不得再次归档正文。
 
 2. **transcript 直接把 stdout/stderr 当完整输出**
 

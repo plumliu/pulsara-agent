@@ -275,3 +275,39 @@ repair stage重新生成`now + timeout`，否则合法长session会退化为
 该deadline只属于`SESSION_REOPEN`。Fresh open没有历史repair链，不得在failed-supervisor
 清理、PostgreSQL schema verification、terminal/MCP resource preparation之前预先启动
 reopen计时；其startup deadline由新`RuntimeSession`在bootstrap admission时独立冻结。
+
+---
+
+## 15. Durable projection recovery
+
+HostCore启动独立于session的`DurableProjectionService`。Recovery从migration-owned
+activation/cutover与kind-specific checkpoint开始，只读取checkpoint后的bounded EventLog pages。
+它不得从sequence 1扫描整个ledger，也不得依赖publisher补发历史notification。
+
+Seeder按`(runtime_session_id, projection_kind)`稳定keyset分页并在尾页wrap-around；扫描cursor不
+进入job semantic。单个session/kind确定性authority失败必须写自己的typed seed failure并继续本页，
+不能使其后的session永久饥饿。每页同时受event count与8 MiB cumulative ledger payload约束；
+合法大页选择非空最长前缀，只有单个event超过storage hard bound才属于authority corruption。
+Unresolved seed failure必须latch同一authority；普通candidate不得越过。只有exact typed repair
+action可授权下一次stable candidate，并在checkpoint/jobs/failure resolution同一transaction FULL
+后解除latch。Job claim在global limit前于SQL层排除active target lease和target authority
+conflict，不能让一个hot/blocked target占满候选窗口。
+
+Job recovery规则：
+
+- pending/retry_wait按durable next-attempt继续；
+- expired lease原子reclaim并增加generation；
+- active external surface operation以stable delivery identity确认settlement；
+- result callback丢失时从immutable result receipt exact rebind；
+- target head只引用receipt，不依赖process-local outcome；
+- dead-letter只经typed repair CAS回到pending，或经decommission authority写terminal receipt并
+  推进surface target head；
+- target authority conflict保持fail-closed，不伪装成普通retry。
+
+Full-replacement timeline若较新source先完成，较旧job在claim阶段直接写superseded receipt；
+single-assignment evidence若已有distinct source head，必须写target conflict并dead-letter。
+
+Pre-activation crash从immutable result receipts、coverage pages与cutover恢复。没有durable
+pre-activation receipt的process-local状态只能显示`not_durably_observable`，不得猜测。
+Migration v7/v8 activation前后由database maintenance epoch隔离，不允许同一kind同时存在
+pre-activation与durable job writer。

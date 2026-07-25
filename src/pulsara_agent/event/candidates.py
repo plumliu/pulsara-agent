@@ -3,7 +3,7 @@
 A ``MemoryCandidate`` is the input contract to the durable-memory write path.
 Tools, post-run extractors, and future UI review flows all produce one of these
 typed candidates; ``MemoryWriteService`` dispatches by ``kind`` to the matching
-``ExecutionEvidenceLedger.submit_*`` method. Modeling each memory type as its
+``CanonicalMemoryLedger.submit_*`` method. Modeling each memory type as its
 own class keeps type-specific constraints (ActionBoundary requires
 ``applies_when``/``do_not_apply_when``; Decision carries ``based_on_ids``) at the
 schema boundary instead of deferring them to runtime dispatch.

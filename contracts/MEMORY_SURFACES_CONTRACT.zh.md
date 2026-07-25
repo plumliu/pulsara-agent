@@ -82,12 +82,9 @@ _Amended: 2026-06-30 — freeze semantic relatedness v1 same-batch boundary_
 
 运行时语义节点不是 governed memory，因此不受“只有 governance 才能写”的限制。
 
-例如：
-
-- `RunTimelinePersistenceHook` 写 `RunTimelineRecord`
-- `ExecutionEvidenceLedger` 写 runtime semantic provenance nodes
-
-这些都属于**合法的 runtime semantic graph writes**，不是对 1.1 的违反。
+Timeline与tool-result evidence由EventLog驱动的durable projection jobs写入。它们使用
+immutable result receipt、target head与canonical mutation V2 surface delivery；不经过memory
+governance，也不再通过publisher persistence hook或`ExecutionEvidenceLedger`写入。
 
 ### 1.3 每条 governed memory 写都必须有原子可审计 provenance
 
@@ -146,7 +143,8 @@ _Amended: 2026-06-30 — freeze semantic relatedness v1 same-batch boundary_
 | working_context | run timeline summary | `working_context_summaries` | candidate pool / governed memory / event log |
 | recall | Postgres recall projection (`memory_nodes` / `memory_relations` / `memory_search_index`) | `recall_traces` / `recall_usages` | candidate pool / governed memory |
 | reflection | current run trace + safe-point | candidate pool(origin=REFLECTION) + reflection events | governed memory |
-| run timeline | event log projection | timeline artifact + runtime semantic graph `RunTimelineRecord` | event log / candidate pool / working_context / governed memory |
+| run timeline | exact EventLog trigger + durable target head | persistent timeline manifest + runtime semantic graph `RunTimelineRecord` | event log / candidate pool / governed memory |
+| tool execution evidence | exact ToolCall/ToolResult/terminal projection join | ToolResult/Artifact documents + immutable relation facts | event log / governed memory |
 | recall degraded | backend unavailable fact | none | 任何把模型导回旧检索路径的自由文本 fallback |
 
 补一句最重要的：
@@ -188,7 +186,8 @@ recall 的 truth source 不是 canonical truth 本身，而是它的 **Postgres 
 这条规则在迁移前后都成立：
 
 - 今天 canonical truth 仍主要来自 Postgres `graph_documents`
-- 迁移后 governed canonical memory 的物理真源会变成 “Postgres mutation journal + Oxigraph materialization”
+- governed canonical memory的提交真源是PostgreSQL canonical document/decision与immutable
+  mutation V2；Oxigraph始终只是异步materialization
 - 但 recall 仍只读 Postgres projection，不直接读 Oxigraph
 - 这条 recall 读面定义不外溢到 governance target validation；后者仍只认同步面
 
@@ -274,15 +273,19 @@ candidate pool 是提案箱，不是 canonical memory 本身。
 
 run timeline 只来自 event log projection：
 
-- `build_run_timeline`
-- `summarize_run_timeline`
+- migration-owned timeline activation/cutover；
+- exact committed trigger event；
+- previous applied target head；
+- paged persistent timeline reducer。
 
 ### 6.2 allowed write targets
 
 run timeline 只允许写：
 
-- timeline artifact
-- runtime semantic graph `RunTimelineRecord`
+- content-addressed timeline pages/manifest；
+- runtime semantic graph `RunTimelineRecord`；
+- immutable canonical mutation V2及surface delivery；
+- result receipt、target head与job settlement。
 
 这里要再次强调：
 
@@ -308,8 +311,8 @@ run timeline 不得回写：
 
 凡是需要 run business view 的消费方，都应复用：
 
-- `build_run_timeline`
-- `summarize_run_timeline`
+- `load_run_timeline_page`
+- `summarize_persisted_run_timeline`
 
 `HostSession.summary()` 不算 run timeline，它只是 host/session lifecycle metadata。
 
@@ -356,25 +359,38 @@ governed canonical memory graph 的唯一写入口是：
 
 把 candidate 升级为 governed canonical memory。
 
-### 8.2 当前态 vs 目标态
+### 8.2 Canonical mutation V2
 
-- **当前态**：`MemoryWriteUnitOfWork` 用单个 Postgres 事务把：
-  - canonical write
-  - `memory_nodes` / `memory_relations`
-  - decision row
-  - outbox row
-  一次性原子提交
-- **目标态**：迁移后机制改成：
-  - decision row + canonical mutation journal + 同步 projection refresh 在 Postgres 事务内原子提交
-  - Oxigraph / `memory_search_index` / `memory_vector_index` 由 unified outbox 异步物化
+`MemoryWriteUnitOfWork`在一个PostgreSQL事务中原子提交：
+
+- canonical write；
+- `memory_nodes` / `memory_relations`同步面；
+- decision row；
+- immutable canonical mutation V2；
+- ordered search/vector/Oxigraph surface delivery states；
+- stable governance event outbox ticket。
+
+Surface worker使用统一lease/retry/dead-letter协议异步物化；legacy
+`memory_write_outbox` production writer/replay已删除。
+
+Dead-letter surface只能经typed transactional repair CAS收口：
+
+- `retry_same_contract`清除failure/attempt并回到pending；
+- `decommission_with_authority`写terminal receipt并推进exact surface target head；
+- `decommission_after_rebuild`只接受durable FULL rebuild result receipt ID；repository在同一
+  transaction exact-read receipt、canonical mutation、surface delivery、terminal applied
+  receipt与frozen handler contract，并由它派生replacement surface identity。Public caller不得
+  自报replacement fingerprint；
+- repair/decommission解除同sequence key后继阻塞，但不得跳过非terminal predecessor；
+- CLI `surface-retry`/`surface-decommission`调用同一repository，不允许直接UPDATE。
 
 生产路径的 hard-cut 边界：
 
 - `MemoryGovernanceExecutor` 只有一条 UoW 执行路径，`memory_write_uow_factory` 是必填依赖；缺失或显式传 `None` 必须在构造期失败，不得推断 storage backend。
-- 生产 wiring 只能注入 PostgreSQL `MemoryWriteUnitOfWork`。PostgreSQL 是 governed canonical authority；Oxigraph、search 与 vector 都是 outbox 驱动的异步派生面，不进入同步 UoW。
+- 生产 wiring 只能注入 PostgreSQL `MemoryWriteUnitOfWork`。PostgreSQL 是 governed canonical authority；Oxigraph、search 与 vector 都由canonical mutation V2 surface delivery驱动，不进入同步external I/O。
 - 生产 `RuntimeSession` 必须显式注入 PostgreSQL event log、artifact store 与 tool-result artifact index；裸构造不得创建任何 InMemory 默认依赖。
 - `MemoryWriteUnitOfWork.archive` 是必填依赖，生产 wiring 必须传入 `PostgresArtifactStore`，不得以 InMemory archive 补缺。
-- 所有PostgreSQL memory/governance stores与UOW required接收同一verified connection provider；constructor、`__enter__`、write、outbox replay和maintenance path均不得执行DDL、`ensure_schema()`或接受raw DSN。
+- 所有PostgreSQL memory/governance stores与UOW required接收同一verified connection provider；constructor、`__enter__`、write、surface worker和maintenance path均不得执行DDL、`ensure_schema()`或接受raw DSN。
 - durable storage 配置必须提供非空 Oxigraph URL；durable wiring 总是构造真实 `OxigraphGraphStore`。空 URL 是配置错误，不表示允许静默关闭该 surface。
 - `InMemoryMemoryWriteUnitOfWork` 只服务显式的 deprecated compatibility/test wiring，不是 fallback，也不满足生产 durability、事务原子性或 async materialization 契约。测试 fake 只能验证 executor 决策逻辑；事务、rollback 与 outbox 一致性必须由 real PostgreSQL 测试证明。
 - `durable=False` / in-memory runtime 暂留作后向兼容，但属于 unsupported production path；后续功能不得新增对该路径的依赖。
@@ -384,12 +400,16 @@ governed canonical memory graph 的唯一写入口是：
 1. governance 是唯一 governed memory 写入口
 2. Postgres-intent-first
 3. 每条 governed memory 写都有原子的 decision / mutation provenance
-4. 不得以“未配置 UoW”为条件 fallback 到 InMemory 或 no-op outbox
+4. 不得以“未配置 UoW”为条件 fallback 到 InMemory 或 no-op surface delivery
 5. 生产 CLI 不得暴露 backend downgrade 开关；InMemory builder 只作为 deprecated 测试兼容 API 保留
 
 ### 8.4 Physical schema ownership
 
-Memory、candidate、governance、recall、vector、working-context与outbox tables/functions/indexes只由packaged PostgreSQL migration registry创建。受限runtime role只获得所需DML/USAGE/EXECUTE privileges。Schema未迁移、head不匹配、pgvector缺失或catalog drift必须在Host resource allocation前失败；UOW不得“顺便修复”schema。完整契约见 [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
+Memory、candidate、governance、recall、vector、working-context、projection job与surface
+delivery tables/functions/indexes只由packaged PostgreSQL migration registry创建。受限runtime
+role只获得所需DML/USAGE/EXECUTE privileges。Schema未迁移、head不匹配、pgvector缺失或
+catalog drift必须在Host resource allocation前失败；UOW不得“顺便修复”schema。完整契约见
+[POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)。
 
 ---
 
@@ -498,7 +518,7 @@ Memory、candidate、governance、recall、vector、working-context与outbox tab
 
 - `PostgresEventLog`
 - `PostgresArtifactStore`
-- governed canonical memory 的 Postgres mutation journal
+- governed canonical memory 的 immutable Postgres mutation V2
 - Oxigraph 作为 canonical RDF materialization
 
 ### 11.2 冻结的不变量
@@ -507,7 +527,7 @@ Memory、candidate、governance、recall、vector、working-context与outbox tab
 
 1. governed memory 只由 governance 写入
 2. Postgres-intent-first
-3. unified outbox 是唯一异步驱动
+3. canonical mutation V2 surface delivery是唯一异步驱动
 4. `memory_nodes` / `memory_relations` 是 committed canonical memory 的事务内同步面
 5. `memory_search_index` / `memory_vector_index` / Oxigraph 是异步面
 6. recall / relatedness / dedupe / lifecycle validation 这些 hot-path 不读 Oxigraph
@@ -520,7 +540,8 @@ Memory、candidate、governance、recall、vector、working-context与outbox tab
 
 下列状态是完全可接受的长期停点：
 
-- Postgres mutation journal 是 authoritative commit/provenance truth
+- Postgres canonical document/decision与immutable mutation V2是authoritative
+  commit/provenance truth
 - Postgres projection 继续服务 recall / relatedness / search
 - Oxigraph 只是 async semantic graph mirror
 - 非 hot-path consumer 从 Oxigraph 获益
@@ -538,7 +559,7 @@ Memory、candidate、governance、recall、vector、working-context与outbox tab
 - run timeline 不得反向写 event log
 - `memory_search` unavailable payload 不得带自由文本 fallback
 - 不得把 `memory_nodes` / `memory_relations` 改成 outbox 异步刷新
-- 不得为 Oxigraph / search / vector 各长一条 outbox
+- 不得为 Oxigraph / search / vector 各长一条私有队列
 - 不得先写 Oxigraph 再补 Postgres provenance
 - 不得因为 Oxigraph named-graph delete 失败而保留 Postgres truth；mirror delete 失败时必须留下可 replay 的 repair 事实
 - hot-path 不得直接读 Oxigraph，除非单独立项并通过性能 gate
@@ -573,14 +594,14 @@ semantic relatedness 落地后必须新增：
 下面这些不变量不应假装已经由 `tests/test_recall_v1.py` 全部守住：
 
 - Postgres-intent-first
-- unified outbox
+- canonical mutation V2 surface delivery
 - `memory_nodes` / `memory_relations` 同步面
 - hot-path 永不读 Oxigraph
 
 这些属于 substrate / migration 级不变量，应由：
 
-- canonical mutation journal tests
-- outbox replay / reconciliation tests
+- canonical mutation V2 settlement tests
+- surface delivery recovery / reconciliation tests
 - Oxigraph materialization parity tests
 - hot-path substrate tests
 

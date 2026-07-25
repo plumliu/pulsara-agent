@@ -391,3 +391,33 @@ provider-input owner处理。
 Human input、pending-interaction resume和confirmed runtime notification只能进入唯一`HostIngressCoordinator`。每个ingress由`QUEUED -> PREPARING -> COMMITTED -> ACTIVE/FINISHED` owner管理；queued取消撤回，preparing取消只detach。`RunStartEvent`必须嵌唯一`HostIngressAdmissionProofFact`，writer在同一linearization lock重验Host generation、permission、close/stop revision和notification heads；stale preparation只能typed replan，不能消费delivery ordinal。
 
 Terminal monitor observation FULL后才可进入Host selection。Human优先于runtime notification；同一wake chain的bounded attachments可合并成一次sampling并只消耗一个automatic ordinal，跨chain不得合并。Active run只可在前一tool/control FULL、无pending interaction/open tool pair、下一次Context/ProviderInput尚未冻结的`PRE_MODEL_STEP`借用notification。`ActiveRunMonitorSafePointCommitGuardFact`必须在ModelStart writer lock内重验segment、stop/close、permission、control disposition、ProviderInput generation/frontier与notification-head CAS，并原子提交ProviderInput append、delivery disposition、chain transition与ModelStart；NONE/UNKNOWN不能消费notification。
+
+---
+
+## 19. Derived projection ownership
+
+AgentRuntime在ToolResult/Reply/Run terminalization时只提交canonical AgentEvents。它不再：
+
+- 同步调用tool-result evidence persistence hook；
+- 写RunTimeline artifact/graph；
+- replay canonical mutation outbox；
+- 因projection failure改变run outcome或追加failure audit event。
+
+Timeline/evidence admission由HostCore-owned durable projection service从exact committed EventLog
+异步完成。Run finalization不等待projection backlog；publisher callback只唤醒service。
+
+ToolResultEnd必须携带terminal projection reference，供evidence handler exact join。
+AgentRuntime不得把process-local `ToolResultBlock`、current state或wall-clock identity直接传给
+projection writer。Projection lag只影响Inspector/working-context可见性，不改变tool result或
+RunEnd canonical semantics。
+
+Evidence source必须保留exact raw tool arguments，并以
+`valid_object | invalid_json | non_object_json`区分解析结果。Runtime已经合法接受并产生error
+ToolResult的malformed arguments不得被projection worker重分类为source authority corruption。
+Parser必须拒绝duplicate object keys与NaN/Infinity等non-finite number；合法object进入
+recursively immutable carrier，canonical fingerprint之后不得发生nested mutation。
+
+Working-context在RunEnd时只消费已经durable applied的timeline receipt。若异步job尚未完成，
+hook返回而不从EventLog重建；后续model compile通过session-owned bounded auxiliary operation
+执行一次latest-RunEnd sparse read，同一planned model-step复用attempt receipt，不得在baseline与
+async projection各做一次同步I/O。Timeline receipt可见后再lazy refresh。

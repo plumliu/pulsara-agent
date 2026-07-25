@@ -474,3 +474,30 @@ Notification account是ledger-derived唯一capacity authority：monitor lifecycl
 显式`terminal_process.kill`的ToolResult必须携带exact completion authority；即使`user_tool_kill`不产生model-deliverable notification，terminal ToolResult batch也必须原子写入`explicitly_observed` disposition并释放对应completion process-head reservation。不可交付不等于无需结算。
 
 PostgreSQL `runtime_projection_checkpoints`只保存notification/account与monitor reducer的bounded process projection。它不是第二authority：EventLog event先FULL，projection row可安全滞后；每个row必须绑定exact `through_sequence`处的canonical ledger prefix，并在持有session transaction lock时由EventLog核对continuity accumulator。Row还必须保存前一个已验证projection state/high-water；首次row的base sequence必须为0，且base payload必须逐字段等于该projection kind的canonical genesis。Notification genesis固定runtime identity、8/8容量、reducer contract、空reservation/head/chain集合；monitor genesis固定runtime identity、reducer contract和空current records。不得由caller自报另一套“空状态”。后续row的base必须与PostgreSQL前一row的完整through-sequence/schema/state精确相等。reopen从该base读取唯一bounded typed delta、重放reducer，并要求结果逐字段等于checkpoint state，随后才读取`through_sequence + 1`后的新delta。notification account/reservation/process head与monitor registration/pending/core必须分别强join，两个projection恢复后还必须交叉核对同一active monitor core。仅重算caller自报payload hash不得建立authority。Receipt/disposition所需`ToolResultEndEvent`按exact ID读取；正常reopen禁止`EventLog.iter()`、全历史monitor event或全历史ToolResult扫描。Checkpoint写失败必须使对应committed reducer进入reconciliation，不能假装row已推进。嵌套checkpoint read/write沿用当前event-write绝对deadline，不得为每个projection重新续期。
+
+---
+
+## 15. Durable projection admission
+
+Timeline与tool-result evidence的source只能是exact committed EventLog row。每个job必须保存
+typed source reference、stored envelope fingerprint与canonical ledger-prefix proof，并满足：
+
+```text
+job.source_horizon.through_sequence
+  == job.source_event_reference.sequence
+```
+
+Seeder scan high-water只进入kind-specific seed checkpoint，不进入job semantic。Jobs与resulting
+seed checkpoint在同一PostgreSQL transaction提交；duplicate source只exact-confirm，不能按target
+key吞掉distinct events。
+
+Timeline与evidence各有独立migration-owned activation/cutover/checkpoint。Source sequence不高于
+cutover时由pre-activation authority解释；高于cutover时只允许durable job owner。Publisher wake
+不是admission authority，丢失wake后periodic seeder仍必须继续。
+
+RuntimeSession/EventLog writer不等待derived projection。Projection failure不写新的AgentEvent，
+只更新durable job/receipt/head/conflict/diagnostic rows，避免recursive publication。
+
+Session bootstrap必须在同一transaction创建session row及每个kind所需的sequence-0
+active/pre-activation cutover。除唯一`RuntimeSessionOwnerBootstrapPort`与migration外，production
+Python不得直接`INSERT INTO sessions`。

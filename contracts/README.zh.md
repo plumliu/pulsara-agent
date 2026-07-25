@@ -65,15 +65,15 @@ _Created: 2026-07-04_
 - [GRAPH_JSONLD_STORAGE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/GRAPH_JSONLD_STORAGE_CONTRACT.zh.md)
   - 覆盖 JSON-LD entity、ontology registry、GraphStore named graph 语义、Postgres projection、Oxigraph materialization substrate。
 - [MEMORY_SURFACES_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MEMORY_SURFACES_CONTRACT.zh.md)
-  - 覆盖 governed canonical memory graph、runtime semantic graph、recall/reflection/run timeline、relatedness、Postgres substrate、outbox surface。
+  - 覆盖 governed canonical memory graph、runtime semantic graph、recall/reflection/run timeline、relatedness、Postgres substrate、durable surface delivery。
 - [GOVERNANCE_WRITE_OUTBOX_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/GOVERNANCE_WRITE_OUTBOX_CONTRACT.zh.md)
-  - 覆盖 memory governance executor、PostgreSQL UOW、relatedness destructive-action gate、mutation outbox、coordinator。
+  - 覆盖 memory governance executor、PostgreSQL UOW、relatedness destructive-action gate、canonical mutation V2、surface delivery与runtime event outbox。
 - [RETRIEVAL_RUNTIME_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RETRIEVAL_RUNTIME_CONTRACT.zh.md)
   - 覆盖 embedding/rerank/tokenizer provider protocols、HostCore-owned retrieval resources、workers、bounded shutdown。
 - [CONTEXT_COMPACTION_CONTINUITY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/CONTEXT_COMPACTION_CONTINUITY_CONTRACT.zh.md)
   - 覆盖 typed compaction events、summary artifact、rehydration、mid-turn inline compact、manual/preflight safe point。
 - [RUNTIME_SEMANTIC_GRAPH_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RUNTIME_SEMANTIC_GRAPH_CONTRACT.zh.md)
-  - 覆盖 run timeline persistence、execution evidence ledger、runtime semantic outbox lane、working_context 非记忆投影边界。
+  - 覆盖EventLog-driven durable projection jobs、incremental timeline、single-assignment evidence、immutable graph relation与working_context边界。
 - [EVAL_DOGFOOD_GATE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/EVAL_DOGFOOD_GATE_CONTRACT.zh.md)
   - 覆盖 deterministic recall/relatedness eval gate、real-LLM dogfood opt-in、发布前证据与禁止事项。
 

@@ -140,7 +140,9 @@ def _requirement(
     )
 
 
-def build_postgres_runtime_grant_policy(through_version: int) -> PostgresRuntimeGrantPolicyFact:
+def build_postgres_runtime_grant_policy(
+    through_version: int,
+) -> PostgresRuntimeGrantPolicyFact:
     manifest = build_postgres_schema_manifest(through_version)
     requirements: list[PostgresRuntimeGrantRequirementFact] = [
         _requirement(
@@ -149,13 +151,23 @@ def build_postgres_runtime_grant_policy(through_version: int) -> PostgresRuntime
         )
     ]
     for relation in manifest.owned_relations:
-        writable = bool(relation["runtime_writable"])
-        privileges = (
-            PostgresRelationPrivilege.SELECT.value,
-            PostgresRelationPrivilege.INSERT.value,
-            PostgresRelationPrivilege.UPDATE.value,
-            PostgresRelationPrivilege.DELETE.value,
-        ) if writable else (PostgresRelationPrivilege.SELECT.value,)
+        declared_privileges = relation.get("runtime_privileges")
+        if declared_privileges is None:
+            writable = bool(relation["runtime_writable"])
+            privileges = (
+                (
+                    PostgresRelationPrivilege.SELECT.value,
+                    PostgresRelationPrivilege.INSERT.value,
+                    PostgresRelationPrivilege.UPDATE.value,
+                    PostgresRelationPrivilege.DELETE.value,
+                )
+                if writable
+                else (PostgresRelationPrivilege.SELECT.value,)
+            )
+        else:
+            privileges = tuple(str(item) for item in declared_privileges)
+        if not privileges:
+            continue
         requirements.append(
             _requirement(
                 PostgresRelationGrantTargetFact(
@@ -168,6 +180,8 @@ def build_postgres_runtime_grant_policy(through_version: int) -> PostgresRuntime
             )
         )
     for function in manifest.required_functions:
+        if function.get("runtime_executable") is False:
+            continue
         requirements.append(
             _requirement(
                 PostgresFunctionGrantTargetFact(

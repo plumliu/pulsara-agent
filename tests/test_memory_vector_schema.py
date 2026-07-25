@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from tests.support.postgres import connect_postgres_test_database
+from tests.support.postgres import guarded_postgres_test_connection
 
 from pulsara_agent.settings import StorageConfig
 
@@ -11,7 +11,7 @@ def test_pgvector_schema_supports_hnsw_compound_key_and_cascade() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     graph_id = f"graph:test/vector-schema/{uuid4().hex}"
     memory_id = f"preference:{uuid4().hex}"
-    with connect_postgres_test_database(dsn, autocommit=True) as connection:
+    with guarded_postgres_test_connection(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """

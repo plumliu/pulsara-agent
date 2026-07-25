@@ -7,15 +7,20 @@ from uuid import uuid4
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
-from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.entities.runtime import Evidence
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
 from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.ontology import memory, runtime as rt
+from pulsara_agent.runtime.projection_jobs.contracts import (
+    CanonicalMutationSurface,
+)
+from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+    CanonicalMutationV2Writer,
+    build_surface_plan,
+)
 from pulsara_agent.settings import StorageConfig
 
 
@@ -91,9 +96,7 @@ def test_postgres_graph_store_projects_memory_nodes_and_runtime_source_relations
     assert query.fetch_nodes(["preference:test-concise"], graph_id=graph_id) == []
 
 
-def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unavailable() -> (
-    None
-):
+def test_durable_facade_delete_graph_commits_v2_projection_obligation() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
@@ -101,9 +104,9 @@ def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unav
     postgres = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
     facade = DurableGraphFacade(
         postgres=postgres,
-        oxigraph=OxigraphGraphStore("http://127.0.0.1:1"),
-        mutation_outbox=MutationOutboxWriter(
-            connection_provider=verified_postgres_provider(dsn)
+        mutation_writer=CanonicalMutationV2Writer(
+            connection_provider=verified_postgres_provider(dsn),
+            surface_plan=build_surface_plan((CanonicalMutationSurface.OXIGRAPH,)),
         ),
     )
 
@@ -133,19 +136,19 @@ def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unav
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                select payload, status, last_error
-                from memory_write_outbox
-                where graph_id = %s and mutation_lane = 'graph_reset'
-                order by created_at desc, outbox_id desc
+                select m.mutation_kind, d.status
+                from canonical_mutations_v2 as m
+                join canonical_mutation_surface_deliveries as d
+                  on d.mutation_id = m.mutation_id
+                where m.graph_id = %s and m.mutation_kind = 'graph_delete.v2'
+                order by m.mutation_sequence_number desc
                 limit 1
                 """,
                 (graph_id,),
             )
-            payload, status, last_error = cursor.fetchone()
-            assert payload["graph_reset"] is True
-            assert payload["surface_apply_status"]["oxigraph"] == "failed"
-            assert status == "failed"
-            assert isinstance(last_error, str) and last_error
+            mutation_kind, status = cursor.fetchone()
+            assert mutation_kind == "graph_delete.v2"
+            assert status == "pending"
 
 
 def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_tombstone() -> (
@@ -156,7 +159,7 @@ def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_
     graph_id = f"graph:test/{uuid4().hex}"
     now = utc_now()
     postgres = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
-    facade = DurableGraphFacade(postgres=postgres, oxigraph=None)
+    facade = DurableGraphFacade(postgres=postgres)
 
     facade.put_jsonld(
         Preference(
@@ -186,8 +189,8 @@ def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_
             cursor.execute(
                 """
                 select count(*)
-                from memory_write_outbox
-                where graph_id = %s and mutation_lane = 'graph_reset'
+                from canonical_mutations_v2
+                where graph_id = %s and mutation_kind = 'graph_reset.v2'
                 """,
                 (graph_id,),
             )

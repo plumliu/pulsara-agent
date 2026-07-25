@@ -399,3 +399,29 @@ cached input只作为operation observation展示，并同时显示generation/rev
 Inspector从session ledger exact重建每个monitor的registration、policy、双cursor、observation ordinal、progress limiter、lifecycle state、pending observation、termination和delivery disposition；同时展示notification account余额、process heads、reservation acquire/release与Host run ingress/admission proof。`pending_count`由heads重算，autonomous eligibility按当前selection policy展示为观察结果，不作为durable head字段。
 
 UI `x.pulsara/terminal_monitor_event`是bounded operational stream，不是authority。它提供stream reconnect cursor、retained replay和显式gap；slow/detached subscriber只能丢自己的窗口，不得阻塞journal、monitor writer或模型delivery。Inspector不得从UI stream补造durable observation，也不得在spool range缺失时显示伪造output delta。
+
+---
+
+## 18. Durable projection jobs
+
+Inspector/CLI从PostgreSQL durable rows投影：
+
+- kind activation、session cutover、seed checkpoint与source horizon；
+- bounded jobs及lease/retry/dead-letter状态；
+- applied/superseded result receipts；
+- target heads与single-assignment authority conflicts；
+- canonical mutation surface deliveries；
+- pre-activation coverage pages/receipts；
+- typed dead-letter repair actions。
+
+每个job必须显示exact source event sequence、source reference fingerprint、handler/seed contract、
+target policy与result receipt。Inspector不得调用handler重算result，也不得从current code补造
+historical contract。
+
+Pre-cutover只有durable receipt/outbox authority时才显示historical state；纯process-local
+preparation/owner状态统一显示`not_durably_observable`。CLI list/status必须有明确limit/cursor，
+不得返回无界job或surface history，输出不得包含DSN、credential或artifact body。
+
+Health diagnostics至少包括：checkpoint/cutover drift、lease过期、dead-letter、target conflict、
+missing receipt/artifact、surface predecessor gap、coverage不完整与migration preparation
+required。Inspector只观察，不自动repair或推进migration。

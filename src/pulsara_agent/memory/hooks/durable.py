@@ -10,22 +10,31 @@ by memory governance, not by this producer hook.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass, field
 from datetime import timedelta
+from time import monotonic
 
-from pulsara_agent.event import AgentEvent
+from pulsara_agent.event import AgentEvent, EventType, RunEndEvent
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
     CandidatePoolProposal,
     PooledMemoryCandidate,
 )
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.recall.projection import ProjectionBuilder
 from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
 from pulsara_agent.memory.canonical.query import MemoryQuery
-from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.recall.service import (
+    MemoryRecallService,
+    RecallQuery,
+    RecallStatus,
+    RecallTrigger,
+)
 from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
@@ -42,7 +51,6 @@ from pulsara_agent.message import Msg, TextBlock, ToolResultBlock
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState, LoopStatus
-from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
     CandidateQuotedEvidenceLocatorFact,
@@ -55,6 +63,8 @@ class DurableMemoryHooks(NoopMemoryHooks):
     sink: MemoryProposalSink
     _: KW_ONLY
     event_store: EventLog | None = None
+    timeline_graph: object | None = None
+    timeline_archive: ArtifactStore | None = None
     recall: MemoryRecallService | None = None
     memory_query: MemoryQuery | None = None
     projector: ProjectionBuilder = field(default_factory=ProjectionBuilder)
@@ -64,17 +74,24 @@ class DurableMemoryHooks(NoopMemoryHooks):
     working_context_store: PostgresWorkingContextStore | None = None
     working_context_domain: MemoryDomainContext | None = None
     working_context_ttl: timedelta | None = timedelta(days=14)
+    working_context_async_operation_port: (
+        Callable[[str, Callable[[], object], float], Awaitable[object]] | None
+    ) = None
+    working_context_refresh_timeout_seconds: float = 2.0
 
     @property
     def memory_proposal_sink(self) -> MemoryProposalSink | None:
         return self.sink
 
-    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict | None:
+    def baseline_projection(
+        self, state: LoopState, *, token_budget: int
+    ) -> dict | None:
         # Recent working context remains operational state.  It is deliberately
         # not projected into provider input until it has its own typed authority.
         return None
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
+        await self._refresh_working_context_once(state)
         if self.recall is None:
             return None
         latest_user_text = _latest_user_quote(state)
@@ -97,14 +114,22 @@ class DurableMemoryHooks(NoopMemoryHooks):
         )
         result = await self.recall.recall(query, graph_id=self.graph_id)
         if result.status is not RecallStatus.OK or not result.items:
-            state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": None}
+            state.scratchpad[cache_key] = {
+                "query_text": latest_user_text,
+                "projection": None,
+            }
             return None
         self.projection_ledger.record(state, result.items)
         recalled = self.projector.build(result, token_budget=token_budget)
-        state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": recalled}
+        state.scratchpad[cache_key] = {
+            "query_text": latest_user_text,
+            "projection": recalled,
+        }
         return recalled
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
+    async def after_model_reply(
+        self, state: LoopState, assistant: Msg
+    ) -> list[AgentEvent]:
         self._drain_to_pool(state)
         return []
 
@@ -124,7 +149,9 @@ class DurableMemoryHooks(NoopMemoryHooks):
         proposals = self.sink.drain_valid()
         return self._append_to_pool(state, proposals)
 
-    def _finalize_invalid_to_pool(self, state: LoopState) -> list[PooledMemoryCandidate]:
+    def _finalize_invalid_to_pool(
+        self, state: LoopState
+    ) -> list[PooledMemoryCandidate]:
         proposals = self.sink.finalize_invalid_attempts()
         return self._append_to_pool(state, proposals)
 
@@ -169,7 +196,9 @@ class DurableMemoryHooks(NoopMemoryHooks):
             pooled.append(self.candidate_pool.append_candidate(candidate))
         return pooled
 
-    def _is_projection_echo(self, proposal: CandidatePoolProposal, state: LoopState) -> bool:
+    def _is_projection_echo(
+        self, proposal: CandidatePoolProposal, state: LoopState
+    ) -> bool:
         payload = proposal.payload
         if not isinstance(payload, ValidCandidatePayload):
             return False
@@ -199,35 +228,127 @@ class DurableMemoryHooks(NoopMemoryHooks):
         return working_context_projection(summary, token_budget=token_budget)
 
     def _update_working_context(self, state: LoopState) -> WorkingContextSummary | None:
+        return self._update_working_context_for_run(
+            runtime_session_id=state.session_id,
+            run_id=state.run_id,
+        )
+
+    async def _refresh_working_context_once(
+        self,
+        state: LoopState,
+    ) -> WorkingContextSummary | None:
+        model_step_key = state.scratchpad.get(
+            "working_context_refresh_model_step_key"
+        )
+        if not isinstance(model_step_key, str) or not model_step_key:
+            model_step_key = (
+                f"{state.run_id}:"
+                f"{state.scratchpad.get('model_call_index', 0)}"
+            )
+        receipt_key = "working_context_refresh_attempted_model_step_key"
+        if state.scratchpad.get(receipt_key) == model_step_key:
+            return None
+        state.scratchpad[receipt_key] = model_step_key
+        def operation() -> WorkingContextSummary | None:
+            return self._refresh_working_context_from_durable_timeline(
+                runtime_session_id=state.session_id,
+                current_run_id=state.run_id,
+            )
+        port = self.working_context_async_operation_port
+        if port is None:
+            return operation()
+        result = await port(
+            "working-context-lazy-refresh",
+            operation,
+            monotonic() + self.working_context_refresh_timeout_seconds,
+        )
+        return result if isinstance(result, WorkingContextSummary) else None
+
+    def _refresh_working_context_from_durable_timeline(
+        self,
+        *,
+        runtime_session_id: str,
+        current_run_id: str,
+    ) -> WorkingContextSummary | None:
+        if (
+            self.event_store is None
+            or self.working_context_store is None
+            or self.working_context_domain is None
+        ):
+            return None
+        existing = self.working_context_store.get_latest(
+            memory_domain_id=self.working_context_domain.memory_domain_id
+        )
+        terminal_events = self.event_store.read_raw_events_by_type(
+            str(EventType.RUN_END),
+            limit=8,
+        )
+        for raw in terminal_events:
+            decoded = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            if not isinstance(decoded, RunEndEvent):
+                raise ValueError("RunEnd sparse read decoded another event type")
+            if decoded.run_id == current_run_id:
+                continue
+            if (
+                existing is not None
+                and decoded.run_id == existing.source_run_id
+            ):
+                return None
+            refreshed = self._update_working_context_for_run(
+                runtime_session_id=runtime_session_id,
+                run_id=decoded.run_id,
+            )
+            if refreshed is not None:
+                return refreshed
+            # The latest terminal run owns freshness. If its async timeline is
+            # not ready yet, retry this bounded read at the next model compile.
+            return None
+        return None
+
+    def _update_working_context_for_run(
+        self,
+        *,
+        runtime_session_id: str,
+        run_id: str,
+    ) -> WorkingContextSummary | None:
         if (
             self.working_context_store is None
             or self.working_context_domain is None
-            or self.event_store is None
+            or self.timeline_graph is None
+            or self.timeline_archive is None
         ):
             return None
         try:
-            timeline = build_run_timeline(
-                self.event_store.iter(run_id=state.run_id),
-                runtime_session_id=state.session_id,
-                run_id=state.run_id,
+            from pulsara_agent.memory.foundation.run_timeline_query import (
+                summarize_persisted_run_timeline,
             )
-        except ValueError:
+
+            summary = summarize_persisted_run_timeline(
+                graph=self.timeline_graph,
+                archive=self.timeline_archive,
+                run_id=run_id,
+                runtime_session_id=runtime_session_id,
+                graph_id=self.graph_id,
+                max_tail_items=256,
+            )
+        except (KeyError, ValueError):
+            # Projection jobs are asynchronous. A missing head is not authority
+            # to reconstruct the timeline from the EventLog in this hook.
             return None
-        from pulsara_agent.memory.foundation.run_timeline_query import summarize_run_timeline
 
         existing = self.working_context_store.get_latest(
             memory_domain_id=self.working_context_domain.memory_domain_id
         )
         update = propose_working_context_update(
-            summarize_run_timeline(timeline),
+            summary,
             existing_summary=existing,
         )
         if not update.should_update:
             return None
         return self.working_context_store.upsert(
             domain=self.working_context_domain,
-            source_session_id=state.session_id,
-            source_run_id=state.run_id,
+            source_session_id=runtime_session_id,
+            source_run_id=run_id,
             summary=update.summary,
             metadata=update.metadata | {"update_reason": update.reason},
             ttl=self.working_context_ttl,
@@ -243,7 +364,9 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
     tool_calls_since_last_reflection: int = 0
     token_delta_since_last_reflection: int = 0
     last_reflection_run_id: str | None = None
-    _cheap_hints_by_run: dict[str, list[MemoryReflectionHint]] = field(default_factory=dict)
+    _cheap_hints_by_run: dict[str, list[MemoryReflectionHint]] = field(
+        default_factory=dict
+    )
     _last_token_total_by_run: dict[str, int] = field(default_factory=dict)
     _memory_attempts_by_run: set[str] = field(default_factory=set)
 
@@ -254,7 +377,9 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
             self._cheap_hints_by_run.setdefault(state.run_id, []).extend(hints)
         return None
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
+    async def after_model_reply(
+        self, state: LoopState, assistant: Msg
+    ) -> list[AgentEvent]:
         self._update_token_delta(state)
         self._remember_attempts(state, self._drain_to_pool(state))
         return []
@@ -315,7 +440,11 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
     ) -> list[str]:
         reasons: list[str] = []
         has_memory_attempt = state.run_id in self._memory_attempts_by_run
-        if safe_point == "on_session_end" and self._cheap_hints_by_run.get(state.run_id) and not has_memory_attempt:
+        if (
+            safe_point == "on_session_end"
+            and self._cheap_hints_by_run.get(state.run_id)
+            and not has_memory_attempt
+        ):
             reasons.append("cheap_memory_hint")
         if self.last_reflection_run_id == state.run_id:
             return []
@@ -334,8 +463,13 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
         self.tool_calls_since_last_reflection = 0
         self.token_delta_since_last_reflection = 0
 
-    def _remember_attempts(self, state: LoopState, candidates: list[PooledMemoryCandidate]) -> None:
-        if any(candidate.origin is CandidateOrigin.MAIN_AGENT_TOOL for candidate in candidates):
+    def _remember_attempts(
+        self, state: LoopState, candidates: list[PooledMemoryCandidate]
+    ) -> None:
+        if any(
+            candidate.origin is CandidateOrigin.MAIN_AGENT_TOOL
+            for candidate in candidates
+        ):
             self._memory_attempts_by_run.add(state.run_id)
 
 
@@ -362,7 +496,9 @@ def _latest_user_quote_with_locator(
     for message in reversed(state.messages):
         if message.role != "user":
             continue
-        text = "\n".join(block.text for block in message.content if isinstance(block, TextBlock)).strip()
+        text = "\n".join(
+            block.text for block in message.content if isinstance(block, TextBlock)
+        ).strip()
         if not text:
             continue
         if len(text) <= max_chars:
@@ -418,14 +554,19 @@ def _merge_projections(first: dict | None, second: dict | None) -> dict | None:
         ],
         "conflict_groups": _merge_conflict_groups(first, second),
         "do_not_write_back": True,
-        "projection_kind": projection_kinds[0] if len(projection_kinds) == 1 else "mixed",
+        "projection_kind": projection_kinds[0]
+        if len(projection_kinds) == 1
+        else "mixed",
         "projection_kinds": projection_kinds,
     }
 
 
 def _projection_kinds(first: dict, second: dict) -> list[str]:
     kinds: list[str] = []
-    for projection, fallback in ((first, "working_context"), (second, "recalled_memory")):
+    for projection, fallback in (
+        (first, "working_context"),
+        (second, "recalled_memory"),
+    ):
         kind = projection.get("projection_kind") or fallback
         if isinstance(kind, str) and kind not in kinds:
             kinds.append(kind)
@@ -440,7 +581,9 @@ def _merge_conflict_groups(first: dict, second: dict) -> list[dict]:
             if not isinstance(group, dict):
                 continue
             kind = str(group.get("kind") or "")
-            memory_ids = tuple(sorted(str(memory_id) for memory_id in group.get("memory_ids") or []))
+            memory_ids = tuple(
+                sorted(str(memory_id) for memory_id in group.get("memory_ids") or [])
+            )
             key = (kind, memory_ids)
             if not kind or not memory_ids or key in seen:
                 continue

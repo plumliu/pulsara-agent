@@ -100,8 +100,10 @@ sequence、调用 `publish_stored_events()` 或把 listener 当第二个 publish
 
 registered committed reducer failure 不是 observer failure：event仍已 commit，但 session进入 `reconciliation_required`，后续 mutation fail closed；safe point必须从完整 EventLog rebuild，成功后才能恢复写入。
 
-Typed failure audit只证明 durable failure fact，不等于 durable hook/projection retry job。
-Publisher仍是 in-process bus；cross-process durable hook/outbox属于独立开放债务。
+Typed failure audit只证明 durable failure fact，不等于 durable projection settlement。
+Timeline、tool-result evidence 与 canonical mutation surface delivery 已由 PostgreSQL
+durable projection jobs拥有；publisher对这些projection只发送O(1)、可合并的wake signal，
+不再执行projection、不保存retry owner，也不决定job completion。
 
 `publish_stored_event(event, state=...)` 契约：
 
@@ -225,7 +227,7 @@ mailbox：
 
 ---
 
-## 7. MemoryHooks 与 ToolResultPersistenceHook
+## 7. MemoryHooks 与 durable projection boundary
 
 `MemoryHooks` 是 `AgentRuntime` 主循环显式调用的 integration interface，不由 `RuntimeHookManager` 自动调用。
 
@@ -243,17 +245,46 @@ mailbox：
 
 `NoopMemoryHooks` 是无副作用默认实现。
 
-`ToolResultPersistenceHook.after_tool_results(state, results)` 是专门的 tool-result persistence seam，用于 execution evidence ledger 等 runtime semantic projection。
-
 边界：
 
 - Memory hooks 的失败语义由 `AgentRuntime` 契约控制，不由 publisher/hook manager 吞掉。
 - Runtime observer hook failure 是 non-fatal diagnostic；MemoryHooks failure 可以导致 run failed。
 - 不得把这两类 hook 混为一条错误策略。
+- `AgentRuntime` 不同步调用 timeline/evidence persistence hook。
+- `ToolResultEndEvent` 与 terminal projection FULL 后，durable seeder按exact event reference创建
+  evidence job；run outcome不等待该job。
+- `ReplyEndEvent`/`RunEndEvent`等timeline trigger同样只由durable seeder解释。
+- 旧 `ToolResultPersistenceHook`、`RunTimelinePersistenceHook` 与
+  `ExecutionEvidencePersistenceHook` 已物理删除，禁止重新注册兼容入口。
 
 ---
 
-## 8. Tool-loop helper events
+## 8. Durable projection wake subscriber
+
+`DurableProjectionService.on_published_event()` 是publisher上的唯一projection subscriber。
+它只允许：
+
+1. 接收已提交event notification；
+2. 从closed trigger registry按event type取得bounded projection-kind集合；
+3. 向bounded process-local dirty-authority queue追加
+   `(runtime_session_id, projection_kind)` latency hint；
+4. `set()` process-local wake event；
+5. 立即返回。
+
+它禁止读取EventLog、PostgreSQL job table、ArtifactStore、Oxigraph或embedding provider。
+Wake丢失不影响correctness：periodic seeder从durable cutover/checkpoint继续扫描exact
+EventLog source。Seeder为每个trigger冻结
+`source_horizon.through_sequence == source_event_reference.sequence`，并在同一transaction写job
+与seed checkpoint。Dirty hint只影响延迟，不进入job/seed semantic；满256个authority page时
+seeder必须立即yield后继续keyset page，只在完整wrap结束后进入idle。
+
+Projection failure只更新durable job/receipt/head/diagnostic rows，不向同一AgentEvent ledger写
+递归failure event。UI hook diagnostics仍可best-effort记录，但不能冒充durable projection
+result。
+
+---
+
+## 9. Tool-loop helper events
 
 `build_tool_result_error_events(context, tool_call_id, tool_call_name, message, state=ERROR)` 必须生成标准三段 tool result event：
 
@@ -274,7 +305,7 @@ mailbox：
 
 ---
 
-## 9. 禁止事项
+## 10. 禁止事项
 
 - 不允许 subscriber 直接写 canonical event log 表达新的 runtime truth，除非该 subscriber本身通过受控 `RuntimeSession.write_event(s)` 路径。
 - 不允许 publisher 按 arrival order 发布跨线程 events。
@@ -290,7 +321,7 @@ mailbox：
 
 ---
 
-## 10. 测试守卫
+## 11. 测试守卫
 
 最低测试门槛：
 
@@ -315,10 +346,13 @@ mailbox：
 - block ids across replies 隔离。
 - `RUN_ERROR` / `REPLY_END` 清理未完成 block。
 - `build_tool_result_error_events()` 产出标准 tool result event shape。
+- projection subscriber callback只调用process-local wake primitive。
+- publisher wake丢失后periodic seeder仍能admit并完成job。
+- projection handler/settlement failure不产生新的AgentEvent。
 
 ---
 
-## 11. Model stream 与 control disposition 提交分相
+## 12. Model stream 与 control disposition 提交分相
 
 model stream commit port 分为 ledger commit/confirm、同步 reducer fold、锁外 ordered publication。control linearization lock 内只允许 guard
 校验、durable confirm、fold 与 permit CAS；禁止 inline 等待 publisher 或 observer callback。ordered publisher 只向 bounded mailbox 入队，

@@ -19,6 +19,12 @@ from pulsara_agent.storage.postgres_connection_provider import (
 )
 
 
+def _bounded_limit(limit: int) -> int:
+    if not 1 <= limit <= 256:
+        raise ValueError("inspector page limit must be between 1 and 256")
+    return limit
+
+
 @dataclass(slots=True)
 class PostgresInspectorStore:
     """Small read-only query facade over Pulsara's durable Postgres tables."""
@@ -176,7 +182,9 @@ class PostgresInspectorStore:
             (session_id,),
         )
 
-    def memory_candidates_for_compaction(self, compaction_id: str) -> list[dict[str, Any]]:
+    def memory_candidates_for_compaction(
+        self, compaction_id: str
+    ) -> list[dict[str, Any]]:
         return self._fetchall(
             """
             select *
@@ -287,40 +295,305 @@ class PostgresInspectorStore:
             (session_id, limit),
         )
 
-    def outbox_for_run(self, run_id: str) -> list[dict[str, Any]]:
+    def durable_projection_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        after_job_id: str | None = None,
+        limit: int = 128,
+        terminal_only: bool = False,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        where: list[str] = []
+        params: list[object] = []
+        if session_id is not None:
+            where.append("runtime_session_id = %s")
+            params.append(session_id)
+        if run_id is not None:
+            where.append("run_id = %s")
+            params.append(run_id)
+        if after_job_id is not None:
+            where.append("job_id > %s")
+            params.append(after_job_id)
+        if terminal_only:
+            where.append("status IN ('succeeded', 'superseded', 'dead_letter')")
+        if statuses is not None:
+            if not statuses:
+                return []
+            where.append("status = any(%s)")
+            params.append(list(statuses))
+        predicate = " AND ".join(where) if where else "TRUE"
+        params.append(resolved_limit + 1)
         return self._fetchall(
-            """
-            select distinct outbox.*
-            from memory_write_outbox as outbox
-            left join memory_candidates as direct_candidate
-                on direct_candidate.entry_id = outbox.target_entry_key
-            left join memory_governance_decisions as decision
-                on decision.governance_batch_id = outbox.governance_batch_id
-               and decision.decision_id = outbox.decision_id
-            left join lateral (
-                select decision.decision->>'target_entry_id' as entry_id
-                where decision.decision ? 'target_entry_id'
-                union all
-                select jsonb_array_elements_text(decision.decision->'target_entry_ids') as entry_id
-                where decision.decision ? 'target_entry_ids'
-            ) as decision_target on true
-            left join memory_candidates as decision_candidate
-                on decision_candidate.entry_id = decision_target.entry_id
-            where outbox.payload->>'source_run_id' = %s
-               or direct_candidate.source_run_id = %s
-               or decision_candidate.source_run_id = %s
-            order by created_at asc
+            f"""
+            select job_id, projection_kind, target_key, runtime_session_id,
+                   run_id, source_event_id, source_sequence, source_event_type,
+                   source_reference, trigger_horizon, handler_contract,
+                   handler_contract_fingerprint, activation_fingerprint,
+                   seed_contract_fingerprint, delivery_policy,
+                   delivery_policy_fingerprint,
+                   canonical_mutation_surface_plan,
+                   canonical_mutation_surface_plan_fingerprint,
+                   job_semantic_fingerprint, job_candidate_fingerprint,
+                   status, state_revision, repair_generation, attempt_count,
+                   lease_generation, lease_owner_id, lease_expires_at,
+                   next_attempt_at, last_failure, result_receipt_reference,
+                   state_fingerprint, created_at, updated_at
+            from durable_projection_jobs
+            where {predicate}
+            order by job_id
+            limit %s
             """,
-            (run_id, run_id, run_id),
+            tuple(params),
         )
 
-    def outbox_status_counts(self) -> list[dict[str, Any]]:
+    def durable_projection_receipts_for_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        where = ["job.result_receipt_reference IS NOT NULL"]
+        params: list[object] = []
+        if session_id is not None:
+            where.append("job.runtime_session_id = %s")
+            params.append(session_id)
+        if run_id is not None:
+            where.append("job.run_id = %s")
+            params.append(run_id)
+        params.append(resolved_limit + 1)
+        return self._fetchall(
+            f"""
+            select distinct receipt.receipt_id, receipt.receipt_kind,
+                   receipt.projection_kind, receipt.target_key,
+                   receipt.candidate_source_sequence,
+                   receipt.effective_source_sequence,
+                   receipt.result_semantic_fingerprint,
+                   receipt.receipt_payload, receipt.receipt_fingerprint,
+                   receipt.created_at
+            from durable_projection_jobs as job
+            join durable_projection_result_receipts as receipt
+              on receipt.receipt_id =
+                 job.result_receipt_reference->>'receipt_id'
+            where {" AND ".join(where)}
+            order by receipt.receipt_id
+            limit %s
+            """,
+            tuple(params),
+        )
+
+    def durable_projection_target_heads(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        where: list[str] = []
+        params: list[object] = []
+        if session_id is not None:
+            where.append("job.runtime_session_id = %s")
+            params.append(session_id)
+        if run_id is not None:
+            where.append("job.run_id = %s")
+            params.append(run_id)
+        predicate = " AND ".join(where) if where else "TRUE"
+        params.append(resolved_limit + 1)
+        return self._fetchall(
+            f"""
+            select distinct head.projection_kind, head.target_key,
+                   head.source_sequence, head.head_payload,
+                   head.head_fingerprint, head.updated_at
+            from durable_projection_target_heads as head
+            join durable_projection_jobs as job
+              on job.projection_kind = head.projection_kind
+             and job.target_key = head.target_key
+            where {predicate}
+            order by head.projection_kind, head.target_key
+            limit %s
+            """,
+            tuple(params),
+        )
+
+    def durable_projection_conflicts(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        where: list[str] = []
+        params: list[object] = []
+        if session_id is not None:
+            where.append("job.runtime_session_id = %s")
+            params.append(session_id)
+        if run_id is not None:
+            where.append("job.run_id = %s")
+            params.append(run_id)
+        predicate = " AND ".join(where) if where else "TRUE"
+        params.append(resolved_limit + 1)
+        return self._fetchall(
+            f"""
+            select distinct conflict.conflict_id, conflict.projection_kind,
+                   conflict.target_key, conflict.candidate_source_sequence,
+                   conflict.existing_target_head_fingerprint,
+                   conflict.conflict_payload, conflict.conflict_fingerprint,
+                   conflict.created_at
+            from durable_projection_target_authority_conflicts as conflict
+            join durable_projection_jobs as job
+              on job.projection_kind = conflict.projection_kind
+             and job.target_key = conflict.target_key
+            where {predicate}
+            order by conflict.conflict_id
+            limit %s
+            """,
+            tuple(params),
+        )
+
+    def durable_projection_cutovers(
+        self,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
         return self._fetchall(
             """
-            select status, mutation_lane, count(*) as count, max(created_at) as latest_created_at
-            from memory_write_outbox
-            group by status, mutation_lane
-            order by status, mutation_lane
+            select 'active' as cutover_state, projection_kind,
+                   cutover_payload, cutover_fingerprint,
+                   cutover_through_sequence
+            from durable_projection_session_cutovers
+            where runtime_session_id = %s
+            union all
+            select 'pre_activation' as cutover_state, projection_kind,
+                   cutover_payload, cutover_fingerprint,
+                   0 as cutover_through_sequence
+            from durable_projection_pre_activation_session_cutovers
+            where runtime_session_id = %s
+            order by projection_kind, cutover_state
+            """,
+            (session_id, session_id),
+        )
+
+    def durable_projection_coverage_receipts(
+        self,
+        session_id: str,
+        *,
+        limit: int = 32,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = min(_bounded_limit(limit), 64)
+        return self._fetchall(
+            """
+            select coverage_receipt_id, projection_kind,
+                   frozen_through_sequence, receipt_payload,
+                   receipt_fingerprint, created_at
+            from durable_projection_pre_activation_coverage_receipts
+            where runtime_session_id = %s
+            order by projection_kind, coverage_receipt_id
+            limit %s
+            """,
+            (session_id, resolved_limit + 1),
+        )
+
+    def durable_projection_repair_actions(
+        self,
+        *,
+        job_ids: tuple[str, ...],
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        if not job_ids:
+            return []
+        resolved_limit = _bounded_limit(limit)
+        return self._fetchall(
+            """
+            select repair_action_id, owner_kind, owner_id,
+                   repair_generation, action_payload, action_fingerprint,
+                   created_at
+            from durable_projection_repair_actions
+            where owner_kind = 'projection_job'
+              and owner_id = any(%s)
+            order by owner_id, repair_generation, repair_action_id
+            limit %s
+            """,
+            (list(job_ids[:resolved_limit]), resolved_limit + 1),
+        )
+
+    def durable_surface_deliveries(
+        self,
+        *,
+        mutation_ids: tuple[str, ...] | None = None,
+        after_key: tuple[str, str] | None = None,
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        where_parts: list[str] = []
+        params: list[object] = []
+        if mutation_ids is not None:
+            if not mutation_ids:
+                return []
+            where_parts.append("delivery.mutation_id = any(%s)")
+            params.append(list(mutation_ids[:256]))
+        if after_key is not None:
+            where_parts.append("(delivery.mutation_id, delivery.surface) > (%s, %s)")
+            params.extend(after_key)
+        where = " AND ".join(where_parts) if where_parts else "TRUE"
+        params.append(resolved_limit + 1)
+        return self._fetchall(
+            f"""
+            select delivery.mutation_id, delivery.surface,
+                   delivery.sequence_key, delivery.surface_sequence_number,
+                   delivery.delivery_identity,
+                   delivery.delivery_identity_fingerprint,
+                   delivery.delivery_policy, delivery.status,
+                   delivery.state_revision, delivery.repair_generation,
+                   delivery.attempt_count, delivery.lease_generation,
+                   delivery.lease_owner_id, delivery.lease_expires_at,
+                   delivery.next_attempt_at, delivery.terminal_receipt,
+                   delivery.last_failure, delivery.state_fingerprint,
+                   delivery.created_at, delivery.updated_at,
+                   mutation.mutation_kind, mutation.graph_id,
+                   mutation.mutation_sequence_number,
+                   mutation.mutation_semantic_fingerprint,
+                   mutation.mutation_fact_fingerprint
+            from canonical_mutation_surface_deliveries as delivery
+            join canonical_mutations_v2 as mutation
+              on mutation.mutation_id = delivery.mutation_id
+            where {where}
+            order by delivery.mutation_id, delivery.surface
+            limit %s
+            """,
+            tuple(params),
+        )
+
+    def durable_projection_status_counts(self) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select 'projection_job' as owner_kind, projection_kind as lane,
+                   status, count(*) as count, max(updated_at) as latest_updated_at
+            from durable_projection_jobs
+            group by projection_kind, status
+            union all
+            select 'canonical_surface' as owner_kind, surface as lane,
+                   status, count(*) as count, max(updated_at) as latest_updated_at
+            from canonical_mutation_surface_deliveries
+            group by surface, status
+            order by owner_kind, lane, status
+            """
+        )
+
+    def runtime_write_admission_epoch(self) -> dict[str, Any] | None:
+        return self._fetchone(
+            """
+            select epoch_number, mode, authorized_runtime_role,
+                   active_migration_registry_prefix_fingerprint,
+                   protected_relation_registry_fingerprint,
+                   maintenance_operation_id, target_migration_version,
+                   state_revision, epoch_payload, epoch_fingerprint, updated_at
+            from runtime_write_admission_epochs
+            where singleton
             """
         )
 
@@ -366,7 +639,9 @@ class PostgresInspectorStore:
             (memory_id,),
         )
 
-    def memory_search_index(self, graph_id: str, memory_id: str) -> dict[str, Any] | None:
+    def memory_search_index(
+        self, graph_id: str, memory_id: str
+    ) -> dict[str, Any] | None:
         return self._fetchone(
             """
             select graph_id, memory_id, memory_type, scope, status, aliases, updated_at
@@ -376,7 +651,9 @@ class PostgresInspectorStore:
             (graph_id, memory_id),
         )
 
-    def memory_vector_index(self, graph_id: str, memory_id: str) -> list[dict[str, Any]]:
+    def memory_vector_index(
+        self, graph_id: str, memory_id: str
+    ) -> list[dict[str, Any]]:
         return self._fetchall(
             """
             select graph_id, memory_id, embedding_fingerprint, updated_at, embedded_text_hash
@@ -415,7 +692,9 @@ class PostgresInspectorStore:
         )
         return [str(row["graph_id"]) for row in rows]
 
-    def recall_usages_for_memory(self, graph_id: str, memory_id: str) -> list[dict[str, Any]]:
+    def recall_usages_for_memory(
+        self, graph_id: str, memory_id: str
+    ) -> list[dict[str, Any]]:
         return self._fetchall(
             """
             select usage.*, trace.session_id, trace.run_id, trace.query, trace.trigger_kind, trace.created_at
@@ -486,7 +765,9 @@ class PostgresInspectorStore:
         )
         return [row["id"] for row in rows]
 
-    def _fetchone(self, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    def _fetchone(
+        self, query: str, params: tuple[Any, ...] = ()
+    ) -> dict[str, Any] | None:
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -496,7 +777,9 @@ class PostgresInspectorStore:
                 cursor.execute(query, params)
                 return cursor.fetchone()
 
-    def _fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    def _fetchall(
+        self, query: str, params: tuple[Any, ...] = ()
+    ) -> list[dict[str, Any]]:
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,

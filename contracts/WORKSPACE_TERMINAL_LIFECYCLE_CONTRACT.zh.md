@@ -207,7 +207,7 @@ OPEN -> CLOSING -> CLOSED
 2. snapshot sessions / workspaces；
 3. 有界关闭所有 HostSession，让 run finally 与 governance notify 完成；
 4. 关闭剩余 workspace supervisor；
-5. drain/cancel governance / vector worker，再关闭 retrieval provider；
+5. drain/cancel governance与durable projection service，再关闭retrieval provider；
 6. 标记 `CLOSED`。
 
 并发 shutdown 调用必须等待同一关闭序列；即使某个 provider / supervisor 的 `aclose` 失败，完成信号也必须在 `finally` 语义下发布。

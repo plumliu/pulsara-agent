@@ -15,11 +15,12 @@ _Created: 2026-07-04_
 - [src/pulsara_agent/graph/jsonld_codec.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/graph/jsonld_codec.py)
 - [src/pulsara_agent/storage/migrations/](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/migrations)
 - [src/pulsara_agent/storage/postgres_memory_projection.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/postgres_memory_projection.py)
+- [src/pulsara_agent/runtime/projection_jobs/graph_relation.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/projection_jobs/graph_relation.py)
 - [tests/test_ontology_registry.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_ontology_registry.py)
-- [tests/test_execution_evidence_ledger.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_execution_evidence_ledger.py)
+- [tests/test_graph_relation_lowering.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_graph_relation_lowering.py)
 - [tests/test_durable_memory.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_durable_memory.py)
 - [tests/test_memory_schema.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_memory_schema.py)
-- [tests/test_oxigraph_materializer.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_oxigraph_materializer.py)
+- [tests/test_durable_projection_postgres.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_durable_projection_postgres.py)
 
 ---
 
@@ -126,6 +127,12 @@ PostgresGraphStore 与 OxigraphGraphStore 的 JSON-LD round-trip 不要求 byte-
 - `update(sparql)`
 - `delete_graph(graph_id)`
 
+Production `PostgresGraphStore`额外提供relation-aware读取：
+
+- `get_jsonld_read_view(node_id, graph_id=None)`；
+- immutable relation repository的paged `read_page(...)`；
+- compatibility `get_jsonld()`只读合成base document与relation rows。
+
 Named graph 隔离是硬契约：
 
 - default graph lookup 不扫描 named graphs；
@@ -158,6 +165,15 @@ Projection refresh 规则：
 - 每次 document refresh 先删除该 source 的旧 relation rows，再插入新 relation rows；
 - `set_status(...)` 必须更新 JSON-LD payload 与 `memory_nodes` projection。
 
+`rt:produced`与`rt:provides`是immutable relation registry拥有的predicates。Ordinary
+`put_jsonld()`携带这些字段必须拒绝。Edge只能通过typed relation fact写
+`graph_relation_facts`；relation row与base document在读取时合成，不得读取Turn/Artifact
+document后整体覆盖。
+
+Tool-result evidence settlement是Turn/Artifact base-document的production owner：同一UOW先按
+deterministic node identity执行put-if-absent-or-confirm-identical，再写immutable relation row。
+测试不得通过预建Turn/Artifact node掩盖缺失producer；同ID异base content必须fail closed。
+
 `PostgresGraphStore.query/update` 不提供 raw SPARQL；typed reads 走 `MemoryQuery` / recall read models。
 
 ---
@@ -171,7 +187,9 @@ Memory substrate 的 PostgreSQL physical schema只由versioned migration registr
 - `graph_documents`
 - `memory_nodes`
 - `memory_relations`
-- `memory_write_outbox`
+- `graph_relation_facts`
+- `canonical_mutations_v2`
+- `canonical_mutation_surface_deliveries`
 - `memory_search_index`
 - `memory_vector_index`
 - `recall_traces`
@@ -203,7 +221,9 @@ Memory substrate 的 PostgreSQL physical schema只由versioned migration registr
 - `bindings` 当前不支持，传入必须 raise `NotImplementedError`。
 - HTTP error 必须带 response body 进入 RuntimeError，便于诊断。
 
-Oxigraph 不得成为 governed memory 的同步写 authority；它只由 outbox/materializer/reconcile 路径维护。
+Oxigraph 不得成为 governed memory 的同步写 authority；它只由canonical mutation V2
+Oxigraph surface handler维护。Immutable relation使用closed lowering contract直接生成exact
+quad；ordinary document materialization不得通过subject replacement删除其他job拥有的edge。
 
 ---
 
@@ -232,6 +252,9 @@ InMemory graph store 只允许测试/兼容使用。
 - 不允许 PostgresGraphStore raw SPARQL update 绕过 typed mutation path。
 - 不允许非 governed memory entity 进入 `memory_nodes`。
 - 不允许 relation projection 包含未 allowlist 的任意 JSON-LD field。
+- 不允许ordinary JSON-LD document写relation-registry-owned predicate。
+- 不允许Turn/Artifact relation使用read-modify-write document update。
+- 不允许direct Oxigraph production mutation绕过V2 surface delivery。
 - 不允许新增 schema table 后不更新 schema tests 与契约。
 - 不允许 GraphStore constructor/write path执行DDL或接受raw PostgreSQL DSN。
 
@@ -252,8 +275,10 @@ InMemory graph store 只允许测试/兼容使用。
 - PostgresGraphStore 写 canonical memory 后 `graph_documents` 与 `memory_nodes` 同步。
 - `set_status` 同步 JSON-LD payload 与 projection。
 - fresh migrated database的manifest包含pgvector与全部memory relations；受限runtime role可以执行GraphStore DML但不能执行DDL。
-- Oxigraph materializer 能 round-trip JSON-LD document。
-- Oxigraph unavailable/failure 通过 outbox failed status 暴露，而不是悄悄吞掉。
+- Oxigraph V2 surface handler能round-trip JSON-LD document。
+- immutable PostgreSQL relation row、relation-aware JSON-LD view与Oxigraph direct quad一致。
+- 并行Turn-produced/ToolResult-artifact关系任意commit顺序不丢edge。
+- Oxigraph unavailable/failure通过surface delivery failed/dead-letter状态暴露，而不是悄悄吞掉。
 
 ---
 
@@ -265,6 +290,6 @@ JSON-LD ontology或 GraphStore write protocol。Reset workflow必须同时清空
 event world与 Oxigraph runtime projection，防止旧 CUSTOM payload或旧 graph projection被新
 decoder误认。
 
-只有已有 typed timeline/outbox materializer可以选择性投影这些 facts；GraphStore不得从
+只有durable timeline/evidence jobs可以选择性投影这些facts；GraphStore不得从
 event metadata/free-form payload猜测新的 entity，也不得把 typed failure audit当作 durable
 retry job。

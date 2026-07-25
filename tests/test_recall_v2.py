@@ -3,12 +3,15 @@ from __future__ import annotations
 from tests.support.postgres import verified_postgres_provider
 
 import asyncio
+from time import monotonic
 from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.types.json import Jsonb
 
+from pulsara_agent.entities.memory import Preference
+from pulsara_agent.graph import PostgresGraphStore
+from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory.canonical.query import PostgresMemoryQuery
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
@@ -20,9 +23,13 @@ from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
 from pulsara_agent.memory.recall.service import RecallQuery, RecallStatus, RecallTrigger
 from pulsara_agent.memory.recall.sparse import SparseCandidateService
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
+from pulsara_agent.ontology import memory
 from pulsara_agent.retrieval.rerank.protocol import RerankResult
 from pulsara_agent.retrieval.tokenizer.regex_word_split import RegexWordSplitTokenizer
 from pulsara_agent.settings import StorageConfig
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+)
 
 
 class _SemanticEmbeddingProvider:
@@ -94,7 +101,10 @@ def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_
     graph_id = f"graph:test/recall-v2/{uuid4().hex}"
     seed_id = _seed_memory(dsn, graph_id, "Blue launch checklist alpha.")
     target_id = _seed_memory(dsn, graph_id, "Emergency rollback protocol omega.")
-    with psycopg.connect(dsn) as connection:
+    with verified_postgres_provider(dsn).connection(
+        lane=PostgresConnectionLane.MEMORY_UOW,
+        deadline_monotonic=monotonic() + 20.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.executemany(
                 """
@@ -396,7 +406,10 @@ def test_hybrid_preserves_canonical_filter_and_visible_contradiction_pair() -> N
     sync = MemorySearchIndexSync(connection_provider=verified_postgres_provider(dsn))
     for memory_id in (active_id, conflict_id, rejected_id):
         sync.sync_memory(memory_id, graph_id=graph_id)
-    with psycopg.connect(dsn) as connection:
+    with verified_postgres_provider(dsn).connection(
+        lane=PostgresConnectionLane.MEMORY_UOW,
+        deadline_monotonic=monotonic() + 20.0,
+    ) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -510,48 +523,24 @@ def _seed_memory(
     dsn: str, graph_id: str, statement: str, *, status: str = "active"
 ) -> str:
     memory_id = f"preference:{uuid4().hex}"
-    try:
-        connection = psycopg.connect(dsn)
-    except psycopg.Error as exc:
-        pytest.skip(f"PostgreSQL unavailable: {exc}")
-    with connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO graph_documents (graph_id, id, type, payload) VALUES (%s, %s, 'Preference', %s)",
-                (
-                    graph_id,
-                    memory_id,
-                    Jsonb(
-                        {
-                            "@id": memory_id,
-                            "@type": ["Preference"],
-                            "statement": statement,
-                        }
-                    ),
-                ),
-            )
-            cursor.execute(
-                """
-                INSERT INTO memory_nodes (
-                    graph_id, id, memory_type, scope, status, statement, created_at, updated_at
-                ) VALUES (%s, %s, 'Preference', 'ctx:user', %s, %s, now(), now())
-                """,
-                (graph_id, memory_id, status, statement),
-            )
+    PostgresGraphStore(connection_provider=verified_postgres_provider(dsn)).put_jsonld(
+        Preference(
+            id=memory_id,
+            statement=statement,
+            scope="ctx:user",
+            status=memory.NodeStatus(status),
+            confidence_level=memory.ConfidenceLevel.VERIFIED,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            gate_reason="test seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
     return memory_id
 
 
 def _delete_graph(dsn: str, graph_id: str) -> None:
-    with psycopg.connect(dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM recall_traces WHERE graph_id = %s", (graph_id,))
-            cursor.execute(
-                "DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,)
-            )
-            cursor.execute(
-                "DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,)
-            )
-            cursor.execute(
-                "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
-            )
-            cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
+    # The database fixture owns teardown; IDs are unique per test.
+    del dsn, graph_id

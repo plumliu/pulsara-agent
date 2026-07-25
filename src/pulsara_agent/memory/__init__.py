@@ -32,7 +32,10 @@ from pulsara_agent.memory.recall.explain import (
     explanation_to_payload,
     validate_explanation,
 )
-from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
+from pulsara_agent.memory.governance.executor import (
+    MemoryGovernanceApplyResult,
+    MemoryGovernanceExecutor,
+)
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     MemoryGovernanceOptions,
@@ -48,21 +51,26 @@ from pulsara_agent.memory.governance.relatedness import (
     RelatednessBatchResult,
     RelatednessExecutionContext,
 )
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.canonical.oxigraph_materializer import OxigraphMaterializer
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.memory.recall.projection import ProjectionBuilder
 from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
-from pulsara_agent.memory.foundation.protocols import ArtifactStore, RuntimeEventReadStore
-from pulsara_agent.memory.foundation.provenance import RuntimeEventRef, RuntimeEventSpan, runtime_event_span_from_events
+from pulsara_agent.memory.foundation.protocols import (
+    ArtifactStore,
+    RuntimeEventReadStore,
+)
+from pulsara_agent.memory.foundation.provenance import (
+    RuntimeEventRef,
+    RuntimeEventSpan,
+    runtime_event_span_from_events,
+)
 from pulsara_agent.memory.canonical.query import (
     CanonicalNodeView,
     MemoryQuery,
     MemoryRelationEdge,
     PostgresMemoryQuery,
 )
-from pulsara_agent.memory.canonical.reconcile import DamagedMemoryNode, PostgresMemoryReconciler, ReconciliationReport
 from pulsara_agent.memory.recall.service import (
     LexicalMemoryRecallService,
     MemoryRecallService,
@@ -103,13 +111,16 @@ from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionOptions,
 )
 from pulsara_agent.memory.foundation.run_timeline_query import (
+    RunTimelineExportLimitExceeded,
+    RunTimelinePage,
+    RunTimelinePageCursor,
     RunTimelineSummary,
     RunTimelineToolTrace,
     load_run_timeline,
+    load_run_timeline_page,
+    summarize_persisted_run_timeline,
     summarize_run_timeline,
 )
-from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
-from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore, RecallTraceStore
 from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
 from pulsara_agent.memory.recall.graph import (
@@ -120,11 +131,17 @@ from pulsara_agent.memory.recall.graph import (
 from pulsara_agent.memory.recall.sparse import SparseCandidateService
 from pulsara_agent.memory.recall.dense import DenseCandidateService
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
-from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync, VectorSyncResult, VectorSyncStatus
+from pulsara_agent.memory.canonical.vector_index_sync import (
+    MemoryVectorIndexSync,
+    VectorSyncResult,
+    VectorSyncStatus,
+)
 from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
-from pulsara_agent.memory.canonical.vector_worker import MemoryVectorIndexWorker
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
-from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
+from pulsara_agent.memory.canonical.write_service import (
+    MemoryWriteOutcome,
+    MemoryWriteService,
+)
 
 __all__ = [
     "ArtifactStore",
@@ -140,11 +157,9 @@ __all__ = [
     "ClaimKind",
     "ContradictAndSubmitDecision",
     "CorrectAndSubmitDecision",
-    "DamagedMemoryNode",
-    "ExecutionEvidenceLedger",
+    "CanonicalMemoryLedger",
     "Explanation",
     "ExplanationClaim",
-    "ExecutionEvidencePersistenceHook",
     "GovernanceDecision",
     "GovernanceRelatednessService",
     "GovernanceWriteOutcome",
@@ -168,7 +183,6 @@ __all__ = [
     "DenseCandidateService",
     "RecallRerankService",
     "MemoryVectorIndexSync",
-    "MemoryVectorIndexWorker",
     "MemoryVectorQuery",
     "VectorSyncResult",
     "VectorSyncStatus",
@@ -181,13 +195,11 @@ __all__ = [
     "MemoryReflectionHint",
     "MemoryReflectionOptions",
     "NoWriteOutcome",
-    "OxigraphMaterializer",
     "PooledMemoryCandidate",
     "PostgresArtifactStore",
     "PostgresCandidatePool",
     "PostgresWorkingContextStore",
     "PostgresMemoryQuery",
-    "PostgresMemoryReconciler",
     "PostgresRecallTraceStore",
     "ProjectionBuilder",
     "ProjectionLedger",
@@ -203,12 +215,13 @@ __all__ = [
     "RelatednessAvailability",
     "RelatednessBatchResult",
     "RelatednessExecutionContext",
-    "ReconciliationReport",
     "LexicalMemoryRecallService",
     "RuntimeEventReadStore",
     "RuntimeEventRef",
     "RuntimeEventSpan",
-    "RunTimelinePersistenceHook",
+    "RunTimelineExportLimitExceeded",
+    "RunTimelinePage",
+    "RunTimelinePageCursor",
     "RunTimelineSummary",
     "RunTimelineToolTrace",
     "SkipDecision",
@@ -229,12 +242,14 @@ __all__ = [
     "is_valid_flat_id",
     "is_valid_scope",
     "load_run_timeline",
+    "load_run_timeline_page",
     "new_governance_batch_id",
     "parse_scope",
     "propose_working_context_update",
     "runtime_event_span_from_events",
     "scopes_for_domain",
     "summarize_run_timeline",
+    "summarize_persisted_run_timeline",
     "validate_explanation",
     "workspace_scope_key",
     "workspace_scope",

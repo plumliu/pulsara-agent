@@ -6,21 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any
-import traceback
 
 from psycopg import Connection
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
-from pulsara_agent.memory.canonical.mutation_outbox import (
-    CanonicalMutationSurface,
-    mark_surface_applied,
-    mark_surface_failed,
-    parse_mutation_payload,
-    pending_surface_names,
-)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -41,7 +30,9 @@ class MemorySearchIndexSync:
     def rebuild(self, *, graph_id: str | None = None) -> int:
         graph = _graph_key(graph_id)
         with self._cursor() as cursor:
-            cursor.execute("DELETE FROM memory_search_index WHERE graph_id = %s", (graph,))
+            cursor.execute(
+                "DELETE FROM memory_search_index WHERE graph_id = %s", (graph,)
+            )
             cursor.execute(
                 """
                 INSERT INTO memory_search_index (
@@ -108,88 +99,6 @@ class MemorySearchIndexSync:
         with self._cursor() as cursor:
             return _sync_memory_with_cursor(cursor, graph_id=graph, memory_id=memory_id)
 
-    def consume_outbox(
-        self,
-        *,
-        limit: int = 100,
-        graph_id: str | None = None,
-        governance_batch_id: str | None = None,
-    ) -> int:
-        applied = 0
-        where = ["status IN ('pending', 'partial', 'failed')"]
-        params: list[object] = []
-        if graph_id is not None:
-            where.append("graph_id = %s")
-            params.append(_graph_key(graph_id))
-        if governance_batch_id is not None:
-            where.append("governance_batch_id = %s")
-            params.append(governance_batch_id)
-        params.append(limit)
-        with self._cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                f"""
-                SELECT outbox_id, graph_id, payload
-                FROM memory_write_outbox
-                WHERE {" AND ".join(where)}
-                ORDER BY sequence_key ASC, created_at ASC, outbox_id ASC
-                LIMIT %s
-                FOR UPDATE SKIP LOCKED
-                """,
-                tuple(params),
-            )
-            rows = cursor.fetchall()
-            for row in rows:
-                try:
-                    payload_model = parse_mutation_payload(row["payload"])
-                    if not pending_surface_names(
-                        payload_model,
-                        CanonicalMutationSurface.SEARCH_INDEX.value,
-                    ):
-                        continue
-                    memory_ids = _outbox_memory_ids(payload_model.model_dump(mode="json"))
-                    for memory_id in memory_ids:
-                        _sync_memory_with_cursor(cursor, graph_id=row["graph_id"], memory_id=memory_id)
-                    payload, top_level_status = mark_surface_applied(
-                        payload_model,
-                        CanonicalMutationSurface.SEARCH_INDEX.value,
-                    )
-                    cursor.execute(
-                        """
-                        UPDATE memory_write_outbox
-                        SET payload = %s,
-                            status = %s,
-                            attempt_count = attempt_count + 1,
-                            last_error = NULL,
-                            applied_at = CASE WHEN %s = 'applied' THEN now() ELSE applied_at END
-                        WHERE outbox_id = %s
-                        """,
-                        (Jsonb(payload), top_level_status, top_level_status, row["outbox_id"]),
-                    )
-                    applied += 1
-                except Exception as exc:
-                    payload_model = parse_mutation_payload(row["payload"])
-                    payload, top_level_status = mark_surface_failed(
-                        payload_model,
-                        CanonicalMutationSurface.SEARCH_INDEX.value,
-                    )
-                    cursor.execute(
-                        """
-                        UPDATE memory_write_outbox
-                        SET payload = %s,
-                            status = %s,
-                            attempt_count = attempt_count + 1,
-                            last_error = %s
-                        WHERE outbox_id = %s
-                        """,
-                        (
-                            Jsonb(payload),
-                            top_level_status,
-                            "".join(traceback.format_exception_only(type(exc), exc)).strip(),
-                            row["outbox_id"],
-                        ),
-                    )
-        return applied
-
     @contextmanager
     def _cursor(self, *, row_factory=None) -> Iterator:
         if self.connection is not None:
@@ -211,32 +120,6 @@ class MemorySearchIndexSync:
         with connection_context as connection:
             with connection.cursor() as cursor:
                 yield cursor
-
-
-def _outbox_memory_ids(payload: Any) -> tuple[str, ...]:
-    if not isinstance(payload, dict):
-        return ()
-    if payload.get("kind") == "canonical_mutation":
-        explicit_dirty = payload.get("dirty_memory_ids")
-        if isinstance(explicit_dirty, list):
-            return tuple(item for item in explicit_dirty if isinstance(item, str))
-    explicit = payload.get("index_dirty")
-    if isinstance(explicit, list):
-        return tuple(item for item in explicit if isinstance(item, str))
-    decision_record = payload.get("decision_record")
-    if not isinstance(decision_record, dict):
-        return ()
-    outcome = decision_record.get("write_outcome")
-    if not isinstance(outcome, dict):
-        return ()
-    memory_ids: list[str] = []
-    memory_id = outcome.get("memory_id")
-    if isinstance(memory_id, str):
-        memory_ids.append(memory_id)
-    superseded = outcome.get("superseded_memory_ids")
-    if isinstance(superseded, list):
-        memory_ids.extend(item for item in superseded if isinstance(item, str))
-    return tuple(dict.fromkeys(memory_ids))
 
 
 def _sync_memory_with_cursor(cursor, *, graph_id: str, memory_id: str) -> bool:

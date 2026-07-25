@@ -1,0 +1,18 @@
+{
+  "schema_version": "legacy_surface_binding_plan_contract_resource.v1",
+  "contract_id": "legacy-surface-binding-plan.v1",
+  "maximum_rows_per_page": 256,
+  "maximum_canonical_utf8_bytes_per_page": 8388608,
+  "ordered_surface_kinds": [
+    "search_index.v1",
+    "vector_index.v1",
+    "oxigraph.v1"
+  ],
+  "allowed_binding_kinds": [
+    "historical_confirmed",
+    "migration_rebound",
+    "decommission_and_rebuild"
+  ],
+  "legacy_payload_codec": "canonical-json.v1",
+  "plan_identity_policy": "database-target+v5-prefix+maintenance-authority+legacy-root"
+}

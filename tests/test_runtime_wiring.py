@@ -15,7 +15,6 @@ from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
 from tests.support.capability import preview_capability_plan
 from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     PooledMemoryCandidate,
@@ -46,9 +45,6 @@ from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from tests.conftest import emit_test_accepted_model_reply, open_test_root_rollout_run
 from tests.support.model_call import test_resolved_target_fact
 from tests.support.settings import compatibility_storage_config
-from pulsara_agent.memory.canonical.unit_of_work import (
-    InMemoryMemoryWriteUnitOfWork,
-)
 
 
 def _governance_execution_identity(
@@ -62,35 +58,6 @@ def _governance_execution_identity(
         allowed_candidate_entry_ids=frozenset({candidate.entry_id}),
         allowed_scopes=frozenset({"ctx:user"}),
     )
-
-
-def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(
-            tmp_path,
-            runtime_session_id=f"runtime:test:{uuid4().hex}",
-        )
-    ctx = _event_context("in-memory-wiring")
-
-    asyncio.run(_emit_timeline_events(wiring.runtime_session, ctx, "hello wiring"))
-
-    timeline = load_run_timeline(
-        graph=wiring.graph,
-        archive=wiring.archive,
-        run_id=ctx.run_id,
-        runtime_session_id=wiring.runtime_session.runtime_session_id,
-        graph_id=wiring.graph_id,
-    )
-    summary = summarize_run_timeline(timeline)
-
-    assert wiring.event_log is wiring.runtime_session.event_log
-    assert wiring.graph_id is None
-    assert isinstance(
-        wiring.memory_governance_executor.memory_write_uow_factory(),
-        InMemoryMemoryWriteUnitOfWork,
-    )
-    assert summary.assistant_text == "hello wiring"
-    assert summary.status == "completed"
 
 
 def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) -> None:

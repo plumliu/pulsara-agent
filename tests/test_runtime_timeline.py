@@ -1,6 +1,4 @@
 import asyncio
-import json
-import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -46,14 +44,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
-from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory import (
-    InMemoryArchiveStore,
-    RunTimelinePersistenceHook,
-    load_run_timeline,
-    summarize_run_timeline,
-)
-from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.memory import summarize_run_timeline
 from pulsara_agent.event import ConfirmResult
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.message import ToolCallBlock, ToolCallState
@@ -367,172 +358,6 @@ def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> No
     assert exit_request.summary == "draft summary"
 
 
-def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(
-    tmp_path,
-) -> None:
-    runtime = in_memory_runtime_session(tmp_path)
-    graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
-    runtime.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime.event_log,
-        ),
-    )
-
-    async def run() -> None:
-        await runtime.emit(_run_start())
-        await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
-        await runtime.emit(
-            make_text_block_segment_event(
-                **CTX.event_fields(), block_id="text:1", delta="done"
-            )
-        )
-        await runtime.emit(
-            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
-        )
-        await runtime.emit(
-            RunEndEvent(
-                **run_end_contract_fields(CTX.run_id, status="finished"),
-                **CTX.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
-        )
-
-    asyncio.run(run())
-
-    records = graph.find_by_type(rt.RUN_TIMELINE)
-    assert len(records) == 1
-    assert records[0][rt.SOURCE_RUN.name] == CTX.run_id
-    assert records[0][rt.STATUS.name] == "completed"
-    assert records[0][rt.ITEM_COUNT.name] >= 2
-
-    blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
-    payload = json.loads(archive.get_text(blob_id))
-    assert payload["runtime_session_id"] == runtime.runtime_session_id
-    assert payload["run_id"] == CTX.run_id
-    assert payload["items"][-1]["kind"] == "assistant_text"
-    assert payload["items"][-1]["summary"] == "done"
-
-
-def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(
-    tmp_path,
-) -> None:
-    runtime = in_memory_runtime_session(tmp_path)
-    graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
-    runtime.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime.event_log,
-        ),
-    )
-
-    async def run() -> None:
-        await runtime.emit(_run_start())
-        await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
-        await runtime.emit(
-            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
-        )
-        first = graph.find_by_type(rt.RUN_TIMELINE)[0]
-        await runtime.emit(
-            RunEndEvent(
-                **run_end_contract_fields(CTX.run_id, status="finished"),
-                **CTX.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
-        )
-        second = graph.find_by_type(rt.RUN_TIMELINE)[0]
-        assert first[rt.CREATED_AT.name] == second[rt.CREATED_AT.name]
-        assert first[rt.UPDATED_AT.name] <= second[rt.UPDATED_AT.name]
-
-    asyncio.run(run())
-
-
-def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
-    runtime = in_memory_runtime_session(tmp_path)
-    graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
-    runtime.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime.event_log,
-        ),
-    )
-
-    async def run() -> None:
-        for event in [
-            _run_start(),
-            ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            make_text_block_segment_event(
-                **CTX.event_fields(), block_id="text:1", delta="Reading now."
-            ),
-            make_tool_call_start_event(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                tool_call_name="read_file",
-            ),
-            make_tool_call_arguments_segment_event(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                delta='{"path":"probe.txt"}',
-            ),
-            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:read"),
-            ToolResultStartEvent(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                tool_call_name="read_file",
-            ),
-            ToolResultTextDeltaEvent(
-                **CTX.event_fields(), tool_call_id="call:read", delta="PULSARA_TRACE_OK"
-            ),
-        ]:
-            await runtime.emit(event)
-        await _emit_tool_terminal_projection(
-            runtime,
-            tool_call_id="call:read",
-            tool_name="read_file",
-        )
-        await runtime.emit(
-            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
-        )
-        await runtime.emit(
-            RunEndEvent(
-                **run_end_contract_fields(CTX.run_id, status="finished"),
-                **CTX.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
-        )
-
-    asyncio.run(run())
-
-    timeline = load_run_timeline(
-        graph=graph,
-        archive=archive,
-        run_id=CTX.run_id,
-        runtime_session_id=runtime.runtime_session_id,
-    )
-    summary = summarize_run_timeline(timeline)
-
-    assert summary.status == "completed"
-    assert summary.assistant_text == "Reading now."
-    assert len(summary.tool_traces) == 1
-    assert summary.tool_traces[0].tool_call_id == "call:read"
-    assert summary.tool_traces[0].tool_name == "read_file"
-    assert summary.tool_traces[0].arguments == '{"path":"probe.txt"}'
-    assert summary.tool_traces[0].status == "success"
-    assert summary.tool_traces[0].result_summary == "PULSARA_TRACE_OK"
-
-
 def test_run_timeline_summary_separates_multiple_assistant_text_items() -> None:
     timeline = build_run_timeline(
         [
@@ -554,13 +379,6 @@ def test_run_timeline_summary_separates_multiple_assistant_text_items() -> None:
     summary = summarize_run_timeline(timeline)
 
     assert summary.assistant_text == "first\nsecond"
-
-
-def _artifact_id_from_node_ref(node_id: str) -> str:
-    prefix = "urn:pulsara:"
-    if node_id.startswith(prefix):
-        return urllib.parse.unquote(node_id[len(prefix) :])
-    return node_id
 
 
 @pytest.mark.parametrize(
