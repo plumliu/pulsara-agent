@@ -8,10 +8,14 @@ from uuid import uuid4
 
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
+from tests.support.capability import tool_runtime_context
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.event import EventContext
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import (
@@ -36,8 +40,8 @@ from pulsara_agent.ontology import memory
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.tools.base import ToolCall
-from pulsara_agent.tools.executor import ToolExecutor
+from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.runtime.tool_executor import ToolExecutor
 from pulsara_agent.tools.registry import ToolRegistry
 from pulsara_agent.tools.builtins.memory_query import (
     MemoryExplainTool,
@@ -705,6 +709,10 @@ def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> Non
                     arguments={"query": "concise summaries", "scope": "ctx:user"},
                 ),
                 event_context=context,
+                runtime_context=tool_runtime_context(
+                    runtime_session_id=session_id,
+                    event_context=context,
+                ),
             )
         )
 
@@ -756,7 +764,6 @@ def _put_preference(
         ).to_jsonld(),
         graph_id=graph_id,
     )
-
 
 
 class _FailingMemoryQuery:

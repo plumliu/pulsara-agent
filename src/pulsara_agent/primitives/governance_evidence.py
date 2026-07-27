@@ -13,7 +13,7 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field, TypeAdapter, model_validator
 
-from pulsara_agent.event.candidates import CandidatePayload
+from pulsara_agent.primitives.memory_candidate import CandidatePayload
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.frozen import (
     FrozenFactBase,
@@ -145,14 +145,26 @@ class CandidateQuotedEvidenceLocatorFact(GovernanceEvidenceFrozenFact):
     @model_validator(mode="after")
     def _locator_shape(self) -> "CandidateQuotedEvidenceLocatorFact":
         if self.locator_kind == "canonical_user_message_span":
-            if self.source_message_id is None or self.start_char is None or self.end_char is None:
+            if (
+                self.source_message_id is None
+                or self.start_char is None
+                or self.end_char is None
+            ):
                 raise ValueError("canonical user locator requires message and span")
             if self.source_quote_index is not None or self.start_char > self.end_char:
                 raise ValueError("canonical user locator span is invalid")
         elif self.locator_kind == "reflection_quote_index":
-            if self.source_quote_index is None or self.start_char is not None or self.end_char is not None:
+            if (
+                self.source_quote_index is None
+                or self.start_char is not None
+                or self.end_char is not None
+            ):
                 raise ValueError("reflection locator requires quote index only")
-        elif self.source_artifact_reference is None or self.start_char is None or self.end_char is None:
+        elif (
+            self.source_artifact_reference is None
+            or self.start_char is None
+            or self.end_char is None
+        ):
             raise ValueError("compaction locator requires artifact and span")
         return self
 
@@ -216,7 +228,10 @@ class GovernanceQuotedEvidenceSemanticFact(GovernanceEvidenceFrozenFact):
             raise ValueError("quoted evidence byte count mismatch")
         if self.text_sha256 != hashlib.sha256(encoded).hexdigest():
             raise ValueError("quoted evidence SHA mismatch")
-        if self.verification_status == "canonical_match" and self.quote_kind != "canonical_user_span":
+        if (
+            self.verification_status == "canonical_match"
+            and self.quote_kind != "canonical_user_span"
+        ):
             raise ValueError("only canonical user spans may be canonical matches")
         return self
 
@@ -256,7 +271,10 @@ class MainAgentToolGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
         result = self.tool_result_semantic.canonical_result_block_semantic
         if call.completion_status != "completed":
             raise ValueError("governance tool-call evidence must be complete")
-        if result.tool_call_id != call.tool_call_id or result.model_tool_name != call.tool_name:
+        if (
+            result.tool_call_id != call.tool_call_id
+            or result.model_tool_name != call.tool_name
+        ):
             raise ValueError("governance tool call/result identity mismatch")
         return self
 
@@ -270,7 +288,9 @@ class ReflectionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
     reflection_policy_contract_fingerprint: Fingerprint
     reflection_model_result_semantic_fingerprint: Fingerprint
     candidate_index: int = Field(ge=0, le=255)
-    ordered_quoted_evidence_semantics: tuple[GovernanceQuotedEvidenceSemanticFact, ...] = Field(max_length=32)
+    ordered_quoted_evidence_semantics: tuple[
+        GovernanceQuotedEvidenceSemanticFact, ...
+    ] = Field(max_length=32)
     semantic_fingerprint: Fingerprint
 
 
@@ -300,7 +320,10 @@ class CompactionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
 
     @model_validator(mode="after")
     def _payload_join(self) -> "CompactionGovernanceSourceSemanticFact":
-        if self.canonical_parsed_candidate_payload_fingerprint != self.candidate_payload_semantic_fingerprint:
+        if (
+            self.canonical_parsed_candidate_payload_fingerprint
+            != self.candidate_payload_semantic_fingerprint
+        ):
             raise ValueError("compaction parsed candidate fingerprint mismatch")
         return self
 
@@ -320,33 +343,66 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
     runtime_session_id: str = Field(min_length=1, max_length=256)
     authority_ledger_through_sequence: int = Field(ge=0)
     candidate_entry_id: str = Field(min_length=1, max_length=256)
-    producer_event_references: tuple[GovernanceStoredEventReferenceFact, ...] = Field(min_length=1, max_length=8)
+    producer_event_references: tuple[GovernanceStoredEventReferenceFact, ...] = Field(
+        min_length=1, max_length=8
+    )
     model_terminal_projection_reference: TerminalProjectionReferenceFact | None = None
     model_disposition_event_reference: GovernanceStoredEventReferenceFact | None = None
     tool_terminal_projection_reference: TerminalProjectionReferenceFact | None = None
-    quoted_evidence_attributions: tuple[GovernanceQuotedEvidenceAttributionFact, ...] = Field(max_length=32)
-    source_artifact_references: tuple[GovernanceEvidenceArtifactReferenceFact, ...] = Field(max_length=16)
+    quoted_evidence_attributions: tuple[
+        GovernanceQuotedEvidenceAttributionFact, ...
+    ] = Field(max_length=32)
+    source_artifact_references: tuple[GovernanceEvidenceArtifactReferenceFact, ...] = (
+        Field(max_length=16)
+    )
     producer_contract_fingerprints: tuple[Fingerprint, ...] = Field(max_length=16)
     fact_fingerprint: Fingerprint
 
     @model_validator(mode="after")
     def _attribution_matrix(self) -> "GovernanceSourceEvidenceAttributionFact":
         refs = self.producer_event_references
-        if any(ref.stable_identity.runtime_session_id != self.runtime_session_id for ref in refs):
+        if any(
+            ref.stable_identity.runtime_session_id != self.runtime_session_id
+            for ref in refs
+        ):
             raise ValueError("governance producer references cross runtime sessions")
         if any(ref.sequence > self.authority_ledger_through_sequence for ref in refs):
-            raise ValueError("governance producer reference exceeds authority high-water")
+            raise ValueError(
+                "governance producer reference exceeds authority high-water"
+            )
         sequences = tuple(ref.sequence for ref in refs)
         event_ids = tuple(ref.stable_identity.event_id for ref in refs)
-        if sequences != tuple(sorted(sequences)) or len(event_ids) != len(set(event_ids)):
-            raise ValueError("governance producer references must be ordered and unique")
-        if self.model_disposition_event_reference is not None and self.model_disposition_event_reference.sequence > self.authority_ledger_through_sequence:
-            raise ValueError("governance disposition reference exceeds authority high-water")
+        if sequences != tuple(sorted(sequences)) or len(event_ids) != len(
+            set(event_ids)
+        ):
+            raise ValueError(
+                "governance producer references must be ordered and unique"
+            )
+        if (
+            self.model_disposition_event_reference is not None
+            and self.model_disposition_event_reference.sequence
+            > self.authority_ledger_through_sequence
+        ):
+            raise ValueError(
+                "governance disposition reference exceeds authority high-water"
+            )
         if self.evidence_kind == "main_agent_tool":
-            if self.model_terminal_projection_reference is None or self.model_disposition_event_reference is None or self.tool_terminal_projection_reference is None:
-                raise ValueError("main-tool evidence requires model, disposition, and tool references")
-        elif self.model_terminal_projection_reference is not None or self.model_disposition_event_reference is not None or self.tool_terminal_projection_reference is not None:
-            raise ValueError("non-tool evidence forbids model/tool projection references")
+            if (
+                self.model_terminal_projection_reference is None
+                or self.model_disposition_event_reference is None
+                or self.tool_terminal_projection_reference is None
+            ):
+                raise ValueError(
+                    "main-tool evidence requires model, disposition, and tool references"
+                )
+        elif (
+            self.model_terminal_projection_reference is not None
+            or self.model_disposition_event_reference is not None
+            or self.tool_terminal_projection_reference is not None
+        ):
+            raise ValueError(
+                "non-tool evidence forbids model/tool projection references"
+            )
         if self.evidence_kind == "compaction" and not self.source_artifact_references:
             raise ValueError("compaction evidence requires summary artifact")
         return self
@@ -355,8 +411,12 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
 class GovernancePromptEvidenceTextFact(GovernanceEvidenceFrozenFact):
     schema_version: Literal["governance_prompt_evidence_text.v1"]
     field_code: Literal[
-        "verified_user_quote", "accepted_assistant_text", "selected_tool_arguments",
-        "tool_result_essential", "reflection_report", "compaction_summary",
+        "verified_user_quote",
+        "accepted_assistant_text",
+        "selected_tool_arguments",
+        "tool_result_essential",
+        "reflection_report",
+        "compaction_summary",
     ]
     text: str = Field(max_length=2_000)
     source_semantic_fingerprint: Fingerprint
@@ -371,11 +431,15 @@ class GovernanceCandidatePromptPayloadFact(GovernanceEvidenceFrozenFact):
     canonical_candidate_payload: CandidatePayload
     evidence_kind: Literal["main_agent_tool", "reflection", "compaction"]
     accepted: bool
-    ordered_evidence_texts: tuple[GovernancePromptEvidenceTextFact, ...] = Field(max_length=16)
+    ordered_evidence_texts: tuple[GovernancePromptEvidenceTextFact, ...] = Field(
+        max_length=16
+    )
     tool_name: str | None = Field(default=None, max_length=256)
     tool_result_state: str | None = Field(default=None, max_length=64)
     observation_timing_fingerprint: str | None = Field(default=None, max_length=256)
-    artifact_references: tuple[GovernanceEvidenceArtifactReferenceFact, ...] = Field(max_length=16)
+    artifact_references: tuple[GovernanceEvidenceArtifactReferenceFact, ...] = Field(
+        max_length=16
+    )
     payload_utf8_bytes: int = Field(ge=1, le=16 * 1024)
     payload_fingerprint: Fingerprint
 
@@ -459,7 +523,9 @@ class GovernanceEvidencePromptProjectionFact(GovernanceEvidenceFrozenFact):
         if self.included_field_codes != included:
             raise ValueError("governance prompt included fields drifted")
         expected_omitted = tuple(
-            field_code for field_code in _PROMPT_FIELD_CODES if field_code not in included
+            field_code
+            for field_code in _PROMPT_FIELD_CODES
+            if field_code not in included
         )
         if self.omitted_field_codes != expected_omitted:
             raise ValueError("governance prompt omitted fields drifted")
@@ -480,13 +546,25 @@ class ImmutableGovernanceCandidateSnapshotFact(GovernanceEvidenceFrozenFact):
     @model_validator(mode="after")
     def _joins(self) -> "ImmutableGovernanceCandidateSnapshotFact":
         payload_fp = self.payload_semantic.payload_semantic_fingerprint
-        if self.source_evidence_semantic.candidate_payload_semantic_fingerprint != payload_fp:
+        if (
+            self.source_evidence_semantic.candidate_payload_semantic_fingerprint
+            != payload_fp
+        ):
             raise ValueError("candidate/source semantic payload mismatch")
-        if self.source_evidence_attribution.candidate_entry_id != self.candidate_attribution.entry_id:
+        if (
+            self.source_evidence_attribution.candidate_entry_id
+            != self.candidate_attribution.entry_id
+        ):
             raise ValueError("candidate/source attribution entry mismatch")
-        if self.source_evidence_attribution.evidence_semantic_fingerprint != self.source_evidence_semantic.semantic_fingerprint:
+        if (
+            self.source_evidence_attribution.evidence_semantic_fingerprint
+            != self.source_evidence_semantic.semantic_fingerprint
+        ):
             raise ValueError("candidate source semantic/attribution mismatch")
-        if self.prompt_projection.source_evidence_semantic_fingerprint != self.source_evidence_semantic.semantic_fingerprint:
+        if (
+            self.prompt_projection.source_evidence_semantic_fingerprint
+            != self.source_evidence_semantic.semantic_fingerprint
+        ):
             raise ValueError("candidate prompt/source semantic mismatch")
         origin_to_evidence = {
             "main_agent_tool": "main_agent_tool",
@@ -581,13 +659,22 @@ class GovernanceRelatednessCandidateFact(GovernanceEvidenceFrozenFact):
 
     @model_validator(mode="after")
     def _content_carrier(self) -> "GovernanceRelatednessCandidateFact":
-        if (self.canonical_statement_inline is None) == (self.canonical_content_reference is None):
+        if (self.canonical_statement_inline is None) == (
+            self.canonical_content_reference is None
+        ):
             raise ValueError("related memory requires exactly one content carrier")
-        if self.prompt_projection.memory_semantic_fingerprint != self.canonical_memory.semantic_fingerprint:
+        if (
+            self.prompt_projection.memory_semantic_fingerprint
+            != self.canonical_memory.semantic_fingerprint
+        ):
             raise ValueError("related memory prompt semantic mismatch")
         if self.canonical_statement_inline is not None:
             encoded = self.canonical_statement_inline.encode("utf-8")
-            if len(encoded) != self.canonical_memory.canonical_statement_utf8_bytes or hashlib.sha256(encoded).hexdigest() != self.canonical_memory.canonical_statement_sha256:
+            if (
+                len(encoded) != self.canonical_memory.canonical_statement_utf8_bytes
+                or hashlib.sha256(encoded).hexdigest()
+                != self.canonical_memory.canonical_statement_sha256
+            ):
                 raise ValueError("related memory inline statement identity mismatch")
         return self
 
@@ -596,13 +683,18 @@ class GovernanceRelatednessSnapshotFact(GovernanceEvidenceFrozenFact):
     schema_version: Literal["governance_relatedness_snapshot.v1"]
     candidate_entry_id: str = Field(min_length=1, max_length=256)
     availability: Literal["full", "partial", "unavailable"]
-    ordered_candidates: tuple[GovernanceRelatednessCandidateFact, ...] = Field(max_length=16)
+    ordered_candidates: tuple[GovernanceRelatednessCandidateFact, ...] = Field(
+        max_length=16
+    )
     provider_contract_fingerprint: Fingerprint
     snapshot_fingerprint: Fingerprint
 
     @model_validator(mode="after")
     def _ordered(self) -> "GovernanceRelatednessSnapshotFact":
-        keys = tuple((item.canonical_memory.memory_id, item.memory_node_revision) for item in self.ordered_candidates)
+        keys = tuple(
+            (item.canonical_memory.memory_id, item.memory_node_revision)
+            for item in self.ordered_candidates
+        )
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise ValueError("relatedness candidates must be ordered and unique")
         return self
@@ -680,15 +772,41 @@ class GovernanceEvidenceBuildResult(GovernanceEvidenceFrozenFact):
     def _status_matrix(self) -> "GovernanceEvidenceBuildResult":
         reason = self.stable_reason_code.value
         if self.status is GovernanceEvidenceBuildStatus.FULL:
-            valid = reason.startswith("full_") and self.evidence_semantic is not None and self.evidence_attribution is not None and self.retry_after_seconds is None
+            valid = (
+                reason.startswith("full_")
+                and self.evidence_semantic is not None
+                and self.evidence_attribution is not None
+                and self.retry_after_seconds is None
+            )
         elif self.status is GovernanceEvidenceBuildStatus.NOT_READY:
-            valid = reason.startswith("wait_") and self.evidence_semantic is None and self.evidence_attribution is None and self.retry_after_seconds is not None
+            valid = (
+                reason.startswith("wait_")
+                and self.evidence_semantic is None
+                and self.evidence_attribution is None
+                and self.retry_after_seconds is not None
+            )
         elif self.status is GovernanceEvidenceBuildStatus.CANDIDATE_SOURCE_INVALID:
-            valid = reason.startswith("invalid_") and self.evidence_semantic is None and self.evidence_attribution is None and self.retry_after_seconds is None
+            valid = (
+                reason.startswith("invalid_")
+                and self.evidence_semantic is None
+                and self.evidence_attribution is None
+                and self.retry_after_seconds is None
+            )
         elif self.status is GovernanceEvidenceBuildStatus.AUTHORITY_UNTRUSTED:
-            valid = reason.startswith("untrusted_") and self.evidence_semantic is None and self.evidence_attribution is None and self.retry_after_seconds is None
+            valid = (
+                reason.startswith("untrusted_")
+                and self.evidence_semantic is None
+                and self.evidence_attribution is None
+                and self.retry_after_seconds is None
+            )
         else:
-            valid = self.stable_reason_code is GovernanceEvidenceBuildReason.NOT_APPLICABLE_AUDIT_ORIGIN and self.evidence_semantic is None and self.evidence_attribution is None and self.retry_after_seconds is None
+            valid = (
+                self.stable_reason_code
+                is GovernanceEvidenceBuildReason.NOT_APPLICABLE_AUDIT_ORIGIN
+                and self.evidence_semantic is None
+                and self.evidence_attribution is None
+                and self.retry_after_seconds is None
+            )
         if not valid:
             raise ValueError("governance evidence build status/reason matrix mismatch")
         return self
@@ -724,13 +842,23 @@ class MemoryGovernanceCandidateClaimFact(GovernanceEvidenceFrozenFact):
 
     @model_validator(mode="after")
     def _claim_matrix(self) -> "MemoryGovernanceCandidateClaimFact":
-        if self.status is GovernanceCandidateClaimStatus.PREPARING and (self.prepared_event_id is not None or self.terminal_record_id is not None):
+        if self.status is GovernanceCandidateClaimStatus.PREPARING and (
+            self.prepared_event_id is not None or self.terminal_record_id is not None
+        ):
             raise ValueError("preparing claim cannot carry terminal references")
-        if self.status is GovernanceCandidateClaimStatus.PREPARED and (self.prepared_event_id is None or self.terminal_record_id is not None):
+        if self.status is GovernanceCandidateClaimStatus.PREPARED and (
+            self.prepared_event_id is None or self.terminal_record_id is not None
+        ):
             raise ValueError("prepared claim requires only prepared event")
-        if self.status is GovernanceCandidateClaimStatus.TERMINAL and self.terminal_record_id is None:
+        if (
+            self.status is GovernanceCandidateClaimStatus.TERMINAL
+            and self.terminal_record_id is None
+        ):
             raise ValueError("terminal claim requires terminal record")
-        if self.status is GovernanceCandidateClaimStatus.RELEASED and self.prepared_event_id is not None:
+        if (
+            self.status is GovernanceCandidateClaimStatus.RELEASED
+            and self.prepared_event_id is not None
+        ):
             raise ValueError("released claim cannot have prepared event")
         return self
 
@@ -810,7 +938,9 @@ class GovernanceModelInputFact(GovernanceEvidenceFrozenFact):
     model_call_index: Literal[None] = None
     system_prompt_contract: GovernanceSystemPromptContractFact
     exact_system_prompt: str = Field(max_length=64 * 1024)
-    ordered_messages: tuple[GovernanceFrozenLLMMessageFact, ...] = Field(min_length=1, max_length=128)
+    ordered_messages: tuple[GovernanceFrozenLLMMessageFact, ...] = Field(
+        min_length=1, max_length=128
+    )
     tool_spec_count: Literal[0] = 0
     compiler_estimated_input_tokens: int = Field(ge=1)
     estimator_contract_fingerprint: Fingerprint
@@ -819,13 +949,19 @@ class GovernanceModelInputFact(GovernanceEvidenceFrozenFact):
 
     @model_validator(mode="after")
     def _call_binding(self) -> "GovernanceModelInputFact":
-        if self.resolved_call.purpose is not ModelCallPurpose.MEMORY_GOVERNANCE or self.resolved_call.context_mode is not ModelContextMode.DIRECT:
+        if (
+            self.resolved_call.purpose is not ModelCallPurpose.MEMORY_GOVERNANCE
+            or self.resolved_call.context_mode is not ModelContextMode.DIRECT
+        ):
             raise ValueError("governance model input requires direct governance call")
         if self.target_fingerprint != self.resolved_call.target.target_fingerprint:
             raise ValueError("governance model input target mismatch")
         if self.context_id != f"memory_governance:{self.governance_batch_id}":
             raise ValueError("governance model input context ID mismatch")
-        if self.system_prompt_contract.template_content_sha256 != hashlib.sha256(self.exact_system_prompt.encode("utf-8")).hexdigest():
+        if (
+            self.system_prompt_contract.template_content_sha256
+            != hashlib.sha256(self.exact_system_prompt.encode("utf-8")).hexdigest()
+        ):
             raise ValueError("governance system prompt content mismatch")
         expected_context = context_fingerprint(
             "provider-neutral-llm-context:v1",
@@ -870,9 +1006,15 @@ class GovernanceBatchInputSnapshotFact(GovernanceEvidenceFrozenFact):
     governance_batch_id: str = Field(min_length=1, max_length=256)
     source_ledger_through_sequence: int = Field(ge=0)
     transcript_authority_snapshot_fingerprint: Fingerprint
-    ordered_preparing_claims: tuple[MemoryGovernanceCandidateClaimFact, ...] = Field(min_length=1, max_length=32)
-    ordered_candidate_snapshots: tuple[ImmutableGovernanceCandidateSnapshotFact, ...] = Field(min_length=1, max_length=32)
-    ordered_relatedness_snapshots: tuple[GovernanceRelatednessSnapshotFact, ...] = Field(min_length=1, max_length=32)
+    ordered_preparing_claims: tuple[MemoryGovernanceCandidateClaimFact, ...] = Field(
+        min_length=1, max_length=32
+    )
+    ordered_candidate_snapshots: tuple[
+        ImmutableGovernanceCandidateSnapshotFact, ...
+    ] = Field(min_length=1, max_length=32)
+    ordered_relatedness_snapshots: tuple[GovernanceRelatednessSnapshotFact, ...] = (
+        Field(min_length=1, max_length=32)
+    )
     allowed_scopes: tuple[str, ...] = Field(max_length=64)
     prompt_projection_contract_fingerprint: Fingerprint
     model_input: GovernanceModelInputFact
@@ -881,18 +1023,43 @@ class GovernanceBatchInputSnapshotFact(GovernanceEvidenceFrozenFact):
 
     @model_validator(mode="after")
     def _batch_joins(self) -> "GovernanceBatchInputSnapshotFact":
-        claim_ids = tuple(item.candidate_entry_id for item in self.ordered_preparing_claims)
-        candidate_ids = tuple(item.candidate_attribution.entry_id for item in self.ordered_candidate_snapshots)
-        related_ids = tuple(item.candidate_entry_id for item in self.ordered_relatedness_snapshots)
-        if claim_ids != candidate_ids or claim_ids != related_ids or len(claim_ids) != len(set(claim_ids)):
-            raise ValueError("governance batch candidate/claim/relatedness join mismatch")
-        if any(item.status is not GovernanceCandidateClaimStatus.PREPARING or item.governance_batch_id != self.governance_batch_id for item in self.ordered_preparing_claims):
+        claim_ids = tuple(
+            item.candidate_entry_id for item in self.ordered_preparing_claims
+        )
+        candidate_ids = tuple(
+            item.candidate_attribution.entry_id
+            for item in self.ordered_candidate_snapshots
+        )
+        related_ids = tuple(
+            item.candidate_entry_id for item in self.ordered_relatedness_snapshots
+        )
+        if (
+            claim_ids != candidate_ids
+            or claim_ids != related_ids
+            or len(claim_ids) != len(set(claim_ids))
+        ):
+            raise ValueError(
+                "governance batch candidate/claim/relatedness join mismatch"
+            )
+        if any(
+            item.status is not GovernanceCandidateClaimStatus.PREPARING
+            or item.governance_batch_id != self.governance_batch_id
+            for item in self.ordered_preparing_claims
+        ):
             raise ValueError("governance batch requires matching preparing claims")
         if tuple(sorted(set(self.allowed_scopes))) != self.allowed_scopes:
             raise ValueError("governance allowed scopes must be sorted and unique")
-        if self.model_input.governance_batch_id != self.governance_batch_id or self.final_model_visible_input_fingerprint != self.model_input.provider_neutral_context_fingerprint:
+        if (
+            self.model_input.governance_batch_id != self.governance_batch_id
+            or self.final_model_visible_input_fingerprint
+            != self.model_input.provider_neutral_context_fingerprint
+        ):
             raise ValueError("governance batch model input identity mismatch")
-        if any(item.source_evidence_attribution.authority_ledger_through_sequence != self.source_ledger_through_sequence for item in self.ordered_candidate_snapshots):
+        if any(
+            item.source_evidence_attribution.authority_ledger_through_sequence
+            != self.source_ledger_through_sequence
+            for item in self.ordered_candidate_snapshots
+        ):
             raise ValueError("governance batch source high-water mismatch")
         return self
 
@@ -931,43 +1098,191 @@ class GovernanceDerivedWriteAttributionFact(GovernanceEvidenceFrozenFact):
 
 
 _SCHEMAS: tuple[tuple[str, str, str], ...] = (
-    ("governance_stored_event_reference.v1", "reference_fingerprint", "governance-stored-event-reference:v1"),
-    ("governance_evidence_artifact_reference.v1", "reference_fingerprint", "governance-evidence-artifact-reference:v1"),
-    ("governance_batch_input_artifact_contract.v2", "contract_fingerprint", "governance-batch-input-artifact-contract:v2"),
-    ("candidate_quoted_evidence_locator.v1", "locator_fingerprint", "candidate-quoted-evidence-locator:v1"),
-    ("governance_candidate_payload_semantic.v1", "payload_semantic_fingerprint", "governance-candidate-payload-semantic:v1"),
-    ("governance_candidate_attribution.v1", "attribution_fingerprint", "governance-candidate-attribution:v1"),
-    ("governance_quoted_evidence_semantic.v1", "semantic_fingerprint", "governance-quoted-evidence-semantic:v1"),
-    ("governance_quoted_evidence_attribution.v1", "attribution_fingerprint", "governance-quoted-evidence-attribution:v1"),
-    ("main_agent_tool_governance_source_semantic.v1", "semantic_fingerprint", "governance-main-tool-source-semantic:v1"),
-    ("reflection_governance_source_semantic.v1", "semantic_fingerprint", "governance-reflection-source-semantic:v1"),
-    ("compaction_memory_candidate_extractor_contract.v1", "contract_fingerprint", "compaction-memory-candidate-extractor-contract:v1"),
-    ("compaction_governance_source_semantic.v1", "semantic_fingerprint", "governance-compaction-source-semantic:v1"),
-    ("governance_source_evidence_attribution.v1", "fact_fingerprint", "governance-source-attribution:v1"),
-    ("governance_prompt_evidence_text.v1", "text_fingerprint", "governance-prompt-evidence-text:v1"),
-    ("governance_candidate_prompt_payload.v1", "payload_fingerprint", "governance-candidate-prompt-payload:v1"),
-    ("governance_evidence_prompt_projection.v1", "projection_fingerprint", "governance-evidence-prompt-projection:v1"),
-    ("immutable_governance_candidate_snapshot.v1", "candidate_snapshot_fingerprint", "governance-immutable-candidate-snapshot:v1"),
-    ("governance_evidence_prompt_projection_contract.v1", "contract_fingerprint", "governance-evidence-prompt-projection-contract:v1"),
-    ("governance_related_memory_semantic.v1", "semantic_fingerprint", "governance-related-memory-semantic:v1"),
-    ("governance_related_memory_prompt_projection.v1", "projection_fingerprint", "governance-related-memory-prompt-projection:v1"),
-    ("governance_relatedness_candidate.v1", "fact_fingerprint", "governance-relatedness-candidate:v1"),
-    ("governance_relatedness_snapshot.v1", "snapshot_fingerprint", "governance-relatedness-snapshot:v1"),
-    ("reflection_candidate_attribution.v1", "attribution_fingerprint", "reflection-candidate-attribution:v1"),
-    ("compaction_candidate_attribution.v1", "attribution_fingerprint", "compaction-candidate-attribution:v1"),
-    ("candidate_projection_outbox_item.v1", "item_fingerprint", "candidate-projection-outbox-item:v1"),
-    ("main_agent_memory_candidate_builder_contract.v1", "contract_fingerprint", "main-agent-memory-candidate-builder-contract:v1"),
-    ("governance_evidence_build_result.v1", "result_fingerprint", "governance-evidence-build-result:v1"),
-    ("memory_candidate_evidence_rejected.v1", "rejection_fingerprint", "memory-candidate-evidence-rejected:v1"),
-    ("memory_governance_candidate_claim.v1", "claim_fingerprint", "memory-governance-candidate-claim:v1"),
-    ("governance_system_prompt_contract.v1", "contract_fingerprint", "governance-system-prompt-contract:v1"),
-    ("governance_frozen_llm_tool_call.v1", "semantic_fingerprint", "governance-frozen-llm-tool-call:v1"),
-    ("governance_frozen_llm_message.v2", "message_fingerprint", "governance-frozen-llm-message:v2"),
-    ("governance_model_input.v2", "model_input_fingerprint", "governance-model-input:v2"),
-    ("governance_batch_input_snapshot.v2", "batch_input_fingerprint", "governance-batch-input-snapshot:v2"),
-    ("governance_batch_input_reference.v1", "reference_fingerprint", "governance-batch-input-reference:v1"),
-    ("governance_model_input_attribution.v1", "attribution_fingerprint", "governance-model-input-attribution:v1"),
-    ("governance_derived_write_attribution.v1", "attribution_fingerprint", "governance-derived-write-attribution:v1"),
+    (
+        "governance_stored_event_reference.v1",
+        "reference_fingerprint",
+        "governance-stored-event-reference:v1",
+    ),
+    (
+        "governance_evidence_artifact_reference.v1",
+        "reference_fingerprint",
+        "governance-evidence-artifact-reference:v1",
+    ),
+    (
+        "governance_batch_input_artifact_contract.v2",
+        "contract_fingerprint",
+        "governance-batch-input-artifact-contract:v2",
+    ),
+    (
+        "candidate_quoted_evidence_locator.v1",
+        "locator_fingerprint",
+        "candidate-quoted-evidence-locator:v1",
+    ),
+    (
+        "governance_candidate_payload_semantic.v1",
+        "payload_semantic_fingerprint",
+        "governance-candidate-payload-semantic:v1",
+    ),
+    (
+        "governance_candidate_attribution.v1",
+        "attribution_fingerprint",
+        "governance-candidate-attribution:v1",
+    ),
+    (
+        "governance_quoted_evidence_semantic.v1",
+        "semantic_fingerprint",
+        "governance-quoted-evidence-semantic:v1",
+    ),
+    (
+        "governance_quoted_evidence_attribution.v1",
+        "attribution_fingerprint",
+        "governance-quoted-evidence-attribution:v1",
+    ),
+    (
+        "main_agent_tool_governance_source_semantic.v1",
+        "semantic_fingerprint",
+        "governance-main-tool-source-semantic:v1",
+    ),
+    (
+        "reflection_governance_source_semantic.v1",
+        "semantic_fingerprint",
+        "governance-reflection-source-semantic:v1",
+    ),
+    (
+        "compaction_memory_candidate_extractor_contract.v1",
+        "contract_fingerprint",
+        "compaction-memory-candidate-extractor-contract:v1",
+    ),
+    (
+        "compaction_governance_source_semantic.v1",
+        "semantic_fingerprint",
+        "governance-compaction-source-semantic:v1",
+    ),
+    (
+        "governance_source_evidence_attribution.v1",
+        "fact_fingerprint",
+        "governance-source-attribution:v1",
+    ),
+    (
+        "governance_prompt_evidence_text.v1",
+        "text_fingerprint",
+        "governance-prompt-evidence-text:v1",
+    ),
+    (
+        "governance_candidate_prompt_payload.v1",
+        "payload_fingerprint",
+        "governance-candidate-prompt-payload:v1",
+    ),
+    (
+        "governance_evidence_prompt_projection.v1",
+        "projection_fingerprint",
+        "governance-evidence-prompt-projection:v1",
+    ),
+    (
+        "immutable_governance_candidate_snapshot.v1",
+        "candidate_snapshot_fingerprint",
+        "governance-immutable-candidate-snapshot:v1",
+    ),
+    (
+        "governance_evidence_prompt_projection_contract.v1",
+        "contract_fingerprint",
+        "governance-evidence-prompt-projection-contract:v1",
+    ),
+    (
+        "governance_related_memory_semantic.v1",
+        "semantic_fingerprint",
+        "governance-related-memory-semantic:v1",
+    ),
+    (
+        "governance_related_memory_prompt_projection.v1",
+        "projection_fingerprint",
+        "governance-related-memory-prompt-projection:v1",
+    ),
+    (
+        "governance_relatedness_candidate.v1",
+        "fact_fingerprint",
+        "governance-relatedness-candidate:v1",
+    ),
+    (
+        "governance_relatedness_snapshot.v1",
+        "snapshot_fingerprint",
+        "governance-relatedness-snapshot:v1",
+    ),
+    (
+        "reflection_candidate_attribution.v1",
+        "attribution_fingerprint",
+        "reflection-candidate-attribution:v1",
+    ),
+    (
+        "compaction_candidate_attribution.v1",
+        "attribution_fingerprint",
+        "compaction-candidate-attribution:v1",
+    ),
+    (
+        "candidate_projection_outbox_item.v1",
+        "item_fingerprint",
+        "candidate-projection-outbox-item:v1",
+    ),
+    (
+        "main_agent_memory_candidate_builder_contract.v1",
+        "contract_fingerprint",
+        "main-agent-memory-candidate-builder-contract:v1",
+    ),
+    (
+        "governance_evidence_build_result.v1",
+        "result_fingerprint",
+        "governance-evidence-build-result:v1",
+    ),
+    (
+        "memory_candidate_evidence_rejected.v1",
+        "rejection_fingerprint",
+        "memory-candidate-evidence-rejected:v1",
+    ),
+    (
+        "memory_governance_candidate_claim.v1",
+        "claim_fingerprint",
+        "memory-governance-candidate-claim:v1",
+    ),
+    (
+        "governance_system_prompt_contract.v1",
+        "contract_fingerprint",
+        "governance-system-prompt-contract:v1",
+    ),
+    (
+        "governance_frozen_llm_tool_call.v1",
+        "semantic_fingerprint",
+        "governance-frozen-llm-tool-call:v1",
+    ),
+    (
+        "governance_frozen_llm_message.v2",
+        "message_fingerprint",
+        "governance-frozen-llm-message:v2",
+    ),
+    (
+        "governance_model_input.v2",
+        "model_input_fingerprint",
+        "governance-model-input:v2",
+    ),
+    (
+        "governance_batch_input_snapshot.v2",
+        "batch_input_fingerprint",
+        "governance-batch-input-snapshot:v2",
+    ),
+    (
+        "governance_batch_input_reference.v1",
+        "reference_fingerprint",
+        "governance-batch-input-reference:v1",
+    ),
+    (
+        "governance_model_input_attribution.v1",
+        "attribution_fingerprint",
+        "governance-model-input-attribution:v1",
+    ),
+    (
+        "governance_derived_write_attribution.v1",
+        "attribution_fingerprint",
+        "governance-derived-write-attribution:v1",
+    ),
 )
 
 for _schema_version, _fingerprint_field, _domain in _SCHEMAS:

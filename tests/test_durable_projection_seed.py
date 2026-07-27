@@ -10,7 +10,7 @@ from pulsara_agent.event_log.transcript_prefix import (
     EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionKind,
     DurableProjectionKindActivationFact,
@@ -19,7 +19,7 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     DurableProjectionSessionCutoverFact,
     build_projection_fact,
 )
-from pulsara_agent.runtime.projection_jobs.migration_state import (
+from pulsara_agent.projection_jobs.migration_state import (
     next_projection_migration_requirement,
 )
 from pulsara_agent.runtime.projection_jobs.registry import (
@@ -127,9 +127,7 @@ def test_service_seed_cursor_wraps_and_isolates_one_authority_failure() -> None:
         DurableProjectionKindActivationSemanticFact,
         build_projection_fact(
             DurableProjectionKindActivationSemanticFact,
-            schema_version=(
-                "durable_projection_kind_activation_semantic.v1"
-            ),
+            schema_version=("durable_projection_kind_activation_semantic.v1"),
             activation_id="activation:test:timeline",
             projection_kind=kind,
             seed_contract=seed_contract,
@@ -170,9 +168,7 @@ def test_service_seed_cursor_wraps_and_isolates_one_authority_failure() -> None:
                     activation.resulting_migration_registry_prefix_fingerprint
                 ),
                 activation_fingerprint=activation.activation_fingerprint,
-                seed_contract_fingerprint=(
-                    seed_contract.seed_contract_fingerprint
-                ),
+                seed_contract_fingerprint=(seed_contract.seed_contract_fingerprint),
                 cutover_policy_id="post_cutover_events_only",
             ),
         )
@@ -199,9 +195,7 @@ def test_service_seed_cursor_wraps_and_isolates_one_authority_failure() -> None:
                     for index, item in enumerate(cutovers)
                     if item.runtime_session_id == after_runtime_session_id
                 )
-            return tuple(
-                (activation, item) for item in cutovers[start : start + limit]
-            )
+            return tuple((activation, item) for item in cutovers[start : start + limit])
 
         def prepare_next_seed_candidate(
             self,

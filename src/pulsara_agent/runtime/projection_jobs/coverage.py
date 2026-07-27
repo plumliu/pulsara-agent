@@ -8,7 +8,7 @@ from pulsara_agent.primitives._context_base import (
     canonical_json_bytes,
     context_fingerprint,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionKind,
     DurableProjectionLedgerHorizonFact,
     DurableProjectionSourceEventReferenceFact,
@@ -71,9 +71,7 @@ def build_coverage_pages(
     for page_index, start in enumerate(range(0, len(ordered), MAX_COVERAGE_PAGE_ITEMS)):
         chunk = ordered[start : start + MAX_COVERAGE_PAGE_ITEMS]
         item_bytes = len(
-            canonical_json_bytes(
-                tuple(item.model_dump(mode="json") for item in chunk)
-            )
+            canonical_json_bytes(tuple(item.model_dump(mode="json") for item in chunk))
         )
         if item_bytes > MAX_COVERAGE_PAGE_BYTES:
             raise ValueError("coverage page exceeds its canonical byte bound")
@@ -132,9 +130,7 @@ def build_coverage_set_reference(
                 "pre-activation-coverage-target-root:v1",
                 tuple(item.item_fingerprint for item in items),
             ),
-            last_page_fingerprint=(
-                pages[-1].page_fingerprint if pages else None
-            ),
+            last_page_fingerprint=(pages[-1].page_fingerprint if pages else None),
         ),
     )
 
@@ -163,17 +159,12 @@ def build_coverage_receipt(
         raise ValueError("coverage trigger lies outside the frozen horizon")
     trigger_accumulator = context_fingerprint(
         "pre-activation-coverage-trigger-root:v1",
-        tuple(
-            item.reference_fingerprint
-            for item in scanned_trigger_event_references
-        ),
+        tuple(item.reference_fingerprint for item in scanned_trigger_event_references),
     )
     identity_payload = {
         "runtime_session_id": runtime_session_id,
         "projection_kind": projection_kind.value,
-        "pre_activation_contract_fingerprint": (
-            pre_activation_contract_fingerprint
-        ),
+        "pre_activation_contract_fingerprint": (pre_activation_contract_fingerprint),
         "start_cutover_fingerprint": start_cutover_fingerprint,
         "frozen_horizon_fingerprint": frozen_horizon.horizon_fingerprint,
         "scanned_trigger_event_count": len(scanned_trigger_event_references),
@@ -196,18 +187,14 @@ def build_coverage_receipt(
             coverage_receipt_id=receipt_id,
             runtime_session_id=runtime_session_id,
             projection_kind=projection_kind,
-            pre_activation_contract_fingerprint=(
-                pre_activation_contract_fingerprint
-            ),
+            pre_activation_contract_fingerprint=(pre_activation_contract_fingerprint),
             start_cutover_fingerprint=start_cutover_fingerprint,
             frozen_horizon=frozen_horizon,
             scanned_trigger_event_count=len(scanned_trigger_event_references),
             scanned_trigger_event_accumulator=trigger_accumulator,
             target_coverage_set=target_coverage_set,
             maintenance_operation_id=maintenance_operation_id,
-            maintenance_authority_fingerprint=(
-                maintenance_authority_fingerprint
-            ),
+            maintenance_authority_fingerprint=(maintenance_authority_fingerprint),
         ),
     )
 

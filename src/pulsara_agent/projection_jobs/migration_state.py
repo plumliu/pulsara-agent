@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import cast
 
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     PostgresMigrationPreparationKind,
     PostgresMigrationPreparationRequirementFact,
     PostgresMigrationProgressOutcomeFact,
@@ -31,40 +31,30 @@ def next_projection_migration_requirement(
             current_head_version=current_head_version,
             next_migration_version=6,
             database_target_fingerprint=database_target_fingerprint,
-            current_registry_prefix_fingerprint=(
-                current_registry_prefix_fingerprint
-            ),
+            current_registry_prefix_fingerprint=(current_registry_prefix_fingerprint),
             maintenance_operation_kind="legacy_surface_binding_plan",
         )
     if current_head_version == 6 and not timeline_coverage_ready:
         return _requirement(
             kind=(
-                PostgresMigrationPreparationKind
-                .RUN_TIMELINE_PRE_ACTIVATION_COVERAGE
+                PostgresMigrationPreparationKind.RUN_TIMELINE_PRE_ACTIVATION_COVERAGE
             ),
             current_head_version=current_head_version,
             next_migration_version=7,
             database_target_fingerprint=database_target_fingerprint,
-            current_registry_prefix_fingerprint=(
-                current_registry_prefix_fingerprint
-            ),
+            current_registry_prefix_fingerprint=(current_registry_prefix_fingerprint),
             maintenance_operation_kind="run_timeline_pre_activation_drain",
         )
     if current_head_version == 7 and not evidence_coverage_ready:
         return _requirement(
             kind=(
-                PostgresMigrationPreparationKind
-                .TOOL_RESULT_EVIDENCE_PRE_ACTIVATION_COVERAGE
+                PostgresMigrationPreparationKind.TOOL_RESULT_EVIDENCE_PRE_ACTIVATION_COVERAGE
             ),
             current_head_version=current_head_version,
             next_migration_version=8,
             database_target_fingerprint=database_target_fingerprint,
-            current_registry_prefix_fingerprint=(
-                current_registry_prefix_fingerprint
-            ),
-            maintenance_operation_kind=(
-                "tool_result_evidence_pre_activation_drain"
-            ),
+            current_registry_prefix_fingerprint=(current_registry_prefix_fingerprint),
+            maintenance_operation_kind=("tool_result_evidence_pre_activation_drain"),
         )
     return None
 
@@ -123,9 +113,7 @@ def _requirement(
             "expected_registry_prefix_fingerprint": (
                 current_registry_prefix_fingerprint
             ),
-            "required_maintenance_operation_kind": (
-                maintenance_operation_kind
-            ),
+            "required_maintenance_operation_kind": (maintenance_operation_kind),
         },
     )
     return cast(
@@ -136,15 +124,9 @@ def _requirement(
             current_head_version=current_head_version,
             next_migration_version=next_migration_version,
             preparation_kind=kind,
-            expected_registry_prefix_fingerprint=(
-                current_registry_prefix_fingerprint
-            ),
-            expected_database_target_fingerprint=(
-                database_target_fingerprint
-            ),
-            required_maintenance_operation_kind=(
-                maintenance_operation_kind
-            ),
+            expected_registry_prefix_fingerprint=(current_registry_prefix_fingerprint),
+            expected_database_target_fingerprint=(database_target_fingerprint),
+            required_maintenance_operation_kind=(maintenance_operation_kind),
             preparation_contract_fingerprint=contract_fingerprint,
         ),
     )

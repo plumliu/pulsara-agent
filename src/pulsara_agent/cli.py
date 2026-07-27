@@ -43,16 +43,15 @@ from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime.agent import AgentRunResult
-from pulsara_agent.runtime import (
-    ApprovalResolution,
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
     PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanExitResolution,
     PlanQuestionResolution,
-    ToolApprovalDecision,
-    build_durable_runtime_wiring,
 )
+from pulsara_agent.runtime.wiring import build_durable_runtime_wiring
 from pulsara_agent.runtime.mcp import (
     McpRequiredStartupError,
     McpServerConfig,
@@ -90,9 +89,12 @@ from pulsara_agent.runtime.long_horizon.reducer_contract import (
     build_default_subagent_graph_reducer_binding,
 )
 from pulsara_agent.runtime.permission import (
-    PermissionState,
     mode_for_policy,
     preset_to_policy,
+)
+from pulsara_agent.runtime.tool_composition import (
+    build_runtime_tool_composition_input,
+    build_runtime_tool_executor,
 )
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE,
@@ -106,7 +108,6 @@ from pulsara_agent.storage.schema_verification_service import (
     acquire_verified_postgres_access_sync,
     process_postgres_schema_verification_service,
 )
-from pulsara_agent.tools import build_core_tool_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -361,8 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rebuild-result-receipt",
         default=None,
         help=(
-            "Use one durable FULL projection result receipt as exact rebuild "
-            "authority."
+            "Use one durable FULL projection result receipt as exact rebuild authority."
         ),
     )
     projection_retry = projection_subcommands.add_parser(
@@ -924,14 +924,14 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
                     PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
                     "PULSARA_POSTGRES_ADMIN_DSN is required for projection preparation",
                 )
-            from pulsara_agent.runtime.projection_jobs.contracts import (
+            from pulsara_agent.projection_jobs.contracts import (
                 DurableProjectionKind,
             )
-            from pulsara_agent.runtime.projection_jobs.pre_activation import (
-                PostgresProjectionMigrationPreparationCoordinator,
+            from pulsara_agent.runtime.projection_jobs.migration_port import (
+                build_postgres_projection_migration_preparation_port,
             )
 
-            coordinator = PostgresProjectionMigrationPreparationCoordinator(
+            coordinator = build_postgres_projection_migration_preparation_port(
                 admin_dsn=admin_dsn,
                 runtime_dsn=runtime_dsn,
             )
@@ -949,7 +949,7 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
                 **asdict(preparation),
             }
 
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             CanonicalMutationSurface,
             DurableProjectionRepairReason,
         )
@@ -1037,14 +1037,8 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
                 "surface-retry",
                 "surface-decommission",
             }:
-                decommission = (
-                    args.db_projection_command == "surface-decommission"
-                )
-                replacement = (
-                    args.rebuild_result_receipt
-                    if decommission
-                    else None
-                )
+                decommission = args.db_projection_command == "surface-decommission"
+                replacement = args.rebuild_result_receipt if decommission else None
                 action_name = (
                     "retry_same_contract"
                     if not decommission
@@ -1159,9 +1153,29 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
         return payload
     if args.db_command == "migrate":
         admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
+        if not admin_dsn:
+            from pulsara_agent.storage.migrations.errors import (
+                PostgresSchemaError,
+                PostgresSchemaFailureCode,
+            )
+
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
+                "PULSARA_POSTGRES_ADMIN_DSN is required for db migrate",
+            )
+        from pulsara_agent.runtime.projection_jobs.migration_port import (
+            build_postgres_projection_migration_preparation_port,
+        )
+
         report = PostgresMigrationRunner(
             admin_dsn=admin_dsn,
             runtime_dsn=runtime_dsn,
+            projection_preparation_port=(
+                build_postgres_projection_migration_preparation_port(
+                    admin_dsn=admin_dsn,
+                    runtime_dsn=runtime_dsn,
+                )
+            ),
         ).migrate(deadline_monotonic=deadline)
         payload = report.to_dict()
         if report.status == "preparation_required":
@@ -1217,7 +1231,7 @@ async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings)
+    core = HostCore.production(settings=settings)
     session = None
     try:
         session = await core.open_session(
@@ -1611,7 +1625,7 @@ async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings)
+    core = HostCore.production(settings=settings)
     repl_prompt: ReplPrompt = build_repl_prompt(
         history_path=default_pulsara_home() / "repl_history",
     )
@@ -2155,10 +2169,6 @@ def _host_inspect_with_access(
     )
     runtime_session = wiring.runtime_session
     try:
-        registry = build_core_tool_registry(
-            runtime_session,
-            permission_state=PermissionState.from_policy(permission_policy),
-        )
         capability_runtime = CapabilityRuntime.with_default_providers(
             LocalSkillCapabilityProvider(
                 skill_health_resolver=SkillHealthResolver(
@@ -2166,6 +2176,16 @@ def _host_inspect_with_access(
                 )
             )
         )
+        registry = build_runtime_tool_executor(
+            build_runtime_tool_composition_input(
+                runtime_session,
+                memory_proposal_sink=None,
+                memory_recall_service=None,
+                memory_query=None,
+                graph_id=None,
+                memory_read_scopes=None,
+            )
+        ).registry
         frozen_surface = capability_runtime.freeze_execution_surface(
             CapabilityExecutionSurfaceSnapshotContext(
                 workspace_root=workspace.workspace_root,

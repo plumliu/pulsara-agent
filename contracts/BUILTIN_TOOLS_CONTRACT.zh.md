@@ -474,3 +474,23 @@ reservation，且至少一份 final agent-call reserve 不得因 deny 被误扣�
 Monitor registration与其ToolResult terminal projection、notification reservation和physical settlement必须同一atomic FULL；`terminal_monitor.cancel`成功结果与pending disposition、termination、reservation release、cancel ToolResult和settlement同批。`terminal_monitor.list`只读；`register/cancel`属于autonomy scheduling mutation，必须通过action-level permission classifier。V1只允许Host main run监控同Host、同RuntimeSession、`host_main_run` origin的process；child caller、child-origin或cross-ledger process稳定拒绝。
 
 `terminal_monitor.list`只返回当前非terminal lifecycle inventory，固定最多8项，并准确报告omitted/truncated；历史monitor只归Inspector。Capacity exhausted与同process重复registration属于typed request rejection，返回`terminal_monitor_error`及稳定policy code，不得包装成adapter failure；architecture invariant异常仍fail closed。
+
+---
+
+## 17. D4 Tool Ownership Hard Cut
+
+Tool execution contract唯一位于`ports/tool_execution.py`，`ToolExecutor`唯一位于
+`runtime/tool_executor.py`。Concrete built-in只持有其所需窄port，不接收`RuntimeSession`，也不拥有
+description/schema/permission/recovery/concurrency第二真源。
+
+Builtin name-level真值由`capability/builtin_catalog.py`唯一拥有：descriptor、origin-aware binding、
+availability、artifact policy、permission action override、terminal rule、recovery severity、Long-Horizon
+action contract与tool family。Catalog callable names、capability descriptors和active registry bindings必须
+按availability过滤后set-equal。`runtime/tool_taxonomy.py`、`runtime/tool_action.py`与旧built-in registry
+switch已删除。
+
+工具physical execution结束后，artifact archive/index是terminalization的一部分但不授权重执行工具。
+Artifact processor抛出runtime failure时，ToolExecutor必须把原physical result降为稳定
+`TOOL_RESULT_ARTIFACT_PROCESSING_ERROR` terminal candidate，清除未确认artifact refs并继续写唯一
+ToolResult terminal projection；不得只留下`ToolResultStartEvent`。Descriptor或frozen artifact policy
+缺失/漂移仍是composition contract error，必须fail closed而不能伪装成普通artifact outage。

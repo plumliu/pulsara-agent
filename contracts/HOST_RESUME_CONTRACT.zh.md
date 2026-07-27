@@ -285,3 +285,19 @@ input-required 使用 `PRE_INTERACTION_RESUME`：从原 RunStart 重绑 target/p
 continuation commit前失败保留原 pending/token/lease；FULL 后无论 observer publication是否失败，都不得恢复成
 “尚未 resume”。binding 被撤销时 exposure只能收窄；MCP pending自身binding被 reconfigure时 terminal deny，unrelated
 required failure则保留pending供重试。
+
+---
+
+## D4 Durable Host Composition
+
+Production入口只有`HostCore.production()`，始终使用`ProductionHostComposition`。不存在`durable`
+字段/参数、in-memory product branch或production mock binding。Component Host只由
+`tests.support.host.component_test_host_core()`创建，不能作为durability evidence。
+
+Host build严格分成immutable semantic `HostRuntimeBuildFact`与process-local
+`HostRuntimeLiveBindings`/`HostRuntimeBuildAdmission`。Live object均有closed binding kind、process
+owner、generation与semantic contract identity；重绑定必须生成新identity。Live carrier拒绝pickle、
+copy、`dataclasses.asdict()`和event serialization。
+
+Manifest port保留`workspace_root + memory_domain_id + include_closed + limit`四维查询。Resume、repair、
+open/close只从同一composition resource lease取得PostgreSQL、projection、retrieval、governance与manifest。

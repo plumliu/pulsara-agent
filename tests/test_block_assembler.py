@@ -31,7 +31,7 @@ from pulsara_agent.message import (
     ToolResultState,
     URLSource,
 )
-from pulsara_agent.message.assembler import (
+from pulsara_agent.replay.message_assembler import (
     BlockAssembler,
     completed_tool_result_from_events,
 )
@@ -54,7 +54,9 @@ def test_block_assembler_completes_text_thinking_and_tool_call_blocks() -> None:
     text_start = make_text_block_start_event(
         **CTX.event_fields(), block_id="text:1", sequence=1
     )
-    text_end = make_text_block_end_event(**CTX.event_fields(), block_id="text:1", sequence=4)
+    text_end = make_text_block_end_event(
+        **CTX.event_fields(), block_id="text:1", sequence=4
+    )
 
     for event in [
         text_start,
@@ -71,7 +73,9 @@ def test_block_assembler_completes_text_thinking_and_tool_call_blocks() -> None:
         make_thinking_block_segment_event(
             **CTX.event_fields(), block_id="thinking:1", delta="plan", sequence=6
         ),
-        make_thinking_block_end_event(**CTX.event_fields(), block_id="thinking:1", sequence=7),
+        make_thinking_block_end_event(
+            **CTX.event_fields(), block_id="thinking:1", sequence=7
+        ),
         make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:1",
@@ -84,7 +88,9 @@ def test_block_assembler_completes_text_thinking_and_tool_call_blocks() -> None:
         make_tool_call_arguments_segment_event(
             **CTX.event_fields(), tool_call_id="call:1", delta=':"x"}', sequence=10
         ),
-        make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:1", sequence=11),
+        make_tool_call_end_event(
+            **CTX.event_fields(), tool_call_id="call:1", sequence=11
+        ),
     ]:
         update = assembler.append(event)
         started.extend(update.started)
@@ -108,16 +114,24 @@ def test_block_assembler_isolates_active_blocks_by_reply_id() -> None:
     completions = []
 
     for event in [
-        make_text_block_start_event(**CTX_A.event_fields(), block_id="text:1", sequence=1),
+        make_text_block_start_event(
+            **CTX_A.event_fields(), block_id="text:1", sequence=1
+        ),
         make_text_block_segment_event(
             **CTX_A.event_fields(), block_id="text:1", delta="A", sequence=2
         ),
-        make_text_block_start_event(**CTX_B.event_fields(), block_id="text:1", sequence=3),
+        make_text_block_start_event(
+            **CTX_B.event_fields(), block_id="text:1", sequence=3
+        ),
         make_text_block_segment_event(
             **CTX_B.event_fields(), block_id="text:1", delta="B", sequence=4
         ),
-        make_text_block_end_event(**CTX_A.event_fields(), block_id="text:1", sequence=5),
-        make_text_block_end_event(**CTX_B.event_fields(), block_id="text:1", sequence=6),
+        make_text_block_end_event(
+            **CTX_A.event_fields(), block_id="text:1", sequence=5
+        ),
+        make_text_block_end_event(
+            **CTX_B.event_fields(), block_id="text:1", sequence=6
+        ),
         make_tool_call_start_event(
             **CTX_A.event_fields(),
             tool_call_id="call:1",
@@ -142,8 +156,12 @@ def test_block_assembler_isolates_active_blocks_by_reply_id() -> None:
             delta='{"reply":"b"}',
             sequence=10,
         ),
-        make_tool_call_end_event(**CTX_A.event_fields(), tool_call_id="call:1", sequence=11),
-        make_tool_call_end_event(**CTX_B.event_fields(), tool_call_id="call:1", sequence=12),
+        make_tool_call_end_event(
+            **CTX_A.event_fields(), tool_call_id="call:1", sequence=11
+        ),
+        make_tool_call_end_event(
+            **CTX_B.event_fields(), tool_call_id="call:1", sequence=12
+        ),
     ]:
         completions.extend(assembler.append(event).completed)
 
@@ -166,7 +184,9 @@ def test_block_assembler_isolates_active_blocks_by_reply_id() -> None:
 def test_block_assembler_can_discard_unfinished_blocks_for_reply() -> None:
     assembler = BlockAssembler()
     assembler.append(
-        make_text_block_start_event(**CTX_A.event_fields(), block_id="text:1", sequence=1)
+        make_text_block_start_event(
+            **CTX_A.event_fields(), block_id="text:1", sequence=1
+        )
     )
     assembler.append(
         make_text_block_segment_event(
@@ -174,7 +194,9 @@ def test_block_assembler_can_discard_unfinished_blocks_for_reply() -> None:
         )
     )
     assembler.append(
-        make_text_block_start_event(**CTX_B.event_fields(), block_id="text:1", sequence=3)
+        make_text_block_start_event(
+            **CTX_B.event_fields(), block_id="text:1", sequence=3
+        )
     )
     assembler.append(
         make_text_block_segment_event(
@@ -189,7 +211,9 @@ def test_block_assembler_can_discard_unfinished_blocks_for_reply() -> None:
 
     assert (
         assembler.append(
-            make_text_block_end_event(**CTX_A.event_fields(), block_id="text:1", sequence=5)
+            make_text_block_end_event(
+                **CTX_A.event_fields(), block_id="text:1", sequence=5
+            )
         ).completed
         == []
     )

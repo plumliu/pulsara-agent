@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,18 +12,14 @@ from pulsara_agent.capability import (
     SkillBinaryLookupPath,
     SkillHealthResolver,
 )
-from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityProvider,
-    empty_mcp_installation,
-)
+from pulsara_agent.capability.providers.mcp import McpCapabilityProvider
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
+from pulsara_agent.event_log import EventLog, PostgresEventLog
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.graph import (
     DEFAULT_GRAPH_ID,
     GraphStore,
-    InMemoryGraphStore,
     PostgresGraphStore,
 )
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
@@ -33,8 +28,6 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import (
     ArtifactStore,
     CandidatePool,
-    InMemoryArchiveStore,
-    InMemoryCandidatePool,
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
@@ -65,14 +58,12 @@ from pulsara_agent.memory.governance.batch_input import (
     MemoryGovernanceBatchPreparationCommitPort,
 )
 from pulsara_agent.memory.governance.claims import (
-    InMemoryMemoryGovernanceCandidateClaimRepository,
     MemoryGovernanceCandidateClaimRepository,
     PostgresMemoryGovernanceCandidateClaimRepository,
 )
 from pulsara_agent.memory.governance.evidence import GovernanceSourceEvidenceBuilder
 from pulsara_agent.memory.governance.preparation import (
     GovernanceBatchPreparationRepository,
-    InMemoryGovernanceBatchPreparationRepository,
     PostgresGovernanceBatchPreparationRepository,
 )
 from pulsara_agent.memory.governance.event_outbox import (
@@ -81,18 +72,27 @@ from pulsara_agent.memory.governance.event_outbox import (
 )
 from pulsara_agent.memory.canonical.unit_of_work import (
     GovernanceWriteUnitOfWork,
-    InMemoryMemoryWriteUnitOfWork,
     MemoryWriteUnitOfWork,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.memory.canonical.postgres_uow_scope import (
+    PostgresMemoryUowTransactionScopeFactory,
+)
+from pulsara_agent.ports.projection_jobs import (
+    issue_memory_uow_scope_factory_authority,
+)
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
     CanonicalMutationSurfacePlanFact,
 )
+from pulsara_agent.projection_jobs.canonical_mutation import build_surface_plan
 from pulsara_agent.runtime.projection_jobs.mutation_writer import (
     CanonicalMutationV2Writer,
-    build_surface_plan,
+    PostgresCanonicalMutationTransactionDriver,
 )
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_gate import (
+    MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT,
+    MemoryWriteGate,
+)
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
@@ -106,7 +106,6 @@ from pulsara_agent.runtime.compaction.candidates import (
 )
 from pulsara_agent.memory.candidates.projection_outbox import (
     CandidateProjectionOutboxDispatcher,
-    InMemoryCandidateProjectionOutbox,
     MemoryCandidateProjectionCommitPort,
     PostgresCandidateProjectionOutbox,
 )
@@ -119,13 +118,12 @@ from pulsara_agent.runtime.permission import (
     default_permission_policy,
 )
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
+from pulsara_agent.runtime.mcp.tool_execution_port import RuntimeMcpToolExecutionPort
 from pulsara_agent.runtime.mcp.types import McpInstalledCapabilitySnapshot
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalRuntimeBinding
-from pulsara_agent.runtime.tool_artifacts import (
-    InMemoryToolResultArtifactIndex,
-    PostgresToolResultArtifactIndex,
-)
+from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
 from pulsara_agent.settings import PulsaraSettings
@@ -174,113 +172,6 @@ class AgentRuntimeWiring:
     runtime_wiring: RuntimeWiring
 
 
-def build_in_memory_runtime_wiring(
-    workspace_root: Path,
-    *,
-    runtime_session_id: str | None = None,
-    reopen_deadline_monotonic: float | None = None,
-    graph_id: str | None = None,
-    memory_domain: MemoryDomainContext | None = None,
-    terminal_binding: TerminalRuntimeBinding | None = None,
-    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
-) -> RuntimeWiring:
-    warnings.warn(
-        "build_in_memory_runtime_wiring() is compatibility/test-only; "
-        "production runtimes require PostgreSQL durable wiring",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    resolved_graph_id = graph_id or (
-        memory_domain.graph_id if memory_domain is not None else None
-    )
-    _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
-    event_log = InMemoryEventLog()
-    graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
-    tool_result_artifacts = InMemoryToolResultArtifactIndex()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = RuntimeSession(
-        workspace_root,
-        **_runtime_session_id_kwargs(runtime_session_id),
-        event_log=event_log,
-        archive=archive,
-        tool_result_artifacts=tool_result_artifacts,
-        reopen_deadline_monotonic=reopen_deadline_monotonic,
-        terminal_binding=terminal_binding,
-        extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
-        allow_unbootstrapped_test_events=True,
-    )
-    candidate_projection_outbox = InMemoryCandidateProjectionOutbox()
-    candidate_projection_dispatcher = CandidateProjectionOutboxDispatcher(
-        runtime_session_id=runtime_session.runtime_session_id,
-        repository=candidate_projection_outbox,
-        candidate_pool=candidate_pool,
-    )
-    candidate_projection_commit_port = MemoryCandidateProjectionCommitPort(
-        runtime_session=runtime_session,
-        repository=candidate_projection_outbox,
-        dispatcher=candidate_projection_dispatcher,
-    )
-    ledger, memory_write_service = _build_ledger_and_service(
-        graph,
-        resolved_graph_id,
-    )
-    memory_governance_executor = _build_memory_governance_executor(
-        candidate_pool=candidate_pool,
-        memory_write_service=memory_write_service,
-        event_log=event_log,
-        event_commit_port=lambda events: (
-            runtime_session.write_events_from_thread(events).committed_events
-        ),
-        async_operation_port=_governance_async_operation_port(runtime_session),
-        graph=graph,
-        graph_id=resolved_graph_id,
-        runtime_session_id=runtime_session.runtime_session_id,
-        memory_write_uow_factory=lambda: InMemoryMemoryWriteUnitOfWork(
-            graph=graph,
-            candidate_pool=candidate_pool,
-            memory_write_service=memory_write_service,
-            graph_id=resolved_graph_id,
-            runtime_session_id=runtime_session.runtime_session_id,
-        ),
-        allowed_write_scopes=_allowed_write_scopes(memory_domain),
-    )
-    governance_claims = InMemoryMemoryGovernanceCandidateClaimRepository(
-        candidate_pool=candidate_pool
-    )
-    governance_preparations = InMemoryGovernanceBatchPreparationRepository()
-    governance_evidence = GovernanceSourceEvidenceBuilder(
-        runtime_session_id=runtime_session.runtime_session_id,
-        event_log=event_log,
-        archive=archive,
-    )
-    governance_preparation_commit = MemoryGovernanceBatchPreparationCommitPort(
-        runtime_session=runtime_session,
-        claim_repository=governance_claims,
-        preparation_repository=governance_preparations,
-    )
-    return RuntimeWiring(
-        runtime_session=runtime_session,
-        event_log=event_log,
-        graph=graph,
-        archive=archive,
-        graph_id=resolved_graph_id,
-        ledger=ledger,
-        candidate_pool=candidate_pool,
-        candidate_projection_commit_port=candidate_projection_commit_port,
-        memory_governance_executor=memory_governance_executor,
-        memory_governance_claim_repository=governance_claims,
-        memory_governance_preparation_repository=governance_preparations,
-        memory_governance_evidence_builder=governance_evidence,
-        memory_governance_preparation_commit_port=governance_preparation_commit,
-        memory_recall_service=None,
-        memory_query=None,
-        memory_domain=memory_domain,
-        working_context_store=None,
-        mcp_installation=mcp_installation or empty_mcp_installation(),
-    )
-
-
 def build_durable_runtime_wiring(
     settings: PulsaraSettings,
     workspace_root: Path,
@@ -320,7 +211,9 @@ def build_durable_runtime_wiring(
         tool_result_artifacts=tool_result_artifacts,
         reopen_deadline_monotonic=reopen_deadline_monotonic,
         terminal_binding=terminal_binding,
-        extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
+        dynamic_tool_installations=(
+            mcp_installation or empty_mcp_installation()
+        ).ordered_binding_installations,
     )
     postgres_graph = PostgresGraphStore(connection_provider)
     mutation_surface_plan = _resolved_mutation_surface_plan(
@@ -336,6 +229,7 @@ def build_durable_runtime_wiring(
     graph: GraphStore = DurableGraphFacade(
         postgres=postgres_graph,
         mutation_writer=mutation_writer,
+        mutation_surface_plan=mutation_surface_plan,
     )
     candidate_pool = PostgresCandidatePool(connection_provider)
     candidate_projection_outbox = PostgresCandidateProjectionOutbox(connection_provider)
@@ -416,6 +310,13 @@ def build_durable_runtime_wiring(
         graph,
         resolved_graph_id,
     )
+    memory_uow_scope_factory = PostgresMemoryUowTransactionScopeFactory(
+        connection_provider=connection_provider,
+        mutation_driver=PostgresCanonicalMutationTransactionDriver(),
+        scope_factory_authority=issue_memory_uow_scope_factory_authority(),
+        gate=MemoryWriteGate(),
+        memory_write_gate_contract_fingerprint=(MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT),
+    )
 
     def governance_event_commit_port(events):
         return runtime_session.write_events_from_thread(events).committed_events
@@ -438,7 +339,7 @@ def build_durable_runtime_wiring(
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-            connection_provider=connection_provider,
+            scope_factory=memory_uow_scope_factory,
             runtime_session_id=runtime_session.runtime_session_id,
             graph_id=resolved_graph_id,
             archive=archive,
@@ -503,8 +404,7 @@ def build_agent_runtime_wiring(
     settings: PulsaraSettings,
     workspace_root: Path,
     *,
-    durable: bool,
-    postgres_access_lease: VerifiedPostgresAccessLease | None = None,
+    postgres_access_lease: VerifiedPostgresAccessLease,
     model_role: ModelRole,
     options: LLMOptions | None = None,
     system_prompt: str | None = None,
@@ -524,35 +424,64 @@ def build_agent_runtime_wiring(
     mcp_installation: McpInstalledCapabilitySnapshot | None = None,
 ) -> AgentRuntimeWiring:
     effective_mcp_installation = mcp_installation or empty_mcp_installation()
-    runtime_wiring = (
-        build_durable_runtime_wiring(
-            settings,
-            workspace_root,
-            postgres_access_lease=_required_postgres_access_lease(
-                postgres_access_lease
-            ),
-            runtime_session_id=runtime_session_id,
-            reopen_deadline_monotonic=reopen_deadline_monotonic,
-            graph_id=graph_id,
-            memory_domain=memory_domain,
-            terminal_binding=terminal_binding,
-            retrieval_resources=retrieval_resources,
-            governance_coordinator=governance_coordinator,
-            mcp_installation=effective_mcp_installation,
-        )
-        if durable
-        else build_in_memory_runtime_wiring(
-            workspace_root,
-            runtime_session_id=runtime_session_id,
-            reopen_deadline_monotonic=reopen_deadline_monotonic,
-            graph_id=graph_id,
-            memory_domain=memory_domain,
-            terminal_binding=terminal_binding,
-            mcp_installation=effective_mcp_installation,
-        )
+    runtime_wiring = build_durable_runtime_wiring(
+        settings,
+        workspace_root,
+        postgres_access_lease=postgres_access_lease,
+        runtime_session_id=runtime_session_id,
+        reopen_deadline_monotonic=reopen_deadline_monotonic,
+        graph_id=graph_id,
+        memory_domain=memory_domain,
+        terminal_binding=terminal_binding,
+        retrieval_resources=retrieval_resources,
+        governance_coordinator=governance_coordinator,
+        mcp_installation=effective_mcp_installation,
     )
+    return compose_agent_runtime_wiring(
+        settings=settings,
+        runtime_wiring=runtime_wiring,
+        model_role=model_role,
+        options=options,
+        system_prompt=system_prompt,
+        memory_reflection=memory_reflection,
+        memory_reflection_options=memory_reflection_options,
+        capability_runtime=capability_runtime,
+        enable_workspace_skills=enable_workspace_skills,
+        permission_policy=permission_policy,
+        mcp_supervisor=mcp_supervisor,
+        mcp_installation=effective_mcp_installation,
+    )
+
+
+def compose_agent_runtime_wiring(
+    *,
+    settings: PulsaraSettings,
+    runtime_wiring: RuntimeWiring,
+    model_role: ModelRole,
+    options: LLMOptions | None = None,
+    system_prompt: str | None = None,
+    memory_reflection: bool = True,
+    memory_reflection_options: MemoryReflectionOptions | None = None,
+    capability_runtime: CapabilityRuntime | None = None,
+    enable_workspace_skills: bool = True,
+    permission_policy: EffectivePermissionPolicy | None = None,
+    mcp_supervisor: McpServerSupervisor | None = None,
+    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
+) -> AgentRuntimeWiring:
+    """Attach Agent behavior to an already-owned RuntimeWiring.
+
+    This function contains no persistence selector. Component tests may build a
+    test-owned RuntimeWiring and still exercise the exact production Agent
+    composition above it.
+    """
+    effective_mcp_installation = mcp_installation or empty_mcp_installation()
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
+    runtime_wiring.runtime_session.mcp_tool_execution_port = (
+        RuntimeMcpToolExecutionPort(mcp_supervisor)
+        if mcp_supervisor is not None
+        else None
+    )
     runtime_wiring.runtime_session.set_mcp_installation_contract(
         installation_id=effective_mcp_installation.installation_id,
     )
@@ -747,9 +676,7 @@ def _build_memory_hooks(
             working_context_store=runtime_wiring.working_context_store,
             working_context_domain=runtime_wiring.memory_domain,
             working_context_async_operation_port=(
-                _governance_async_operation_port(
-                    runtime_wiring.runtime_session
-                )
+                _governance_async_operation_port(runtime_wiring.runtime_session)
             ),
         )
     reflection = MemoryReflectionEngine(

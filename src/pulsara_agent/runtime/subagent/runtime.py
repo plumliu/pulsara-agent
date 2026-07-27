@@ -53,6 +53,7 @@ from pulsara_agent.event_log import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
+from pulsara_agent.ports.tool_registry import McpToolBindingContract
 from pulsara_agent.primitives.subagent import (
     ChildExplicitResultEvidenceFact,
     ChildNativeTerminalReferenceFact,
@@ -65,14 +66,18 @@ from pulsara_agent.primitives.subagent import (
     validate_child_render_policy_against_budget,
 )
 from pulsara_agent.message import TextBlock
-from pulsara_agent.message.assembler import BlockAssembler
+from pulsara_agent.replay.message_assembler import BlockAssembler
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.mcp.lifecycle import McpInputRequiredLifecycleStore
 from pulsara_agent.runtime.mcp.recovery import (
     terminalize_reopened_mcp_input_required,
 )
-from pulsara_agent.runtime.session import EventWriteConflict, RuntimeSession
+from pulsara_agent.runtime.session import (
+    EventWriteConflict,
+    RuntimeSession,
+    event_batch_commit_outcome_from_error,
+)
 from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.subagent.projection import (
     EventLogLocator,
@@ -84,7 +89,7 @@ from pulsara_agent.runtime.subagent.hydration import (
     HydratedSubagentTaskView,
     SubagentGraphHydrator,
 )
-from pulsara_agent.runtime.subagent.immutable import thaw_json_mapping
+from pulsara_agent.primitives.subagent_json import thaw_json_mapping
 from pulsara_agent.runtime.subagent.reducer import pending_subagent_result_ids
 from pulsara_agent.runtime.subagent.facts import (
     SubagentGraphState,
@@ -109,7 +114,7 @@ from pulsara_agent.runtime.authority_materialization import (
 )
 from pulsara_agent.runtime.long_horizon.accounting import child_settlement_aggregate
 from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
-from pulsara_agent.runtime.subagent.types import (
+from pulsara_agent.primitives.subagent import (
     SubagentBudget,
     SubagentCapabilityProfile,
     SubagentContextPolicy,
@@ -961,10 +966,18 @@ class SubagentRuntime:
                     ),
                 )
             )
-        except Exception:
+        except BaseException as exc:
+            if reservation is None or not self._adopt_full_reservation_commit(
+                reservation,
+                error=exc,
+            ):
+                raise
+        else:
             if reservation is not None:
-                self._execution_registry.release_reservation(reservation)
-            raise
+                self._execution_registry.record_reservation_commit_outcome(
+                    reservation,
+                    status="full",
+                )
 
         runs: list[SubagentRunFact] = []
         run_views: list[HydratedSubagentRunView] = []
@@ -1143,9 +1156,14 @@ class SubagentRuntime:
                     ),
                 )
             )
-        except Exception:
-            self._execution_registry.release_reservation(reservation)
-            raise
+        except BaseException as exc:
+            if not self._adopt_full_reservation_commit(reservation, error=exc):
+                raise
+        else:
+            self._execution_registry.record_reservation_commit_outcome(
+                reservation,
+                status="full",
+            )
         try:
             child_runtime = self._create_child_runtime_session(
                 child_runtime_session_id=child_runtime_session_id,
@@ -1266,7 +1284,7 @@ class SubagentRuntime:
                         "child_runtime_session_id": child_runtime_session_id,
                     },
                 )
-        except Exception:
+        except BaseException:
             self._execution_registry.release_reservation(reservation)
             raise
         task_preview = _clip(task, 500)
@@ -1325,9 +1343,14 @@ class SubagentRuntime:
                     ),
                 )
             )
-        except Exception:
-            self._execution_registry.release_reservation(reservation)
-            raise
+        except BaseException as exc:
+            if not self._adopt_full_reservation_commit(reservation, error=exc):
+                raise
+        else:
+            self._execution_registry.record_reservation_commit_outcome(
+                reservation,
+                status="full",
+            )
         try:
             child_runtime = self._create_child_runtime_session(
                 child_runtime_session_id=child_runtime_session_id,
@@ -2349,6 +2372,7 @@ class SubagentRuntime:
         settlement are committed atomically.
         """
 
+        self._execution_registry.require_no_unresolved_commit_reservations()
         active_runs = [run for run in self.runs if run.status in _ACTIVE_STATUSES]
         cancelled: list[SubagentRunFact] = []
         for run in active_runs:
@@ -2361,7 +2385,35 @@ class SubagentRuntime:
                     drain_timeout_seconds=timeout_seconds,
                 )
             )
+        self._execution_registry.require_no_unresolved_commit_reservations()
         return tuple(cancelled)
+
+    def _adopt_full_reservation_commit(
+        self,
+        reservation,
+        *,
+        error: BaseException,
+    ) -> bool:
+        """Settle a writer-resolved failure without losing physical capacity."""
+
+        outcome = event_batch_commit_outcome_from_error(error)
+        if outcome is None or outcome.status == "none":
+            self._execution_registry.record_reservation_commit_outcome(
+                reservation,
+                status="none",
+            )
+            return False
+        if outcome.status == "unknown":
+            self._execution_registry.record_reservation_commit_outcome(
+                reservation,
+                status="unknown",
+            )
+            return False
+        self._execution_registry.record_reservation_commit_outcome(
+            reservation,
+            status="full",
+        )
+        return True
 
     async def drain_children_for_parent_run(
         self,
@@ -2418,9 +2470,7 @@ class SubagentRuntime:
             child_log = self.event_log_locator.event_log_for_runtime_session(
                 run.child_runtime_session_id
             )
-            child_events = tuple(
-                child_log.iter(deadline_monotonic=recovery_deadline)
-            )
+            child_events = tuple(child_log.iter(deadline_monotonic=recovery_deadline))
             starts = [
                 event
                 for event in child_events
@@ -2469,13 +2519,11 @@ class SubagentRuntime:
                     ),
                 )
                 try:
-                    recovered_mcp = (
-                        await terminalize_reopened_mcp_input_required(
-                            child_session,
-                            run_id=start.run_id,
-                            closure_reason="child_pending_unsupported",
-                            deadline_monotonic=recovery_deadline,
-                        )
+                    recovered_mcp = await terminalize_reopened_mcp_input_required(
+                        child_session,
+                        run_id=start.run_id,
+                        closure_reason="child_pending_unsupported",
+                        deadline_monotonic=recovery_deadline,
                     )
                     child_events = tuple(
                         child_log.iter(deadline_monotonic=recovery_deadline)
@@ -3645,7 +3693,9 @@ class SubagentRuntime:
             tool_result_artifacts=self.parent_runtime_session.tool_result_artifacts,
             runtime_session_id=child_runtime_session_id,
             terminal_binding=self.parent_runtime_session.terminal_binding,
-            extra_tool_bindings=self.parent_runtime_session.extra_tool_bindings,
+            dynamic_tool_installations=(
+                self.parent_runtime_session.dynamic_tool_installations
+            ),
             default_event_metadata={
                 "subagent": {
                     "subagent_run_id": subagent_run_id,
@@ -3663,6 +3713,9 @@ class SubagentRuntime:
             ),
         )
         child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
+        child.mcp_tool_execution_port = (
+            self.parent_runtime_session.mcp_tool_execution_port
+        )
         child.set_mcp_installation_contract(
             installation_id=self.parent_runtime_session.mcp_installation_id,
             owner_runtime_session_id=self.parent_runtime_session.runtime_session_id,
@@ -4440,15 +4493,22 @@ def _mcp_binding_identities(
     *,
     allowed_tool_names: frozenset[str],
 ) -> frozenset[McpBindingIdentity]:
-    identities = {
-        identity
-        for tool in runtime_session.extra_tool_bindings
-        if getattr(tool, "name", None) in allowed_tool_names
-        if isinstance(
-            (identity := getattr(tool, "binding_identity", None)),
-            McpBindingIdentity,
+    identities = set()
+    for installation in runtime_session.dynamic_tool_installations:
+        binding = installation.binding_contract
+        if not isinstance(binding, McpToolBindingContract):
+            continue
+        if binding.tool_name not in allowed_tool_names:
+            continue
+        identity = binding.binding_identity
+        identities.add(
+            McpBindingIdentity(
+                server_id=identity.server_id,
+                slot_id=identity.slot_id,
+                snapshot_id=identity.snapshot_id,
+                discovery_generation=identity.discovery_generation,
+            )
         )
-    }
     return frozenset(identities)
 
 

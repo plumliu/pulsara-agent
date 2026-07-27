@@ -3,9 +3,14 @@ import json
 import tempfile
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.capability import (
+    descriptor_attribution_for_test,
+    tool_runtime_context,
+)
 
 from pulsara_agent.event import (
     EventContext,
@@ -17,8 +22,8 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolResultBlock, ToolResultState
-from pulsara_agent.message.assembler import completed_tool_result_from_events
-from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.replay.message_assembler import completed_tool_result_from_events
+from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -27,40 +32,40 @@ from pulsara_agent.runtime.permission import (
     TerminalAccess,
 )
 from pulsara_agent.runtime.tool_artifacts import (
-    InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactRecord,
     ToolResultArtifactService,
+    artifact_processing_policy_for_descriptor,
 )
+from tests.support.artifacts import FakeToolResultArtifactIndex
+from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
 from pulsara_agent.runtime.tool_execution import build_tool_result_terminal_event
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.primitives.terminal_observation import (
     ArtifactTerminalObservationCoverageFact,
 )
-from pulsara_agent.primitives.mcp import McpBindingIdentityFact
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import thaw_json
-from pulsara_agent.primitives.runtime_event_vocabulary import (
-    prepare_mcp_input_required_suspension,
-)
-from pulsara_agent.tools import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
     ToolExecutionSuspended,
-    ToolExecutor,
     ToolResultArtifactCandidate,
     ToolRuntimeContext,
-    build_core_tool_registry,
+)
+from pulsara_agent.runtime.tool_executor import ToolExecutor
+from tests.support.tools import (
+    build_component_tool_executor,
+    build_component_tool_registry as build_core_tool_registry,
 )
 from pulsara_agent.tools.builtins.terminal import (
-    TerminalTool,
     freeze_tool_display_payload,
 )
-from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
-from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
 
 
 CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:tools")
+TEST_RUNTIME_SESSION_ID = "runtime:tools-component"
 
 
 class _AsyncContextProbeTool:
@@ -108,47 +113,69 @@ class _AsyncSuspendingTool:
             tool_call_id=call.id,
             tool_name=call.name,
             interaction_kind="mcp_input_required",
-            prepared_mcp_input_required=prepare_mcp_input_required_suspension(
-                interaction_id=f"mcp_input_required:{call.id}",
-                tool_call_id=call.id,
-                tool_name=call.name,
-                server_id="test-mcp",
-                round_count=1,
-                binding_identity=McpBindingIdentityFact(
-                    server_id="test-mcp",
-                    slot_id="slot:test-mcp",
-                    snapshot_id="snapshot:test-mcp",
-                    discovery_generation=1,
-                ),
-                pending_lease_reservation_id=f"mcp_pending_lease:{call.id}",
-                protocol_version="test",
-                input_requests=(),
-                original_request={
-                    "source_method": "tools/call",
-                    "tool_name": call.name,
-                    "arguments": call.arguments,
-                },
-                request_state="needs-more-input",
-                deadline_monotonic=None,
-            ),
+            mcp_pending_handle=object(),  # executor treats the port-owned handle opaquely
         )
 
 
 def make_registry(tmp_path):
-    return build_core_tool_registry(in_memory_runtime_session(tmp_path))
+    return build_core_tool_registry(
+        in_memory_runtime_session(
+            tmp_path,
+            runtime_session_id=TEST_RUNTIME_SESSION_ID,
+        )
+    )
+
+
+def execute_runtime_tool(
+    executor: ToolExecutor,
+    call: ToolCall,
+    *,
+    event_context: EventContext,
+    permission_mode: PermissionMode = PermissionMode.BYPASS_PERMISSIONS,
+    descriptor=None,
+):
+    resolved_descriptor = descriptor
+    if resolved_descriptor is None:
+        resolved_descriptor = next(
+            (item for item in builtin_tool_descriptors() if item.name == call.name),
+            None,
+        )
+    return ToolExecutor.execute(
+        executor,
+        call,
+        event_context=event_context,
+        descriptor=resolved_descriptor,
+        descriptor_attribution=(
+            descriptor_attribution_for_test(
+                resolved_descriptor,
+                runtime_session_id=(
+                    executor.runtime_session_id or TEST_RUNTIME_SESSION_ID
+                ),
+            )
+            if resolved_descriptor is not None
+            else None
+        ),
+        runtime_context=tool_runtime_context(
+            runtime_session_id=(executor.runtime_session_id or TEST_RUNTIME_SESSION_ID),
+            event_context=event_context,
+            permission_mode=permission_mode,
+        ),
+    )
 
 
 def make_runtime_executor(tmp_path) -> tuple[RuntimeSession, ToolExecutor]:
     runtime_session = in_memory_runtime_session(tmp_path)
-    return runtime_session, runtime_session.create_tool_executor(
-        record_event=runtime_session.make_thread_recorder()
+    return runtime_session, build_component_tool_executor(
+        runtime_session,
+        recorder=runtime_session.make_thread_recorder(),
     )
 
 
 def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, object]:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(id=f"call:{name}", name=name, arguments=arguments),
         event_context=CTX,
     )
@@ -225,6 +252,9 @@ def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
         result = await executor.execute_async(
             ToolCall(id="call:async-probe", name=probe.name),
             event_context=CTX,
+            runtime_context=tool_runtime_context(
+                runtime_session_id="runtime:async-probe", event_context=CTX
+            ),
         )
         return loop, result
 
@@ -235,6 +265,12 @@ def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
     assert probe.runtime_context == ToolRuntimeContext(
         runtime_session_id="runtime:async-probe",
         event_context=CTX,
+        permission=tool_runtime_context(
+            runtime_session_id="runtime:async-probe", event_context=CTX
+        ).permission,
+        owner_kind=tool_runtime_context(
+            runtime_session_id="runtime:async-probe", event_context=CTX
+        ).owner_kind,
     )
 
 
@@ -252,15 +288,19 @@ def test_async_suspended_tool_payload_gets_observation_timing_seed() -> None:
             event_context=CTX,
             context_id="context:suspend",
             model_call_index=3,
+            runtime_context=tool_runtime_context(
+                runtime_session_id="runtime:async-suspend",
+                event_context=CTX,
+                context_id="context:suspend",
+                model_call_index=3,
+            ),
         )
         assert isinstance(result, ToolExecutionSuspended)
         return result
 
     suspended = asyncio.run(run_probe())
 
-    frozen_seed = (
-        suspended.prepared_mcp_input_required.tool_observation_timing_seed
-    )
+    frozen_seed = suspended.tool_observation_timing_seed
     assert frozen_seed is not None
     seed = thaw_json(frozen_seed)
     assert seed["tool_call_id"] == "call:async-suspend"
@@ -276,7 +316,7 @@ def test_async_suspended_tool_payload_gets_observation_timing_seed() -> None:
 def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
     registry = make_registry(tmp_path)
 
-    assert registry.names() == [
+    assert registry.names() == (
         "artifact_read",
         "ask_plan_question",
         "edit_file",
@@ -289,11 +329,18 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
         "terminal_process",
         "todo",
         "write_file",
-    ]
-    assert [spec.name for spec in registry.tool_specs()] == registry.names()
+    )
+    descriptors = tuple(
+        descriptor
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.name in registry.names()
+    )
+    assert tuple(descriptor.name for descriptor in descriptors) == registry.names()
     assert all(
-        spec.parameters.get("type") == "object" or "oneOf" in spec.parameters
-        for spec in registry.tool_specs()
+        descriptor.input_schema.get("type") == "object"
+        or "oneOf" in descriptor.input_schema
+        for descriptor in descriptors
+        if descriptor.input_schema is not None
     )
     assert not any(name.startswith("remember_") for name in registry.names())
     assert "propose_memory" not in registry.names()
@@ -314,7 +361,7 @@ def test_tool_registry_restricted_surface_preserves_exact_binding_contract() -> 
 
     restricted = registry.restricted_to(frozenset({allowed.name}))
 
-    assert restricted.names() == [allowed.name]
+    assert restricted.names() == (allowed.name,)
     assert restricted.get(allowed.name) is allowed
     assert restricted.binding_contract(allowed.name) == allowed_contract
     with pytest.raises(KeyError, match="Unknown tool"):
@@ -411,11 +458,16 @@ def test_core_tool_registry_is_constant_across_permission_modes(tmp_path) -> Non
 
 
 def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
-    registry = make_registry(tmp_path)
-    terminal = next(spec for spec in registry.tool_specs() if spec.name == "terminal")
-    properties = terminal.parameters["properties"]
+    del tmp_path
+    terminal = next(
+        descriptor
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.name == "terminal"
+    )
+    assert terminal.input_schema is not None
+    properties = terminal.input_schema["properties"]
 
-    assert terminal.parameters["additionalProperties"] is False
+    assert terminal.input_schema["additionalProperties"] is False
     assert "yield_time_ms" in properties
     assert "tty" in properties
     assert "background" not in properties
@@ -505,9 +557,9 @@ def test_read_file_deduplicates_unchanged_repeated_reads(tmp_path) -> None:
     executor = ToolExecutor(registry=registry)
     call = ToolCall(id="call:read", name="read_file", arguments={"path": "note.txt"})
 
-    first = executor.execute(call, event_context=CTX)
-    second = executor.execute(call, event_context=CTX)
-    third = executor.execute(call, event_context=CTX)
+    first = execute_runtime_tool(executor, call, event_context=CTX)
+    second = execute_runtime_tool(executor, call, event_context=CTX)
+    third = execute_runtime_tool(executor, call, event_context=CTX)
 
     assert json.loads(first.output)["content"] == "1|hello Pulsara"
     assert json.loads(second.output)["status"] == "unchanged"
@@ -629,14 +681,16 @@ def test_write_file_warns_when_file_changed_after_read(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    executor.execute(
+    execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:read", name="read_file", arguments={"path": "docs/design.md"}
         ),
         event_context=CTX,
     )
     target.write_text("external", encoding="utf-8")
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:write",
             name="write_file",
@@ -710,11 +764,15 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     registry = make_registry(tmp_path)
     terminal_spec = next(
-        spec for spec in registry.tool_specs() if spec.name == "terminal"
+        descriptor
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.name == "terminal"
     )
+    assert terminal_spec.input_schema is not None
     executor = ToolExecutor(registry=registry)
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -724,8 +782,8 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     )
     payload = json.loads(result.output)
 
-    assert "workdir" in terminal_spec.parameters["properties"]
-    assert "terminal_session_id" in terminal_spec.parameters["properties"]
+    assert "workdir" in terminal_spec.input_schema["properties"]
+    assert "terminal_session_id" in terminal_spec.input_schema["properties"]
     assert result.status is ToolResultState.SUCCESS
     assert payload["output"] == str(tmp_path / "src")
     assert payload["terminal_session_id"] == "default"
@@ -752,7 +810,8 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -763,7 +822,8 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
     start_payload = json.loads(start.output)
     process_id = start_payload["process_id"]
 
-    poll = executor.execute(
+    poll = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:poll",
             name="terminal_process",
@@ -771,7 +831,8 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
         ),
         event_context=CTX,
     )
-    kill = executor.execute(
+    kill = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:kill",
             name="terminal_process",
@@ -796,7 +857,8 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -808,7 +870,8 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]
-    executor.execute(
+    execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -821,11 +884,13 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
         event_context=CTX,
     )
 
-    listed = executor.execute(
+    listed = execute_runtime_tool(
+        executor,
         ToolCall(id="call:list", name="terminal_process", arguments={"action": "list"}),
         event_context=CTX,
     )
-    logged = executor.execute(
+    logged = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:log",
             name="terminal_process",
@@ -855,7 +920,7 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
 
 
 def test_terminal_process_wait_without_timeout_uses_finite_default() -> None:
-    from pulsara_agent.terminal_public_api import (
+    from pulsara_agent.ports.terminal import (
         TerminalProcessWaitInput,
         parse_terminal_process_input,
     )
@@ -872,7 +937,8 @@ def test_terminal_process_wait_zero_timeout_is_rejected(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -881,7 +947,8 @@ def test_terminal_process_wait_zero_timeout_is_rejected(tmp_path) -> None:
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]
-    wait = executor.execute(
+    wait = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1002,7 +1069,8 @@ def test_terminal_process_max_output_chars_tiny_value_is_rejected(tmp_path) -> N
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1011,7 +1079,8 @@ def test_terminal_process_max_output_chars_tiny_value_is_rejected(tmp_path) -> N
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]
-    wait = executor.execute(
+    wait = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1069,7 +1138,8 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1082,7 +1152,8 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
     )
     process_id = json.loads(start.output)["process_id"]
 
-    submit = executor.execute(
+    submit = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:submit",
             name="terminal_process",
@@ -1090,7 +1161,8 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
         ),
         event_context=CTX,
     )
-    close = executor.execute(
+    close = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:close",
             name="terminal_process",
@@ -1098,7 +1170,8 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
         ),
         event_context=CTX,
     )
-    wait = executor.execute(
+    wait = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1127,7 +1200,8 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1136,7 +1210,8 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]
-    executor.execute(
+    execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1148,7 +1223,8 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
         ),
         event_context=CTX,
     )
-    write = executor.execute(
+    write = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:write",
             name="terminal_process",
@@ -1164,19 +1240,12 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
 
 
 def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
-    tool = TerminalTool(
-        tmp_path,
-        permission_state=PermissionState.from_policy(
-            EffectivePermissionPolicy(
-                profile=PermissionProfile.WORKSPACE_GUARDED,
-                approval=ApprovalPolicy.RISKY_ONLY,
-                terminal=TerminalAccess.OFF,
-            )
-        ),
-    )
-
-    result = tool.execute(
-        ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd"})
+    executor = ToolExecutor(registry=make_registry(tmp_path))
+    result = execute_runtime_tool(
+        executor,
+        ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd"}),
+        event_context=CTX,
+        permission_mode=PermissionMode.READ_ONLY,
     )
     payload = json.loads(result.output)
 
@@ -1188,23 +1257,16 @@ def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> N
 def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(
     tmp_path,
 ) -> None:
-    tool = TerminalProcessTool(
-        tmp_path,
-        permission_state=PermissionState.from_policy(
-            EffectivePermissionPolicy(
-                profile=PermissionProfile.WORKSPACE_GUARDED,
-                approval=ApprovalPolicy.RISKY_ONLY,
-                terminal=TerminalAccess.OFF,
-            )
-        ),
-    )
-
-    result = tool.execute(
+    executor = ToolExecutor(registry=make_registry(tmp_path))
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:process",
             name="terminal_process",
             arguments={"action": "list"},
-        )
+        ),
+        event_context=CTX,
+        permission_mode=PermissionMode.READ_ONLY,
     )
     payload = json.loads(result.output)
 
@@ -1214,11 +1276,15 @@ def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(
 
 
 def test_terminal_tool_context_records_yielded_completion_event(tmp_path) -> None:
-    registry = make_registry(tmp_path)
     event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+    runtime_session = in_memory_runtime_session(tmp_path, event_log=event_log)
+    executor = build_component_tool_executor(
+        runtime_session,
+        recorder=runtime_session.make_thread_recorder(),
+    )
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1230,7 +1296,8 @@ def test_terminal_tool_context_records_yielded_completion_event(tmp_path) -> Non
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]
-    executor.execute(
+    execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1274,7 +1341,8 @@ def test_terminal_tool_yielded_tty_reports_io_mode(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1287,7 +1355,8 @@ def test_terminal_tool_yielded_tty_reports_io_mode(tmp_path) -> None:
         event_context=CTX,
     )
     start_payload = json.loads(start.output)
-    wait = executor.execute(
+    wait = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1312,7 +1381,8 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
-    added = executor.execute(
+    added = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:todo:add",
             name="todo",
@@ -1323,7 +1393,8 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     payload = json.loads(added.output)
     item_id = payload["items"][0]["id"]
 
-    updated = executor.execute(
+    updated = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:todo:update",
             name="todo",
@@ -1333,13 +1404,15 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     )
     assert json.loads(updated.output)["items"][0]["status"] == "completed"
 
-    listed = executor.execute(
+    listed = execute_runtime_tool(
+        executor,
         ToolCall(id="call:todo:list", name="todo", arguments={"action": "list"}),
         event_context=CTX,
     )
     assert json.loads(listed.output)["items"][0]["text"] == "write tests"
 
-    invalid = executor.execute(
+    invalid = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:todo:bad",
             name="todo",
@@ -1350,7 +1423,8 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     assert invalid.status is ToolResultState.ERROR
     assert "unsupported todo status" in invalid.output
 
-    cleared = executor.execute(
+    cleared = execute_runtime_tool(
+        executor,
         ToolCall(id="call:todo:clear", name="todo", arguments={"action": "clear"}),
         event_context=CTX,
     )
@@ -1361,7 +1435,8 @@ def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> N
     runtime_session, executor = make_runtime_executor(tmp_path)
     event_log = runtime_session.event_log
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal", name="terminal", arguments={"command": "printf ok"}
         ),
@@ -1410,14 +1485,32 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(LargeOutputTool())
+    descriptor = replace(
+        next(item for item in builtin_tool_descriptors() if item.name == "read_file"),
+        id="component-test:large-output",
+        name="large_output",
+        description=LargeOutputTool.description,
+    )
+    call = ToolCall(id="call:large", name="large_output")
     executor = ToolExecutor(
         registry=registry,
         record_event=runtime_session.make_thread_recorder(),
         artifact_service=runtime_session.artifact_service,
+        artifact_policies={
+            "large_output": artifact_processing_policy_for_descriptor(
+                descriptor=descriptor,
+                tool_call=call,
+                options=runtime_session.artifact_service.options,
+            )
+        },
+        runtime_session_id=runtime_session.runtime_session_id,
     )
 
-    result = executor.execute(
-        ToolCall(id="call:large", name="large_output"), event_context=CTX
+    result = execute_runtime_tool(
+        executor,
+        call,
+        event_context=CTX,
+        descriptor=descriptor,
     )
     _commit_prepared_terminal(runtime_session, result)
     block = _completed_tool_result(runtime_session.event_log, "call:large")
@@ -1436,7 +1529,7 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
 
 def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) -> None:
     archive = InMemoryArchiveStore()
-    index = InMemoryToolResultArtifactIndex()
+    index = FakeToolResultArtifactIndex()
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     session_a = in_memory_runtime_session(
@@ -1445,14 +1538,17 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
     session_b = in_memory_runtime_session(
         tmp_path / "b", archive=archive, tool_result_artifacts=index
     )
-    executor_a = session_a.create_tool_executor(
-        record_event=session_a.make_thread_recorder()
+    executor_a = build_component_tool_executor(
+        session_a,
+        recorder=session_a.make_thread_recorder(),
     )
-    executor_b = session_b.create_tool_executor(
-        record_event=session_b.make_thread_recorder()
+    executor_b = build_component_tool_executor(
+        session_b,
+        recorder=session_b.make_thread_recorder(),
     )
 
-    terminal_result = executor_a.execute(
+    terminal_result = execute_runtime_tool(
+        executor_a,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1469,7 +1565,8 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
     assert isinstance(block, ToolResultBlock)
     artifact_id = block.artifacts[0].artifact_id
 
-    missing = executor_b.execute(
+    missing = execute_runtime_tool(
+        executor_b,
         ToolCall(
             id="call:missing",
             name="artifact_read",
@@ -1477,7 +1574,8 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
         ),
         event_context=CTX,
     )
-    forbidden = executor_b.execute(
+    forbidden = execute_runtime_tool(
+        executor_b,
         ToolCall(
             id="call:forbidden",
             name="artifact_read",
@@ -1518,11 +1616,13 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
             size_bytes=write.size_bytes,
         )
     )
-    executor = runtime_session.create_tool_executor(
-        record_event=runtime_session.make_thread_recorder()
+    executor = build_component_tool_executor(
+        runtime_session,
+        recorder=runtime_session.make_thread_recorder(),
     )
 
-    info = executor.execute(
+    info = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:info",
             name="artifact_read",
@@ -1530,7 +1630,8 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
         ),
         event_context=CTX,
     )
-    text = executor.execute(
+    text = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:text", name="artifact_read", arguments={"artifact_id": artifact_id}
         ),
@@ -1572,11 +1673,13 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
             size_bytes=write.size_bytes,
         )
     )
-    executor = runtime_session.create_tool_executor(
-        record_event=runtime_session.make_thread_recorder()
+    executor = build_component_tool_executor(
+        runtime_session,
+        recorder=runtime_session.make_thread_recorder(),
     )
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:artifact-read",
             name="artifact_read",
@@ -1600,7 +1703,7 @@ def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_previe
     None
 ):
     archive = InMemoryArchiveStore()
-    index = InMemoryToolResultArtifactIndex()
+    index = FakeToolResultArtifactIndex()
     service = ToolResultArtifactService(
         archive=archive,
         index=index,
@@ -1634,10 +1737,19 @@ def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_previe
         ),
     )
 
+    call = ToolCall(id="call:terminal", name="terminal")
+    descriptor = next(
+        item for item in builtin_tool_descriptors() if item.name == "terminal"
+    )
     processed, refs = service.process_result(
         result,
         event_context=CTX,
-        tool_call=ToolCall(id="call:terminal", name="terminal"),
+        tool_call=call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=call,
+            options=service.options,
+        ),
     )
 
     payload = json.loads(processed.output)
@@ -1658,7 +1770,7 @@ def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previ
     None
 ):
     archive = InMemoryArchiveStore()
-    index = InMemoryToolResultArtifactIndex()
+    index = FakeToolResultArtifactIndex()
     service = ToolResultArtifactService(
         archive=archive,
         index=index,
@@ -1666,6 +1778,10 @@ def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previ
         options=ToolResultArtifactOptions(archive_threshold_bytes=8_000),
     )
     text = "界" * 3_000
+    call = ToolCall(id="call:tool", name="lookup")
+    descriptor = next(
+        item for item in builtin_tool_descriptors() if item.name == "read_file"
+    )
     processed, refs = service.process_result(
         ToolExecutionResult(
             call_id="call:tool",
@@ -1674,7 +1790,12 @@ def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previ
             output=text,
         ),
         event_context=CTX,
-        tool_call=ToolCall(id="call:tool", name="lookup"),
+        tool_call=call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=call,
+            options=service.options,
+        ),
     )
 
     assert len(text) < 8_000
@@ -1693,7 +1814,8 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
     result_holder = {}
 
     def execute_and_commit() -> None:
-        result = executor.execute(
+        result = execute_runtime_tool(
+            executor,
             ToolCall(
                 id="call:terminal",
                 name="terminal",
@@ -1739,7 +1861,8 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
     event_log = runtime_session.event_log
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1764,7 +1887,8 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(
 ) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1802,7 +1926,8 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
 ) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1825,7 +1950,8 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
 def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1855,7 +1981,8 @@ def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None
 def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    result = executor.execute(
+    result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1879,7 +2006,8 @@ def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -
     assert block.artifacts
     artifact_id = block.artifacts[0].artifact_id
 
-    read_result = executor.execute(
+    read_result = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:artifact-read",
             name="artifact_read",
@@ -1897,7 +2025,8 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
     tmp_path,
 ) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
-    start = executor.execute(
+    start = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:start",
             name="terminal",
@@ -1912,7 +2041,8 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
     _commit_prepared_terminal(runtime_session, start)
     process_id = json.loads(start.output)["process_id"]
     assert process_id
-    waited = executor.execute(
+    waited = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1931,7 +2061,8 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ArtifactTerminalObservationCoverageFact,
     )
     _commit_prepared_terminal(runtime_session, waited)
-    logged = executor.execute(
+    logged = execute_runtime_tool(
+        executor,
         ToolCall(
             id="call:log",
             name="terminal_process",
@@ -1961,12 +2092,8 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
 # --- Step 4.1: read-only allowlist drift guard + todo semantics -------------
 
 
-def test_read_only_allowlist_matches_is_read_only_tools(tmp_path) -> None:
-    # The contract's source of truth is the per-tool is_read_only flag; the gate
-    # uses a name-set constant for self-containment. This test locks them
-    # together: if a new read-only tool is added (or a flag flips) without
-    # updating READ_ONLY_ALLOWED_TOOL_NAMES, this fails.
-    from pulsara_agent.runtime.permission import READ_ONLY_ALLOWED_TOOL_NAMES
+def test_read_only_catalog_matches_registered_tools(tmp_path) -> None:
+    # The catalog descriptor is the only built-in read-only authority.
 
     class _StubService:
         """Registration-only stand-in; the drift test never executes tools."""
@@ -1978,15 +2105,27 @@ def test_read_only_allowlist_matches_is_read_only_tools(tmp_path) -> None:
         memory_query=_StubService(),
     )
 
-    read_only_tool_names = {tool.name for tool in registry.all() if tool.is_read_only}
-    assert read_only_tool_names == set(READ_ONLY_ALLOWED_TOOL_NAMES)
+    registry_names = frozenset(registry.names())
+    read_only_tool_names = {
+        descriptor.name
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.name in registry_names and descriptor.is_read_only
+    }
+    catalog_read_only_names = {
+        descriptor.name
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.name in registry_names and descriptor.is_read_only
+    }
+    assert read_only_tool_names == catalog_read_only_names
 
 
 def test_todo_tool_is_read_only_true() -> None:
     # Semantic redefinition: todo only mutates agent-local ephemeral state, so
     # it is read-only for permission purposes (allowed under read-only mode).
-    tool = TodoTool()
-    assert tool.is_read_only is True
+    descriptor = next(
+        item for item in builtin_tool_descriptors() if item.name == "todo"
+    )
+    assert descriptor.is_read_only is True
     # ...but it is NOT concurrency-safe (mutates shared _items), so the flip
     # does not let it run in parallel.
-    assert tool.is_concurrency_safe is False
+    assert descriptor.is_concurrency_safe is False

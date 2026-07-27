@@ -27,7 +27,7 @@ from pulsara_agent.primitives.context import (
     ContextCompileInputManifestFact,
     context_fingerprint,
 )
-from pulsara_agent.runtime import AgentRuntime
+from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.context_input.live import (
     _advance_sparse_relevant_through_sequence,
     collect_live_context_inputs,

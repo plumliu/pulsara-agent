@@ -184,3 +184,14 @@ Recovery只可rebind frozen artifact/target/call，不能从当前配置重新re
 - legacy V1 rows只经typed v6 binding plan迁移；
 - architecture guard证明旧outbox writer/replay/vector/Oxigraph worker物理消失；
 - relatedness allowlist、target revision drift与destructive-action downgrade。
+
+---
+
+## 11. D4 Same-Transaction Port
+
+Governance UOW通过sealed、borrower-scoped same-physical-transaction capability append canonical
+mutation。Capability由UOW scope唯一签发，绑定owner、generation、backend PID、driver authority与
+write-admission guard；没有generic SQL escape hatch。Commit/rollback/revoke只归scope owner，
+`CanonicalMutationCommitPort`对caller只暴露append。
+
+In-memory governance UOW已移至`tests/support/memory_uow.py`，production module不提供fake fallback。

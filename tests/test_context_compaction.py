@@ -77,6 +77,7 @@ from tests.support import (
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from tests.support.model_call import model_call_end_fields, model_call_start_fields
+from tests.support.mcp import prepared_test_mcp_pending_handle
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.errors import (
     CompactionSummarizerInputBudgetExceeded,
@@ -173,7 +174,9 @@ from pulsara_agent.runtime.transcript import (
 )
 from pulsara_agent.runtime.wiring import (
     AgentRuntimeWiring,
-    build_in_memory_runtime_wiring,
+)
+from tests.support.runtime_factory import (
+    build_component_runtime_wiring,
 )
 from pulsara_agent.primitives.model_call import (
     CompactionObservedAfterMeasurementFact,
@@ -478,10 +481,7 @@ def _compaction_service(**kwargs: Any) -> ContextCompactionService:
         kwargs["event_commit_port"] = RuntimeSessionCompactionEventCommitPort(
             runtime_session
         )
-    if (
-        sink is not None
-        and kwargs.get("candidate_projection_commit_port") is None
-    ):
+    if sink is not None and kwargs.get("candidate_projection_commit_port") is None:
         repository = InMemoryCandidateProjectionOutbox()
         kwargs["candidate_projection_commit_port"] = (
             MemoryCandidateProjectionCommitPort(
@@ -1001,9 +1001,7 @@ def _fake_compaction_attempt(
         publication_terminalization_scope=None,
         status=status,
         not_attempted_reason="below_threshold" if terminal_event is None else None,
-        core_committed_events=(
-            (terminal_event,) if terminal_event is not None else ()
-        ),
+        core_committed_events=((terminal_event,) if terminal_event is not None else ()),
         terminal_event=terminal_event,
         committed_through_sequence=(
             terminal_event.sequence if terminal_event is not None else None
@@ -2640,7 +2638,7 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
     tmp_path,
 ) -> None:
     async def run():
-        wiring = build_in_memory_runtime_wiring(tmp_path)
+        wiring = build_component_runtime_wiring(tmp_path)
         runtime_session = wiring.runtime_session
         await _emit_turn(
             runtime_session,
@@ -2758,7 +2756,7 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
     tmp_path,
 ) -> None:
     async def run():
-        wiring = build_in_memory_runtime_wiring(tmp_path)
+        wiring = build_component_runtime_wiring(tmp_path)
         runtime_session = wiring.runtime_session
         await _emit_turn(
             runtime_session,
@@ -2850,8 +2848,7 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
             timeout=1,
         )
         assert (
-            emitted.projection_id
-            == "projection:test:after_failed_mid_turn_compaction"
+            emitted.projection_id == "projection:test:after_failed_mid_turn_compaction"
         )
 
     asyncio.run(run())
@@ -3504,7 +3501,7 @@ def test_preflight_current_user_input_affects_threshold_but_not_summary_input() 
 
 def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None:
     transport = CompactScriptedTransport("unused")
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     session = HostSession(
@@ -3548,7 +3545,7 @@ def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None
 
 def test_host_session_invokes_compaction_at_preflight_only(tmp_path) -> None:
     transport = CompactScriptedTransport("final answer")
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     session = HostSession(
@@ -3611,7 +3608,7 @@ def test_host_session_does_not_notify_compaction_listener_after_run_end(
     tmp_path,
 ) -> None:
     transport = CompactScriptedTransport("final answer")
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     session = HostSession(
@@ -3652,7 +3649,7 @@ def test_preflight_compaction_rebuilds_prior_messages_and_continues_original_use
     tmp_path,
 ) -> None:
     transport = CompactScriptedTransport("final answer")
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     asyncio.run(
         _emit_turn(
             runtime_wiring.runtime_session,
@@ -3707,7 +3704,7 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
     tmp_path,
 ) -> None:
     transport = CompactScriptedTransport("final answer")
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     asyncio.run(
         _emit_turn(
             runtime_wiring.runtime_session,
@@ -3776,7 +3773,7 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
 
 
 def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeFailingAutoCompactionService(runtime_wiring.event_log)
     session = HostSession(
         host_session_id="host:test",
@@ -3812,7 +3809,7 @@ def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> No
 
 
 def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     agent = AgentRuntime(
@@ -3880,7 +3877,7 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
 
 
 def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     agent = AgentRuntime(
@@ -3949,7 +3946,7 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
 
 
 def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     agent = AgentRuntime(
@@ -4005,10 +4002,12 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
         request_state="request:test",
         deadline_monotonic=None,
     )
+    pending_handle = prepared_test_mcp_pending_handle(prepared_suspension)
+
     async def fake_mcp_resume(resume_state, resolution):
-        resume_state.scratchpad[
-            "mcp_input_required_publication_closure_reason"
-        ] = "live_pending_lease_unavailable"
+        resume_state.scratchpad["mcp_input_required_publication_closure_reason"] = (
+            "live_pending_lease_unavailable"
+        )
         async for _event in agent._terminalize_pending_mcp_for_abort(
             resume_state,
             reason=AbortKind.HOST_TEARDOWN,
@@ -4154,7 +4153,7 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
             )
             state.pending_interaction_payload.update(
                 {
-                    "prepared_mcp_input_required": prepared_suspension,
+                    "mcp_pending_handle": pending_handle,
                     "suspension_fact": suspension_fact,
                     "source_suspension_event_reference": source_reference,
                 }
@@ -4173,7 +4172,7 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
                 server_id="docs",
                 source_suspension_event_reference=source_reference,
                 suspension_fact=suspension_fact,
-                prepared_suspension=prepared_suspension,
+                pending_handle=pending_handle,
                 input_requests=(),
             )
             session._suspended_state = state
@@ -5125,7 +5124,7 @@ def test_compaction_terminal_event_preserves_usage_or_missing_status() -> None:
 
 
 async def _resume_contract_fixture(tmp_path):
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_wiring.runtime_session,

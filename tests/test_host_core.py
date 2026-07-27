@@ -22,6 +22,7 @@ from tests.support.raw_provider import (
     RawProviderToolCallEnd,
     RawProviderToolCallStart,
 )
+from tests.support.host import component_test_host_core
 
 from tests.support.model_stream import (
     make_text_block_end_event,
@@ -90,8 +91,8 @@ from pulsara_agent.message import (
     ToolResultState,
 )
 from pulsara_agent.message.message import AssistantMsg
-from pulsara_agent.message.reducer import MessageReducer
-from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.replay.message_reducer import MessageReducer
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
 from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
@@ -315,7 +316,7 @@ def _core(monkeypatch, transport: ScriptedTransport) -> HostCore:
     settings = _settings()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    core = HostCore(settings=settings, durable=False)
+    core = component_test_host_core(settings)
 
     def _patched_runtime(_config):
         return LLMRuntime(config=settings.llm, registry=registry)
@@ -407,10 +408,7 @@ def test_fresh_host_open_starts_bootstrap_deadline_after_prerequisites(
 
     async def run() -> tuple[float, float | None]:
         session = await _open_project_session(core, tmp_path)
-        runtime_deadline = (
-            session.wiring.runtime_wiring.runtime_session
-            .runtime_open_deadline_monotonic
-        )
+        runtime_deadline = session.wiring.runtime_wiring.runtime_session.runtime_open_deadline_monotonic
         reopen_deadline = session.reopen_deadline_monotonic
         await core.shutdown()
         return runtime_deadline, reopen_deadline
@@ -1656,7 +1654,19 @@ def test_host_terminal_monitor_registration_completion_and_autonomous_delivery(
         for event in events
         if isinstance(event, TerminalProcessMonitorObservationCommittedEvent)
     )
-    assert len(registrations) == 1
+    assert len(registrations) == 1, "\n".join(
+        repr(
+            (
+                event.type.value,
+                getattr(event, "tool_call_name", None),
+                getattr(event, "delta", None),
+                getattr(event, "state", None),
+                getattr(event, "failure_stage", None),
+            )
+        )
+        for event in events
+        if "TOOL" in event.type.value or "TERMINAL" in event.type.value
+    )
     assert [event.observation.observation_kind for event in observations] == [
         "process_completed"
     ]
@@ -1968,9 +1978,9 @@ def test_host_terminal_monitor_repeated_progress_without_reregistration(
     assert len(kinds) >= 3
     assert kinds[-1] == "process_completed"
     assert set(kinds[:-1]) == {"output_progress"}
-    assert [
-        event.observation.observation_ordinal for event in observations
-    ] == list(range(1, len(observations) + 1))
+    assert [event.observation.observation_ordinal for event in observations] == list(
+        range(1, len(observations) + 1)
+    )
     outcomes_by_source = {
         observation.id: tuple(
             event.outcome

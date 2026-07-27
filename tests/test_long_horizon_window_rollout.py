@@ -141,7 +141,7 @@ from pulsara_agent.runtime.context_input.event_slice import (
     event_reference_from_stored,
 )
 from pulsara_agent.runtime.context_input.live import _read_live_primary_event_slice
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     ToolActionClassifierRegistry,
     default_tool_action_classifier_registry,
     fixed_tool_action_policy,
@@ -149,7 +149,7 @@ from pulsara_agent.runtime.tool_action import (
 from pulsara_agent.runtime.tool_execution import ToolExecutionTerminalDrainBlocked
 from pulsara_agent.primitives.long_horizon import LongHorizonActionClass
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from tests.conftest import tool_result_end_contract_fields
 from pulsara_agent.runtime.long_horizon.projection_reducer import (
     ContextProjectionReducerError,
@@ -2862,10 +2862,10 @@ def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
         event_log=log,
         business_events=(
             RunEndEvent(
-            **CTX.event_fields(),
-            status="finished",
-            stop_reason=RunStopReason.FINAL,
-            terminalization_kind=RunTerminalizationKind.NORMAL,
+                **CTX.event_fields(),
+                status="finished",
+                stop_reason=RunStopReason.FINAL,
+                terminalization_kind=RunTerminalizationKind.NORMAL,
             ),
         ),
         owner_scope="test-control-recovery-run-end",

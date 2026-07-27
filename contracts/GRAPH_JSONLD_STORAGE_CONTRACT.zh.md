@@ -293,3 +293,12 @@ decoder误认。
 只有durable timeline/evidence jobs可以选择性投影这些facts；GraphStore不得从
 event metadata/free-form payload猜测新的 entity，也不得把 typed failure audit当作 durable
 retry job。
+
+---
+
+## 13. D4 Graph Ownership
+
+Immutable relation fact与PostgreSQL/Oxigraph lowering由`graph/projection_relations.py`拥有。
+Graph facade只依赖process-scoped canonical mutation writer port，不依赖
+`runtime.projection_jobs` concrete repository。Memory UOW内的GraphStore通过revocable scoped facade
+访问exact transaction；scope外调用在任何SQL前失败。

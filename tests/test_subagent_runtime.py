@@ -8,9 +8,10 @@ from time import monotonic
 import pytest
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
-from tests.support.capability import preview_capability_plan
+from tests.support.capability import preview_capability_plan, tool_runtime_context
 from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.tools import build_component_tool_executor
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -81,18 +82,23 @@ from pulsara_agent.runtime.subagent import (
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
 from pulsara_agent.runtime.subagent.run_entry import SubagentRunEntryDriver
-from pulsara_agent.runtime import (
-    AgentRuntime,
+from pulsara_agent.runtime.subagent.tool_port import RuntimeSubagentControlPort
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.session import (
+    EventBatchCommitOutcome,
+    EventWriteCancelled,
     EventWriteConflict,
-    LoopStatus,
     RuntimeSession,
 )
+from pulsara_agent.runtime.state import LoopStatus
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import (
     AgentRuntimeWiring,
-    build_in_memory_runtime_wiring,
+)
+from tests.support.runtime_factory import (
+    build_component_runtime_wiring,
 )
 from pulsara_agent.runtime.transcript import rebuild_prior_messages
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
@@ -100,7 +106,7 @@ from pulsara_agent.runtime.context_input.replay import (
     load_context_input_manifest,
     replay_compiled_context,
 )
-from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.subagent import (
     CreateAgentTasksTool,
     ListAgentsTool,
@@ -113,6 +119,11 @@ from pulsara_agent.tools.builtins.subagent import (
 
 
 CTX = EventContext(run_id="run:parent", turn_id="turn:parent", reply_id="reply:parent")
+
+
+def _control_port(runtime: SubagentRuntime) -> RuntimeSubagentControlPort:
+    return RuntimeSubagentControlPort(runtime)
+
 
 _SUBAGENT_TEST_MODEL_LIMITS = test_model_limits(
     total_context_tokens=512_000,
@@ -302,7 +313,7 @@ def _resumed_runtime(parent, locator, child_logs):
         tool_result_artifacts=parent.tool_result_artifacts,
         runtime_session_id=parent.runtime_session_id,
         terminal_binding=parent.terminal_binding,
-        extra_tool_bindings=parent.extra_tool_bindings,
+        dynamic_tool_installations=parent.dynamic_tool_installations,
         allow_unbootstrapped_test_events=True,
     )
     resumed = SubagentRuntime(
@@ -337,6 +348,72 @@ def test_child_registry_indexes_exact_mcp_binding_identities() -> None:
     )
     registry.release_handle("subagent_run:mcp")
     assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset()
+
+
+@pytest.mark.parametrize("operation", ("spawn", "batch"))
+@pytest.mark.parametrize("commit_status", ("none", "full", "unknown"))
+def test_subagent_start_commit_cancellation_settles_capacity_by_durable_outcome(
+    tmp_path,
+    monkeypatch,
+    operation: str,
+    commit_status: str,
+) -> None:
+    parent, _locator, _child_logs, runtime = _runtime(tmp_path)
+    original_write_events = RuntimeSession.write_events
+
+    async def cancelled_write(runtime_session, events, **kwargs):
+        if runtime_session is not parent:
+            return await original_write_events(runtime_session, events, **kwargs)
+        if commit_status == "full":
+            result = await original_write_events(runtime_session, events, **kwargs)
+        else:
+            result = None
+        raise EventWriteCancelled(
+            EventBatchCommitOutcome(
+                status=commit_status,  # type: ignore[arg-type]
+                deadline_monotonic=monotonic() + 1,
+                result=result,
+            )
+        )
+
+    monkeypatch.setattr(RuntimeSession, "write_events", cancelled_write)
+
+    async def invoke():
+        if operation == "spawn":
+            return await runtime.spawn_fake(
+                task="commit cancellation probe",
+                event_context=CTX,
+            )
+        return await runtime.materialize_task_batch(
+            (
+                {
+                    "task_id": "subagent_task:commit-cancellation",
+                    "objective": "commit cancellation probe",
+                    "profile_id": "review_worker",
+                    "initial_status": "start",
+                },
+            ),
+            event_context=CTX,
+        )
+
+    if commit_status == "full":
+        asyncio.run(invoke())
+        [handle] = runtime._execution_registry.handles()  # noqa: SLF001
+        assert handle.capacity_reservation is not None
+        assert handle.capacity_reservation.commit_state == "full"
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(invoke())
+        assert runtime._execution_registry.handles() == ()  # noqa: SLF001
+        if commit_status == "none":
+            assert runtime._execution_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
+            assert runtime._execution_registry.unresolved_commit_reservations() == ()  # noqa: SLF001
+        else:
+            assert (
+                len(runtime._execution_registry.unresolved_commit_reservations()) == 1
+            )  # noqa: SLF001
+            with pytest.raises(RuntimeError, match="require reconciliation"):
+                runtime._execution_registry.require_no_unresolved_commit_reservations()  # noqa: SLF001
 
 
 def test_child_runtime_mcp_installation_owner_points_to_parent_session(
@@ -459,7 +536,7 @@ def test_child_start_failure_emits_terminal_repair(tmp_path, monkeypatch) -> Non
 
 def test_materialized_batch_facts_are_applied_once(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -473,7 +550,7 @@ def test_materialized_batch_facts_are_applied_once(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -632,13 +709,13 @@ def test_wait_agent_failed_run_returns_terminal_outcome_without_fake_consumption
             reason_code="child_failed_for_test",
             event_context=CTX,
         )
-        result = await WaitAgentTool(runtime).execute_async(
+        result = await WaitAgentTool(_control_port(runtime)).execute_async(
             ToolCall(
                 id="tool:wait-failed",
                 name="wait_agent",
                 arguments={"subagent_run_id": child.subagent_run_id},
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -660,7 +737,7 @@ def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = SpawnAgentTool(runtime)
+    tool = SpawnAgentTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -673,7 +750,7 @@ def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(
                     "context": "telepathic",
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -691,7 +768,7 @@ def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(
 
 def test_list_agents_tool_returns_bounded_run_only_projection(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = ListAgentsTool(runtime)
+    tool = ListAgentsTool(_control_port(runtime))
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(
@@ -705,7 +782,7 @@ def test_list_agents_tool_returns_bounded_run_only_projection(tmp_path) -> None:
             ToolCall(
                 id="tool:list", name="list_agents", arguments={"include_edges": True}
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -731,7 +808,7 @@ def test_list_projection_does_not_hydrate_full_child_transcript(
     tmp_path, monkeypatch
 ) -> None:
     parent, locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = ListAgentsTool(runtime)
+    tool = ListAgentsTool(_control_port(runtime))
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(
@@ -757,7 +834,7 @@ def test_list_projection_does_not_hydrate_full_child_transcript(
         monkeypatch.setattr(InMemoryEventLog, "iter", fail_if_child_log_is_iterated)
         result = await tool.execute_async(
             ToolCall(id="tool:list-no-hydration", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -773,7 +850,7 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = ListAgentsTool(runtime)
+    tool = ListAgentsTool(_control_port(runtime))
 
     async def run() -> None:
         task = await runtime.create_task(
@@ -801,7 +878,7 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(
 
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -822,7 +899,7 @@ def test_subagent_task_start_links_child_run_without_duplicate_list_item(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = ListAgentsTool(runtime)
+    tool = ListAgentsTool(_control_port(runtime))
 
     async def run() -> None:
         task = await runtime.create_task(
@@ -872,7 +949,7 @@ def test_subagent_task_start_links_child_run_without_duplicate_list_item(
 
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1082,7 +1159,7 @@ def test_subagent_task_completion_updates_task_projection(tmp_path) -> None:
 
 def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = ListAgentsTool(runtime)
+    tool = ListAgentsTool(_control_port(runtime))
 
     async def run() -> None:
         task = await runtime.create_task(
@@ -1115,7 +1192,7 @@ def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
         assert graph.tasks[0].phase == "investigating"
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1132,7 +1209,7 @@ def test_report_agent_result_submits_explicit_result_before_completion(
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
-        tool = ReportAgentResultTool(runtime, subagent.subagent_run_id)
+        tool = ReportAgentResultTool(_control_port(runtime), subagent.subagent_run_id)
 
         submitted = await tool.execute_async(
             ToolCall(
@@ -1143,7 +1220,7 @@ def test_report_agent_result_submits_explicit_result_before_completion(
                     "output_preview": "explicit child result with evidence",
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=runtime.child_runtime_session(
                     subagent.subagent_run_id
                 ).runtime_session_id,
@@ -1271,7 +1348,7 @@ def test_child_report_events_use_parent_spawn_context_not_child_native_context(
 def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     parent.subagent_runtime = runtime
-    executor = parent.create_tool_executor()
+    executor = build_component_tool_executor(parent)
     exposure = preview_capability_plan(
         CapabilityRuntime(),
         workspace_root=tmp_path,
@@ -1339,7 +1416,7 @@ def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
 def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     parent.subagent_runtime = runtime
-    executor = parent.create_tool_executor()
+    executor = build_component_tool_executor(parent)
     exposure = preview_capability_plan(
         CapabilityRuntime(),
         workspace_root=tmp_path,
@@ -1356,7 +1433,7 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
         permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS).to_dict(),
     )
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -1380,7 +1457,7 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
                 context_id="context:create",
@@ -1410,7 +1487,7 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(
     tmp_path, monkeypatch
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
     extend_calls = 0
     original_event_log = parent.event_log
 
@@ -1473,7 +1550,7 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1491,7 +1568,7 @@ def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -1509,7 +1586,7 @@ def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1533,7 +1610,7 @@ def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completi
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         created = await tool.execute_async(
@@ -1556,7 +1633,7 @@ def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completi
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1597,7 +1674,7 @@ def test_dependency_start_unavailable_fails_task_and_blocks_downstream(
             max_concurrent_children_per_host_session=1,
         ),
     )
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         created = await tool.execute_async(
@@ -1622,7 +1699,7 @@ def test_dependency_start_unavailable_fails_task_and_blocks_downstream(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -1662,7 +1739,7 @@ def test_dependency_post_commit_child_start_failure_keeps_upstream_completed(
     monkeypatch,
 ) -> None:
     _parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         created = await tool.execute_async(
@@ -1687,7 +1764,7 @@ def test_dependency_post_commit_child_start_failure_keeps_upstream_completed(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=runtime.parent_runtime_session.runtime_session_id,
                 event_context=CTX,
             ),
@@ -1722,7 +1799,7 @@ def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(
     tmp_path, monkeypatch
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
     original_materialize_task_batch = runtime.materialize_task_batch
 
     async def flaky_materialize_task_batch(*args, **kwargs):
@@ -1744,7 +1821,7 @@ def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -1779,7 +1856,7 @@ def test_materialized_batch_start_failure_commits_repair_before_bounded_drain(
     monkeypatch,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
     observed_terminal_before_drain: list[bool] = []
 
     def fail_child_session(**_kwargs):
@@ -1814,7 +1891,7 @@ def test_materialized_batch_start_failure_commits_repair_before_bounded_drain(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -1889,7 +1966,7 @@ def test_create_agent_tasks_post_commit_failure_repairs_waiting_and_blocked_batc
             reason_code="upstream_cancelled",
         )
     )
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
     original_materialize = runtime.materialize_task_batch
 
     async def fail_after_materialization(*args, **kwargs):
@@ -1921,7 +1998,7 @@ def test_create_agent_tasks_post_commit_failure_repairs_waiting_and_blocked_batc
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -1950,7 +2027,7 @@ def test_create_agent_tasks_post_commit_failure_repairs_waiting_and_blocked_batc
 
 def test_dependency_failure_blocks_downstream_task_without_retry(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         created = await tool.execute_async(
@@ -1969,7 +2046,7 @@ def test_dependency_failure_blocks_downstream_task_without_retry(tmp_path) -> No
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2009,7 +2086,7 @@ def test_dependency_failure_blocks_downstream_task_without_retry(tmp_path) -> No
 
 def test_dependency_failure_propagates_transitively(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         created = await tool.execute_async(
@@ -2034,7 +2111,7 @@ def test_dependency_failure_propagates_transitively(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2091,7 +2168,7 @@ def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         upstream = await runtime.create_task(
@@ -2127,7 +2204,7 @@ def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2175,7 +2252,7 @@ def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -2199,7 +2276,7 @@ def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2219,7 +2296,7 @@ def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(
 
 def test_wait_agent_tasks_consumes_completed_task_results(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    wait_tool = WaitAgentTasksTool(runtime)
+    wait_tool = WaitAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         tasks = []
@@ -2247,7 +2324,7 @@ def test_wait_agent_tasks_consumes_completed_task_results(tmp_path) -> None:
                     "settle": "all",
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2274,7 +2351,7 @@ def test_wait_agent_tasks_consumes_completed_task_results(tmp_path) -> None:
 
 def test_wait_agent_serializes_nested_explicit_result_diagnostics(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = WaitAgentTool(runtime)
+    tool = WaitAgentTool(_control_port(runtime))
 
     async def run() -> None:
         child = await runtime.spawn_fake(task="diagnostic child", event_context=CTX)
@@ -2297,7 +2374,7 @@ def test_wait_agent_serializes_nested_explicit_result_diagnostics(tmp_path) -> N
                 name="wait_agent",
                 arguments={"subagent_run_id": child.subagent_run_id},
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -2368,7 +2445,7 @@ def test_wait_agent_tasks_consumes_resultless_cancelled_terminal_fact(tmp_path) 
 
 def test_wait_agent_tasks_first_does_not_cancel_unsettled_tasks(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    wait_tool = WaitAgentTasksTool(runtime)
+    wait_tool = WaitAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         done_task = await runtime.create_task(
@@ -2402,7 +2479,7 @@ def test_wait_agent_tasks_first_does_not_cancel_unsettled_tasks(tmp_path) -> Non
                     "settle": "first",
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2431,7 +2508,7 @@ def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    wait_tool = WaitAgentTasksTool(runtime)
+    wait_tool = WaitAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         done_task = await runtime.create_task(
@@ -2470,7 +2547,7 @@ def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(
                     "timeout_seconds": 0,
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -2554,7 +2631,7 @@ def test_wait_agent_tasks_repeated_wait_requires_include_consumed(tmp_path) -> N
 
 def test_stop_agent_task_cancels_active_attempt_and_task_projection(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    stop_tool = StopAgentTaskTool(runtime)
+    stop_tool = StopAgentTaskTool(_control_port(runtime))
 
     async def run() -> None:
         task = await runtime.create_task(
@@ -2573,7 +2650,7 @@ def test_stop_agent_task_cancels_active_attempt_and_task_projection(tmp_path) ->
                 name="stop_agent_task",
                 arguments={"task_id": task.task_id, "reason": "No longer needed."},
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -2630,7 +2707,7 @@ def test_runtime_bootstraps_completed_result_from_parent_event_log(tmp_path) -> 
 
 def test_restart_preserves_waiting_dependency_fact(tmp_path) -> None:
     parent, locator, child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def seed() -> None:
         result = await tool.execute_async(
@@ -2649,7 +2726,7 @@ def test_restart_preserves_waiting_dependency_fact(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -2668,7 +2745,7 @@ def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(
     tmp_path,
 ) -> None:
     parent, locator, child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def seed() -> None:
         result = await tool.execute_async(
@@ -2687,7 +2764,7 @@ def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -3076,7 +3153,7 @@ def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def seed() -> None:
         result = await tool.execute_async(
@@ -3095,7 +3172,7 @@ def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id, event_context=CTX
             ),
         )
@@ -3143,8 +3220,8 @@ def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(
 def test_cancel_sync_async_fact_equality(tmp_path) -> None:
     async_parent, _locator, _logs, async_runtime = _runtime(tmp_path / "async")
     sync_parent, _locator2, _logs2, sync_runtime = _runtime(tmp_path / "sync")
-    async_tool = CreateAgentTasksTool(async_runtime)
-    sync_tool = CreateAgentTasksTool(sync_runtime)
+    async_tool = CreateAgentTasksTool(_control_port(async_runtime))
+    sync_tool = CreateAgentTasksTool(_control_port(sync_runtime))
 
     async def seed(runtime, tool, parent) -> None:
         result = await tool.execute_async(
@@ -3163,7 +3240,7 @@ def test_cancel_sync_async_fact_equality(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -3212,7 +3289,7 @@ def test_cancel_sync_async_fact_equality(tmp_path) -> None:
 
 def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
     parent, _locator, _logs, runtime = _runtime(tmp_path)
-    tool = CreateAgentTasksTool(runtime)
+    tool = CreateAgentTasksTool(_control_port(runtime))
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -3237,7 +3314,7 @@ def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id=parent.runtime_session_id,
                 event_context=CTX,
             ),
@@ -3265,7 +3342,7 @@ def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
 def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     started = asyncio.Event()
     child_finalized = asyncio.Event()
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     _append_parent_run_start(
         runtime_wiring.runtime_session,
         runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
@@ -3349,7 +3426,7 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(
     tmp_path,
 ) -> None:
     started = asyncio.Event()
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
     _append_parent_run_start(
         runtime_wiring.runtime_session,
         runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
@@ -4502,7 +4579,7 @@ def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
         tool_result_artifacts=parent.tool_result_artifacts,
         runtime_session_id=parent.runtime_session_id,
         terminal_binding=parent.terminal_binding,
-        extra_tool_bindings=parent.extra_tool_bindings,
+        dynamic_tool_installations=parent.dynamic_tool_installations,
         allow_unbootstrapped_test_events=True,
     )
     resumed = SubagentRuntime(

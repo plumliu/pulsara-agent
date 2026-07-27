@@ -37,9 +37,9 @@
 | Governance events 同 UOW | `SUPERSEDED` | 已由 memory UOW 内 durable stable-candidate outbox + session-owned accounted dispatcher 闭环，不应改回直接跨 owner 写 ledger | 无新 hard cut |
 | CustomEvent typed 化 | `CLOSED` | 7 个 production事实及 MCP closure已 typed；`CustomEvent`/`EventType.CUSTOM`与旧 decoder已物理删除 | 已完成 |
 | Hook/outbox 重构 | `CLOSED` | timeline/evidence、canonical mutation surfaces、seed repair、shutdown physical owner与eventual working-context均由durable owner闭环 | 已完成 |
-| Runtime dependency-cycle cleanup | `OPEN` | lazy facade、local import 与 runtime/tools 双向依赖仍是生产结构 | 高但需分步 |
+| Runtime dependency-cycle cleanup | `CLOSED`（D4 scope） | target DAG、ports、test-support、durable Host与facade hard cut已闭环；剩余全局SCC仅作为D5/D6 diagnostic baseline | 已完成 |
 | AgentRuntime coordinator 拆分 | `OPEN`，已有基础 | `RunWorkingSet` 与若干 coordinator 已出现，但 production scratchpad 和大范围 orchestration 仍集中 | 中后期 |
-| 删除 legacy MCP / in-memory product mode | `PARTIAL` | 手写 MCP transport 已删除；mock MCP 与 `durable=False` 产品分支仍在生产包 | 中 |
+| 删除 legacy MCP / in-memory product mode | `CLOSED` | legacy transport、production mock、`durable=False`与in-memory product composition均已删除；fake world只在tests/support | 已完成 |
 | Schema hot-path hard cut | `CLOSED` | migration registry/ledger、verify-only startup与verified connection provider已落地；constructor/UOW DDL及raw-DSN adapter入口已删除 | 已完成 |
 | Compaction-memory extension | `OPEN`，correctness 已改善 | event-first candidate projection 已闭环，但 compaction core 仍直接拥有 memory candidate 语义 | 中后期 |
 
@@ -249,64 +249,39 @@ Compaction candidate projection outbox属于D5，不因D3关闭而自动关闭�
 
 ## 9. Runtime dependency-cycle cleanup
 
-### 9.1 当前仍有明确生产证据
+状态：**CLOSED（2026-07-26，D4 scope）**。
 
-`runtime/__init__.py` 和 `tools/__init__.py` 的模块注释都明确说明 facade 被设计为 lazy，以规避 runtime/tools/memory 的 import cycle。
+### 9.1 已完成的硬切
 
-当前双向依赖仍包括：
+- `ports`、低层 primitives、replay receipt 与 Host composition contract 已建立最终类型 owner；旧路径不存在 compatibility re-export；
+- `ToolExecutor` 由 runtime 唯一拥有，concrete tools 只消费 artifact、terminal、MCP、subagent 与 registry closed ports；
+- `tools -> runtime`、`capability -> concrete runtime/tools`、`event -> replay/runtime`、`storage|graph|memory -> runtime.projection_jobs`、`src -> tests` 五组 target DAG 反向边归零；
+- canonical mutation pure factory、PostgreSQL repository、transaction capability 与 writer 已按层分离；Memory UOW 只借用 revocable scoped facade；
+- builtin descriptor、binding、permission、recovery、Long-Horizon action taxonomy 收敛到单一 catalog；
+- runtime/tools lazy facade、temporary type/edge cutover ledger与旧 package owner均物理删除；
+- production Host 只接受 durable composition；test fake composition、mock MCP 与 in-memory governance UOW 仅存在于 `tests/support`。
 
-- tools executor/built-ins 导入 runtime session、permission、terminal、subagent、MCP supervisor；
-- runtime agent/session/tool loop/permission/artifact service 导入 concrete tools DTO、registry 和 executor；
-- `RuntimeSession.create_tool_executor()` 仍使用 local import 延迟触发 cycle；
-- event/message/primitives 与 runtime/memory 的静态依赖表面仍形成大型 strongly-connected region。
+### 9.2 可执行门控
 
-仓库当前也没有 import-linter/dependency rule 作为新增依赖的阻断门槛。
+普通 pytest 运行 canonical AST dependency scanner。D4 target DAG 不再使用 exception；global package SCC只保存 module-level canonical observation baseline，新增同 package-pair import也会失败。
 
-### 9.2 已有进展
-
-不能说“完全没做”：
-
-- `primitives` 已承载大量 frozen facts；
-- terminal、provider input、authority materialization 等区域已经出现 typed ports/coordinator；
-- test support 目录已经存在；
-- 若干 composition root 已能注入 commit port，而不是直接持有整个 RuntimeSession。
-
-但这些局部改进尚未改变 package-level 方向，lazy facade 仍是产品启动条件。
-
-### 9.3 推荐实施方式
-
-不要先移动大量文件。先冻结可执行依赖规则：
+最终 residual baseline 为 394 条 observation，fingerprint：
 
 ```text
-contracts/primitives
-    -> message schema
-    -> event schema
-    -> replay/reducers
-    -> runtime domain services
-    -> host/cli/inspector composition
+sha256:3ba9dfb749090f78256c6e7bd4eedb5e11f60947a1b5d3ab90689ab0cdddb367
 ```
 
-tools 不接收全能 `RuntimeSession`，而按能力注入小 port：
+该 baseline 中仍存在跨 `runtime/llm/memory/host/storage/graph/event_log/capability` 的全局 SCC。它们属于 D5 compaction-memory 与 D6 AgentRuntime/HostSession ownership 拆分；D4 的关闭不宣称全仓库跨 package SCC 已消除，也不得重新引入 lazy facade。
 
-- workspace/file access；
-- artifact read/write；
-- terminal process/monitor control；
-- runtime event/result commit；
-- subagent control；
-- memory query/mutation proposal。
+### 9.3 验证结果
 
-第一步应加入 import architecture test，即使初始使用 explicit allowlist；之后每次迁移一个边界就缩小 allowlist。没有自动规则的“逐步清理”很容易再次回流。
+- D4 专项最终 `65 passed`；
+- 全量 pytest 首轮 `2504 passed, 27 failed, 2 skipped`，27 项旧 fixture迁移后按用户要求只复跑失败集合并全部通过；
+- migrated PostgreSQL Host backlog/restart与open/resume/close通过；
+- frozen manifest validate通过；`durable-resume`、`subagent-delegation`、`workspace-patch`真实 provider dogfood通过；
+- static grep/AST、正反import-order smoke、changed-file format/lint与diff check通过。
 
-### 9.4 完成门槛
-
-- import-linter 或等价 AST rule 在 CI 执行；
-- runtime/tools 不再双向导入 concrete implementations；
-- built-in tool constructor 不接收 concrete `RuntimeSession`；
-- event schema 不依赖 replay/assembler/reducer；
-- permission/tool taxonomy 只有一个生产 registry；
-- 最终删除 runtime/tools lazy export workaround。
-
-结论：**仍是 OPEN，是 AgentRuntime 拆分的真实前置，而不是可以顺手整理的目录问题。**
+结论：**D4 target scope 已关闭；remaining global SCC继续由D5/D6负责。**
 
 ## 10. AgentRuntime coordinator 拆分
 
@@ -373,7 +348,7 @@ tools 不接收全能 `RuntimeSession`，而按能力注入小 port：
 
 ## 11. Legacy MCP / in-memory product mode
 
-这个旧工作项实际上包含两个不同状态的子项，必须拆开评价。
+状态：**CLOSED（2026-07-26）**。
 
 ### 11.1 legacy MCP transport：已闭环
 
@@ -381,38 +356,19 @@ tools 不接收全能 `RuntimeSession`，而按能力注入小 port：
 
 因此“删除 legacy MCP transport spike”应标记为 `CLOSED`。
 
-仍有一个 `MockMcpClientManager` 位于 production package 并从 `runtime.mcp` 导出；当前用途是测试。它应迁到 `tests/support`，但不能据此重新宣称旧 transport 仍存在。
+`MockMcpClientManager` 已迁入 `tests/support/mcp.py`，production package不再导出或构造mock transport。
 
-### 11.2 in-memory product mode：仍未闭环
+### 11.2 in-memory product mode：已闭环
 
-当前生产 API 仍公开：
+- `HostCore.production()`只安装`ProductionHostComposition`，不再接受`durable`布尔分支；
+- production `build_agent_runtime_wiring()`不再选择in-memory world；
+- whole in-memory runtime factory与fake governance UOW分别位于`tests/support/runtime_factory.py`和`tests/support/memory_uow.py`；
+- component tests通过显式test composition借用fake world，production package不反向依赖tests；
+- durable integration统一使用migrated PostgreSQL fixture与verified connection provider。
 
-- `HostCore(durable: bool = True)`；
-- `build_agent_runtime_wiring(..., durable: bool)`；
-- `build_in_memory_runtime_wiring()`；
-- `InMemoryMemoryWriteUnitOfWork`；
-- runtime lazy facade 对 in-memory factory 的 export。
+底层通用的in-memory EventLog/GraphStore仍可作为数据结构存在；它们不再组成可由产品composition root选择的第二套架构。
 
-虽然 factory 会发出 compatibility/test-only warning，但它仍是 production composition 的合法分支。大量测试也通过 `HostCore(durable=False)` 或 production factory 构造另一套架构。
-
-债务不是“仓库里有 fake”，而是“产品 composition root 用布尔值选择 fake architecture”。
-
-### 11.3 推荐 hard cut
-
-1. 在 `tests/support/runtime_factory.py` 建立明确的 component-test composition。
-2. 测试直接依赖该 factory，不经过 production `durable` flag。
-3. production `HostCore` 永远 durable，删除字段与分支。
-4. `build_agent_runtime_wiring()` 删除 `durable` 参数，只构造 production wiring。
-5. `MockMcpClientManager` 与 in-memory UOW/factory 移入 test support；底层通用 in-memory data structures可以保留在对应 test-support 模块。
-
-### 11.4 完成门槛
-
-- `src/pulsara_agent` 不含 `durable=False` 产品分支；
-- production export 不包含 mock manager/in-memory runtime factory；
-- unit/component tests仍无需 PostgreSQL即可运行；
-- durable integration tests使用显式 migrated PostgreSQL fixture。
-
-结论：**旧工作项为 PARTIAL：legacy transport 已关，in-memory selectable product mode 仍开。**
+结论：**legacy MCP与selectable in-memory product mode均已关闭。**
 
 ## 12. Schema hot-path hard cut
 
@@ -579,12 +535,15 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 - [x] exact bootstrap confirmation与eventual working-context；
 - [x] Inspector/CLI、restart/final migration/Host dogfood最终复核。
 
-### D4：依赖规则与 test-support hard cut
+### D4：依赖规则与 test-support hard cut（`CLOSED`）
 
-- 建 contracts/ports与import rule；
-- 优先切断 runtime/tools concrete 双向依赖；
-- `MockMcpClientManager` 与 in-memory runtime composition移入 tests/support；
-- production HostCore删除 `durable` branch。
+- [x] 建立 contracts/ports与canonical AST import rule；
+- [x] D4 target DAG forbidden edge清零，residual SCC以D5/D6 diagnostic baseline冻结；
+- [x] 切断 tools -> runtime concrete反向依赖，ToolExecutor归runtime唯一拥有；
+- [x] `MockMcpClientManager`、in-memory runtime与fake governance UOW移入 tests/support；
+- [x] production HostCore删除 `durable` branch并使用唯一durable composition；
+- [x] runtime/tools lazy facade物理删除；
+- [x] D4-5全量pytest失败集合闭环、durable integration与冻结dogfood最终确认。
 
 ### D5：Compaction-memory extension（`OPEN`）
 
@@ -639,12 +598,12 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 
 - **1 项已被更合适的方案替代并闭环**：Governance events 同 UOW；
 - **1 项 correctness 已完成，仅保留独立性能门控**：Async LiveRuntimeEventWriter；
-- **1 项应拆成已完成与未完成两部分**：legacy MCP 已删除，in-memory product mode仍在；
-- **3 项仍是有效债务**：dependency cycles、AgentRuntime ownership、compaction-memory ownership。
+- **2 项由D4一并关闭**：target dependency/test-support hard cut，以及legacy MCP/in-memory product mode；
+- **2 项仍是有效债务**：AgentRuntime ownership、compaction-memory ownership。
 
-Schema hot-path、D2 event vocabulary/writer尾巴与D3 durable projection jobs已经完成。
-下一项可进入D4 dependency/ports hard cut。D5继续保持`OPEN`，不能把D3的runtime semantic
-projection receipt误报为
-compaction candidate crash ownership已经闭环。
+Schema hot-path、D2 event vocabulary/writer尾巴、D3 durable projection jobs与D4 dependency/test-support
+hard cut均已完成。下一项进入D5；D5继续保持`OPEN`，不能把D3的runtime semantic projection receipt
+误报为compaction candidate crash ownership已经闭环。D4保留的global SCC baseline则继续作为D5/D6
+新增依赖的阻断基线。
 
 这份重基线的目的不是减少债务数量，而是把工程投入重新对准仍然存在的风险。

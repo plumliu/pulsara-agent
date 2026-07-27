@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable
 
 from pulsara_agent.event import (
@@ -34,8 +35,12 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultEssentialCapturePolicyFact,
     ToolResultStateFact,
 )
-from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.artifact import (
+    ToolResultArtifactProcessingPolicy,
+    ToolResultArtifactProcessingPort,
+    resolve_tool_result_artifact_policy_for_call,
+)
+from pulsara_agent.ports.tool_execution import (
     PreparedToolTerminalResult,
     ToolCall,
     ToolExecutionResult,
@@ -84,7 +89,10 @@ def _cancelled_execution_result(
 class ToolExecutor:
     registry: ToolRegistry
     record_event: Callable[[AgentEvent], AgentEvent] | None = None
-    artifact_service: ToolResultArtifactService | None = None
+    artifact_service: ToolResultArtifactProcessingPort | None = None
+    artifact_policies: Mapping[str, ToolResultArtifactProcessingPolicy] = field(
+        default_factory=dict
+    )
     runtime_session_id: str | None = None
     essential_capture_policy: ToolResultEssentialCapturePolicyFact = (
         default_essential_capture_policy()
@@ -107,12 +115,9 @@ class ToolExecutor:
         event_context: EventContext,
         descriptor: CapabilityDescriptor | None = None,
         descriptor_attribution: CapabilityDescriptorRenderAttributionFact | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
         context_id: str | None = None,
         model_call_index: int | None = None,
-        permission_snapshot_id: str | None = None,
-        permission_mode: str | None = None,
-        permission_policy: dict | None = None,
-        run_entry_kind: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         start_event = self._append(
             ToolResultStartEvent(
@@ -123,20 +128,14 @@ class ToolExecutor:
         )
         try:
             tool = self.registry.get(call.name)
-            runtime_context = (
-                ToolRuntimeContext(
-                    runtime_session_id=self.runtime_session_id,
-                    event_context=event_context,
-                    context_id=context_id,
-                    model_call_index=model_call_index,
-                    permission_snapshot_id=permission_snapshot_id,
-                    permission_mode=permission_mode,
-                    permission_policy=permission_policy,
-                    run_entry_kind=run_entry_kind,
-                )
-                if self.runtime_session_id is not None
-                else None
-            )
+            if runtime_context is not None:
+                if runtime_context.event_context != event_context:
+                    raise ValueError("tool runtime context event authority mismatch")
+                if (
+                    self.runtime_session_id is not None
+                    and runtime_context.runtime_session_id != self.runtime_session_id
+                ):
+                    raise ValueError("tool runtime context session mismatch")
             if hasattr(tool, "execute_streaming_with_context"):
                 result = tool.execute_streaming_with_context(
                     call,
@@ -201,12 +200,9 @@ class ToolExecutor:
         event_context: EventContext,
         descriptor: CapabilityDescriptor | None = None,
         descriptor_attribution: CapabilityDescriptorRenderAttributionFact | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
         context_id: str | None = None,
         model_call_index: int | None = None,
-        permission_snapshot_id: str | None = None,
-        permission_mode: str | None = None,
-        permission_policy: dict | None = None,
-        run_entry_kind: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         start_event = self._append(
             ToolResultStartEvent(
@@ -220,20 +216,20 @@ class ToolExecutor:
             execute_async = getattr(tool, "execute_async", None)
             if execute_async is None:
                 raise TypeError(f"Tool {call.name!r} does not implement execute_async")
-            if self.runtime_session_id is None:
-                raise RuntimeError("Async tool execution requires runtime_session_id")
+            if runtime_context is None:
+                raise RuntimeError(
+                    "Async tool execution requires typed runtime context"
+                )
+            if runtime_context.event_context != event_context:
+                raise ValueError("tool runtime context event authority mismatch")
+            if (
+                self.runtime_session_id is not None
+                and runtime_context.runtime_session_id != self.runtime_session_id
+            ):
+                raise ValueError("tool runtime context session mismatch")
             result = await execute_async(
                 call,
-                runtime_context=ToolRuntimeContext(
-                    runtime_session_id=self.runtime_session_id,
-                    event_context=event_context,
-                    context_id=context_id,
-                    model_call_index=model_call_index,
-                    permission_snapshot_id=permission_snapshot_id,
-                    permission_mode=permission_mode,
-                    permission_policy=permission_policy,
-                    run_entry_kind=run_entry_kind,
-                ),
+                runtime_context=runtime_context,
             )
             if isinstance(result, ToolExecutionSuspended):
                 return _with_tool_observation_timing_seed(
@@ -283,12 +279,40 @@ class ToolExecutor:
     ) -> ToolExecutionResult:
         artifact_refs = ()
         if self.artifact_service is not None:
-            result, artifact_refs = self.artifact_service.process_result(
-                result,
-                event_context=event_context,
+            if descriptor is None:
+                raise ValueError(
+                    "artifact processing requires an exact capability descriptor"
+                )
+            try:
+                base_policy = self.artifact_policies[call.name]
+            except KeyError as exc:
+                raise ValueError(
+                    f"tool {call.name!r} lacks a frozen artifact processing policy"
+                ) from exc
+            if (
+                base_policy.descriptor_id != descriptor.id
+                or base_policy.descriptor_fingerprint != descriptor.fingerprint()
+            ):
+                raise ValueError("tool artifact policy/descriptor identity mismatch")
+            policy = resolve_tool_result_artifact_policy_for_call(
+                base_policy=base_policy,
                 tool_call=call,
-                descriptor=descriptor,
             )
+            try:
+                result, artifact_refs = self.artifact_service.process_result(
+                    result,
+                    event_context=event_context,
+                    tool_call=call,
+                    policy=policy,
+                )
+            except Exception as exc:
+                result = _artifact_processing_failure_result(
+                    call,
+                    result=result,
+                    descriptor=descriptor,
+                    error=exc,
+                )
+                artifact_refs = ()
         if result.output and not result.metadata.get("streamed_output_complete"):
             self._append(
                 ToolResultTextDeltaEvent(
@@ -380,6 +404,44 @@ class ToolExecutor:
         return emit
 
 
+def _artifact_processing_failure_result(
+    call: ToolCall,
+    *,
+    result: ToolExecutionResult,
+    descriptor: CapabilityDescriptor | None,
+    error: Exception,
+) -> ToolExecutionResult:
+    """Close a completed physical tool when auxiliary artifact storage fails."""
+
+    output = (
+        "[TOOL_RESULT_ARTIFACT_PROCESSING_ERROR] The tool executed, but its "
+        f"result artifact could not be finalized ({type(error).__name__})."
+    )
+    failed = replace(
+        result,
+        status=ToolResultState.ERROR,
+        output=output,
+        display_payload=None,
+        artifact_candidates=(),
+        metadata={
+            **result.metadata,
+            "artifact_processing_failure_code": "artifact_processing_failed",
+            "artifact_processing_error_type": type(error).__name__,
+        },
+    )
+    if descriptor is None:
+        return failed
+    return replace(
+        failed,
+        semantics_input=build_adapter_failure_runtime_input(
+            contract=descriptor.result_render_contract,
+            call=call,
+            error_text=output,
+            state=ToolResultStateFact.ERROR,
+        ),
+    )
+
+
 def build_tool_observation_timing(
     *,
     start_event: AgentEvent,
@@ -451,8 +513,7 @@ def _with_tool_observation_timing_seed(
     context_id: str | None,
     model_call_index: int | None,
 ) -> ToolExecutionSuspended:
-    prepared = suspended.prepared_mcp_input_required
-    existing_seed = prepared.tool_observation_timing_seed
+    existing_seed = suspended.tool_observation_timing_seed
     seed = (
         dict(thaw_json(existing_seed))
         if isinstance(existing_seed, FrozenJsonObjectFact)
@@ -476,10 +537,7 @@ def _with_tool_observation_timing_seed(
         raise AssertionError("MCP timing seed must freeze as an object")
     return replace(
         suspended,
-        prepared_mcp_input_required=prepared.model_copy(
-            update={"tool_observation_timing_seed": frozen_seed},
-            deep=True,
-        ),
+        tool_observation_timing_seed=frozen_seed,
     )
 
 

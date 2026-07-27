@@ -21,12 +21,12 @@ from pulsara_agent.primitives._context_base import (
     context_fingerprint,
 )
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalGraphRelationRowFact,
     CanonicalMutationKind,
     CanonicalMutationSurface,
 )
-from pulsara_agent.runtime.projection_jobs.graph_relation import (
+from pulsara_agent.graph.projection_relations import (
     oxigraph_relation_insert,
 )
 from pulsara_agent.runtime.projection_jobs.surface import (
@@ -232,12 +232,8 @@ class OxigraphCanonicalMutationSurfaceHandler:
             ).fetchone()
         if row is None:
             raise ValueError("Oxigraph relation source row is absent")
-        relation = CanonicalGraphRelationRowFact.model_validate(
-            row["relation_payload"]
-        )
-        expected_semantic = str(
-            reference.get("relation_semantic_fingerprint", "")
-        )
+        relation = CanonicalGraphRelationRowFact.model_validate(row["relation_payload"])
+        expected_semantic = str(reference.get("relation_semantic_fingerprint", ""))
         if (
             relation.row_fingerprint != str(row["relation_fingerprint"])
             or relation.relation_semantic_fingerprint != expected_semantic
@@ -251,9 +247,7 @@ def _payload(
 ) -> dict[str, Any]:
     semantic = delivery.mutation.candidate.mutation_semantic
     if semantic.mutation_payload.carrier_kind != "inline_json":
-        raise ValueError(
-            "artifact-backed canonical mutation hydration is unavailable"
-        )
+        raise ValueError("artifact-backed canonical mutation hydration is unavailable")
     text = semantic.mutation_payload.canonical_json_utf8
     payload = json.loads(text)
     if not isinstance(payload, dict):
@@ -289,9 +283,7 @@ def _graph_documents(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         raise ValueError("canonical mutation documents carrier is invalid")
     documents: list[dict[str, Any]] = []
     for item in raw:
-        if not isinstance(item, dict) or not isinstance(
-            item.get("document"), dict
-        ):
+        if not isinstance(item, dict) or not isinstance(item.get("document"), dict):
             raise ValueError("canonical mutation graph document is invalid")
         documents.append(dict(item["document"]))
     if not documents:

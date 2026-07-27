@@ -41,7 +41,7 @@ from pulsara_agent.runtime.subagent.facts import (
     subagent_dependency_generation,
 )
 from pulsara_agent.runtime.subagent.invariants import run_attribution_error
-from pulsara_agent.runtime.subagent.types import (
+from pulsara_agent.primitives.subagent import (
     SubagentBudget,
     SubagentCapabilityProfile,
     SubagentContextPolicy,
@@ -107,7 +107,9 @@ def pending_subagent_result_ids(state: SubagentGraphState) -> tuple[str, ...]:
     )
 
 
-def apply_subagent_event(state: SubagentGraphState, event: AgentEvent) -> SubagentGraphState:
+def apply_subagent_event(
+    state: SubagentGraphState, event: AgentEvent
+) -> SubagentGraphState:
     if not event.id:
         return _diagnose(
             state,
@@ -227,19 +229,42 @@ def apply_subagent_event(state: SubagentGraphState, event: AgentEvent) -> Subage
     return state
 
 
-def _run_started(state: SubagentGraphState, event: SubagentRunStartedEvent) -> SubagentGraphState:
+def _run_started(
+    state: SubagentGraphState, event: SubagentRunStartedEvent
+) -> SubagentGraphState:
     if event.subagent_run_id in state.runs:
-        return _entity_error(state, event, "run", event.subagent_run_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "run", event.subagent_run_id, "duplicate_entity_creation"
+        )
     if event.edge_id in state.edges:
-        return _entity_error(state, event, "edge", event.edge_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "edge", event.edge_id, "duplicate_entity_creation"
+        )
     task = state.tasks.get(event.task_id or "")
     if event.task_id is not None:
         if task is None:
-            return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+            return _entity_error(
+                state, event, "task", event.task_id, "orphan_subagent_event_reference"
+            )
         if task.current_run_id is not None:
-            return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
-        if task.batch_id != event.batch_id or task.create_tool_call_id != event.create_tool_call_id:
-            return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+            return _entity_error(
+                state,
+                event,
+                "task",
+                event.task_id,
+                "subagent_task_run_attribution_mismatch",
+            )
+        if (
+            task.batch_id != event.batch_id
+            or task.create_tool_call_id != event.create_tool_call_id
+        ):
+            return _entity_error(
+                state,
+                event,
+                "task",
+                event.task_id,
+                "subagent_task_run_attribution_mismatch",
+            )
     created_at = _dt(event.created_at)
     provenance = _provenance(event, created_at)
     run = SubagentRunFact(
@@ -317,7 +342,9 @@ def _run_started(state: SubagentGraphState, event: SubagentRunStartedEvent) -> S
         source_context_id=event.parent_context_id,
         source_model_call_index=event.parent_model_call_index,
         source_tool_call_id=(
-            event.spawn_initiator_id if event.spawn_initiator_kind == "tool_call" else None
+            event.spawn_initiator_id
+            if event.spawn_initiator_kind == "tool_call"
+            else None
         ),
         source_tool_name=event.spawning_tool_name,
         target_context_id=None,
@@ -334,10 +361,18 @@ def _run_started(state: SubagentGraphState, event: SubagentRunStartedEvent) -> S
     return replace(state, runs=runs, edges=edges)
 
 
-def _message_sent(state: SubagentGraphState, event: SubagentMessageSentEvent) -> SubagentGraphState:
+def _message_sent(
+    state: SubagentGraphState, event: SubagentMessageSentEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -352,7 +387,13 @@ def _message_sent(state: SubagentGraphState, event: SubagentMessageSentEvent) ->
     if event.delivery_kind == "spawn_task":
         task = state.tasks.get(run.task_id or "")
         if task is not None and task.objective_artifact_id != event.message_artifact_id:
-            return _entity_error(state, event, "task", task.task_id, "subagent_task_run_attribution_mismatch")
+            return _entity_error(
+                state,
+                event,
+                "task",
+                task.task_id,
+                "subagent_task_run_attribution_mismatch",
+            )
         runs[run.subagent_run_id] = replace(
             run,
             task_artifact_id=event.message_artifact_id,
@@ -430,10 +471,18 @@ def _message_sent(state: SubagentGraphState, event: SubagentMessageSentEvent) ->
     return replace(state, runs=runs, edges=edges)
 
 
-def _run_suspended(state: SubagentGraphState, event: SubagentRunSuspendedEvent) -> SubagentGraphState:
+def _run_suspended(
+    state: SubagentGraphState, event: SubagentRunSuspendedEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -457,10 +506,18 @@ def _run_suspended(state: SubagentGraphState, event: SubagentRunSuspendedEvent) 
     return replace(state, runs=runs)
 
 
-def _run_completed(state: SubagentGraphState, event: SubagentRunCompletedEvent) -> SubagentGraphState:
+def _run_completed(
+    state: SubagentGraphState, event: SubagentRunCompletedEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -522,17 +579,23 @@ def _run_completed(state: SubagentGraphState, event: SubagentRunCompletedEvent) 
                 "subagent_explicit_result_completion_mismatch",
             )
     completed_at = _dt(event.created_at)
-    provenance = _provenance(event, completed_at, terminal=True) if existing is None else _touch(
-        existing.provenance,
-        event,
-        completed_at,
-        terminal=True,
+    provenance = (
+        _provenance(event, completed_at, terminal=True)
+        if existing is None
+        else _touch(
+            existing.provenance,
+            event,
+            completed_at,
+            terminal=True,
+        )
     )
     if existing is not None:
         result = replace(
             existing,
             status="completed",
-            token_usage=dict(event.token_usage) if event.token_usage is not None else None,
+            token_usage=dict(event.token_usage)
+            if event.token_usage is not None
+            else None,
             tool_call_count=event.tool_call_count,
             provenance=provenance,
         )
@@ -548,7 +611,9 @@ def _run_completed(state: SubagentGraphState, event: SubagentRunCompletedEvent) 
             final_message_artifact_id=event.result_artifact_id,
             artifact_ids=tuple(event.artifact_ids),
             diagnostics=(),
-            token_usage=dict(event.token_usage) if event.token_usage is not None else None,
+            token_usage=dict(event.token_usage)
+            if event.token_usage is not None
+            else None,
             tool_call_count=event.tool_call_count,
             provenance=provenance,
         )
@@ -575,7 +640,13 @@ def _run_terminal(
 ) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -587,8 +658,17 @@ def _run_terminal(
         return attribution_error
     if run.status in _TERMINAL_RUN_STATUSES:
         return _terminal_conflict(state, event, "run", event.subagent_run_id)
-    if run.batch_id != event.batch_id or run.create_tool_call_id != event.create_tool_call_id:
-        return _entity_error(state, event, "run", event.subagent_run_id, "subagent_task_run_attribution_mismatch")
+    if (
+        run.batch_id != event.batch_id
+        or run.create_tool_call_id != event.create_tool_call_id
+    ):
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     updated_at = _dt(event.created_at)
     runs = dict(state.runs)
     runs[event.subagent_run_id] = replace(
@@ -603,10 +683,18 @@ def _run_terminal(
     return replace(state, runs=runs)
 
 
-def _edge_recorded(state: SubagentGraphState, event: SubagentEdgeRecordedEvent) -> SubagentGraphState:
+def _edge_recorded(
+    state: SubagentGraphState, event: SubagentEdgeRecordedEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -618,7 +706,9 @@ def _edge_recorded(state: SubagentGraphState, event: SubagentEdgeRecordedEvent) 
     if attribution_error is not None:
         return attribution_error
     if event.edge_id in state.edges:
-        return _entity_error(state, event, "edge", event.edge_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "edge", event.edge_id, "duplicate_entity_creation"
+        )
     created_at = _dt(event.created_at)
     edge = SubagentEdgeFact(
         edge_id=event.edge_id,
@@ -646,15 +736,31 @@ def _edge_recorded(state: SubagentGraphState, event: SubagentEdgeRecordedEvent) 
     runs = dict(state.runs)
     if event.child_run_id is not None:
         if run.reported_child_run_id not in {None, event.child_run_id}:
-            return _entity_error(state, event, "run", event.subagent_run_id, "child_run_attribution_mismatch")
-        runs[event.subagent_run_id] = replace(run, reported_child_run_id=event.child_run_id)
+            return _entity_error(
+                state,
+                event,
+                "run",
+                event.subagent_run_id,
+                "child_run_attribution_mismatch",
+            )
+        runs[event.subagent_run_id] = replace(
+            run, reported_child_run_id=event.child_run_id
+        )
     consumptions = dict(state.consumptions)
     if event.edge_kind == "wait" and event.result_id is not None:
         if event.returned_to_tool_call_id is None:
-            return _entity_error(state, event, "edge", event.edge_id, "orphan_subagent_event_reference")
+            return _entity_error(
+                state, event, "edge", event.edge_id, "orphan_subagent_event_reference"
+            )
         result = state.results.get(event.result_id)
         if result is None or result.status != "completed":
-            return _entity_error(state, event, "result", event.result_id, "orphan_subagent_event_reference")
+            return _entity_error(
+                state,
+                event,
+                "result",
+                event.result_id,
+                "orphan_subagent_event_reference",
+            )
         if (
             result.subagent_run_id != event.subagent_run_id
             or result.final_message_artifact_id != event.result_artifact_id
@@ -681,13 +787,27 @@ def _edge_recorded(state: SubagentGraphState, event: SubagentEdgeRecordedEvent) 
     return replace(state, edges=edges, runs=runs, consumptions=consumptions)
 
 
-def _result_delivered(state: SubagentGraphState, event: SubagentResultDeliveredEvent) -> SubagentGraphState:
+def _result_delivered(
+    state: SubagentGraphState, event: SubagentResultDeliveredEvent
+) -> SubagentGraphState:
     result = state.results.get(event.result_id)
-    if result is None or result.status != "completed" or result.subagent_run_id != event.subagent_run_id:
-        return _entity_error(state, event, "result", event.result_id, "orphan_subagent_event_reference")
+    if (
+        result is None
+        or result.status != "completed"
+        or result.subagent_run_id != event.subagent_run_id
+    ):
+        return _entity_error(
+            state, event, "result", event.result_id, "orphan_subagent_event_reference"
+        )
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     attribution_error = _run_attribution_state_error(
         state,
         event,
@@ -697,7 +817,13 @@ def _result_delivered(state: SubagentGraphState, event: SubagentResultDeliveredE
     if attribution_error is not None:
         return attribution_error
     if result.final_message_artifact_id != event.result_artifact_id:
-        return _entity_error(state, event, "result", event.result_id, "subagent_task_run_attribution_mismatch")
+        return _entity_error(
+            state,
+            event,
+            "result",
+            event.result_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     if result.summary != event.summary:
         return _entity_error(
             state,
@@ -708,7 +834,9 @@ def _result_delivered(state: SubagentGraphState, event: SubagentResultDeliveredE
         )
     deliveries = dict(state.deliveries)
     if event.result_id in deliveries:
-        return _entity_error(state, event, "result", event.result_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "result", event.result_id, "duplicate_entity_creation"
+        )
     created_at = _dt(event.created_at)
     deliveries[event.result_id] = SubagentDeliveryFact(
         result_id=event.result_id,
@@ -725,11 +853,17 @@ def _result_delivered(state: SubagentGraphState, event: SubagentResultDeliveredE
     return replace(state, deliveries=deliveries)
 
 
-def _task_created(state: SubagentGraphState, event: SubagentTaskCreatedEvent) -> SubagentGraphState:
+def _task_created(
+    state: SubagentGraphState, event: SubagentTaskCreatedEvent
+) -> SubagentGraphState:
     if event.task_id in state.tasks:
-        return _entity_error(state, event, "task", event.task_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "task", event.task_id, "duplicate_entity_creation"
+        )
     if event.task_id in event.depends_on:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_self_dependency")
+        return _entity_error(
+            state, event, "task", event.task_id, "subagent_task_self_dependency"
+        )
     created_at = _dt(event.created_at)
     task = SubagentTaskFact(
         task_id=event.task_id,
@@ -766,14 +900,30 @@ def _task_created(state: SubagentGraphState, event: SubagentTaskCreatedEvent) ->
     return replace(state, tasks=tasks)
 
 
-def _task_scheduled(state: SubagentGraphState, event: SubagentTaskScheduledEvent) -> SubagentGraphState:
+def _task_scheduled(
+    state: SubagentGraphState, event: SubagentTaskScheduledEvent
+) -> SubagentGraphState:
     task = state.tasks.get(event.task_id)
     if task is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
-    if task.status not in {"created", "waiting_dependency"} or task.current_run_id is not None:
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
+    if (
+        task.status not in {"created", "waiting_dependency"}
+        or task.current_run_id is not None
+    ):
         return _terminal_conflict(state, event, "task", event.task_id)
-    if task.batch_id != event.batch_id or task.create_tool_call_id != event.create_tool_call_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+    if (
+        task.batch_id != event.batch_id
+        or task.create_tool_call_id != event.create_tool_call_id
+    ):
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     updated_at = _dt(event.created_at)
     tasks = dict(state.tasks)
     tasks[event.task_id] = replace(
@@ -785,17 +935,43 @@ def _task_scheduled(state: SubagentGraphState, event: SubagentTaskScheduledEvent
     return replace(state, tasks=tasks)
 
 
-def _task_started(state: SubagentGraphState, event: SubagentTaskStartedEvent) -> SubagentGraphState:
+def _task_started(
+    state: SubagentGraphState, event: SubagentTaskStartedEvent
+) -> SubagentGraphState:
     task = state.tasks.get(event.task_id)
     run = state.runs.get(event.subagent_run_id)
     if task is None or run is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
-    if task.status not in {"created", "waiting_dependency"} or task.current_run_id is not None:
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
+    if (
+        task.status not in {"created", "waiting_dependency"}
+        or task.current_run_id is not None
+    ):
         return _terminal_conflict(state, event, "task", event.task_id)
-    if run.task_id != event.task_id or run.run_index != event.run_index or event.run_index != 1:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
-    if run.batch_id != event.batch_id or run.create_tool_call_id != event.create_tool_call_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+    if (
+        run.task_id != event.task_id
+        or run.run_index != event.run_index
+        or event.run_index != 1
+    ):
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
+    if (
+        run.batch_id != event.batch_id
+        or run.create_tool_call_id != event.create_tool_call_id
+    ):
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     updated_at = _dt(event.created_at)
     tasks = dict(state.tasks)
     tasks[event.task_id] = replace(
@@ -809,16 +985,25 @@ def _task_started(state: SubagentGraphState, event: SubagentTaskStartedEvent) ->
     return replace(state, tasks=tasks)
 
 
-def _task_blocked(state: SubagentGraphState, event: SubagentTaskBlockedEvent) -> SubagentGraphState:
+def _task_blocked(
+    state: SubagentGraphState, event: SubagentTaskBlockedEvent
+) -> SubagentGraphState:
     task = state.tasks.get(event.task_id)
     if task is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
-    if task.status not in {"created", "waiting_dependency"} or task.current_run_id is not None:
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
+    if (
+        task.status not in {"created", "waiting_dependency"}
+        or task.current_run_id is not None
+    ):
         return _terminal_conflict(state, event, "task", event.task_id)
     updated_at = _dt(event.created_at)
     terminal = event.status == "blocked_dependency_failed"
     if terminal and not event.dependency_terminal_event_ids:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
     blocked_ids = tuple(event.blocked_by_task_ids)
     if set(event.dependency_status_snapshot) != set(blocked_ids):
         return _entity_error(
@@ -888,18 +1073,34 @@ def _task_blocked(state: SubagentGraphState, event: SubagentTaskBlockedEvent) ->
     return replace(state, tasks=tasks)
 
 
-def _task_completed(state: SubagentGraphState, event: SubagentTaskCompletedEvent) -> SubagentGraphState:
+def _task_completed(
+    state: SubagentGraphState, event: SubagentTaskCompletedEvent
+) -> SubagentGraphState:
     task = state.tasks.get(event.task_id)
     run = state.runs.get(event.subagent_run_id)
     result = state.results.get(event.result_id)
     if task is None or run is None or result is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
     if task.status != "running" or run.status != "completed":
         return _terminal_conflict(state, event, "task", event.task_id)
     if run.task_id != event.task_id or run.result_id != event.result_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     if result.final_message_artifact_id != event.primary_result_artifact_id:
-        return _entity_error(state, event, "result", event.result_id, "subagent_task_run_attribution_mismatch")
+        return _entity_error(
+            state,
+            event,
+            "result",
+            event.result_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     if result.result_source != event.result_source:
         return _entity_error(
             state,
@@ -928,7 +1129,9 @@ def _task_terminal(
 ) -> SubagentGraphState:
     task = state.tasks.get(event.task_id)
     if task is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
     repair_cancel_of_blocked = (
         task.status == "blocked_dependency_failed"
         and status == "cancelled"
@@ -937,8 +1140,17 @@ def _task_terminal(
     )
     if task.status in _TERMINAL_TASK_STATUSES and not repair_cancel_of_blocked:
         return _terminal_conflict(state, event, "task", event.task_id)
-    if task.batch_id != event.batch_id or task.create_tool_call_id != event.create_tool_call_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+    if (
+        task.batch_id != event.batch_id
+        or task.create_tool_call_id != event.create_tool_call_id
+    ):
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     if task.current_run_id is None:
         if event.subagent_run_id is not None:
             return _entity_error(
@@ -995,10 +1207,18 @@ def _task_terminal(
     return replace(state, tasks=tasks)
 
 
-def _phase_reported(state: SubagentGraphState, event: SubagentPhaseReportedEvent) -> SubagentGraphState:
+def _phase_reported(
+    state: SubagentGraphState, event: SubagentPhaseReportedEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     if run.status in _TERMINAL_RUN_STATUSES:
         return _diagnose(
             state,
@@ -1010,7 +1230,13 @@ def _phase_reported(state: SubagentGraphState, event: SubagentPhaseReportedEvent
             message="Late phase report was ignored after terminal run state.",
         )
     if event.task_id is not None and run.task_id != event.task_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     updated_at = _dt(event.created_at)
     runs = dict(state.runs)
     runs[event.subagent_run_id] = replace(
@@ -1022,7 +1248,9 @@ def _phase_reported(state: SubagentGraphState, event: SubagentPhaseReportedEvent
     if event.task_id is not None:
         task = tasks.get(event.task_id)
         if task is None:
-            return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+            return _entity_error(
+                state, event, "task", event.task_id, "orphan_subagent_event_reference"
+            )
         tasks[event.task_id] = replace(
             task,
             phase=event.phase,
@@ -1031,16 +1259,32 @@ def _phase_reported(state: SubagentGraphState, event: SubagentPhaseReportedEvent
     return replace(state, runs=runs, tasks=tasks)
 
 
-def _result_submitted(state: SubagentGraphState, event: SubagentResultSubmittedEvent) -> SubagentGraphState:
+def _result_submitted(
+    state: SubagentGraphState, event: SubagentResultSubmittedEvent
+) -> SubagentGraphState:
     run = state.runs.get(event.subagent_run_id)
     if run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     if run.status in _TERMINAL_RUN_STATUSES:
         return _terminal_conflict(state, event, "run", event.subagent_run_id)
     if event.task_id is not None and run.task_id != event.task_id:
-        return _entity_error(state, event, "task", event.task_id, "subagent_task_run_attribution_mismatch")
+        return _entity_error(
+            state,
+            event,
+            "task",
+            event.task_id,
+            "subagent_task_run_attribution_mismatch",
+        )
     if run.result_id is not None or event.result_id in state.results:
-        return _entity_error(state, event, "result", event.result_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "result", event.result_id, "duplicate_entity_creation"
+        )
     submitted_at = _dt(event.created_at)
     result = SubagentResultFact(
         result_id=event.result_id,
@@ -1068,18 +1312,32 @@ def _result_submitted(state: SubagentGraphState, event: SubagentResultSubmittedE
     return replace(state, results=results, runs=runs)
 
 
-def _result_consumed(state: SubagentGraphState, event: SubagentResultConsumedEvent) -> SubagentGraphState:
+def _result_consumed(
+    state: SubagentGraphState, event: SubagentResultConsumedEvent
+) -> SubagentGraphState:
     if event.consumption_id in state.consumptions:
-        return _entity_error(state, event, "edge", event.consumption_id, "duplicate_entity_creation")
+        return _entity_error(
+            state, event, "edge", event.consumption_id, "duplicate_entity_creation"
+        )
     result = state.results.get(event.result_id or "")
     if event.result_id is not None and result is None:
-        return _entity_error(state, event, "result", event.result_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state, event, "result", event.result_id, "orphan_subagent_event_reference"
+        )
     task = state.tasks.get(event.task_id or "")
     if event.task_id is not None and task is None:
-        return _entity_error(state, event, "task", event.task_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state, event, "task", event.task_id, "orphan_subagent_event_reference"
+        )
     run = state.runs.get(event.subagent_run_id or "")
     if event.subagent_run_id is not None and run is None:
-        return _entity_error(state, event, "run", event.subagent_run_id, "orphan_subagent_event_reference")
+        return _entity_error(
+            state,
+            event,
+            "run",
+            event.subagent_run_id,
+            "orphan_subagent_event_reference",
+        )
     if task is not None:
         if task.status != event.consumed_status:
             return _entity_error(
@@ -1089,7 +1347,10 @@ def _result_consumed(state: SubagentGraphState, event: SubagentResultConsumedEve
                 task.task_id,
                 "subagent_consumption_status_mismatch",
             )
-        if event.subagent_run_id is not None and task.current_run_id != event.subagent_run_id:
+        if (
+            event.subagent_run_id is not None
+            and task.current_run_id != event.subagent_run_id
+        ):
             return _entity_error(
                 state,
                 event,
@@ -1105,7 +1366,10 @@ def _result_consumed(state: SubagentGraphState, event: SubagentResultConsumedEve
                 event.result_id,
                 "subagent_task_run_attribution_mismatch",
             )
-        if event.result_id is None and event.terminal_event_id != task.provenance.terminal_event_id:
+        if (
+            event.result_id is None
+            and event.terminal_event_id != task.provenance.terminal_event_id
+        ):
             return _entity_error(
                 state,
                 event,
@@ -1124,7 +1388,10 @@ def _result_consumed(state: SubagentGraphState, event: SubagentResultConsumedEve
     if result is not None:
         if result.status != "completed":
             return _terminal_conflict(state, event, "result", result.result_id)
-        if event.subagent_run_id is not None and result.subagent_run_id != event.subagent_run_id:
+        if (
+            event.subagent_run_id is not None
+            and result.subagent_run_id != event.subagent_run_id
+        ):
             return _entity_error(
                 state,
                 event,

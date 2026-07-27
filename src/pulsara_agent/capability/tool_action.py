@@ -15,7 +15,7 @@ from pulsara_agent.primitives.long_horizon import (
     ToolActionClassificationFact,
     ToolActionClassifierContractFact,
 )
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 
 
 class ToolActionClassifierContractError(RuntimeError):
@@ -146,12 +146,15 @@ def fixed_tool_action_policy(
     )
 
 
-def terminal_process_tool_action_policy() -> LongHorizonToolPolicyFact:
+def terminal_process_tool_action_policy(
+    *,
+    observe_actions: tuple[str, ...],
+) -> LongHorizonToolPolicyFact:
     contract = _classifier_contract(
         classifier_id="pulsara.tool_action.terminal_process",
         policy_payload={
             "kind": "terminal_process_action",
-            "observe_actions": ["list", "log", "poll", "wait"],
+            "observe_actions": list(observe_actions),
             "default_action_class": LongHorizonActionClass.PROCESS_CONTROL.value,
             "rollout_cost_units": 1,
         },
@@ -172,12 +175,15 @@ def terminal_process_tool_action_policy() -> LongHorizonToolPolicyFact:
     )
 
 
-def terminal_monitor_tool_action_policy() -> LongHorizonToolPolicyFact:
+def terminal_monitor_tool_action_policy(
+    *,
+    observe_actions: tuple[str, ...],
+) -> LongHorizonToolPolicyFact:
     contract = _classifier_contract(
         classifier_id="pulsara.tool_action.terminal_monitor",
         policy_payload={
             "kind": "terminal_monitor_action",
-            "observe_actions": ["list"],
+            "observe_actions": list(observe_actions),
             "default_action_class": LongHorizonActionClass.PROCESS_CONTROL.value,
             "rollout_cost_units": 1,
         },
@@ -231,18 +237,32 @@ def default_tool_action_classifier_registry() -> ToolActionClassifierRegistry:
                 classify=lambda _call, value=action_class: (value, 1),
             )
         )
-    terminal_policy = terminal_process_tool_action_policy()
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+
+    process_entry = builtin_tool_catalog_entry("terminal_process")
+    process_observe_actions = tuple(
+        item.discriminator_value
+        for item in process_entry.permission_contract.ordered_action_overrides
+        if item.allowed_in_read_only
+    )
+    terminal_policy = process_entry.descriptor.long_horizon_policy
     registry.register(
         ToolActionClassifierBinding(
             contract=terminal_policy.action_classifier_contract,
-            classify=_classify_terminal_process,
+            classify=_terminal_action_classifier(process_observe_actions),
         )
     )
-    terminal_monitor_policy = terminal_monitor_tool_action_policy()
+    monitor_entry = builtin_tool_catalog_entry("terminal_monitor")
+    monitor_observe_actions = tuple(
+        item.discriminator_value
+        for item in monitor_entry.permission_contract.ordered_action_overrides
+        if item.allowed_in_read_only
+    )
+    terminal_monitor_policy = monitor_entry.descriptor.long_horizon_policy
     registry.register(
         ToolActionClassifierBinding(
             contract=terminal_monitor_policy.action_classifier_contract,
-            classify=_classify_terminal_monitor,
+            classify=_terminal_action_classifier(monitor_observe_actions),
         )
     )
     terminal_command_policy = terminal_tool_action_policy()
@@ -255,47 +275,19 @@ def default_tool_action_classifier_registry() -> ToolActionClassifierRegistry:
     return registry
 
 
-def builtin_tool_action_policy(name: str) -> LongHorizonToolPolicyFact:
-    if name == "terminal":
-        return terminal_tool_action_policy()
-    if name == "terminal_process":
-        return terminal_process_tool_action_policy()
-    if name == "terminal_monitor":
-        return terminal_monitor_tool_action_policy()
-    if name in {
-        "artifact_read",
-        "wait_agent",
-        "list_agents",
-        "wait_agent_tasks",
-        "memory_get",
-        "memory_explain",
-    }:
-        return fixed_tool_action_policy(LongHorizonActionClass.EVIDENCE_HYDRATION)
-    if name in {
-        "read_file",
-        "search_files",
-        "memory_search",
-        "spawn_agent",
-        "create_agent_tasks",
-    }:
-        return fixed_tool_action_policy(LongHorizonActionClass.EVIDENCE_ACQUISITION)
-    if name in {
-        "edit_file",
-        "write_file",
-        "todo",
-        "report_agent_result",
-        "remember_claim",
-        "remember_preference",
-        "remember_observation",
-        "remember_action_boundary",
-        "remember_decision",
-    }:
-        return fixed_tool_action_policy(LongHorizonActionClass.SYNTHESIS_MUTATION)
-    if name in {"stop_agent", "stop_agent_task", "report_agent_phase"}:
-        return fixed_tool_action_policy(LongHorizonActionClass.PROCESS_CONTROL)
-    if name in {"enter_plan", "ask_plan_question", "exit_plan"}:
-        return fixed_tool_action_policy(LongHorizonActionClass.USER_INTERACTION)
-    return fixed_tool_action_policy(LongHorizonActionClass.EXTERNAL_ACTION)
+def builtin_tool_action_policy(tool_name: str) -> LongHorizonToolPolicyFact:
+    """Return the catalog-owned policy for one built-in tool.
+
+    This compatibility query deliberately contains no name/action taxonomy of
+    its own.  The built-in catalog remains the only policy owner.
+    """
+
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+
+    try:
+        return builtin_tool_catalog_entry(tool_name).descriptor.long_horizon_policy
+    except KeyError:
+        return fixed_tool_action_policy(LongHorizonActionClass.EXTERNAL_ACTION)
 
 
 def mcp_tool_action_policy() -> LongHorizonToolPolicyFact:
@@ -370,21 +362,17 @@ def _allowed_phases(
     )
 
 
-def _classify_terminal_process(
-    call: ToolCall,
-) -> tuple[LongHorizonActionClass, int]:
-    action = call.arguments.get("action")
-    if action in {"list", "log", "poll", "wait"}:
-        return LongHorizonActionClass.EVIDENCE_HYDRATION, 1
-    return LongHorizonActionClass.PROCESS_CONTROL, 1
+def _terminal_action_classifier(
+    observe_actions: tuple[str, ...],
+) -> ToolActionClassifier:
+    allowed = frozenset(observe_actions)
 
+    def classify(call: ToolCall) -> tuple[LongHorizonActionClass, int]:
+        if call.arguments.get("action") in allowed:
+            return LongHorizonActionClass.EVIDENCE_HYDRATION, 1
+        return LongHorizonActionClass.PROCESS_CONTROL, 1
 
-def _classify_terminal_monitor(
-    call: ToolCall,
-) -> tuple[LongHorizonActionClass, int]:
-    if call.arguments.get("action") == "list":
-        return LongHorizonActionClass.EVIDENCE_HYDRATION, 1
-    return LongHorizonActionClass.PROCESS_CONTROL, 1
+    return classify
 
 
 _TERMINAL_READ_ONLY_COMMANDS = frozenset(

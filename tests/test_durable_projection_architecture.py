@@ -76,8 +76,7 @@ def test_legacy_outbox_is_read_only_migration_authority() -> None:
     }
     assert observed == allowed
     production_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in _python_sources(_SOURCE)
+        path.read_text(encoding="utf-8") for path in _python_sources(_SOURCE)
     )
     assert "MutationOutboxWriter" not in production_text
     assert "append_payload(" not in production_text
@@ -108,9 +107,7 @@ def test_runtime_session_bootstrap_is_the_only_python_session_insert_owner() -> 
     for path in _python_sources(_SOURCE):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(
-                node.value, str
-            ):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
             normalized = " ".join(node.value.lower().split())
             if (
@@ -139,8 +136,7 @@ def test_publisher_wake_callback_has_no_storage_calls() -> None:
     callback = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef)
-        and node.name == "on_published_event"
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "on_published_event"
     )
     call_names = {
         (
@@ -182,7 +178,7 @@ def test_owned_graph_relations_only_use_the_immutable_relation_port() -> None:
 
     allowed = {
         "src/pulsara_agent/entities/runtime/turn.py",
-        "src/pulsara_agent/runtime/projection_jobs/graph_relation.py",
+        "src/pulsara_agent/graph/projection_relations.py",
         "src/pulsara_agent/runtime/projection_jobs/projection_handlers.py",
         "src/pulsara_agent/storage/postgres_memory_projection.py",
     }

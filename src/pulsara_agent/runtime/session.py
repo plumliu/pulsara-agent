@@ -105,7 +105,6 @@ from pulsara_agent.runtime.event_write_service import (
 )
 from pulsara_agent.runtime.context_input.render import InMemoryToolResultRenderCache
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
-from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.runtime.publisher import (
     PublisherEnqueueResult,
     RuntimeEventPublisher,
@@ -134,7 +133,6 @@ from pulsara_agent.runtime.publication_maintenance import (
     validate_publication_latched_run_termination_authority,
 )
 from pulsara_agent.runtime.mandatory_audit import RuntimeSessionMandatoryAuditOwner
-from pulsara_agent.tools.base import AsyncTool, Tool
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     RuntimeEventOperationDeadlineBudget,
 )
@@ -348,10 +346,11 @@ class RuntimeSession:
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     terminal_binding: TerminalRuntimeBinding | None = None
-    extra_tool_bindings: tuple[Tool | AsyncTool, ...] = ()
+    dynamic_tool_installations: tuple[object, ...] = ()
     subagent_runtime: Any | None = None
     window_compaction_service: Any | None = None
     mcp_supervisor: Any | None = None
+    mcp_tool_execution_port: Any | None = None
     context_event_log_locator: Any | None = None
     rollout_account_owner_state_store: Any | None = None
     allow_unbootstrapped_test_events: bool = False
@@ -552,9 +551,9 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
-    _publication_maintenance_coordinator: (
-        PublicationTerminalMaintenanceCoordinator
-    ) = field(init=False, repr=False)
+    _publication_maintenance_coordinator: PublicationTerminalMaintenanceCoordinator = (
+        field(init=False, repr=False)
+    )
     mcp_installation_id: str = field(default="mcp_installation:empty", init=False)
     mcp_installation_owner_runtime_session_id: str = field(init=False)
     _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
@@ -879,9 +878,7 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"mcp_input_required_lifecycle:{self.runtime_session_id}",
             through_sequence=self.mcp_input_required_lifecycle_store.through_sequence,
-            apply_committed=(
-                self.mcp_input_required_lifecycle_store.apply_committed
-            ),
+            apply_committed=(self.mcp_input_required_lifecycle_store.apply_committed),
             rebuild_committed=self.mcp_input_required_lifecycle_store.rebuild,
         )
         from pulsara_agent.primitives.long_horizon import (
@@ -2221,7 +2218,9 @@ class RuntimeSession:
         if attempt is None:
             return
         normalized: Literal["full", "none", "unknown", "partial"]
-        normalized = status if status in {"full", "none", "unknown", "partial"} else "unknown"  # type: ignore[assignment]
+        normalized = (
+            status if status in {"full", "none", "unknown", "partial"} else "unknown"
+        )  # type: ignore[assignment]
         try:
             with self._publication_maintenance_lock:
                 self._publication_maintenance_coordinator.resolve(
@@ -2804,12 +2803,11 @@ class RuntimeSession:
                 *publication_errors,
             ),
         )
-        if (
-            self._batch_requires_critical_publication(tuple(result.committed_events))
-            and (
-                result.publication_status == "unavailable"
-                or bool(result.publication_errors)
-            )
+        if self._batch_requires_critical_publication(
+            tuple(result.committed_events)
+        ) and (
+            result.publication_status == "unavailable"
+            or bool(result.publication_errors)
         ):
             self.latch_publication_reconciliation_required()
         self._resolve_publication_terminal_maintenance_attempt(
@@ -3466,12 +3464,9 @@ class RuntimeSession:
             delivery_futures=full_attempt.delivery_futures,
             published_events=full_attempt.published_events,
         )
-        if (
-            self._batch_requires_critical_publication(committed_business)
-            and (
-                attempt.result.publication_status == "unavailable"
-                or bool(attempt.result.publication_errors)
-            )
+        if self._batch_requires_critical_publication(committed_business) and (
+            attempt.result.publication_status == "unavailable"
+            or bool(attempt.result.publication_errors)
         ):
             self.latch_publication_reconciliation_required()
         return attempt
@@ -5292,43 +5287,6 @@ class RuntimeSession:
             self._mandatory_audit_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
-
-    def create_tool_executor(
-        self,
-        *,
-        record_event: RuntimeThreadRecorder | None = None,
-        memory_proposal_sink: MemoryProposalSink | None = None,
-        memory_recall_service=None,
-        memory_query=None,
-        graph_id: str | None = None,
-        memory_read_scopes: frozenset[str] | None = None,
-        permission_state: PermissionState | None = None,
-    ):
-        from pulsara_agent.tools import ToolExecutor
-        from pulsara_agent.tools.builtins.registry import build_core_tool_registry
-
-        if record_event is not None and not isinstance(
-            record_event, RuntimeThreadRecorder
-        ):
-            raise TypeError(
-                "create_tool_executor(record_event=...) requires RuntimeSession.make_thread_recorder(...)"
-            )
-
-        return ToolExecutor(
-            registry=build_core_tool_registry(
-                self,
-                memory_proposal_sink=memory_proposal_sink,
-                memory_recall_service=memory_recall_service,
-                memory_query=memory_query,
-                graph_id=graph_id,
-                memory_read_scopes=memory_read_scopes,
-                permission_state=permission_state,
-                extra_tools=self.extra_tool_bindings,
-            ),
-            record_event=record_event,
-            artifact_service=self.artifact_service,
-            runtime_session_id=self.runtime_session_id,
-        )
 
 
 def _commit_phase_deadline(terminal_deadline_monotonic: float) -> float:

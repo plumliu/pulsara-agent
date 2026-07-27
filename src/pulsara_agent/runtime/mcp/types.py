@@ -67,7 +67,9 @@ class McpStdioConfig:
         if not self.command.strip():
             raise ValueError("MCP stdio command is required")
         object.__setattr__(self, "args", tuple(str(arg) for arg in self.args))
-        object.__setattr__(self, "env", MappingProxyType({str(k): str(v) for k, v in self.env.items()}))
+        object.__setattr__(
+            self, "env", MappingProxyType({str(k): str(v) for k, v in self.env.items()})
+        )
         if self.cwd is not None:
             object.__setattr__(self, "cwd", self.cwd.expanduser())
 
@@ -86,13 +88,20 @@ class McpStreamableHttpConfig:
         object.__setattr__(self, "url", self.url.strip())
         if not (self.url.startswith("http://") or self.url.startswith("https://")):
             raise ValueError("MCP streamable HTTP URL must use http:// or https://")
-        object.__setattr__(self, "headers", MappingProxyType({str(k): str(v) for k, v in self.headers.items()}))
+        object.__setattr__(
+            self,
+            "headers",
+            MappingProxyType({str(k): str(v) for k, v in self.headers.items()}),
+        )
         object.__setattr__(
             self,
             "env_headers",
             MappingProxyType({str(k): str(v) for k, v in self.env_headers.items()}),
         )
-        if self.bearer_token_env_var is not None and not self.bearer_token_env_var.strip():
+        if (
+            self.bearer_token_env_var is not None
+            and not self.bearer_token_env_var.strip()
+        ):
             raise ValueError("bearer_token_env_var cannot be empty")
 
 
@@ -133,8 +142,12 @@ class McpServerConfig:
             raise ValueError("startup_deadline_ms must be >= connect_timeout_ms")
         object.__setattr__(self, "server_id", normalized_id)
         if self.enabled_tools is not None:
-            object.__setattr__(self, "enabled_tools", tuple(dict.fromkeys(self.enabled_tools)))
-        object.__setattr__(self, "disabled_tools", tuple(dict.fromkeys(self.disabled_tools)))
+            object.__setattr__(
+                self, "enabled_tools", tuple(dict.fromkeys(self.enabled_tools))
+            )
+        object.__setattr__(
+            self, "disabled_tools", tuple(dict.fromkeys(self.disabled_tools))
+        )
 
     @property
     def transport_kind(self) -> McpServerTransportKind:
@@ -155,9 +168,15 @@ class McpToolAnnotations:
         if not payload:
             return cls()
         return cls(
-            read_only_hint=_optional_bool(payload.get("readOnlyHint") or payload.get("read_only_hint")),
-            destructive_hint=_optional_bool(payload.get("destructiveHint") or payload.get("destructive_hint")),
-            open_world_hint=_optional_bool(payload.get("openWorldHint") or payload.get("open_world_hint")),
+            read_only_hint=_optional_bool(
+                payload.get("readOnlyHint") or payload.get("read_only_hint")
+            ),
+            destructive_hint=_optional_bool(
+                payload.get("destructiveHint") or payload.get("destructive_hint")
+            ),
+            open_world_hint=_optional_bool(
+                payload.get("openWorldHint") or payload.get("open_world_hint")
+            ),
             title=_optional_str(payload.get("title")),
         )
 
@@ -185,7 +204,9 @@ class McpDiscoveredTool:
             raise ValueError("MCP discovered tool requires name")
         object.__setattr__(self, "server_id", normalize_mcp_identifier(self.server_id))
         object.__setattr__(self, "name", self.name.strip())
-        object.__setattr__(self, "description", self.description.strip() or f"MCP tool {self.name}")
+        object.__setattr__(
+            self, "description", self.description.strip() or f"MCP tool {self.name}"
+        )
         schema = dict(self.input_schema or {})
         if schema.get("type") != "object":
             schema.setdefault("type", "object")
@@ -293,7 +314,9 @@ class McpServerSnapshot:
         if self.status is not McpServerStatus.READY and (
             self.tools or self.resources or self.resource_templates or self.prompts
         ):
-            raise ValueError("non-ready MCP snapshots cannot expose discovered collections")
+            raise ValueError(
+                "non-ready MCP snapshots cannot expose discovered collections"
+            )
         discovered_items = (
             *self.tools,
             *self.resources,
@@ -313,7 +336,9 @@ class McpServerSnapshot:
             self.timing.connect_ended_at_utc is None
             or self.timing.discovery_ended_at_utc is None
         ):
-            raise ValueError("ready MCP snapshot requires completed connect/discovery timing")
+            raise ValueError(
+                "ready MCP snapshot requires completed connect/discovery timing"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,10 +514,7 @@ class McpServerCandidate:
             raise ValueError("MCP candidate discovery generation mismatch")
         if spec.config.server_id != snapshot.server_id:
             raise ValueError("MCP candidate server identity mismatch")
-        if (
-            spec.event_safe_config_fingerprint
-            != snapshot.event_safe_config_fingerprint
-        ):
+        if spec.event_safe_config_fingerprint != snapshot.event_safe_config_fingerprint:
             raise ValueError("MCP candidate event-safe config identity mismatch")
         counts = (self.retry_attempt, self.request_count, self.page_count)
         if any(value < 0 for value in counts) or self.page_count > self.request_count:
@@ -536,8 +558,7 @@ class McpCandidateBatch:
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
         if self.config_epoch < 0 or any(
-            candidate.config_epoch != self.config_epoch
-            for candidate in self.candidates
+            candidate.config_epoch != self.config_epoch for candidate in self.candidates
         ):
             raise ValueError("MCP candidate batch epoch mismatch")
 
@@ -581,7 +602,7 @@ class McpInstalledCapabilitySnapshot:
     installed_at_utc: str
     snapshots: tuple[McpServerSnapshot, ...]
     descriptors: tuple[object, ...]
-    tools: tuple[object, ...]
+    ordered_binding_installations: tuple[object, ...]
     diagnostics: tuple[object, ...]
     ready_server_ids: frozenset[str]
     binding_identities: frozenset[McpBindingIdentity]
@@ -589,7 +610,11 @@ class McpInstalledCapabilitySnapshot:
     def __post_init__(self) -> None:
         object.__setattr__(self, "snapshots", tuple(self.snapshots))
         object.__setattr__(self, "descriptors", tuple(self.descriptors))
-        object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(
+            self,
+            "ordered_binding_installations",
+            tuple(self.ordered_binding_installations),
+        )
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "ready_server_ids", frozenset(self.ready_server_ids))
         object.__setattr__(
@@ -612,17 +637,34 @@ class McpInstalledCapabilitySnapshot:
         descriptor_names = {
             str(getattr(descriptor, "name", "")) for descriptor in self.descriptors
         }
-        tool_names = {str(getattr(tool, "name", "")) for tool in self.tools}
+        tool_names = {
+            str(getattr(getattr(item, "tool", None), "name", ""))
+            for item in self.ordered_binding_installations
+        }
         if descriptor_names != tool_names:
             raise ValueError("MCP installation descriptor/tool name mismatch")
         tool_identities = frozenset(
             identity
             for identity in (
-                getattr(tool, "binding_identity", None) for tool in self.tools
+                getattr(
+                    getattr(item, "binding_contract", None),
+                    "binding_identity",
+                    None,
+                )
+                for item in self.ordered_binding_installations
             )
-            if isinstance(identity, McpBindingIdentity)
+            if identity is not None
         )
-        if tool_identities != self.binding_identities:
+        normalized_identities = frozenset(
+            McpBindingIdentity(
+                server_id=str(identity.server_id),
+                slot_id=str(identity.slot_id),
+                snapshot_id=str(identity.snapshot_id),
+                discovery_generation=int(identity.discovery_generation),
+            )
+            for identity in tool_identities
+        )
+        if normalized_identities != self.binding_identities:
             raise ValueError("MCP installation binding identity projection mismatch")
 
 
@@ -646,13 +688,6 @@ class McpPendingInstallationAudit:
     diagnostics: tuple[McpDiagnosticFact, ...]
     baseline_tool_names: frozenset[str]
     current_tool_names: frozenset[str]
-
-
-@dataclass(frozen=True, slots=True)
-class McpCapabilityExecutionSurface:
-    installation: McpInstalledCapabilitySnapshot
-    capability_runtime: object
-    extra_tool_bindings: tuple[object, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,14 +830,14 @@ _MCP_TOOL_NAME_OVERHEAD = len("mcp__") + len("__") + len("__")
 _HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _SECRET_KEY_PATTERN = r"x-api-key|api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|password|secret|token"
-_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization\s*:\s*)((?:Bearer|Basic)\s+)?([^\s,;}]+)")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(authorization\s*:\s*)((?:Bearer|Basic)\s+)?([^\s,;}]+)"
+)
 _SECRET_QUOTED_VALUE_RE = re.compile(
     rf"(?i)([\"']?(?:{_SECRET_KEY_PATTERN})[\"']?\s*:\s*)([\"'])([^\r\n\"']*)([\"'])"
 )
 _SECRET_COLON_RE = re.compile(rf"(?i)\b({_SECRET_KEY_PATTERN})\s*:\s*([^\s,;}}]+)")
-_SECRET_ASSIGNMENT_RE = re.compile(
-    rf"(?i)\b({_SECRET_KEY_PATTERN})=([^\s&]+)"
-)
+_SECRET_ASSIGNMENT_RE = re.compile(rf"(?i)\b({_SECRET_KEY_PATTERN})=([^\s&]+)")
 
 
 def normalize_mcp_identifier(value: str) -> str:
@@ -960,7 +995,9 @@ def _event_safe_config_payload(config: McpServerConfig) -> dict[str, object]:
             host = f"{host}:{port}"
         transport_payload = {
             "kind": "streamable_http",
-            "endpoint": urlunsplit((split.scheme.lower(), host, split.path or "/", "", "")),
+            "endpoint": urlunsplit(
+                (split.scheme.lower(), host, split.path or "/", "", "")
+            ),
             "bearer_token_env_var": transport.bearer_token_env_var,
             "bearer_token_present": bool(
                 transport.bearer_token_env_var
@@ -1001,17 +1038,23 @@ def _runtime_secret_fingerprint(value: str | None) -> str | None:
 
 
 def _sha256_json(payload: object) -> str:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    text = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
-def mangle_mcp_tool_name(server_id: str, tool_name: str, *, max_length: int = MAX_MCP_MODEL_TOOL_NAME_CHARS) -> str:
+def mangle_mcp_tool_name(
+    server_id: str, tool_name: str, *, max_length: int = MAX_MCP_MODEL_TOOL_NAME_CHARS
+) -> str:
     safe_server = normalize_mcp_identifier(server_id) or "server"
     safe_tool = normalize_mcp_identifier(tool_name) or "tool"
     full = f"mcp__{safe_server}__{safe_tool}"
     if len(full) <= max_length:
         return full
-    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[
+        :10
+    ]
     budget = max_length - _MCP_TOOL_NAME_OVERHEAD - len(digest)
     if budget < 2:
         return f"mcp__{digest}"[:max_length]
@@ -1052,15 +1095,18 @@ def _redact_url_text(url: str) -> str:
         netloc = f"[redacted]@{netloc.rsplit('@', 1)[1]}"
     query = "[redacted]" if split.query else ""
     fragment = "[redacted]" if split.fragment else ""
-    return urlunsplit(
-        SplitResult(
-            scheme=split.scheme,
-            netloc=netloc,
-            path=split.path,
-            query=query,
-            fragment=fragment,
+    return (
+        urlunsplit(
+            SplitResult(
+                scheme=split.scheme,
+                netloc=netloc,
+                path=split.path,
+                query=query,
+                fragment=fragment,
+            )
         )
-    ) + trailing
+        + trailing
+    )
 
 
 def _optional_bool(value: Any) -> bool | None:

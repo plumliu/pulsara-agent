@@ -18,7 +18,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState
-from pulsara_agent.runtime import (
+from pulsara_agent.runtime.hooks import (
     ControlHookResult,
     HookContext,
     HookDecision,
@@ -55,7 +55,9 @@ def test_event_hooks_support_all_and_specific_subscriptions() -> None:
     asyncio.run(
         manager.dispatch_observer_event(
             _ctx(),
-            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="hi"),
+            make_text_block_segment_event(
+                **CTX.event_fields(), block_id="text:1", delta="hi"
+            ),
         )
     )
     asyncio.run(
@@ -159,7 +161,9 @@ def test_block_hooks_fire_on_completed_text_and_tool_result_blocks() -> None:
 
     for event in [
         make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
-        make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="hello"),
+        make_text_block_segment_event(
+            **CTX.event_fields(), block_id="text:1", delta="hello"
+        ),
         make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"
@@ -234,7 +238,9 @@ def test_block_hooks_isolate_reused_block_ids_across_replies() -> None:
         ),
         (
             _ctx("reply:a"),
-            make_text_block_segment_event(**ctx_a.event_fields(), block_id="text:1", delta="A"),
+            make_text_block_segment_event(
+                **ctx_a.event_fields(), block_id="text:1", delta="A"
+            ),
         ),
         (
             _ctx("reply:b"),
@@ -242,10 +248,18 @@ def test_block_hooks_isolate_reused_block_ids_across_replies() -> None:
         ),
         (
             _ctx("reply:b"),
-            make_text_block_segment_event(**ctx_b.event_fields(), block_id="text:1", delta="B"),
+            make_text_block_segment_event(
+                **ctx_b.event_fields(), block_id="text:1", delta="B"
+            ),
         ),
-        (_ctx("reply:a"), make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1")),
-        (_ctx("reply:b"), make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1")),
+        (
+            _ctx("reply:a"),
+            make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1"),
+        ),
+        (
+            _ctx("reply:b"),
+            make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1"),
+        ),
     ]:
         asyncio.run(manager.dispatch_observer_event(context, event))
 
@@ -261,7 +275,9 @@ def test_runtime_hook_manager_cleans_unfinished_blocks_on_run_error() -> None:
 
     for event in [
         make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
-        make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="partial"),
+        make_text_block_segment_event(
+            **CTX.event_fields(), block_id="text:1", delta="partial"
+        ),
         RunErrorEvent(**CTX.event_fields(), message="stream failed"),
         make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
     ]:
@@ -289,7 +305,9 @@ def test_runtime_hook_manager_cleans_only_finished_reply_on_reply_end() -> None:
         ),
         (
             _ctx("reply:a"),
-            make_text_block_segment_event(**ctx_a.event_fields(), block_id="text:1", delta="A"),
+            make_text_block_segment_event(
+                **ctx_a.event_fields(), block_id="text:1", delta="A"
+            ),
         ),
         (
             _ctx("reply:b"),
@@ -297,11 +315,22 @@ def test_runtime_hook_manager_cleans_only_finished_reply_on_reply_end() -> None:
         ),
         (
             _ctx("reply:b"),
-            make_text_block_segment_event(**ctx_b.event_fields(), block_id="text:1", delta="B"),
+            make_text_block_segment_event(
+                **ctx_b.event_fields(), block_id="text:1", delta="B"
+            ),
         ),
-        (_ctx("reply:a"), ReplyEndEvent(**ctx_a.event_fields(), model_terminal_outcome="completed")),
-        (_ctx("reply:a"), make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1")),
-        (_ctx("reply:b"), make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1")),
+        (
+            _ctx("reply:a"),
+            ReplyEndEvent(**ctx_a.event_fields(), model_terminal_outcome="completed"),
+        ),
+        (
+            _ctx("reply:a"),
+            make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1"),
+        ),
+        (
+            _ctx("reply:b"),
+            make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1"),
+        ),
     ]:
         asyncio.run(manager.dispatch_observer_event(context, event))
 

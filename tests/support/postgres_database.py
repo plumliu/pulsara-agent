@@ -13,11 +13,11 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from pulsara_agent.settings import load_env_file
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionKind,
 )
-from pulsara_agent.runtime.projection_jobs.pre_activation import (
-    PostgresProjectionMigrationPreparationCoordinator,
+from pulsara_agent.runtime.projection_jobs.migration_port import (
+    build_postgres_projection_migration_preparation_port,
 )
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 
@@ -32,13 +32,14 @@ class MigratedPostgresTestDatabase:
 def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
     database = create_empty_postgres_test_database()
     try:
-        runner = PostgresMigrationRunner(
+        coordinator = build_postgres_projection_migration_preparation_port(
             admin_dsn=database.admin_dsn,
             runtime_dsn=database.runtime_dsn,
         )
-        coordinator = PostgresProjectionMigrationPreparationCoordinator(
+        runner = PostgresMigrationRunner(
             admin_dsn=database.admin_dsn,
             runtime_dsn=database.runtime_dsn,
+            projection_preparation_port=coordinator,
         )
         deadline = monotonic() + 240.0
         report = runner.migrate(deadline_monotonic=deadline)

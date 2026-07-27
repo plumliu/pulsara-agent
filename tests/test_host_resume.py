@@ -165,7 +165,7 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(
 
     async def run():
         nonlocal runtime_session_id
-        first_core = HostCore(settings=settings)
+        first_core = HostCore.production(settings=settings)
         session = await first_core.open_session(
             _workspace(tmp_path),
             model_role=ModelRole.FLASH,
@@ -177,7 +177,7 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(
             first_core.shutdown()
         )  # detach process resources, keep durable conversation resumable
 
-        second_core = HostCore(settings=settings)
+        second_core = HostCore.production(settings=settings)
         resumed = await second_core.resume_session(
             runtime_session_id,
             model_role=ModelRole.FLASH,
@@ -247,7 +247,7 @@ def test_closed_runtime_session_is_not_resumable(tmp_path, monkeypatch) -> None:
 
     async def run():
         nonlocal runtime_session_id
-        core = HostCore(settings=settings)
+        core = HostCore.production(settings=settings)
         session = await core.open_session(
             _workspace(tmp_path),
             model_role=ModelRole.FLASH,
@@ -276,7 +276,7 @@ def test_resume_restores_manifest_permission_mode_when_not_overridden(
 
     async def run():
         nonlocal runtime_session_id
-        first_core = HostCore(settings=settings)
+        first_core = HostCore.production(settings=settings)
         session = await first_core.open_session(
             _workspace(tmp_path),
             model_role=ModelRole.FLASH,
@@ -285,7 +285,7 @@ def test_resume_restores_manifest_permission_mode_when_not_overridden(
         runtime_session_id = session.runtime_session_id
         await first_core.shutdown()
 
-        second_core = HostCore(settings=settings)
+        second_core = HostCore.production(settings=settings)
         resumed = await second_core.resume_session(
             runtime_session_id, model_role=ModelRole.FLASH
         )
@@ -494,7 +494,7 @@ def test_resume_repairs_dangling_running_run_before_replay(
         )
         runtime_session.close()
 
-        core = HostCore(settings=settings)
+        core = HostCore.production(settings=settings)
         resumed = await core.resume_session(
             runtime_session_id,
             model_role=ModelRole.FLASH,

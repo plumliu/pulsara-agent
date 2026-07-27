@@ -14,7 +14,7 @@ from pulsara_agent.event import (
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
 )
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
 from pulsara_agent.memory.candidates.pool import (
@@ -56,7 +56,7 @@ from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
     GovernanceDerivedWriteAttributionFact,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
 )
 

@@ -20,7 +20,7 @@ from pulsara_agent.runtime.blocking_executor import (
 from pulsara_agent.runtime.projection_jobs.service import (
     DurableProjectionJobService,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionKind,
 )
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent

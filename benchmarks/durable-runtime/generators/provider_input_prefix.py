@@ -35,7 +35,7 @@ from pulsara_agent.runtime.provider_input.materialization import (
 )
 from pulsara_agent.runtime.provider_input.vector import load_provider_input_vector
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
+from tests.support.artifacts import FakeToolResultArtifactIndex
 from tests.support import run_agent_task, test_llm_config, test_model_limits
 
 
@@ -130,7 +130,7 @@ async def run_provider_input_prefix_benchmark(
         workspace_root,
         event_log=InMemoryEventLog(),
         archive=archive,
-        tool_result_artifacts=InMemoryToolResultArtifactIndex(),
+        tool_result_artifacts=FakeToolResultArtifactIndex(),
         runtime_session_id="runtime:provider-input-prefix-benchmark",
     )
     transport = DeterministicProviderInputTransport(model_calls=model_calls)

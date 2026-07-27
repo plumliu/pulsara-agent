@@ -8,7 +8,7 @@ import pytest
 
 from pulsara_agent.event import EventContext, RunStartEvent
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.runtime import EventCommitError
+from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.runtime.execution_handles import (
     BoundaryExecutionHandles,
     CapabilityExecutionBorrowUnavailable,
@@ -233,7 +233,9 @@ def test_terminal_graph_reconciles_and_cancels_live_handle(tmp_path) -> None:
         handle.coroutine = asyncio.create_task(asyncio.sleep(10))  # type: ignore[assignment]
         handle.phase = "started"
         diagnostics = registry.reconcile(fold_subagent_graph(parent.event_log.iter()))
-        assert [item.code for item in diagnostics] == ["subagent_terminal_run_handle_active"]
+        assert [item.code for item in diagnostics] == [
+            "subagent_terminal_run_handle_active"
+        ]
         await registry.cancel(child.subagent_run_id)
         assert handle.coroutine.done()
         assert registry.handles() == ()
@@ -359,7 +361,9 @@ def test_sync_cancel_requests_on_owner_loop_and_releases_after_done(tmp_path) ->
         registry.attach_coroutine(handle.subagent_run_id, task)
         await started.wait()
 
-        thread = threading.Thread(target=registry.cancel_now, args=(handle.subagent_run_id,))
+        thread = threading.Thread(
+            target=registry.cancel_now, args=(handle.subagent_run_id,)
+        )
         thread.start()
         thread.join(timeout=1)
         assert not thread.is_alive()

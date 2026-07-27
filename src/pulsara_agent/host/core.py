@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
@@ -16,6 +16,11 @@ from pulsara_agent.host.identity import (
     ResolvedWorkspace,
     resolve_workspace,
 )
+from pulsara_agent.host.composition_contract import (
+    HostProcessResourceLease,
+    HostRuntimeComposition,
+    build_host_runtime_admission,
+)
 from pulsara_agent.host.registry import HostSessionRegistry, HostSessionSummary
 from pulsara_agent.host.resume import (
     DanglingRunRepairResult,
@@ -25,7 +30,6 @@ from pulsara_agent.host.run_boundary import HostBoundaryStopResult
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.host.session_manifest import (
     ResumableSessionSummary,
-    SessionManifestStore,
     permission_policy_from_manifest,
 )
 from pulsara_agent.host.supervisor import (
@@ -38,18 +42,6 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
-from pulsara_agent.runtime.projection_jobs.service import (
-    DurableProjectionJobService,
-)
-from pulsara_agent.runtime.projection_jobs.projection_handlers import (
-    projection_executables,
-)
-from pulsara_agent.runtime.projection_jobs.registry import (
-    build_projection_executable_registry,
-)
-from pulsara_agent.runtime.projection_jobs.surface_handlers import (
-    surface_handlers,
-)
 from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
     PendingInteraction,
@@ -64,6 +56,7 @@ from pulsara_agent.runtime.terminal import (
 )
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
 from pulsara_agent.runtime.mcp.types import McpReconcileTicket
 from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
     CheckpointMaintenanceAuthority,
@@ -73,20 +66,13 @@ from pulsara_agent.runtime.long_horizon.feasibility import (
     ProductionRolloutBudgetFeasibilityReport,
     require_production_rollout_budget_configuration,
 )
-from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
-from pulsara_agent.retrieval.runtime import (
-    RetrievalRuntimeResources,
-    build_retrieval_runtime_resources,
-)
-from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
+from pulsara_agent.runtime.permission import default_permission_policy
 from pulsara_agent.settings import PulsaraSettings
-from pulsara_agent.storage.schema_verification_service import (
-    VerifiedPostgresAccessLease,
-    process_postgres_schema_verification_service,
-)
 
 
 _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS = 30.0
+_HOST_SHUTDOWN_RESOURCE_TIMEOUT_SECONDS = 30.0
+_HOST_CORE_CONSTRUCTION_GUARD = object()
 
 
 class HostCoreLifecycle(StrEnum):
@@ -101,13 +87,23 @@ class _HostShutdownAttempt:
     completion: asyncio.Future[None]
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, init=False)
 class HostCore:
     settings: PulsaraSettings
-    durable: bool = True
     scratch_root: Path | None = None
     registry: HostSessionRegistry = field(default_factory=HostSessionRegistry)
     checkpoint_maintenance_authority: CheckpointMaintenanceAuthority | None = None
+    _composition: HostRuntimeComposition = field(init=False, repr=False)
+    _process_resource_lease: HostProcessResourceLease | None = field(
+        default=None, init=False, repr=False
+    )
+    _process_resource_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _build_admission_generation: int = field(default=0, init=False, repr=False)
+    _process_owner_id: str = field(
+        default_factory=lambda: f"host-core:{uuid4().hex}", init=False, repr=False
+    )
     rollout_budget_feasibility: ProductionRolloutBudgetFeasibilityReport | None = field(
         init=False,
         repr=False,
@@ -121,35 +117,6 @@ class HostCore:
     )
     _supervisor_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
-    )
-    _retrieval_resources: RetrievalRuntimeResources | None = field(
-        default=None, init=False, repr=False
-    )
-    _retrieval_lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock, init=False, repr=False
-    )
-    _postgres_access_lease: VerifiedPostgresAccessLease | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
-    _postgres_access_lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock,
-        init=False,
-        repr=False,
-    )
-    _projection_service: DurableProjectionJobService | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
-    _projection_service_lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock,
-        init=False,
-        repr=False,
-    )
-    _governance_coordinator: MemoryGovernanceCoordinator | None = field(
-        default=None, init=False, repr=False
     )
     _lifecycle: HostCoreLifecycle = field(
         default=HostCoreLifecycle.OPEN, init=False, repr=False
@@ -171,20 +138,83 @@ class HostCore:
         repr=False,
     )
 
-    def __post_init__(self) -> None:
-        if self.durable:
-            # Resolve feasibility through the same composition-root factory used
-            # by AgentRuntime wiring. Embedders may install a trusted transport
-            # binding there; constructing an unrelated default registry would
-            # validate a different execution surface.
-            from pulsara_agent.runtime import wiring as runtime_wiring
+    def __init__(
+        self,
+        *,
+        settings: PulsaraSettings,
+        scratch_root: Path | None,
+        registry: HostSessionRegistry | None,
+        checkpoint_maintenance_authority: CheckpointMaintenanceAuthority | None,
+        composition: HostRuntimeComposition,
+        _construction_guard: object,
+    ) -> None:
+        if _construction_guard is not _HOST_CORE_CONSTRUCTION_GUARD:
+            raise TypeError("Use HostCore.production()")
+        explicit = {
+            "settings": settings,
+            "scratch_root": scratch_root,
+            "registry": registry or HostSessionRegistry(),
+            "checkpoint_maintenance_authority": checkpoint_maintenance_authority,
+            "_composition": composition,
+        }
+        for descriptor in fields(type(self)):
+            if descriptor.name in explicit:
+                value = explicit[descriptor.name]
+            elif descriptor.default_factory is not MISSING:
+                value = descriptor.default_factory()
+            elif descriptor.default is not MISSING:
+                value = descriptor.default
+            else:
+                continue
+            setattr(self, descriptor.name, value)
 
-            self.rollout_budget_feasibility = (
-                require_production_rollout_budget_configuration(
-                    self.settings.llm,
-                    resolver=runtime_wiring.build_llm_runtime(self.settings.llm),
-                )
+    @classmethod
+    def production(
+        cls,
+        *,
+        settings: PulsaraSettings,
+        scratch_root: Path | None = None,
+        registry: HostSessionRegistry | None = None,
+        checkpoint_maintenance_authority: CheckpointMaintenanceAuthority | None = None,
+    ) -> "HostCore":
+        from pulsara_agent.host.production_composition import (
+            ProductionHostComposition,
+        )
+        from pulsara_agent.runtime.wiring import build_llm_runtime
+
+        instance = cls(
+            settings=settings,
+            scratch_root=scratch_root,
+            registry=registry,
+            checkpoint_maintenance_authority=checkpoint_maintenance_authority,
+            composition=ProductionHostComposition(settings),
+            _construction_guard=_HOST_CORE_CONSTRUCTION_GUARD,
+        )
+        instance.rollout_budget_feasibility = (
+            require_production_rollout_budget_configuration(
+                settings.llm,
+                resolver=build_llm_runtime(settings.llm),
             )
+        )
+        return instance
+
+    @classmethod
+    def _from_component_test_composition(
+        cls,
+        *,
+        settings: PulsaraSettings,
+        composition: HostRuntimeComposition,
+        scratch_root: Path | None = None,
+        registry: HostSessionRegistry | None = None,
+    ) -> "HostCore":
+        return cls(
+            settings=settings,
+            scratch_root=scratch_root,
+            registry=registry,
+            checkpoint_maintenance_authority=None,
+            composition=composition,
+            _construction_guard=_HOST_CORE_CONSTRUCTION_GUARD,
+        )
 
     # -- Lifecycle gate -------------------------------------------------------
 
@@ -239,10 +269,8 @@ class HostCore:
         repair_dangling: bool = True,
     ) -> HostSession:
         """Reopen an existing durable runtime session in this HostCore process."""
-        if not self.durable:
-            raise RuntimeError("resume_session requires durable HostCore wiring")
         self._raise_if_not_accepting("resume a session")
-        await self._get_postgres_access_lease()
+        await self._get_process_resource_lease()
         guard = (
             self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
             if self.checkpoint_maintenance_authority is not None
@@ -310,9 +338,7 @@ class HostCore:
         include_closed: bool = False,
         limit: int = 20,
     ) -> list[ResumableSessionSummary]:
-        if not self.durable:
-            return []
-        await self._get_postgres_access_lease()
+        await self._get_process_resource_lease()
         workspace = (
             resolve_workspace(workspace_input, scratch_root=self.scratch_root)
             if workspace_input is not None
@@ -341,11 +367,10 @@ class HostCore:
     async def repair_session_for_resume(
         self, runtime_session_id: str
     ) -> DanglingRunRepairResult:
-        if not self.durable:
-            raise RuntimeError(
-                "repair_session_for_resume requires durable HostCore wiring"
-            )
-        access_lease = await self._get_postgres_access_lease()
+        resources = await self._get_process_resource_lease()
+        access_lease = resources.postgres_access_lease
+        if access_lease is None:
+            raise RuntimeError("component Host has no durable resume authority")
         reopen_deadline_monotonic = monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
         guard = (
             self.checkpoint_maintenance_authority.acquire_shared(runtime_session_id)
@@ -381,20 +406,9 @@ class HostCore:
         self._raise_if_not_accepting("open a session")
         reopen_deadline_monotonic: float | None = None
         await self._drain_failed_open_mcp_supervisors()
-        postgres_access_lease = (
-            await self._get_postgres_access_lease() if self.durable else None
-        )
-        retrieval_resources = (
-            await self._get_retrieval_resources() if self.durable else None
-        )
-        projection_service = (
-            await self._get_projection_service(
-                postgres_access_lease,
-                retrieval_resources=retrieval_resources,
-            )
-            if postgres_access_lease is not None
-            else None
-        )
+        resources = await self._get_process_resource_lease()
+        postgres_access_lease = resources.postgres_access_lease
+        projection_service = resources.projection_service
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
         conversation_id = conversation_id or f"conversation:{uuid4().hex}"
@@ -430,39 +444,52 @@ class HostCore:
                 workspace, host_session_id, conversation_id
             )
             mcp_supervisor, mcp_ticket = await self._build_mcp_supervisor(workspace)
-            wiring = build_agent_runtime_wiring(
-                self.settings,
-                workspace.workspace_root,
-                durable=self.durable,
-                postgres_access_lease=postgres_access_lease,
+            permission_policy = permission_policy or default_permission_policy()
+            terminal_binding = BorrowedWorkspaceTerminalRuntime(
+                owner=TerminalOwnerContext(
+                    host_session_id=host_session_id,
+                    conversation_id=conversation_id,
+                ),
+                manager=lease.manager,
+            )
+            self._build_admission_generation += 1
+            admission = build_host_runtime_admission(
+                settings=self.settings,
+                workspace=workspace,
+                runtime_session_id=runtime_session_id,
+                graph_id=None,
                 model_role=model_role,
                 options=options,
                 system_prompt=system_prompt,
-                runtime_session_id=runtime_session_id,
                 reopen_deadline_monotonic=reopen_deadline_monotonic,
-                memory_domain=workspace.memory_domain,
                 memory_reflection=memory_reflection,
-                terminal_binding=BorrowedWorkspaceTerminalRuntime(
-                    owner=TerminalOwnerContext(
-                        host_session_id=host_session_id,
-                        conversation_id=conversation_id,
-                    ),
-                    manager=lease.manager,
-                ),
+                memory_reflection_options=None,
+                enable_workspace_skills=True,
+                capability_runtime_override=None,
+                terminal_binding=terminal_binding,
                 permission_policy=permission_policy,
-                retrieval_resources=retrieval_resources,
-                governance_coordinator=self._governance_coordinator
-                if self.durable
-                else None,
                 mcp_supervisor=mcp_supervisor,
+                mcp_installation=empty_mcp_installation(
+                    config_epoch=mcp_ticket.config_epoch,
+                    event_safe_config_set_fingerprint=(
+                        mcp_ticket.event_safe_config_set_fingerprint
+                    ),
+                    installation_id=f"mcp_installation:initial:{mcp_ticket.ticket_id}",
+                ),
+                process_owner_id=self._process_owner_id,
+                admission_generation=self._build_admission_generation,
             )
+            wiring_outcome = self._composition.build_agent_runtime_wiring(
+                admission=admission,
+                resources=resources,
+            )
+            wiring = wiring_outcome.agent_runtime_wiring
             wiring.agent_runtime.rollout_budget_feasibility_report = (
                 self.rollout_budget_feasibility
             )
-            if projection_service is not None:
-                wiring.runtime_wiring.runtime_session.publisher.subscribe(
-                    projection_service
-                )
+            wiring.runtime_wiring.runtime_session.publisher.subscribe(
+                projection_service
+            )
             session = HostSession(
                 host_session_id=host_session_id,
                 conversation_id=conversation_id,
@@ -492,16 +519,15 @@ class HostCore:
             wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
             if mcp_ticket is not None:
                 await session.initialize_mcp(mcp_ticket)
-            if self.durable:
-                manifest_runtime_session_id = session.runtime_session_id
-                self._manifest_store().upsert_open_manifest(
-                    runtime_session_id=manifest_runtime_session_id,
-                    conversation_id=conversation_id,
-                    workspace=workspace,
-                    model_role=model_role,
-                    permission_policy=wiring.agent_runtime.permission_policy,
-                    created_by=created_by,
-                )
+            manifest_runtime_session_id = session.runtime_session_id
+            self._manifest_store().upsert_open_manifest(
+                runtime_session_id=manifest_runtime_session_id,
+                conversation_id=conversation_id,
+                workspace=workspace,
+                model_role=model_role,
+                permission_policy=wiring.agent_runtime.permission_policy,
+                created_by=created_by,
+            )
             # Publish under the lifecycle lock and re-check state: this is the
             # linearization point against shutdown/close. If shutdown won the
             # race, we roll back instead of leaking a session into a closed
@@ -519,13 +545,13 @@ class HostCore:
                     self._session_leases[host_session_id] = lease
             session.activate_terminal_notification_dispatch_after_open()
             if (
-                self._governance_coordinator is not None
+                resources.governance_coordinator is not None
                 and wiring.runtime_wiring.memory_governance_engine is not None
             ):
                 # Reopen recovery cannot wait for a future run safe point.  The
                 # coordinator discovers durable Preparing/Prepared ownership
                 # after the Host session itself is visible and fully wired.
-                self._governance_coordinator.notify(
+                resources.governance_coordinator.notify(
                     wiring.runtime_wiring.memory_governance_engine
                 )
             return session
@@ -746,7 +772,7 @@ class HostCore:
             return
         if not claim.is_owner:
             await asyncio.shield(attempt.completion)
-            if claim.requires_manifest_close_after_wait and self.durable:
+            if claim.requires_manifest_close_after_wait:
                 self._manifest_store().mark_closed(attempt.session.runtime_session_id)
                 await self.registry.complete_manifest_close(
                     host_session_id=host_session_id,
@@ -792,7 +818,7 @@ class HostCore:
             except BaseException as exc:
                 errors.append(exc)
             merged_close_conversation = await self.registry.seal_close_intent(attempt)
-            if merged_close_conversation and self.durable:
+            if merged_close_conversation:
                 try:
                     self._manifest_store().mark_closed(session.runtime_session_id)
                 except BaseException as exc:
@@ -890,20 +916,6 @@ class HostCore:
                     )
                 )
             if not blocked_by_close_work:
-                async with self._projection_service_lock:
-                    projection_service = self._projection_service
-                if projection_service is not None:
-                    try:
-                        await projection_service.aclose()
-                    except BaseException as exc:
-                        errors.append(exc)
-                        blocked_by_close_work = True
-                        blocked_by_projection_close = True
-                    else:
-                        async with self._projection_service_lock:
-                            if self._projection_service is projection_service:
-                                self._projection_service = None
-            if not blocked_by_close_work:
                 async with self._supervisor_lock:
                     supervisors = list(self._supervisors.values())
                     self._supervisors.clear()
@@ -913,20 +925,23 @@ class HostCore:
                         await asyncio.to_thread(supervisor.terminal_sessions.shutdown)
                     except BaseException as exc:
                         errors.append(exc)
-                async with self._retrieval_lock:
-                    resources = self._retrieval_resources
-                    self._retrieval_resources = None
-                    self._governance_coordinator = None
+                async with self._process_resource_lock:
+                    resources = self._process_resource_lease
                 if resources is not None:
                     try:
-                        await resources.aclose()
+                        await resources.release(
+                            deadline_monotonic=(
+                                monotonic() + _HOST_SHUTDOWN_RESOURCE_TIMEOUT_SECONDS
+                            )
+                        )
                     except BaseException as exc:
                         errors.append(exc)
-                async with self._postgres_access_lock:
-                    postgres_access_lease = self._postgres_access_lease
-                    self._postgres_access_lease = None
-                if postgres_access_lease is not None:
-                    postgres_access_lease.release()
+                        blocked_by_close_work = True
+                        blocked_by_projection_close = True
+                    else:
+                        async with self._process_resource_lock:
+                            if self._process_resource_lease is resources:
+                                self._process_resource_lease = None
         except BaseException as exc:
             # Even an unexpected coordinator failure must not strand every
             # concurrent waiter behind a permanently-CLOSING HostCore.
@@ -971,88 +986,35 @@ class HostCore:
             if first_error is not None:
                 raise first_error
 
-    async def _get_postgres_access_lease(self) -> VerifiedPostgresAccessLease:
-        if not self.durable:
-            raise RuntimeError("in-memory HostCore has no PostgreSQL access lease")
-        async with self._postgres_access_lock:
-            existing = self._postgres_access_lease
-            if existing is not None:
+    async def _get_process_resource_lease(self) -> HostProcessResourceLease:
+        async with self._process_resource_lock:
+            existing = self._process_resource_lease
+            if existing is not None and not existing.released:
                 return existing
             if self._lifecycle is not HostCoreLifecycle.OPEN:
-                raise RuntimeError(
-                    "HostCore is closing; cannot verify PostgreSQL schema"
-                )
-            access_lease = await process_postgres_schema_verification_service().acquire(
-                self.settings.storage.postgres_dsn,
-                deadline_monotonic=monotonic() + 30.0,
+                raise RuntimeError("HostCore is closing; cannot acquire resources")
+            resources = await self._composition.acquire_process_resources(
+                deadline_monotonic=monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
             )
             if self._lifecycle is not HostCoreLifecycle.OPEN:
-                access_lease.release()
-                raise RuntimeError(
-                    "HostCore closed while PostgreSQL schema was being verified"
+                await resources.release(
+                    deadline_monotonic=(
+                        monotonic() + _HOST_SHUTDOWN_RESOURCE_TIMEOUT_SECONDS
+                    )
                 )
-            self._postgres_access_lease = access_lease
-            if self.checkpoint_maintenance_authority is None:
+                raise RuntimeError("HostCore closed while resources were acquired")
+            self._process_resource_lease = resources
+            access_lease = resources.postgres_access_lease
+            if (
+                access_lease is not None
+                and self.checkpoint_maintenance_authority is None
+            ):
                 self.checkpoint_maintenance_authority = (
                     PostgresCheckpointMaintenanceAuthority(
                         access_lease.connection_provider
                     )
                 )
-            return access_lease
-
-    async def _get_projection_service(
-        self,
-        access_lease: VerifiedPostgresAccessLease,
-        *,
-        retrieval_resources: RetrievalRuntimeResources,
-    ) -> DurableProjectionJobService:
-        async with self._projection_service_lock:
-            if self._lifecycle is not HostCoreLifecycle.OPEN:
-                raise RuntimeError(
-                    "HostCore is closing; cannot start projection service"
-                )
-            existing = self._projection_service
-            if existing is not None:
-                return existing
-            service = DurableProjectionJobService(
-                connection_provider=access_lease.connection_provider,
-                executable_registry=build_projection_executable_registry(
-                    projection_executables(access_lease.connection_provider)
-                ),
-                surface_handlers=surface_handlers(
-                    connection_provider=access_lease.connection_provider,
-                    oxigraph_url=self.settings.storage.oxigraph_url,
-                    embedding=retrieval_resources.embedding,
-                    embedding_provider_name=(
-                        self.settings.retrieval.embedding.provider
-                    ),
-                ),
-            )
-            await service.start()
-            if self._lifecycle is not HostCoreLifecycle.OPEN:
-                await service.aclose()
-                raise RuntimeError(
-                    "HostCore closed while projection service was starting"
-                )
-            self._projection_service = service
-            if self._governance_coordinator is not None:
-                self._governance_coordinator.on_commit = service.wake
-            return service
-
-    async def _get_retrieval_resources(self) -> RetrievalRuntimeResources:
-        async with self._retrieval_lock:
-            if self._lifecycle is not HostCoreLifecycle.OPEN:
-                raise RuntimeError(
-                    "HostCore is closing; cannot start retrieval resources"
-                )
-            if self._retrieval_resources is None:
-                self._retrieval_resources = build_retrieval_runtime_resources(
-                    self.settings.retrieval
-                )
-                self._governance_coordinator = MemoryGovernanceCoordinator()
-                self._retrieval_resources.attach_worker(self._governance_coordinator)
-                self._retrieval_resources.start()
-            return self._retrieval_resources
+            return resources
 
     async def _build_mcp_supervisor(
         self, workspace: ResolvedWorkspace
@@ -1125,8 +1087,8 @@ class HostCore:
         if workspace.cleanup_workspace_root_on_close:
             shutil.rmtree(workspace.workspace_root, ignore_errors=True)
 
-    def _manifest_store(self) -> SessionManifestStore:
-        access_lease = self._postgres_access_lease
-        if access_lease is None:
-            raise RuntimeError("PostgreSQL access lease has not been verified")
-        return SessionManifestStore(access_lease.connection_provider)
+    def _manifest_store(self):
+        resources = self._process_resource_lease
+        if resources is None or resources.released:
+            raise RuntimeError("Host process resources have not been acquired")
+        return self._composition.session_manifest_store(resources=resources)

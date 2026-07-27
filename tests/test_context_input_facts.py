@@ -57,7 +57,7 @@ from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.event import EventContext, RequireExternalExecutionEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from tests.conftest import external_tool_call_requirement_fact
 
 

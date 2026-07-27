@@ -9,7 +9,10 @@ from typing import Protocol, cast
 from pulsara_agent.event import EventType
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.canonical_mutation import (
+    default_projection_delivery_policy,
+)
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationKind,
     CanonicalMutationPlannedSurfaceFact,
     CanonicalMutationSurface,
@@ -18,8 +21,6 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     DurableProjectionDeliveryPolicyFact,
     DurableProjectionHandlerContractFact,
     DurableProjectionKind,
-    DurableProjectionPhysicalPolicyFact,
-    DurableProjectionRetryPolicyFact,
     DurableProjectionSeedContractFact,
     DurableProjectionTargetUpdatePolicy,
     DurableProjectionTriggerBindingFact,
@@ -85,15 +86,11 @@ class DurableProjectionExecutableRegistry:
 
 
 def build_projection_executable_registry(
-    executables: Mapping[
-        DurableProjectionKind, DurableProjectionExecutable
-    ],
+    executables: Mapping[DurableProjectionKind, DurableProjectionExecutable],
 ) -> DurableProjectionExecutableRegistry:
     expected = {
         DurableProjectionKind.RUN_TIMELINE: _TIMELINE_HANDLER,
-        DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (
-            _EVIDENCE_HANDLER
-        ),
+        DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (_EVIDENCE_HANDLER),
     }
     if set(executables) != set(expected):
         raise ValueError(
@@ -122,7 +119,9 @@ class DurableProjectionTriggerRegistry:
         try:
             return self._by_kind[kind]
         except KeyError as exc:
-            raise ValueError(f"projection seed contract is unavailable: {kind}") from exc
+            raise ValueError(
+                f"projection seed contract is unavailable: {kind}"
+            ) from exc
 
     def contracts(self) -> tuple[DurableProjectionSeedContractFact, ...]:
         return tuple(
@@ -131,48 +130,9 @@ class DurableProjectionTriggerRegistry:
         )
 
 
-def _build_policy() -> DurableProjectionDeliveryPolicyFact:
-    retry = cast(
-        DurableProjectionRetryPolicyFact,
-        build_projection_fact(
-            DurableProjectionRetryPolicyFact,
-            schema_version="durable_projection_retry_policy.v1",
-            maximum_attempts=12,
-            base_delay_milliseconds=1000,
-            maximum_delay_milliseconds=300_000,
-            lease_duration_seconds=180,
-            claim_batch_size=32,
-        ),
-    )
-    physical = cast(
-        DurableProjectionPhysicalPolicyFact,
-        build_projection_fact(
-            DurableProjectionPhysicalPolicyFact,
-            schema_version="durable_projection_physical_policy.v1",
-            database_operation_timeout_seconds=10,
-            source_hydration_timeout_seconds=20,
-            handler_compute_timeout_seconds=30,
-            result_commit_timeout_seconds=20,
-            external_surface_attempt_timeout_seconds=60,
-            maximum_physical_attempt_seconds=120,
-        ),
-    )
-    return cast(
-        DurableProjectionDeliveryPolicyFact,
-        build_projection_fact(
-            DurableProjectionDeliveryPolicyFact,
-            schema_version="durable_projection_delivery_policy.v1",
-            retry_policy=retry,
-            physical_policy=physical,
-        ),
-    )
-
-
-def default_projection_delivery_policy() -> DurableProjectionDeliveryPolicyFact:
-    return _DELIVERY_POLICY
-
-
-def _surface_plan(policy: DurableProjectionDeliveryPolicyFact) -> CanonicalMutationSurfacePlanFact:
+def _surface_plan(
+    policy: DurableProjectionDeliveryPolicyFact,
+) -> CanonicalMutationSurfacePlanFact:
     handler = cast(
         CanonicalMutationSurfaceHandlerContractFact,
         build_projection_fact(
@@ -335,7 +295,7 @@ def _seed_contract(
     )
 
 
-_DELIVERY_POLICY = _build_policy()
+_DELIVERY_POLICY = default_projection_delivery_policy()
 _SURFACE_PLAN = _surface_plan(_DELIVERY_POLICY)
 _TIMELINE_TYPES = (
     EventType.REPLY_END,
@@ -381,8 +341,7 @@ def validate_projection_registry_completeness(
 ) -> None:
     expected = set(DurableProjectionKind)
     trigger_kinds = {
-        item.projection_kind
-        for item in DURABLE_PROJECTION_TRIGGER_REGISTRY.contracts()
+        item.projection_kind for item in DURABLE_PROJECTION_TRIGGER_REGISTRY.contracts()
     }
     handler_kinds = {
         _TIMELINE_HANDLER.projection_kind,

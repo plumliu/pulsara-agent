@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import (
     json_text,
-    object_schema,
     required_str_arg,
     str_arg,
 )
@@ -28,30 +26,6 @@ class TodoItem:
 @dataclass(slots=True)
 class TodoTool:
     name: str = "todo"
-    description: str = "Track the current runtime task plan."
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "action": {
-                "type": "string",
-                "enum": ["add", "update", "list", "clear"],
-                "description": "Todo operation.",
-            },
-            "text": {"type": "string", "description": "Todo text for add/update."},
-            "id": {"type": "string", "description": "Todo id for update."},
-            "status": {
-                "type": "string",
-                "enum": ["pending", "in_progress", "completed"],
-                "description": "Todo status for update/add.",
-            },
-        },
-        required=["action"],
-    ))
-    # read-only in the permission sense: todo only mutates agent-local
-    # ephemeral state (_items), with no user-workspace / external / terminal /
-    # durable-memory side effect, so read-only mode allows it. It is NOT
-    # concurrency-safe (it mutates shared _items), so it never runs in parallel.
-    is_read_only: bool = True
-    is_concurrency_safe: bool = False
     _items: list[TodoItem] = field(default_factory=list)
     _next_id: int = 1
 
@@ -64,7 +38,9 @@ class TodoTool:
             item = TodoItem(id=f"todo:{self._next_id}", text=text, status=status)
             self._next_id += 1
             self._items.append(item)
-            output = json_text({"items": [_todo_item_to_dict(item) for item in self._items]})
+            output = json_text(
+                {"items": [_todo_item_to_dict(item) for item in self._items]}
+            )
         elif action == "update":
             item_id = required_str_arg(call.arguments, "id")
             item = self._find_item(item_id)
@@ -75,9 +51,13 @@ class TodoTool:
             if status is not None:
                 _validate_todo_status(status)
                 item.status = status
-            output = json_text({"items": [_todo_item_to_dict(item) for item in self._items]})
+            output = json_text(
+                {"items": [_todo_item_to_dict(item) for item in self._items]}
+            )
         elif action == "list":
-            output = json_text({"items": [_todo_item_to_dict(item) for item in self._items]})
+            output = json_text(
+                {"items": [_todo_item_to_dict(item) for item in self._items]}
+            )
         elif action == "clear":
             self._items.clear()
             output = json_text({"items": []})

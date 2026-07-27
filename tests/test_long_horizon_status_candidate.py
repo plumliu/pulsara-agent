@@ -53,11 +53,11 @@ from pulsara_agent.runtime.long_horizon.status import (
     render_rollout_status_candidate,
     rollout_status_candidate_is_required,
 )
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     default_tool_action_classifier_registry,
     fixed_tool_action_policy,
 )
-from pulsara_agent.tools import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from tests.conftest import tool_result_end_contract_fields
 
 

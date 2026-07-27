@@ -218,3 +218,14 @@ pages/receipts。Activation transaction只验证frozen head、coverage count/roo
 guard由database trigger/advisory lock强制，不依赖人工停止Host。
 
 每次追加migration必须有golden测试证明所有历史definition/registry prefix不变。
+
+---
+
+## 13. D4 Projection Migration Port
+
+Migration runner/CLI只调用注入的`ProjectionMigrationPreparationPort`与sealed migration transaction
+capability，不local-import runtime projection implementation。Port穷尽binding-plan、coverage、activation
+preparation request/outcome，并重验exact migration head、maintenance epoch与transaction identity。
+
+D3 v5-v8 SQL、ledger contract与expected catalog fingerprint保持不变；本次只改变Python module与
+composition ownership。

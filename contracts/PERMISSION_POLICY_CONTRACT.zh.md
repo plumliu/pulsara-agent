@@ -231,7 +231,7 @@ permission mode 有两层身份：
 - 不允许给 Agent 任何自切 permission mode 的工具（仅用户/host 可切，见 §8.6）。
 - 不允许在 mode 切换时重建 gate/executor/registry/终端会话而丢失 live 终端进程或 event log。
 - 不允许把 read-only 退回 denylist（“只拦某几类、其余放行”）——read-only 必须是 fail-closed allowlist，未来副作用工具默认被拦（见 §3.1）。
-- 不允许把有工作区写入 / 外部系统写入 / 终端执行或控制 / durable memory 写入副作用的工具加进 `READ_ONLY_ALLOWED_TOOL_NAMES`，或为绕过 allowlist 把这类工具标成 `is_read_only=True`。host-local ordinary text read 是本契约显式允许的 read-only 能力，不属于这条禁止项。
+- 不允许把有工作区写入 / 外部系统写入 / 终端执行或控制 / durable memory 写入副作用的工具在 builtin catalog 中标成默认 `is_read_only=True`，或增加无精确 action discriminator 的 read-only override。host-local ordinary text read 是本契约显式允许的 read-only 能力，不属于这条禁止项。
 
 ---
 
@@ -242,8 +242,8 @@ permission mode 有两层身份：
 - 四个预设各自解析出 §2 表中的精确配置（read-only 断言可变工具被拒，不对 approval 值做断言）。
 - 默认（不选预设）解析为 bypass-permissions。
 - read-only 拒绝 file write 和 terminal，允许 read 工具；其中 filesystem read 工具允许 host-local ordinary text read，且该行为与底层 approval 值无关。
-- **read-only 是 fail-closed allowlist：拒绝 `remember_*`（durable memory 写）与任何不在 `READ_ONLY_ALLOWED_TOOL_NAMES` 的工具；放行 read 工具 / memory 读工具 / `todo`。**
-- **`READ_ONLY_ALLOWED_TOOL_NAMES` 与内置工具中被产品明确纳入 read-only 的 `is_read_only=True` 集合严格一致（防漂移测试）；MCP 等动态 provider 工具不自动加入。**
+- **read-only 是 fail-closed：拒绝 `remember_*`（durable memory 写）及任何 catalog/descriptor未明确授予 read-only 的工具；放行 read 工具、memory读工具与`todo`。**
+- **Builtin默认read-only只读catalog descriptor；action级例外只读同一catalog permission override。MCP等dynamic provider不因名字相似自动取得grant。**
 - **`todo.is_read_only` 为 True，但 `is_concurrency_safe` 仍为 False（语义重定义不改并发行为）。**
 - ask-permissions 对 write、terminal和terminal_monitor调度action返回WAIT，对read、terminal_process只读action和terminal_monitor.list返回ALLOW。
 - accept-edits 对 write 返回 ALLOW、对 terminal 返回 WAIT。
@@ -288,3 +288,19 @@ permission mode 有两层身份：
 `terminal_process.list/log/poll/wait`与`terminal_monitor.list`属于只读观察；`terminal_monitor.register/cancel`不是普通read，即使不修改child process，也会创建或终结未来付费模型调用的Host-owned scheduling authority，必须按mutating action进入permission gate。Registration同时冻结permission snapshot和versioned scheduling policy；delivery时必须重新按当前permission revision判断autonomous eligibility，head中不得持久化可能过期的`autonomous_delivery_eligible`。Terminal access关闭时三个terminal工具的全部action均拒绝。
 
 V1 autonomy policy固定human-first、同ledger main-run only、bounded wake chain与minimum automatic delivery interval。Budget exhausted只阻止付费automatic dispatch，不删除pending observation；下一次human run仍可携带它。Child caller、child-origin process、cross-ledger process与未知monitor action均fail closed。
+
+---
+
+## 13. D4 Catalog-Owned Permission Contract
+
+`CapabilityDescriptor.permission_category`与`is_read_only`是默认permission唯一真源。Builtin catalog
+permission contract只保存closed action overrides与terminal-specific rule，不复制默认字段。
+
+`terminal_process.list|log|poll|wait`和`terminal_monitor.list`的read-only override、三类terminal action
+集合及`terminal_monitor.register|cancel` scheduling集合都由同一catalog entry分类。Unknown/malformed
+action fail closed。`runtime/permission.py`不得恢复独立builtin name/action allowlist。
+
+Permission gate只消费classifier返回的exact catalog entry fingerprint、tool family、execution binding kind
+和effective read-only/category；不得再次按tool name或观察action字符串建集合。Catalog标记为terminal且
+effective read-only的调用在terminal access开启时直接允许观察，其他terminal调用进入统一terminal
+policy。Catalog、classifier与Long-Horizon action binding必须共享同一action override contract。

@@ -20,7 +20,8 @@ from pulsara_agent.primitives.context_source import (
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonContextAllocationPolicyFact,
 )
-from pulsara_agent.runtime import AgentRuntime, LoopBudget
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.long_horizon.rollup import (
     ObservationRollupRendererRegistry,
 )

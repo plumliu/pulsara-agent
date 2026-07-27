@@ -24,6 +24,7 @@ class ChildCapacityReservation:
     released_run_ids: set[str] = field(default_factory=set)
     uncommitted_released: bool = False
     released: bool = False
+    commit_state: Literal["pending", "full", "none", "unknown"] = "pending"
 
     @property
     def uncommitted_count(self) -> int:
@@ -68,9 +69,7 @@ class ChildExecutionRegistry:
         self._lock = RLock()
         self._handles: dict[str, ChildExecutionHandle] = {}
         self._reservations: dict[str, ChildCapacityReservation] = {}
-        self._child_ids_by_mcp_binding_identity: dict[
-            McpBindingIdentity, set[str]
-        ] = {}
+        self._child_ids_by_mcp_binding_identity: dict[McpBindingIdentity, set[str]] = {}
 
     def reserve(self, *, parent_run_id: str, count: int) -> ChildCapacityReservation:
         if count < 1:
@@ -95,7 +94,9 @@ class ChildExecutionRegistry:
     ) -> ChildExecutionHandle:
         with self._lock:
             if subagent_run_id in self._handles:
-                raise ValueError(f"Child execution handle already exists: {subagent_run_id}")
+                raise ValueError(
+                    f"Child execution handle already exists: {subagent_run_id}"
+                )
             if reservation is not None:
                 if reservation.released:
                     raise ValueError("capacity reservation was already released")
@@ -114,9 +115,9 @@ class ChildExecutionRegistry:
             )
             self._handles[subagent_run_id] = handle
             for identity in mcp_binding_identities:
-                self._child_ids_by_mcp_binding_identity.setdefault(
-                    identity, set()
-                ).add(subagent_run_id)
+                self._child_ids_by_mcp_binding_identity.setdefault(identity, set()).add(
+                    subagent_run_id
+                )
             return handle
 
     def child_ids_for_mcp_bindings(
@@ -126,9 +127,7 @@ class ChildExecutionRegistry:
         with self._lock:
             result: set[str] = set()
             for identity in identities:
-                result.update(
-                    self._child_ids_by_mcp_binding_identity.get(identity, ())
-                )
+                result.update(self._child_ids_by_mcp_binding_identity.get(identity, ()))
             return frozenset(result)
 
     def attach_session(self, subagent_run_id: str, session: RuntimeSession) -> None:
@@ -158,7 +157,9 @@ class ChildExecutionRegistry:
                 )
             )
 
-    def attach_coroutine(self, subagent_run_id: str, coroutine: asyncio.Task[None]) -> None:
+    def attach_coroutine(
+        self, subagent_run_id: str, coroutine: asyncio.Task[None]
+    ) -> None:
         with self._lock:
             handle = self._handles[subagent_run_id]
             if handle.coroutine is not None and not handle.coroutine.done():
@@ -196,13 +197,57 @@ class ChildExecutionRegistry:
                 reservation.released = True
                 self._reservations.pop(reservation.reservation_id, None)
 
+    def record_reservation_commit_outcome(
+        self,
+        reservation: ChildCapacityReservation,
+        *,
+        status: Literal["full", "none", "unknown"],
+    ) -> None:
+        with self._lock:
+            resident = self._reservations.get(reservation.reservation_id)
+            if resident is not reservation:
+                if status == "none" and reservation.released:
+                    return
+                raise RuntimeError("child capacity reservation owner is unavailable")
+            if reservation.commit_state not in {"pending", status}:
+                raise RuntimeError("child capacity reservation commit outcome drifted")
+            reservation.commit_state = status
+        if status == "none":
+            self.release_reservation(reservation)
+
+    def unresolved_commit_reservations(
+        self,
+    ) -> tuple[ChildCapacityReservation, ...]:
+        with self._lock:
+            return tuple(
+                reservation
+                for reservation in self._reservations.values()
+                if reservation.commit_state == "unknown"
+                or (
+                    reservation.commit_state == "pending"
+                    and reservation.uncommitted_count > 0
+                )
+            )
+
+    def require_no_unresolved_commit_reservations(self) -> None:
+        unresolved = self.unresolved_commit_reservations()
+        if unresolved:
+            identities = ",".join(sorted(item.reservation_id for item in unresolved))
+            raise RuntimeError(
+                "subagent capacity commit reservations require reconciliation: "
+                f"{identities}"
+            )
+
     def occupied_run_ids(self, *, parent_run_id: str | None = None) -> frozenset[str]:
         """Return attached handles that still own physical child capacity."""
 
         with self._lock:
             occupied: set[str] = set()
             for reservation in self._reservations.values():
-                if parent_run_id is not None and reservation.parent_run_id != parent_run_id:
+                if (
+                    parent_run_id is not None
+                    and reservation.parent_run_id != parent_run_id
+                ):
                     continue
                 occupied.update(
                     reservation.attached_run_ids - reservation.released_run_ids
@@ -447,7 +492,9 @@ class ChildExecutionRegistry:
                 return
         self._finalize_release(subagent_run_id, expected_task=task)
 
-    def reconcile(self, graph: SubagentGraphState) -> tuple[ChildExecutionDiagnostic, ...]:
+    def reconcile(
+        self, graph: SubagentGraphState
+    ) -> tuple[ChildExecutionDiagnostic, ...]:
         diagnostics: list[ChildExecutionDiagnostic] = []
         handles = {handle.subagent_run_id: handle for handle in self.handles()}
         for run in graph.runs.values():
@@ -466,7 +513,12 @@ class ChildExecutionRegistry:
                         child_runtime_session_id=run.child_runtime_session_id,
                     )
                 )
-            elif not active and handle is not None and handle.coroutine is not None and not handle.coroutine.done():
+            elif (
+                not active
+                and handle is not None
+                and handle.coroutine is not None
+                and not handle.coroutine.done()
+            ):
                 diagnostics.append(
                     ChildExecutionDiagnostic(
                         code="subagent_terminal_run_handle_active",

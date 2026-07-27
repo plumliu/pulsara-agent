@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ActionBoundaryCandidate,
     CandidatePayload,
     ClaimCandidate,
@@ -33,8 +33,9 @@ _MAIN_MEMORY_TOOL_TYPES: dict[str, tuple[type[MemoryCandidateBase], str]] = {
 }
 
 
-def main_agent_memory_candidate_builder_contract(
-) -> MainAgentMemoryCandidateBuilderContractFact:
+def main_agent_memory_candidate_builder_contract() -> (
+    MainAgentMemoryCandidateBuilderContractFact
+):
     return build_frozen_fact(
         MainAgentMemoryCandidateBuilderContractFact,
         schema_version="main_agent_memory_candidate_builder_contract.v1",

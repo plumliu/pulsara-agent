@@ -363,3 +363,19 @@ phase narrowing 发生在 exposure/permission 之后、真实执行之前，并�
 typed gate/tool-result facts，但不得创建实际执行 owner。`finalization_only` 仅允许 evidence hydration、synthesis mutation、bounded
 verification、user interaction 与 process control；`exhausted`/`emergency_hard_stop` 不允许新 tool execution。descriptor 的普通
 read-only/permission category 不能覆盖这条 rollout contract。
+
+---
+
+## 20. D4 Descriptor / Binding Ownership
+
+Capability descriptor只描述model-visible surface；execution binding使用
+`BuiltinToolBindingContract | McpToolBindingContract | CustomToolBindingContract` closed union。
+MCP branch required携带server/slot/snapshot/discovery generation exact identity，Host/resume/child reverse
+index不得从concrete tool或`getattr()`猜测来源。
+
+Execution-surface freeze从descriptor派生低层`ToolResultArtifactProcessingPolicy`，ToolExecutor只把该
+policy与result交给artifact port；artifact port不得反向接收`CapabilityDescriptor`。Descriptor input
+schema/metadata在catalog内递归immutable，provider每次只取得defensive materialization。
+
+Capability package不得import concrete runtime/tools implementation。Concrete registry由composition root
+按binding contract安装，并验证descriptor fingerprint、schema fingerprint与binding identity exact join。

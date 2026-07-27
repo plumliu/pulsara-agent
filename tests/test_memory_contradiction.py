@@ -19,7 +19,7 @@ from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Claim, Preference
 from pulsara_agent.event import EventContext, EventType
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ClaimCandidate,
     PreferenceCandidate,
     ValidCandidatePayload,
@@ -64,7 +64,7 @@ from pulsara_agent.memory.recall.service import (
 )
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
-from tests.support.memory_uow import fake_memory_uow_factory
+from tests.support.memory_uow import fake_memory_uow_factory, postgres_memory_uow
 
 
 def test_contradict_decision_facade_export_and_round_trip() -> None:
@@ -661,7 +661,8 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
             event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
+            memory_write_uow_factory=lambda: postgres_memory_uow(
+                uow_type=_FailingContradictionLifecycleUow,
                 connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
                 archive=PostgresArtifactStore(
@@ -1117,7 +1118,7 @@ def _postgres_executor(
         event_commit_port=log.extend,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(
@@ -1141,13 +1142,17 @@ def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
 class _FailingContradictionLifecycleUow(MemoryWriteUnitOfWork):
     def __enter__(self):
         uow = super().__enter__()
-        uow.lifecycle = _FailingAfterFirstContradictionEdgeLifecycle(uow.lifecycle)
+        uow.lifecycle = _FailingAfterFirstContradictionEdgeLifecycle(
+            uow.lifecycle,
+            uow.graph,
+        )
         return uow
 
 
 class _FailingAfterFirstContradictionEdgeLifecycle:
-    def __init__(self, wrapped: MemoryLifecycle) -> None:
+    def __init__(self, wrapped, graph) -> None:
         self._wrapped = wrapped
+        self._graph = graph
 
     def link_contradiction(
         self,
@@ -1157,9 +1162,9 @@ class _FailingAfterFirstContradictionEdgeLifecycle:
         governance_batch_id: str,
         graph_id: str | None = None,
     ):
-        left_doc = self._wrapped.graph.get_jsonld(left_id, graph_id=graph_id)
+        left_doc = self._graph.get_jsonld(left_id, graph_id=graph_id)
         _append_jsonld_ref(left_doc, memory.CONTRADICTS.name, right_id)
-        self._wrapped.graph.put_jsonld(left_doc, graph_id=graph_id)
+        self._graph.put_jsonld(left_doc, graph_id=graph_id)
         raise RuntimeError("boom after first contradiction edge")
 
 

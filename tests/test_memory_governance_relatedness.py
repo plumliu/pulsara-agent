@@ -12,7 +12,10 @@ import psycopg
 import pytest
 
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, PostgresMemoryQuery

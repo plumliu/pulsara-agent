@@ -372,3 +372,13 @@ fail-closed，不进入交互式resume流程。连接与发现结束后，无论
 - host inspect 输出 static workspace capability snapshot 且不 sync bundled skills。
 - runtime context prompt 包含 workspace root/kind、terminal cwd 和 filesystem/terminal boundary。
 - MCP doctor/reconnect与Host使用同一SDK facade、config schema和deadline；旧`start()`入口不存在。
+
+---
+
+## 16. D4 Production Composition Entry
+
+CLI的Host入口只调用`HostCore.production(settings=...)`。命令行、env或内部flag均不得选择
+in-memory/non-durable runtime composition；旧`durable`参数及factory已硬切。Unit/component composition
+只位于`tests/support`，`src/`和packaged CLI不得import。
+
+CLI与benchmark必须direct import owning module，不得从runtime/tools convenience facade获取symbol。

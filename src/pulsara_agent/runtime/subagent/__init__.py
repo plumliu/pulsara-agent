@@ -54,7 +54,7 @@ from pulsara_agent.runtime.subagent.store import (
     SubagentGraphStateStore,
     SubagentReducerApplyError,
 )
-from pulsara_agent.runtime.subagent.types import (
+from pulsara_agent.primitives.subagent import (
     SubagentBudget,
     SubagentCapabilityProfile,
     SubagentCapabilityProfileName,

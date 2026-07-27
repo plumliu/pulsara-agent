@@ -9,6 +9,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, TypeVar, get_args, get_origin, get_type_hints
 
+from pydantic import BaseModel
+
 from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -17,6 +19,7 @@ from pulsara_agent.event_log.serialization import (
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 from pulsara_agent.primitives.long_horizon import (
+    ChildRolloutReservationPolicyFact,
     SubagentGraphReducerContractFact,
     SupportedGraphEventContractFact,
 )
@@ -30,7 +33,7 @@ from pulsara_agent.runtime.subagent.facts import (
     SubagentRunFact,
     SubagentTaskFact,
 )
-from pulsara_agent.runtime.subagent.immutable import thaw_json_value
+from pulsara_agent.primitives.subagent_json import thaw_json_value
 from pulsara_agent.runtime.subagent.reducer import apply_subagent_event
 
 
@@ -123,9 +126,7 @@ def _supported_graph_event_contracts(
             "event_type": contract.event_type,
             "event_schema_version": contract.event_schema_version,
             "event_schema_fingerprint": contract.event_schema_fingerprint,
-            "event_domain_contract_fingerprint": (
-                contract.domain_contract_fingerprint
-            ),
+            "event_domain_contract_fingerprint": (contract.domain_contract_fingerprint),
             "semantic_projection_contract_fingerprint": projection_fp,
         }
         entries.append(
@@ -153,9 +154,7 @@ def build_default_subagent_graph_reducer_contract(
         "supported_graph_events": supported,
         "event_filter_contract_fingerprint": context_fingerprint(
             "subagent-graph-event-filter:v1",
-            tuple(
-                (item.event_type, item.event_schema_version) for item in supported
-            ),
+            tuple((item.event_type, item.event_schema_version) for item in supported),
         ),
         "graph_semantic_event_canonicalization_fingerprint": context_fingerprint(
             "subagent-graph-semantic-canonicalization:v1",
@@ -230,8 +229,7 @@ def _fold_raw_event(
                 "graph-domain event is unsupported by the frozen reducer contract"
             )
         if (
-            supported.event_schema_fingerprint
-            != envelope.event_schema_fingerprint
+            supported.event_schema_fingerprint != envelope.event_schema_fingerprint
             or supported.event_domain_contract_fingerprint
             != envelope.event_domain_contract_fingerprint
             or historical.project_graph_semantic_payload is None
@@ -294,13 +292,20 @@ def _restore_value(annotation: Any, value: Any) -> Any:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         return annotation(value)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation.model_validate(value)
     if isinstance(annotation, type) and is_dataclass(annotation):
         return _restore_dataclass(annotation, value)
     return value
 
 
 def _restore_dataclass(cls: type[T], payload: Mapping[str, Any]) -> T:
-    hints = get_type_hints(cls)
+    hints = get_type_hints(
+        cls,
+        localns={
+            "ChildRolloutReservationPolicyFact": (ChildRolloutReservationPolicyFact)
+        },
+    )
     values = {
         field.name: _restore_value(hints.get(field.name, Any), payload[field.name])
         for field in fields(cls)
@@ -313,7 +318,10 @@ def restore_subagent_graph_state(payload_bytes: bytes) -> SubagentGraphState:
     import json
 
     payload = json.loads(payload_bytes.decode("utf-8"))
-    if not isinstance(payload, dict) or payload.get("schema_version") != GRAPH_SCHEMA_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != GRAPH_SCHEMA_VERSION
+    ):
         raise ValueError("unsupported subagent graph checkpoint payload")
     raw = payload.get("state")
     if not isinstance(raw, dict):

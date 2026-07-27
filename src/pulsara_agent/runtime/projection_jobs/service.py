@@ -15,7 +15,7 @@ from uuid import uuid4
 from pulsara_agent.runtime.blocking_executor import (
     projection_maintenance_executor,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
     DurableProjectionCommitConfirmation,
     DurableProjectionKind,
@@ -56,7 +56,6 @@ _PROCESS_SURFACE_HANDLER_CAPACITY = {
 }
 _ACTIVE_POLL_SECONDS = 1.0
 _IDLE_POLL_SECONDS = 5.0
-_SERVICE_CLOSE_SECONDS = 10.0
 _DIRTY_AUTHORITY_HINT_LIMIT = 4096
 
 
@@ -140,8 +139,8 @@ class DurableProjectionJobService:
         init=False,
         repr=False,
     )
-    _trigger_kinds_by_event_type: dict[str, tuple[DurableProjectionKind, ...]] = (
-        field(default_factory=dict, init=False, repr=False)
+    _trigger_kinds_by_event_type: dict[str, tuple[DurableProjectionKind, ...]] = field(
+        default_factory=dict, init=False, repr=False
     )
     _claimed_job_count: int = field(default=0, init=False, repr=False)
     _settled_job_count: int = field(default=0, init=False, repr=False)
@@ -167,9 +166,7 @@ class DurableProjectionJobService:
     )
 
     def __post_init__(self) -> None:
-        self.repository = PostgresDurableProjectionRepository(
-            self.connection_provider
-        )
+        self.repository = PostgresDurableProjectionRepository(self.connection_provider)
         surfaces = tuple(handler.surface for handler in self.surface_handlers)
         if len(surfaces) != len(set(surfaces)):
             raise ValueError("projection service has duplicate surface handlers")
@@ -181,9 +178,12 @@ class DurableProjectionJobService:
                     [],
                 ).append(contract.projection_kind)
         self._trigger_kinds_by_event_type = {
-            event_type: tuple(kinds)
-            for event_type, kinds in by_event_type.items()
+            event_type: tuple(kinds) for event_type, kinds in by_event_type.items()
         }
+
+    @property
+    def accepting(self) -> bool:
+        return self._accepting
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -240,15 +240,16 @@ class DurableProjectionJobService:
         self._wake_count += 1
         self._wake_event.set()
 
-    def wake(self) -> None:
+    def wake(self, runtime_session_id: str | None = None) -> None:
+        del runtime_session_id
         if self._accepting:
             self._wake_count += 1
             self._wake_event.set()
 
-    async def aclose(self, *, timeout_seconds: float = _SERVICE_CLOSE_SECONDS) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("projection service close timeout must be positive")
-        deadline = monotonic() + timeout_seconds
+    async def aclose(self, *, deadline_monotonic: float) -> None:
+        if deadline_monotonic <= monotonic():
+            raise TimeoutError("projection service close deadline exceeded")
+        deadline = deadline_monotonic
         self._accepting = False
         self._closing = True
         self._wake_event.set()
@@ -291,12 +292,8 @@ class DurableProjectionJobService:
             seed_page_count=self._seed_page_count,
             claimed_job_count=self._claimed_job_count,
             settled_job_count=self._settled_job_count,
-            claimed_surface_delivery_count=(
-                self._claimed_surface_delivery_count
-            ),
-            settled_surface_delivery_count=(
-                self._settled_surface_delivery_count
-            ),
+            claimed_surface_delivery_count=(self._claimed_surface_delivery_count),
+            settled_surface_delivery_count=(self._settled_surface_delivery_count),
             health=self._health,
             recent_diagnostics=tuple(self._diagnostics),
         )
@@ -355,9 +352,9 @@ class DurableProjectionJobService:
             )
             if authority is None:
                 continue
-            progressed = self._seed_authority_with_failure_isolation(
-                *authority
-            ) or progressed
+            progressed = (
+                self._seed_authority_with_failure_isolation(*authority) or progressed
+            )
 
         cursor = self._seed_authority_cursor
         authorities = self.repository.list_active_seed_authorities(
@@ -381,10 +378,13 @@ class DurableProjectionJobService:
             self._seed_authority_cursor = None
             self._seed_scan_continuation_pending = False
         for activation, cutover in authorities:
-            progressed = self._seed_authority_with_failure_isolation(
-                activation,
-                cutover,
-            ) or progressed
+            progressed = (
+                self._seed_authority_with_failure_isolation(
+                    activation,
+                    cutover,
+                )
+                or progressed
+            )
         return progressed
 
     def _seed_authority_with_failure_isolation(
@@ -413,17 +413,14 @@ class DurableProjectionJobService:
                 candidate=failure,
                 deadline_monotonic=monotonic() + 10.0,
             )
-            if (
-                outcome.confirmation
-                is not DurableProjectionCommitConfirmation.FULL
-            ):
+            if outcome.confirmation is not DurableProjectionCommitConfirmation.FULL:
                 raise ValueError(
                     "durable projection seed failure could not be confirmed"
                 )
             return True
 
     def _seed_one_authority(self, activation: object, cutover: object) -> bool:
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             DurableProjectionKindActivationFact,
             DurableProjectionSessionCutoverFact,
         )
@@ -444,9 +441,7 @@ class DurableProjectionJobService:
             )
         binding = self.executable_registry.resolve(
             typed_cutover.projection_kind,
-            contract_fingerprint=(
-                seed_contract.handler_contract.contract_fingerprint
-            ),
+            contract_fingerprint=(seed_contract.handler_contract.contract_fingerprint),
         )
         if binding.contract != seed_contract.handler_contract:
             raise DurableProjectionSeedAuthorityError(
@@ -478,9 +473,7 @@ class DurableProjectionJobService:
         if outcome.confirmation is DurableProjectionCommitConfirmation.NONE:
             return True
         self._health = DurableProjectionServiceHealth.AUTHORITY_UNTRUSTED
-        raise RuntimeError(
-            "durable projection seed commit could not be confirmed"
-        )
+        raise RuntimeError("durable projection seed commit could not be confirmed")
 
     async def _claim_cycle(self) -> bool:
         loop = asyncio.get_running_loop()
@@ -516,9 +509,7 @@ class DurableProjectionJobService:
             claimed = 0
             settled = 0
             for handler in self.surface_handlers:
-                semaphore = _PROCESS_SURFACE_HANDLER_CAPACITY[
-                    handler.surface
-                ]
+                semaphore = _PROCESS_SURFACE_HANDLER_CAPACITY[handler.surface]
                 with semaphore:
                     before = _pending_surface_count(
                         self.connection_provider,
@@ -528,9 +519,7 @@ class DurableProjectionJobService:
                     worker = CanonicalMutationSurfaceWorker(
                         repository=repository,
                         handler=handler,
-                        owner_id=(
-                            f"{self.service_id}:surface:{handler.surface.value}"
-                        ),
+                        owner_id=(f"{self.service_id}:surface:{handler.surface.value}"),
                     )
                     completed = worker.run_once(
                         limit=4,
@@ -559,9 +548,7 @@ class DurableProjectionJobService:
         try:
             binding = self.executable_registry.resolve(
                 lease.job.projection_kind,
-                contract_fingerprint=(
-                    lease.job.handler_contract.contract_fingerprint
-                ),
+                contract_fingerprint=(lease.job.handler_contract.contract_fingerprint),
             )
         except ValueError as error:
             self._health = DurableProjectionServiceHealth.WORKER_UNAVAILABLE
@@ -588,9 +575,7 @@ class DurableProjectionJobService:
                     or "projection settlement returned NONE without diagnostic"
                 )
             elif outcome.confirmation is DurableProjectionCommitConfirmation.CONFLICT:
-                self._health = (
-                    DurableProjectionServiceHealth.AUTHORITY_UNTRUSTED
-                )
+                self._health = DurableProjectionServiceHealth.AUTHORITY_UNTRUSTED
             elif outcome.confirmation is DurableProjectionCommitConfirmation.UNRESOLVED:
                 self._health = DurableProjectionServiceHealth.RETRYING
 

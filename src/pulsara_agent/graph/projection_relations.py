@@ -24,7 +24,7 @@ from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.frozen import (
     DURABLE_FACT_FINGERPRINT_REGISTRY,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalGraphNodeReadViewFact,
     CanonicalGraphRelationLoweringContractFact,
     CanonicalGraphRelationReadPageFact,
@@ -45,8 +45,9 @@ OWNED_RELATION_PREDICATES = (
 )
 
 
-def build_graph_relation_lowering_contract(
-) -> CanonicalGraphRelationLoweringContractFact:
+def build_graph_relation_lowering_contract() -> (
+    CanonicalGraphRelationLoweringContractFact
+):
     accepted = tuple(
         DURABLE_FACT_FINGERPRINT_REGISTRY.resolve(version).domain_separator
         for version in (
@@ -118,9 +119,7 @@ def lower_graph_relation(
 def reject_owned_relation_predicates(document: dict[str, object]) -> None:
     for key in (rt.PRODUCED.name, rt.PROVIDES.name):
         if key in document:
-            raise ValueError(
-                f"{key} is owned by the immutable graph relation port"
-            )
+            raise ValueError(f"{key} is owned by the immutable graph relation port")
 
 
 class InMemoryCanonicalGraphRelationRepository:
@@ -130,8 +129,7 @@ class InMemoryCanonicalGraphRelationRepository:
 
     def put(
         self,
-        relation: TurnProducedToolResultRelationFact
-        | ToolResultArtifactRelationFact,
+        relation: TurnProducedToolResultRelationFact | ToolResultArtifactRelationFact,
     ) -> CanonicalGraphRelationRowFact:
         row = lower_graph_relation(relation)
         key = (row.graph_id, row.relation_id)
@@ -160,10 +158,7 @@ class InMemoryCanonicalGraphRelationRepository:
                 if row_graph == graph_id
                 and row.source_document_id == source_document_id
                 and (predicate_iri is None or row.predicate_iri == predicate_iri)
-                and (
-                    after_relation_id is None
-                    or row.relation_id > after_relation_id
-                )
+                and (after_relation_id is None or row.relation_id > after_relation_id)
             )
         selected = candidates[:limit]
         return cast(
@@ -209,9 +204,7 @@ class InMemoryCanonicalGraphRelationRepository:
             graph_id=graph_id,
             node_id=node_id,
             base_document=base_document,
-            base_document_semantic_fingerprint=(
-                base_document_semantic_fingerprint
-            ),
+            base_document_semantic_fingerprint=(base_document_semantic_fingerprint),
             page=page,
         )
 
@@ -229,14 +222,11 @@ class PostgresCanonicalGraphRelationRepository:
 
     def __post_init__(self) -> None:
         if (self.connection_provider is None) == (self.connection is None):
-            raise ValueError(
-                "graph relation repository requires one connection owner"
-            )
+            raise ValueError("graph relation repository requires one connection owner")
 
     def put(
         self,
-        relation: TurnProducedToolResultRelationFact
-        | ToolResultArtifactRelationFact,
+        relation: TurnProducedToolResultRelationFact | ToolResultArtifactRelationFact,
     ) -> CanonicalGraphRelationRowFact:
         row = lower_graph_relation(relation)
         with self._cursor(row_factory=dict_row) as cursor:
@@ -246,8 +236,7 @@ class PostgresCanonicalGraphRelationRepository:
     @staticmethod
     def put_in_transaction(
         connection: Connection,
-        relation: TurnProducedToolResultRelationFact
-        | ToolResultArtifactRelationFact,
+        relation: TurnProducedToolResultRelationFact | ToolResultArtifactRelationFact,
     ) -> CanonicalGraphRelationRowFact:
         row = lower_graph_relation(relation)
         PostgresCanonicalGraphRelationRepository._put_row(connection, row)
@@ -290,9 +279,7 @@ class PostgresCanonicalGraphRelationRepository:
         if existing is None:
             raise ValueError("graph relation disappeared during confirmation")
         payload = (
-            existing["relation_payload"]
-            if isinstance(existing, dict)
-            else existing[0]
+            existing["relation_payload"] if isinstance(existing, dict) else existing[0]
         )
         fingerprint = (
             existing["relation_fingerprint"]
@@ -337,9 +324,7 @@ class PostgresCanonicalGraphRelationRepository:
         with self._cursor(row_factory=dict_row) as cursor:
             raw_rows = cursor.execute(query, tuple(params)).fetchall()
         rows = tuple(
-            CanonicalGraphRelationRowFact.model_validate(
-                item["relation_payload"]
-            )
+            CanonicalGraphRelationRowFact.model_validate(item["relation_payload"])
             for item in raw_rows[:limit]
         )
         for raw, row in zip(raw_rows, rows, strict=False):
@@ -391,9 +376,7 @@ class PostgresCanonicalGraphRelationRepository:
                     if row.predicate_iri == rt.PRODUCED.value
                     else rt.PROVIDES.name
                 )
-                grouped.setdefault(key, []).append(
-                    {"@id": row.target_document_id}
-                )
+                grouped.setdefault(key, []).append({"@id": row.target_document_id})
             if not page.has_more:
                 break
             after = page.next_after_relation_id
@@ -419,9 +402,7 @@ class PostgresCanonicalGraphRelationRepository:
             graph_id=graph_id,
             node_id=node_id,
             base_document=base_document,
-            base_document_semantic_fingerprint=(
-                base_document_semantic_fingerprint
-            ),
+            base_document_semantic_fingerprint=(base_document_semantic_fingerprint),
             page=page,
         )
 
@@ -488,9 +469,7 @@ def _build_read_view(
             schema_version="canonical_graph_node_read_view.v1",
             graph_id=graph_id,
             node_id=node_id,
-            base_document_semantic_fingerprint=(
-                base_document_semantic_fingerprint
-            ),
+            base_document_semantic_fingerprint=(base_document_semantic_fingerprint),
             ordered_relation_semantic_accumulator=context_fingerprint(
                 "canonical-graph-node-relation-root:v1",
                 tuple(

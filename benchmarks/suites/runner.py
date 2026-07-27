@@ -166,13 +166,13 @@ class CoreDogfoodRunner:
                 session_report = await asyncio.to_thread(
                     inspector.inspect_session,
                     runtime_session_id,
-                    limit_events=0,
+                    limit_events=256,
                 )
                 for run_id, final_text in root_run_texts.items():
                     report = await asyncio.to_thread(
                         inspector.inspect_run,
                         run_id,
-                        limit_events=0,
+                        limit_events=256,
                     )
                     root_run_reports.append(report)
                     inspected_texts.append(final_text)
@@ -266,7 +266,7 @@ class CoreDogfoodRunner:
                 execution_state=execution_state,
             )
 
-        core = HostCore(settings=self.settings, durable=True)
+        core = HostCore.production(settings=self.settings)
         session = None
         try:
             session = await self._open_session(
@@ -360,7 +360,7 @@ class CoreDogfoodRunner:
     ) -> str:
         workflow = scenario.contract.workflow
         assert isinstance(workflow, DurableResumeWorkflow)
-        first_core = HostCore(settings=self.settings, durable=True)
+        first_core = HostCore.production(settings=self.settings)
         first_session = None
         runtime_session_id: str | None = None
         try:
@@ -393,7 +393,7 @@ class CoreDogfoodRunner:
         self.progress(
             f"{scenario.contract.scenario_id}: reopening {runtime_session_id} in new HostCore"
         )
-        second_core = HostCore(settings=self.settings, durable=True)
+        second_core = HostCore.production(settings=self.settings)
         resumed = None
         try:
             resumed = await second_core.resume_session(

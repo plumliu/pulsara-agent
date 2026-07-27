@@ -15,7 +15,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
 )
 from pulsara_agent.runtime.state import LoopState
-from pulsara_agent.runtime.tool_taxonomy import (
+from pulsara_agent.capability.builtin_catalog import (
     FILE_WRITE_TOOL_NAMES,
     PLAN_WORKFLOW_TOOL_NAMES,
     READ_ONLY_RECOVERY_TOOL_NAMES,
@@ -111,9 +111,7 @@ HOST_TEARDOWN_NOTE_TEXT = (
     "work from that turn may be partial; verify external state before continuing."
 )
 
-IN_RUN_STEP_FAILED_TRANSCRIPT_TEXT = (
-    "Pulsara note: a recoverable step failed. Inspect the latest observation and continue carefully."
-)
+IN_RUN_STEP_FAILED_TRANSCRIPT_TEXT = "Pulsara note: a recoverable step failed. Inspect the latest observation and continue carefully."
 
 GUIDANCE_TEXT_FOR_TRANSCRIPT: dict[GuidanceKind, str] = {
     GuidanceKind.RUN_FAILED: FAILURE_NOTE_TEXT,
@@ -149,7 +147,9 @@ GUIDANCE_TEXT_FOR_PROMPT: dict[GuidanceKind, str] = {
 
 
 RECOVERABLE_RUN_STATUSES = frozenset({"failed", "aborted"})
-RECOVERY_NOTE_KIND_BY_STATUS: dict[str, Literal["previous_turn_failed", "previous_turn_aborted"]] = {
+RECOVERY_NOTE_KIND_BY_STATUS: dict[
+    str, Literal["previous_turn_failed", "previous_turn_aborted"]
+] = {
     "failed": "previous_turn_failed",
     "aborted": "previous_turn_aborted",
 }
@@ -161,7 +161,9 @@ RECOVERY_NOTE_ID_PREFIX_BY_STATUS = {
 _MAX_LISTED_TOOLS = 3
 
 
-def classify_unfinished_tool_calls(events: Iterable[AgentEvent]) -> list[UnfinishedToolCall]:
+def classify_unfinished_tool_calls(
+    events: Iterable[AgentEvent],
+) -> list[UnfinishedToolCall]:
     proposed: dict[str, str] = {}
     completed: set[str] = set()
     attempted: set[str] = set()
@@ -178,7 +180,9 @@ def classify_unfinished_tool_calls(events: Iterable[AgentEvent]) -> list[Unfinis
             for block in event.tool_calls:
                 pending.add(block.id)
 
-    unfinished_ids = [tool_call_id for tool_call_id in proposed if tool_call_id not in completed]
+    unfinished_ids = [
+        tool_call_id for tool_call_id in proposed if tool_call_id not in completed
+    ]
     unfinished: list[UnfinishedToolCall] = []
     for tool_call_id in unfinished_ids:
         tool_name = proposed[tool_call_id]
@@ -210,14 +214,18 @@ def render_unfinished_summary(
     return f" Unfinished tool call(s) from the {status_label} turn: {tools}. {wording}"
 
 
-def project_recovery_from_events(events: Iterable[AgentEvent]) -> RecoveryProjection | None:
+def project_recovery_from_events(
+    events: Iterable[AgentEvent],
+) -> RecoveryProjection | None:
     from pulsara_agent.runtime.plan import reduce_plan_workflow_state
 
     all_events = list(events)
     target_run_end = _last_recoverable_run_end(all_events)
     if target_run_end is None:
         return None
-    run_events_all = [event for event in all_events if event.run_id == target_run_end.run_id]
+    run_events_all = [
+        event for event in all_events if event.run_id == target_run_end.run_id
+    ]
     through_target = _events_through_target_run_end(all_events, target_run_end)
     in_plan_workflow = reduce_plan_workflow_state(through_target).active
     abort_kind = _parse_abort_kind(target_run_end.abort_kind)
@@ -357,17 +365,29 @@ def _most_conservative_wording(unfinished: list[UnfinishedToolCall]) -> str:
 def _wording_rank(call: UnfinishedToolCall) -> int:
     if call.state is UnfinishedState.STARTED and call.severity is ToolSeverity.TERMINAL:
         return 100
-    if call.state is UnfinishedState.STARTED and call.severity is ToolSeverity.BOUNDED_WRITE:
+    if (
+        call.state is UnfinishedState.STARTED
+        and call.severity is ToolSeverity.BOUNDED_WRITE
+    ):
         return 90
     if call.severity is ToolSeverity.UNKNOWN_EFFECT:
         return 80
-    if call.state is UnfinishedState.AMBIGUOUS and call.severity is ToolSeverity.TERMINAL:
+    if (
+        call.state is UnfinishedState.AMBIGUOUS
+        and call.severity is ToolSeverity.TERMINAL
+    ):
         return 75
-    if call.state is UnfinishedState.AMBIGUOUS and call.severity is ToolSeverity.BOUNDED_WRITE:
+    if (
+        call.state is UnfinishedState.AMBIGUOUS
+        and call.severity is ToolSeverity.BOUNDED_WRITE
+    ):
         return 70
     if call.state is UnfinishedState.PENDING_APPROVAL:
         return 60
-    if call.state is UnfinishedState.STARTED and call.severity is ToolSeverity.READ_ONLY:
+    if (
+        call.state is UnfinishedState.STARTED
+        and call.severity is ToolSeverity.READ_ONLY
+    ):
         return 50
     return 0
 
@@ -388,7 +408,9 @@ def _wording_for(call: UnfinishedToolCall) -> str | None:
             return "It may not have completed; inspect or retry if needed."
     if call.state is UnfinishedState.AMBIGUOUS:
         if call.severity is ToolSeverity.TERMINAL:
-            return "It was proposed; uncertain whether it ran; verify before continuing."
+            return (
+                "It was proposed; uncertain whether it ran; verify before continuing."
+            )
         if call.severity is ToolSeverity.BOUNDED_WRITE:
             return "It was proposed but uncertain; re-evaluate before continuing."
     return None

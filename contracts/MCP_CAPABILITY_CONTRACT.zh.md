@@ -382,6 +382,8 @@ Inspector 不应通过查询 live MCP manager 来解释历史；历史解释必�
 - pagination 有 max pages/items 与 repeated cursor guard；非 refresh cache hit/miss 可 inspect。
 - remote HTTP 使用自建 `httpx.AsyncClient`，redirect 默认 fail-closed。
 - manager close 幂等并取消 active calls。
+- terminal metadata/artifact与successor prepared-fact lowering fault injection证明physical resume count恒为1；
+  terminal failure返回相同frozen carrier，successor成功执行atomic predecessor replacement。
 - inspector 能看到 exposure/gate/tool metadata。
 
 ---
@@ -398,3 +400,34 @@ NONE 保留 pending carrier与lease；PARTIAL/UNKNOWN latch并阻止破坏性 te
 
 MCP manager slot lease 与 rollout reservation 是不同 ownership，不得合并计数。前者保护 exact manager/request state，后者只核算 run
 工作量；任一分支遗漏其中一侧都必须由 fault-injection test 捕获。
+
+---
+
+## 15. D4 MCP Execution Port
+
+`McpCapabilityTool`只持有`McpToolExecutionPort`，不持有supervisor/manager。Completed outcome无损保留
+`ToolResultState`、output、artifact candidates与递归冻结normalized metadata；MCP application error仍是
+completed transport outcome，不能降成rejected而丢失内容。
+
+Port-owned pending handle唯一保存raw request/state、pending lease及manager lifecycle。Agent只保存
+handle identity和stable candidate owner identity，不回读Supervisor。Suspension/terminal candidate由
+`ToolExecutionTerminalRegistry`拥有；FULL/NONE/UNKNOWN/PARTIAL按exact receipt驱动pending lease
+confirm/abort/complete。Resume短期active borrow在manager operation的`finally`归还。
+
+Cancellation也是physical ownership边界。普通execute在任何`BaseException`（包括caller cancellation）
+下释放尚未promote的lease；pending promotion取消时abort exact reservation。Resume取消必须先在
+`finally`归还短期borrow，再把handle从`RESUME_IN_FLIGHT`恢复为`PENDING_CONFIRMED`，不得遗留不可恢复
+状态。Host close顺序固定为stable candidate registry drain、execution port停止admission并证明active
+operation和resident pending handle归零、最后关闭Supervisor；任一步未收口都使close fail closed。
+
+Provider physical resume成功返回是另一条不可逆线性化边。Port必须先把handle从
+`RESUME_IN_FLIGHT`推进到`RESUME_RESULT_RECEIVED`，此后任何路径都不得恢复为可再次调用manager的
+`PENDING_CONFIRMED`。Terminal output/metadata/artifact必须先冻结为port-owned immutable outcome，再进入
+`TERMINAL_RESULT_FROZEN`；相同resume request在durable settlement前只返回同一个frozen carrier。
+Successor suspension必须先完整构造prepared fact、successor handle与outcome，再在同一锁区间安装
+successor并退休predecessor。Lowering/validation失败冻结为non-retryable
+`result_lowering_failed` protocol result；若连该carrier或owner join都无法证明，则进入
+`RECONCILIATION_REQUIRED`。两者都不得重新调用provider。
+
+Registry返回origin-aware MCP binding contract，required携带server/slot/snapshot/discovery generation；
+concrete attribute和`getattr()`不得成为binding authority。Mock manager只存在于`tests/support/mcp.py`。

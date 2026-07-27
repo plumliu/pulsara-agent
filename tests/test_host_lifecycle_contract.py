@@ -16,7 +16,6 @@ import time
 from typing import AsyncIterator
 
 import pytest
-from tests.support import unverified_test_postgres_access_lease
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.support.settings import compatibility_storage_config
 
@@ -28,6 +27,7 @@ from tests.support.raw_provider import (
     RawProviderToolCallEnd,
     RawProviderToolCallStart,
 )
+from tests.support.host import component_manifest_store, component_test_host_core
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -48,17 +48,15 @@ from pulsara_agent.host import (
     HostWorkspaceInput,
     WorkspaceClosingError,
 )
-from pulsara_agent.host.session_manifest import SessionManifest
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.runtime import (
-    AbortKind,
-    ApprovalResolution,
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.recovery import AbortKind
+from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventWriteCancelled,
-    ToolApprovalDecision,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
@@ -70,6 +68,7 @@ from pulsara_agent.runtime.terminal import (
     TerminalSessionManager,
     TerminalStatus,
 )
+from pulsara_agent.runtime.terminal.models import TerminalExecutionOwner
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -96,11 +95,15 @@ class ScriptedTransport:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockStart(
+                **event_context.event_fields(), block_id="text:1"
+            )
             yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(
+                **event_context.event_fields(), block_id="text:1"
+            )
         for call in reply.get("tool_calls", []):
             yield RawProviderToolCallStart(
                 **event_context.event_fields(),
@@ -134,7 +137,7 @@ def _core(monkeypatch, transport: ScriptedTransport) -> HostCore:
     settings = _settings()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    core = HostCore(settings=settings, durable=False)
+    core = component_test_host_core(settings)
 
     def _patched_runtime(_config):
         return LLMRuntime(config=settings.llm, registry=registry)
@@ -299,9 +302,7 @@ def test_registry_capacity_failure_leaks_no_supervisor_owner(
 def test_wiring_failure_rolls_back_lease_and_reservation(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport([{"text": "second open ok"}])
     core = _core(monkeypatch, transport)
-    import pulsara_agent.host.core as core_mod
-
-    original = core_mod.build_agent_runtime_wiring
+    original = core._composition.build_agent_runtime_wiring
     calls = {"n": 0}
 
     def maybe_boom(*args, **kwargs):
@@ -310,7 +311,11 @@ def test_wiring_failure_rolls_back_lease_and_reservation(tmp_path, monkeypatch) 
             raise RuntimeError("wiring boom")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(core_mod, "build_agent_runtime_wiring", maybe_boom)
+    monkeypatch.setattr(
+        core._composition,
+        "build_agent_runtime_wiring",
+        maybe_boom,
+    )
 
     async def run():
         with pytest.raises(RuntimeError, match="wiring boom"):
@@ -558,9 +563,8 @@ def test_close_attempt_monotonically_merges_detach_and_explicit_close_intent(
     release_close = asyncio.Event()
     marked_closed: list[str] = []
 
-    class _ManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            marked_closed.append(runtime_session_id)
+    def mark_closed(runtime_session_id: str) -> None:
+        marked_closed.append(runtime_session_id)
 
     async def delayed_close(
         self,
@@ -577,11 +581,10 @@ def test_close_attempt_monotonically_merges_detach_and_explicit_close_intent(
         )
 
     monkeypatch.setattr(HostSession, "aclose", delayed_close)
-    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> str:
         session = await _open(core, tmp_path, host_session_id="host:close-intent")
-        core.durable = True
         owner = asyncio.create_task(
             core.close_session(
                 session.host_session_id,
@@ -615,9 +618,8 @@ def test_shutdown_close_attempt_merges_competing_explicit_close_intent(
     release_close = asyncio.Event()
     marked_closed: list[str] = []
 
-    class _ManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            marked_closed.append(runtime_session_id)
+    def mark_closed(runtime_session_id: str) -> None:
+        marked_closed.append(runtime_session_id)
 
     async def delayed_close(
         self,
@@ -634,13 +636,12 @@ def test_shutdown_close_attempt_merges_competing_explicit_close_intent(
         )
 
     monkeypatch.setattr(HostSession, "aclose", delayed_close)
-    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> str:
         session = await _open(
             core, tmp_path, host_session_id="host:shutdown-close-intent"
         )
-        core.durable = True
         shutdown = asyncio.create_task(core.shutdown())
         await close_entered.wait()
         explicit_close = asyncio.create_task(
@@ -666,9 +667,8 @@ def test_explicit_close_arriving_after_detach_intent_seal_closes_manifest(
     release_seal = asyncio.Event()
     marked_closed: list[str] = []
 
-    class _ManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            marked_closed.append(runtime_session_id)
+    def mark_closed(runtime_session_id: str) -> None:
+        marked_closed.append(runtime_session_id)
 
     async def delayed_after_seal(self, attempt):
         merged = await original_seal(self, attempt)
@@ -677,13 +677,12 @@ def test_explicit_close_arriving_after_detach_intent_seal_closes_manifest(
         return merged
 
     monkeypatch.setattr(HostSessionRegistry, "seal_close_intent", delayed_after_seal)
-    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> str:
         session = await _open(
             core, tmp_path, host_session_id="host:late-explicit-intent"
         )
-        core.durable = True
         detach = asyncio.create_task(core.detach_session(session.host_session_id))
         await sealed.wait()
         explicit_close = asyncio.create_task(
@@ -707,23 +706,17 @@ def test_explicit_close_manifest_failure_keeps_tombstone_for_retry(
     calls = 0
     marked_closed: list[str] = []
 
-    class _FailOnceManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError("manifest unavailable")
-            marked_closed.append(runtime_session_id)
+    def mark_closed(runtime_session_id: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("manifest unavailable")
+        marked_closed.append(runtime_session_id)
 
-    monkeypatch.setattr(
-        HostCore,
-        "_manifest_store",
-        lambda self: _FailOnceManifestStore(),
-    )
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> str:
         session = await _open(core, tmp_path, host_session_id="host:manifest-retry")
-        core.durable = True
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(
                 session.host_session_id,
@@ -758,13 +751,12 @@ def test_late_explicit_manifest_failure_keeps_tombstone_for_retry(
     calls = 0
     marked_closed: list[str] = []
 
-    class _FailOnceManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError("late manifest unavailable")
-            marked_closed.append(runtime_session_id)
+    def mark_closed(runtime_session_id: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("late manifest unavailable")
+        marked_closed.append(runtime_session_id)
 
     async def delayed_after_seal(self, attempt):
         merged = await original_seal(self, attempt)
@@ -773,17 +765,12 @@ def test_late_explicit_manifest_failure_keeps_tombstone_for_retry(
         return merged
 
     monkeypatch.setattr(HostSessionRegistry, "seal_close_intent", delayed_after_seal)
-    monkeypatch.setattr(
-        HostCore,
-        "_manifest_store",
-        lambda self: _FailOnceManifestStore(),
-    )
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> str:
         session = await _open(
             core, tmp_path, host_session_id="host:late-manifest-retry"
         )
-        core.durable = True
         detach = asyncio.create_task(core.detach_session(session.host_session_id))
         await sealed.wait()
         late_explicit = asyncio.create_task(
@@ -814,22 +801,17 @@ def test_shutdown_retries_pending_manifest_close_before_shared_teardown(
     core = _core(monkeypatch, ScriptedTransport([]))
     calls = 0
 
-    class _FailOnceManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError("manifest unavailable before shutdown")
+    def mark_closed(runtime_session_id: str) -> None:
+        nonlocal calls
+        del runtime_session_id
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("manifest unavailable before shutdown")
 
-    monkeypatch.setattr(
-        HostCore,
-        "_manifest_store",
-        lambda self: _FailOnceManifestStore(),
-    )
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> HostCoreLifecycle:
         session = await _open(core, tmp_path, host_session_id="host:manifest-shutdown")
-        core.durable = True
         with pytest.raises(RuntimeError, match="manifest unavailable before shutdown"):
             await core.close_session(session.host_session_id, close_conversation=True)
         await core.shutdown()
@@ -850,23 +832,19 @@ def test_cancelled_manifest_retry_owner_releases_retry_ownership(
     release_retry_finish = asyncio.Event()
     original_finish_retry = HostSessionRegistry.finish_manifest_close_retry
 
-    class _FailOnceManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError("manifest unavailable")
+    def mark_closed(runtime_session_id: str) -> None:
+        nonlocal calls
+        del runtime_session_id
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("manifest unavailable")
 
     async def delayed_finish_retry(self, attempt, *, error=None):
         retry_finish_entered.set()
         await release_retry_finish.wait()
         return await original_finish_retry(self, attempt, error=error)
 
-    monkeypatch.setattr(
-        HostCore,
-        "_manifest_store",
-        lambda self: _FailOnceManifestStore(),
-    )
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
     monkeypatch.setattr(
         HostSessionRegistry,
         "finish_manifest_close_retry",
@@ -875,7 +853,6 @@ def test_cancelled_manifest_retry_owner_releases_retry_ownership(
 
     async def run() -> None:
         session = await _open(core, tmp_path, host_session_id="host:cancelled-retry")
-        core.durable = True
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(session.host_session_id, close_conversation=True)
 
@@ -911,18 +888,14 @@ def test_runtime_reservation_atomically_rejects_pending_manifest_tombstone(
     core = _core(monkeypatch, ScriptedTransport([]))
     calls = 0
 
-    class _FailOnceManifestStore:
-        def mark_closed(self, runtime_session_id: str) -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError("manifest unavailable")
+    def mark_closed(runtime_session_id: str) -> None:
+        nonlocal calls
+        del runtime_session_id
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("manifest unavailable")
 
-    monkeypatch.setattr(
-        HostCore,
-        "_manifest_store",
-        lambda self: _FailOnceManifestStore(),
-    )
+    monkeypatch.setattr(component_manifest_store(core), "mark_closed", mark_closed)
 
     async def run() -> None:
         session = await _open(
@@ -931,7 +904,6 @@ def test_runtime_reservation_atomically_rejects_pending_manifest_tombstone(
             host_session_id="host:old-runtime",
             conversation_id="conversation:same-runtime",
         )
-        core.durable = True
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(session.host_session_id, close_conversation=True)
 
@@ -971,81 +943,35 @@ def test_tombstoned_resume_rejects_before_dangling_repair(
     core = _core(monkeypatch, ScriptedTransport([]))
     repair_calls: list[str] = []
     fail_manifest_close = True
-    manifest: SessionManifest | None = None
+    manifest_store = component_manifest_store(core)
+    original_mark_closed = manifest_store.mark_closed
 
-    class _ManifestStore:
-        def get(self, runtime_session_id: str) -> SessionManifest | None:
-            assert manifest is not None
-            assert runtime_session_id == manifest.runtime_session_id
-            return manifest
+    def mark_closed(runtime_session_id: str) -> None:
+        if fail_manifest_close:
+            raise RuntimeError("manifest unavailable")
+        original_mark_closed(runtime_session_id)
 
-        def mark_closed(self, runtime_session_id: str) -> None:
-            if fail_manifest_close:
-                raise RuntimeError("manifest unavailable")
-
-    def record_repair(*, dsn: str, runtime_session_id: str, workspace_root: str):
+    async def record_repair(
+        *, connection_provider, runtime_session_id: str, workspace_root: str, **kwargs
+    ):
+        del connection_provider, workspace_root, kwargs
         repair_calls.append(runtime_session_id)
         raise AssertionError("repair must not run before runtime reservation")
 
-    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
-
-    access_lease = unverified_test_postgres_access_lease()
-
-    async def fake_postgres_access_lease(_self):
-        return access_lease
-
-    async def no_projection_service(
-        _self,
-        _access_lease,
-        *,
-        retrieval_resources,
-    ):
-        del retrieval_resources
-        return None
-
-    monkeypatch.setattr(
-        HostCore,
-        "_get_postgres_access_lease",
-        fake_postgres_access_lease,
-    )
-    monkeypatch.setattr(
-        HostCore,
-        "_get_projection_service",
-        no_projection_service,
-    )
+    monkeypatch.setattr(manifest_store, "mark_closed", mark_closed)
     monkeypatch.setattr(
         "pulsara_agent.host.core.repair_dangling_runs_for_resume",
         record_repair,
     )
 
     async def run() -> None:
-        nonlocal fail_manifest_close, manifest
+        nonlocal fail_manifest_close
         session = await _open(
             core,
             tmp_path,
             host_session_id="host:tombstoned-resume",
             conversation_id="conversation:tombstoned-resume",
         )
-        manifest = SessionManifest(
-            runtime_session_id=session.runtime_session_id,
-            conversation_id=session.conversation_id,
-            workspace_kind="project",
-            workspace_root=str(tmp_path),
-            display_label="tombstoned resume",
-            memory_domain_id="u_test",
-            model_role=ModelRole.FLASH.value,
-            permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
-            permission_policy=preset_to_policy(
-                PermissionMode.BYPASS_PERMISSIONS
-            ).to_dict(),
-            created_by="test",
-            created_at=None,
-            last_active_at=None,
-            closed_at=None,
-            archived=False,
-            metadata={},
-        )
-        core.durable = True
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(session.host_session_id, close_conversation=True)
 
@@ -1131,16 +1057,16 @@ def test_host_close_pending_terminal_completion_preserves_retryable_session_and_
             TerminalRequest(
                 command="sleep 5",
                 yield_time_ms=0,
-                metadata={
-                    "origin_event_context": EventContext(
-                        run_id="run:terminal-pending",
-                        turn_id="turn:terminal-pending",
-                        reply_id="reply:terminal-pending",
-                    ),
-                    "tool_call_id": "call:terminal-pending",
-                    "record_event": recorder,
-                },
-            )
+            ),
+            execution_owner=TerminalExecutionOwner(
+                origin_event_context=EventContext(
+                    run_id="run:terminal-pending",
+                    turn_id="turn:terminal-pending",
+                    reply_id="reply:terminal-pending",
+                ),
+                origin_tool_call_id="call:terminal-pending",
+                record_event=recorder,
+            ),
         )
         assert started.process_id is not None
         lease.manager.kill_process(
@@ -1799,14 +1725,19 @@ def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(
     release_close = asyncio.Event()
 
     class FailingResources:
+        fail = True
+
         async def aclose(self):
             close_entered.set()
             await release_close.wait()
-            raise RuntimeError("retrieval close boom")
+            if self.fail:
+                raise RuntimeError("retrieval close boom")
 
-    core._retrieval_resources = FailingResources()  # type: ignore[assignment]
+    resources = FailingResources()
 
     async def run():
+        lease = await core._get_process_resource_lease()
+        lease.retrieval_resources = resources  # type: ignore[attr-defined]
         owner = asyncio.create_task(core.shutdown())
         await close_entered.wait()
         waiter = asyncio.create_task(core.shutdown())
@@ -1817,6 +1748,9 @@ def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(
             await owner
         with pytest.raises(RuntimeError, match="retrieval close boom"):
             await asyncio.wait_for(waiter, timeout=0.2)
+        assert core.lifecycle is HostCoreLifecycle.CLOSING
+        resources.fail = False
+        await core.shutdown()
         return core.lifecycle
 
     assert asyncio.run(run()) is HostCoreLifecycle.CLOSED
@@ -1828,7 +1762,8 @@ def test_projection_close_block_retains_retrieval_dependencies(monkeypatch) -> N
     class ProjectionService:
         blocked = True
 
-        async def aclose(self):
+        async def aclose(self, *, deadline_monotonic):
+            del deadline_monotonic
             if self.blocked:
                 raise RuntimeError("projection physical owner still active")
 
@@ -1840,29 +1775,27 @@ def test_projection_close_block_retains_retrieval_dependencies(monkeypatch) -> N
 
     projection = ProjectionService()
     resources = RetrievalResources()
-    core._projection_service = projection  # type: ignore[assignment]
-    core._retrieval_resources = resources  # type: ignore[assignment]
 
     async def run():
+        lease = await core._get_process_resource_lease()
+        lease.projection_service = projection  # type: ignore[attr-defined]
+        lease.retrieval_resources = resources  # type: ignore[attr-defined]
         with pytest.raises(
             RuntimeError,
             match="projection physical owner still active",
         ):
             await core.shutdown()
         assert core.lifecycle is HostCoreLifecycle.CLOSING
-        assert core._projection_service is projection
-        assert core._retrieval_resources is resources
+        assert core._process_resource_lease is lease
+        assert lease.projection_service is projection
+        assert lease.retrieval_resources is resources
         assert resources.close_count == 0
-        with pytest.raises(RuntimeError, match="HostCore is closing"):
-            await core._get_projection_service(  # type: ignore[arg-type]
-                object(),
-                retrieval_resources=resources,
-            )
 
         projection.blocked = False
         await core.shutdown()
         assert core.lifecycle is HostCoreLifecycle.CLOSED
         assert resources.close_count == 1
+        assert core._process_resource_lease is None
 
     asyncio.run(run())
 

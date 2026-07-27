@@ -7,8 +7,11 @@ from typing import cast
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.canonical_mutation import (
+    CANONICAL_MUTATION_ORDERING_CONTRACT,
+    canonical_mutation_sequence_key,
+)
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationAppendReceipt,
     CanonicalMutationCandidateFact,
     CanonicalMutationDocumentFact,
@@ -22,19 +25,6 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     DurableProjectionResultOwner,
     build_projection_fact,
 )
-
-
-_ORDERING_CONTRACT = context_fingerprint(
-    "canonical-mutation-ordering-contract:v1",
-    {"sequence_key_policy": "graph-semantic-fingerprint"},
-)
-
-
-def canonical_mutation_sequence_key(graph_id: str) -> str:
-    return "graph:" + context_fingerprint(
-        "canonical-mutation-sequence-key:v1",
-        {"graph_id": graph_id},
-    )
 
 
 class PostgresCanonicalMutationRepository:
@@ -53,17 +43,14 @@ class PostgresCanonicalMutationRepository:
         ):
             raise ValueError("canonical mutation ordinals must be contiguous")
         planned_surfaces = tuple(
-            item.handler_contract.surface
-            for item in surface_plan.ordered_surfaces
+            item.handler_contract.surface for item in surface_plan.ordered_surfaces
         )
         if len(planned_surfaces) != len(set(planned_surfaces)):
             raise ValueError("canonical mutation surface plan has duplicates")
         for candidate in candidates:
             if (
-                candidate.source_owner_fingerprint
-                != source_owner.owner_fingerprint
-                or candidate.surface_plan_fingerprint
-                != surface_plan.plan_fingerprint
+                candidate.source_owner_fingerprint != source_owner.owner_fingerprint
+                or candidate.surface_plan_fingerprint != surface_plan.plan_fingerprint
                 or candidate.requested_surfaces != planned_surfaces
             ):
                 raise ValueError("canonical mutation candidate owner/plan drifted")
@@ -71,9 +58,7 @@ class PostgresCanonicalMutationRepository:
         sequence_keys = tuple(
             sorted(
                 {
-                    canonical_mutation_sequence_key(
-                        item.mutation_semantic.graph_id
-                    )
+                    canonical_mutation_sequence_key(item.mutation_semantic.graph_id)
                     for item in candidates
                 }
             )
@@ -167,11 +152,11 @@ class PostgresCanonicalMutationRepository:
                         previous.last_mutation_id if previous else None
                     ),
                     predecessor_ordering_fingerprint=(
-                        previous.last_ordering_fingerprint
-                        if previous
-                        else None
+                        previous.last_ordering_fingerprint if previous else None
                     ),
-                    ordering_contract_fingerprint=_ORDERING_CONTRACT,
+                    ordering_contract_fingerprint=(
+                        CANONICAL_MUTATION_ORDERING_CONTRACT
+                    ),
                 ),
             )
             document = cast(
@@ -198,9 +183,7 @@ class PostgresCanonicalMutationRepository:
                     sequence_key,
                     sequence_number,
                     Jsonb(document.model_dump(mode="json")),
-                    (
-                        candidate.mutation_semantic.mutation_semantic_fingerprint
-                    ),
+                    (candidate.mutation_semantic.mutation_semantic_fingerprint),
                     document.mutation_fact_fingerprint,
                 ),
             )
@@ -244,12 +227,8 @@ class PostgresCanonicalMutationRepository:
                         mutation_semantic_fingerprint=(
                             candidate.mutation_semantic.mutation_semantic_fingerprint
                         ),
-                        mutation_fact_fingerprint=(
-                            document.mutation_fact_fingerprint
-                        ),
-                        mutation_ordering_fingerprint=(
-                            ordering.ordering_fingerprint
-                        ),
+                        mutation_fact_fingerprint=(document.mutation_fact_fingerprint),
+                        mutation_ordering_fingerprint=(ordering.ordering_fingerprint),
                         surface_sequence_number=surface_sequence,
                         predecessor_surface_delivery_identity_fingerprint=(
                             prior_surface.last_delivery_identity_fingerprint
@@ -268,9 +247,7 @@ class PostgresCanonicalMutationRepository:
                     CanonicalMutationSurfaceDeliveryStateFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceDeliveryStateFact,
-                        schema_version=(
-                            "canonical_mutation_surface_delivery_state.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_delivery_state.v1"),
                         delivery_identity=identity,
                         delivery_policy=planned.delivery_policy,
                         status="pending",
@@ -320,9 +297,7 @@ class PostgresCanonicalMutationRepository:
                     CanonicalMutationSurfaceSequenceHeadFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceSequenceHeadFact,
-                        schema_version=(
-                            "canonical_mutation_surface_sequence_head.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_sequence_head.v1"),
                         surface=surface,
                         sequence_key=sequence_key,
                         last_surface_sequence_number=surface_sequence,
@@ -332,9 +307,7 @@ class PostgresCanonicalMutationRepository:
                             identity.delivery_identity_fingerprint
                         ),
                         head_revision=(
-                            prior_surface.head_revision + 1
-                            if prior_surface
-                            else 1
+                            prior_surface.head_revision + 1 if prior_surface else 1
                         ),
                     ),
                 )
@@ -344,9 +317,7 @@ class PostgresCanonicalMutationRepository:
                     resulting=surface_head,
                 )
                 surface_heads[(surface.value, sequence_key)] = surface_head
-                delivery_fingerprints.append(
-                    identity.delivery_identity_fingerprint
-                )
+                delivery_fingerprints.append(identity.delivery_identity_fingerprint)
             receipts.append(
                 PostgresCanonicalMutationRepository._append_receipt(
                     candidate=candidate,
@@ -516,9 +487,7 @@ class PostgresCanonicalMutationRepository:
         }
         expected = tuple(surface.value for surface in ordered_surfaces)
         if set(by_surface) != set(expected):
-            raise ValueError(
-                "canonical mutation exact-confirm surface set drifted"
-            )
+            raise ValueError("canonical mutation exact-confirm surface set drifted")
         return tuple(by_surface[surface] for surface in expected)
 
     @staticmethod
@@ -541,9 +510,7 @@ class PostgresCanonicalMutationRepository:
                 append_disposition=disposition,
                 mutation_fact_fingerprint=document.mutation_fact_fingerprint,
                 ordering_fingerprint=document.ordering.ordering_fingerprint,
-                ordered_surface_delivery_identity_fingerprints=(
-                    delivery_fingerprints
-                ),
+                ordered_surface_delivery_identity_fingerprints=(delivery_fingerprints),
             ),
         )
 
@@ -556,5 +523,4 @@ def _field(row: object, name: str, index: int) -> object:
 
 __all__ = [
     "PostgresCanonicalMutationRepository",
-    "canonical_mutation_sequence_key",
 ]

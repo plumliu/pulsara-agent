@@ -14,6 +14,7 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.mcp import install_prepared_test_mcp_pending_handle
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -81,6 +82,7 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProviderKind,
 )
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
 )
@@ -128,22 +130,25 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.message.reducer import MessageReducer
-from pulsara_agent.runtime import (
-    ApprovalResolution,
-    AgentRuntime,
+from pulsara_agent.replay.message_reducer import MessageReducer
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventCommitError,
     EventPublicationAfterCommitError,
+    EventPublicationError,
     EventWriteCancelled,
-    InRunRecoveryCause,
+    EventWriteResult,
+)
+from pulsara_agent.runtime.recovery import InRunRecoveryCause
+from pulsara_agent.runtime.state import (
     LoopBudget,
     LoopState,
     LoopStatus,
     LoopTransition,
-    ToolApprovalDecision,
-    build_tool_result_error_events,
 )
+from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
 from pulsara_agent.runtime.context_input.replay import load_context_input_manifest
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
@@ -171,21 +176,29 @@ from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
-from pulsara_agent.runtime.tool_action import fixed_tool_action_policy
+from pulsara_agent.capability.tool_action import fixed_tool_action_policy
 from pulsara_agent.runtime.tool_execution import (
     RuntimeSessionToolExecutionEventCommitPort,
+)
+from pulsara_agent.runtime.tool_composition import (
+    build_runtime_tool_binding_installation,
 )
 from pulsara_agent.runtime.long_horizon.run_contract import (
     empty_projection_state_fingerprint,
     prepare_root_long_horizon_run,
 )
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
+    ToolExecutionStableCandidateOwnerState,
     ToolExecutionSuspended,
     ToolRuntimeContext,
 )
 from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.ports.tool_registry import (
+    ToolBindingOrigin,
+    build_tool_binding_contract,
+)
 from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
 
 
@@ -1047,11 +1060,97 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        interaction_id="mcp_input_required:post-commit",
+        tool_call_id="call:mcp-post-commit",
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id="lease:post-commit",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
+    reservation_payload = {
+        "reservation_id": "rollout_reservation:tool:mcp-post-commit",
+        "account_id": "rollout:mcp-post-commit",
+        "owner_kind": "tool_call",
+        "owner_id": "call:mcp-post-commit",
+        "phase_at_reservation": RolloutPhase.EXPLORATION,
+        "budget_bucket": RolloutBudgetBucket.EXPLORATION,
+        "reserved_milliunits": 1,
+        "model_call_reservation_quote": None,
+        "source_sequence": 0,
+    }
+    rollout_reservation = RolloutReservationFact(
+        **reservation_payload,
+        semantic_fingerprint=context_fingerprint(
+            "rollout-reservation:v1",
+            reservation_payload,
+        ),
+    )
+    terminal_owner = (
+        runtime_session.tool_execution_terminal_registry.install_admitted_batch(
+            run_id=state.run_id,
+            reservations=(rollout_reservation,),
+        )[0]
+    )
+    terminal_owner.state = ToolExecutionStableCandidateOwnerState.SUSPENDED
     state.pending_interaction_payload = {
         "interaction_id": "mcp_input_required:post-commit",
         "tool_call_id": "call:mcp-post-commit",
         "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
+        "rollout_reservation_id": rollout_reservation.reservation_id,
+        "rollout_reservation_fingerprint": (rollout_reservation.semantic_fingerprint),
     }
+
+    async def commit_then_fail_publication(
+        self,
+        *,
+        terminal_candidates,
+        settlement_candidate,
+        **_kwargs,
+    ):
+        assert self.runtime_session is runtime_session
+        committed = tuple(
+            runtime_session.event_log.extend(
+                (*tuple(terminal_candidates), settlement_candidate)
+            )
+        )
+        terminal = next(
+            event for event in committed if isinstance(event, ToolResultEndEvent)
+        )
+        result = EventWriteResult(
+            committed_events=committed,
+            commit_status="committed",
+            reducer_high_waters={},
+            reconciliation_required=False,
+            reducer_errors=(),
+            publication_status="completed",
+            publisher_enqueued_through_sequence=terminal.sequence,
+            publication_errors=(
+                EventPublicationError(
+                    event_id=terminal.id,
+                    sequence=terminal.sequence or 0,
+                    subscriber_id="test:terminal-publication",
+                    error_type="RuntimeError",
+                    message="synthetic terminal observer failure",
+                ),
+            ),
+        )
+        raise EventPublicationAfterCommitError(result)
+
+    monkeypatch.setattr(
+        RuntimeSessionToolExecutionEventCommitPort,
+        "commit_terminal_batch_and_settlement",
+        commit_then_fail_publication,
+    )
 
     async def terminal_result(self, current_state, _resolution):
         current_state.pending_interaction_kind = None
@@ -1064,6 +1163,7 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
             tool_call_name="mcp__docs__lookup",
             output="terminal result committed",
             result_state=ToolResultState.ERROR,
+            rollout_reservation=rollout_reservation,
         ):
             yield event
 
@@ -1087,7 +1187,7 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     assert [result.id for result in state.tool_results] == ["call:mcp-post-commit"]
     assert state.pending_interaction_kind is None
     assert supervisor.completed == ["mcp_input_required:post-commit"]
-    assert supervisor.close_calls == 1
+    assert supervisor.close_calls == 0
 
 
 def test_abort_waiting_mcp_releases_pending_lease_once(
@@ -1118,14 +1218,34 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        interaction_id="mcp_input_required:user-stop",
+        tool_call_id="call:mcp-user-stop",
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id="lease:user-stop",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     state.pending_interaction_payload = {
         "interaction_id": "mcp_input_required:user-stop",
+        "tool_call_id": "call:mcp-user-stop",
+        "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
     }
 
     async def terminalize(self, current_state, *, reason):
         assert self is agent
         assert current_state is state
         assert reason.value == "user_stop"
+        supervisor.complete_pending_lease("mcp_input_required:user-stop")
         if False:
             yield None
 
@@ -1145,7 +1265,7 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
     asyncio.run(_collect_async(agent.stream_abort_run(state)))
 
     assert supervisor.completed == ["mcp_input_required:user-stop"]
-    assert supervisor.close_calls == 1
+    assert supervisor.close_calls == 0
     assert state.status is LoopStatus.ABORTED
 
 
@@ -1199,11 +1319,21 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
         tool_name="mcp__docs__lookup",
         pending_lease_reservation_id="reservation:suspend-cancel",
     )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     suspended = ToolExecutionSuspended(
         tool_call_id="call:mcp-suspend-cancel",
         tool_name="mcp__docs__lookup",
         interaction_kind="mcp_input_required",
-        prepared_mcp_input_required=prepared_suspension,
+        mcp_pending_handle=pending_handle,
     )
 
     async def run() -> None:
@@ -1345,17 +1475,23 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
             *,
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
-            del runtime_context
+            prepared = _prepared_test_mcp_suspension(
+                interaction_id="mcp_input_required:precommit-none",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                pending_lease_reservation_id="lease:precommit-none",
+            )
+            pending_handle = install_prepared_test_mcp_pending_handle(
+                runtime_session=runtime_session,
+                supervisor=supervisor,
+                prepared=prepared,
+                event_context=runtime_context.event_context,
+            )
             return ToolExecutionSuspended(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                prepared_mcp_input_required=_prepared_test_mcp_suspension(
-                    interaction_id="mcp_input_required:precommit-none",
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    pending_lease_reservation_id="lease:precommit-none",
-                ),
+                mcp_pending_handle=pending_handle,
             )
 
     class LeaseSupervisor:
@@ -1447,22 +1583,29 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
             *,
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
-            del runtime_context
+            prepared = _prepared_test_mcp_suspension(
+                interaction_id="mcp_input_required:physical-tail",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                pending_lease_reservation_id="lease:physical-tail",
+            )
+            pending_handle = install_prepared_test_mcp_pending_handle(
+                runtime_session=runtime_session,
+                supervisor=supervisor,
+                prepared=prepared,
+                event_context=runtime_context.event_context,
+            )
             return ToolExecutionSuspended(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                prepared_mcp_input_required=_prepared_test_mcp_suspension(
-                    interaction_id="mcp_input_required:physical-tail",
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    pending_lease_reservation_id="lease:physical-tail",
-                ),
+                mcp_pending_handle=pending_handle,
             )
 
     class LeaseSupervisor:
         def __init__(self) -> None:
             self.confirmed: list[tuple[str, str]] = []
+            self.completed: list[str] = []
 
         def confirm_pending_lease(
             self,
@@ -1470,6 +1613,9 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
             reservation_id: str,
         ) -> None:
             self.confirmed.append((interaction_id, reservation_id))
+
+        def complete_pending_lease(self, interaction_id: str) -> None:
+            self.completed.append(interaction_id)
 
     runtime_session = in_memory_runtime_session(tmp_path)
     supervisor = LeaseSupervisor()
@@ -1628,10 +1774,27 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        interaction_id=interaction_id,
+        tool_call_id=tool_call_id,
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id=f"lease:{failure_mode}",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     state.pending_interaction_payload = {
         "interaction_id": interaction_id,
         "tool_call_id": tool_call_id,
         "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
     }
 
     async def terminal_result(self, current_state, _resolution):
@@ -1639,14 +1802,24 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
         current_state.pending_interaction_payload = {}
         current_state.status = LoopStatus.RUNNING
         current_state.stop_reason = None
-        async for event in self._emit_tool_result_and_record(
-            current_state,
-            tool_call_id=tool_call_id,
-            tool_call_name="mcp__docs__lookup",
-            output="terminal result",
-            result_state=ToolResultState.ERROR,
-        ):
-            yield event
+        try:
+            async for event in self._emit_tool_result_and_record(
+                current_state,
+                tool_call_id=tool_call_id,
+                tool_call_name="mcp__docs__lookup",
+                output="terminal result",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+        except BaseException:
+            if (
+                self._mcp_terminal_commit_outcomes.get(
+                    (current_state.run_id, tool_call_id)
+                )
+                == "full"
+            ):
+                supervisor.complete_pending_lease(interaction_id)
+            raise
 
     monkeypatch.setattr(
         AgentRuntime,
@@ -2884,7 +3057,7 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
@@ -2953,7 +3126,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     before_resume_confirm_count = sum(
@@ -3008,7 +3181,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     result = asyncio.run(
@@ -3068,7 +3241,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=[]))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
 
@@ -3127,7 +3300,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous commands"))
     result = asyncio.run(
@@ -3493,14 +3666,56 @@ def _prepared_test_mcp_suspension(
 def _install_registry_with_explicit_test_descriptors(
     agent: AgentRuntime, registry: ToolRegistry
 ) -> None:
-    agent.tool_executor.registry = registry
     custom_names = tuple(sorted(set(registry.names()).difference(_BUILTIN_TOOL_NAMES)))
+    custom_descriptors = tuple(_test_tool_descriptor(name) for name in custom_names)
+    _install_test_tool_registry(
+        agent,
+        registry,
+        descriptors=custom_descriptors,
+    )
     if custom_names:
         agent.capability_runtime = CapabilityRuntime.with_default_providers(
-            StaticCapabilityProvider(
-                tuple(_test_tool_descriptor(name) for name in custom_names)
+            StaticCapabilityProvider(custom_descriptors)
+        )
+
+
+def _install_test_tool_registry(
+    agent: AgentRuntime,
+    registry: ToolRegistry,
+    *,
+    descriptors: tuple[CapabilityDescriptor, ...] = (),
+) -> None:
+    descriptor_overrides = {item.name: item for item in descriptors}
+    catalog = {item.name: item for item in builtin_tool_catalog()}
+    policies = {}
+    for name in registry.names():
+        catalog_entry = catalog.get(name)
+        descriptor = descriptor_overrides.get(name)
+        if descriptor is None:
+            if catalog_entry is None:
+                descriptor = _test_tool_descriptor(name)
+            else:
+                descriptor = catalog_entry.descriptor
+        binding = (
+            catalog_entry.binding_contract
+            if catalog_entry is not None
+            else build_tool_binding_contract(
+                tool_name=name,
+                origin=ToolBindingOrigin.CUSTOM,
+                contract_id=f"test-tool-binding:{name}",
+                contract_version="v1",
             )
         )
+        installation = build_runtime_tool_binding_installation(
+            tool=registry.get(name),
+            descriptor=descriptor,
+            binding_contract=binding,
+            artifact_options=agent.runtime_session.artifact_service.options,
+        )
+        registry.bind_contract(binding)
+        policies[name] = installation.artifact_processing_policy
+    agent.tool_executor.registry = registry
+    agent.tool_executor.artifact_policies = policies
 
 
 class SlowProjectionHooks(NoopMemoryHooks):
@@ -3754,7 +3969,11 @@ Use the review checklist.
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("noop", calls=[]))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(
+        agent,
+        registry,
+        descriptors=(_test_tool_descriptor("noop"),),
+    )
 
     result = asyncio.run(run_agent_task(agent, "$review-pr inspect this"))
 
@@ -5254,7 +5473,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
     recall = _ConcurrentRecallService()
     registry = ToolRegistry()
     registry.register(MemorySearchTool(recall=recall))  # type: ignore[arg-type]
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search twice"))
 

@@ -76,8 +76,8 @@ from pulsara_agent.message import (
     ToolResultBlock,
     UserMsg,
 )
-from pulsara_agent.message.assembler import BlockAssembler
-from pulsara_agent.message.reducer import accepted_main_reply_ids
+from pulsara_agent.replay.message_assembler import BlockAssembler
+from pulsara_agent.replay.message_reducer import accepted_main_reply_ids
 from pulsara_agent.runtime.compaction.planner import (
     SUMMARY_ARTIFACT_KIND,
     latest_completed_boundary,
@@ -154,19 +154,20 @@ class ContextCompactionAttemptResult:
     attempt_id: str
     compaction_id: str | None
     terminal_event_deadline_budget: RuntimeEventOperationDeadlineBudget | None
-    publication_terminalization_scope: (
-        CompactionPublicationTerminalizationScope | None
-    )
+    publication_terminalization_scope: CompactionPublicationTerminalizationScope | None
     status: Literal["not_attempted", "completed", "failed"]
-    not_attempted_reason: Literal[
-        "disabled",
-        "manual_disabled",
-        "auto_disabled",
-        "failure_circuit_open",
-        "below_threshold",
-        "empty_source",
-        "no_plan",
-    ] | None
+    not_attempted_reason: (
+        Literal[
+            "disabled",
+            "manual_disabled",
+            "auto_disabled",
+            "failure_circuit_open",
+            "below_threshold",
+            "empty_source",
+            "no_plan",
+        ]
+        | None
+    )
     core_committed_events: tuple[AgentEvent, ...]
     terminal_event: (
         ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
@@ -264,7 +265,10 @@ class _CompactionAttemptCollector:
             raise RuntimeError("compaction core receipt identity mismatch")
         if receipt.candidate_deadline_budget != deadline_budget:
             raise RuntimeError("compaction core receipt deadline identity mismatch")
-        if self.receipts and event.sequence <= self.receipts[-1].committed_through_sequence:
+        if (
+            self.receipts
+            and event.sequence <= self.receipts[-1].committed_through_sequence
+        ):
             raise RuntimeError("compaction core receipts are not strictly ordered")
         self.admit_event_candidate(event.id, deadline_budget)
         self.receipts.append(receipt)
@@ -331,13 +335,11 @@ class _CompactionAttemptCollector:
             if any(receipt.publication_errors for receipt in self.receipts):
                 publication_summary = "failed_after_commit"
             elif any(
-                receipt.publication_status == "unavailable"
-                for receipt in self.receipts
+                receipt.publication_status == "unavailable" for receipt in self.receipts
             ):
                 publication_summary = "unavailable"
             elif any(
-                receipt.publication_status == "enqueued"
-                for receipt in self.receipts
+                receipt.publication_status == "enqueued" for receipt in self.receipts
             ):
                 publication_summary = "enqueued"
             else:
@@ -480,9 +482,9 @@ class ContextCompactionService:
         init=False,
         repr=False,
     )
-    _candidate_projection_receipts: dict[
-        str, CompactionCandidateProjectionReceipt
-    ] = field(default_factory=dict, init=False, repr=False)
+    _candidate_projection_receipts: dict[str, CompactionCandidateProjectionReceipt] = (
+        field(default_factory=dict, init=False, repr=False)
+    )
     _candidate_projection_accepting: bool = field(
         default=True,
         init=False,
@@ -993,15 +995,18 @@ class ContextCompactionService:
         host_boundary_kind: Literal["pre_run"] | None = None,
         runtime_state: LoopState | None = None,
     ) -> ContextCompactionAttemptResult:
-        not_attempted_reason: Literal[
-            "disabled",
-            "manual_disabled",
-            "auto_disabled",
-            "failure_circuit_open",
-            "below_threshold",
-            "empty_source",
-            "no_plan",
-        ] | None = None
+        not_attempted_reason: (
+            Literal[
+                "disabled",
+                "manual_disabled",
+                "auto_disabled",
+                "failure_circuit_open",
+                "below_threshold",
+                "empty_source",
+                "no_plan",
+            ]
+            | None
+        ) = None
         if not self.policy.enabled:
             not_attempted_reason = "disabled"
         elif trigger == "manual" and not self.policy.manual_enabled:
@@ -1052,8 +1057,7 @@ class ContextCompactionService:
         result = collector.freeze(
             not_attempted_reason=(
                 "empty_source"
-                if not collector.receipts
-                and self.event_log.next_sequence() == 1
+                if not collector.receipts and self.event_log.next_sequence() == 1
                 else "no_plan"
             )
         )
@@ -1078,7 +1082,9 @@ class ContextCompactionService:
         mid_turn = runtime_state is not None or metadata.get("phase") == "mid_turn"
         if mid_turn:
             if runtime_state is None or runtime_state.run_working_set is None:
-                raise ValueError("mid-turn compaction requires its active RunWorkingSet")
+                raise ValueError(
+                    "mid-turn compaction requires its active RunWorkingSet"
+                )
             contract = runtime_state.run_working_set.long_horizon_contract
             payload = {
                 "scope_kind": "mid_turn_active_run",
@@ -1104,9 +1110,7 @@ class ContextCompactionService:
                 "active_run_id": None,
                 "active_context_window_id": None,
                 "active_rollout_account_id": None,
-                "host_state_generation": int(
-                    metadata.get("host_state_generation", 0)
-                ),
+                "host_state_generation": int(metadata.get("host_state_generation", 0)),
             }
         return CompactionPublicationTerminalizationScope(
             **payload,  # type: ignore[arg-type]
@@ -1377,9 +1381,7 @@ class ContextCompactionService:
                         target_model_target.fact.context_budget.input_budget_tokens
                     ),
                     threshold_tokens=plan.threshold_tokens,
-                    post_compaction_target_tokens=(
-                        plan.post_compaction_target_tokens
-                    ),
+                    post_compaction_target_tokens=(plan.post_compaction_target_tokens),
                     failure_stage="started_publication",
                     target_estimate=plan.target_estimate,
                     summarizer_target=None,
@@ -1395,8 +1397,7 @@ class ContextCompactionService:
                     keep_after_sequence=plan.keep_after_sequence,
                     error_type="CompactionStartedPublicationUnavailable",
                     message=(
-                        "compaction Started committed but publication "
-                        "was not confirmed"
+                        "compaction Started committed but publication was not confirmed"
                     ),
                     started_event_id=started_event_id,
                     termination_kind="failed",
@@ -1621,7 +1622,10 @@ class ContextCompactionService:
             self._consecutive_failures = 0
             return stored
         except BaseException as exc:
-            if summarizer_provider_input is not None and self.runtime_session is not None:
+            if (
+                summarizer_provider_input is not None
+                and self.runtime_session is not None
+            ):
                 await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     summarizer_provider_input.prepared_candidate.preparation_ownership.preparation_id,
                     reason="compaction_failed_before_model_start",
@@ -1878,18 +1882,14 @@ class ContextCompactionService:
                 "missing_candidates_block_policy": (
                     policy.missing_candidates_block_policy
                 ),
-                "max_candidates_per_compaction": (
-                    policy.max_candidates_per_compaction
-                ),
+                "max_candidates_per_compaction": (policy.max_candidates_per_compaction),
                 "max_summary_excerpt_chars": policy.max_summary_excerpt_chars,
                 "max_provenance_ids": policy.max_provenance_ids,
                 "extractor_version": policy.extractor_version,
             },
         )
         request_payload = {
-            "request_id": (
-                f"compaction-candidate-projection:{compaction_id}"
-            ),
+            "request_id": (f"compaction-candidate-projection:{compaction_id}"),
             "compaction_id": compaction_id,
             "expected_completed_event_id": expected_completed_event_id,
             "extractor_id": contract.extractor_id,
@@ -1928,9 +1928,7 @@ class ContextCompactionService:
                         "owner_id": prepared_payload["owner_id"],
                         "summary_artifact_id": summary_artifact_id,
                         "summary_artifact_content_fingerprint": (
-                            prepared_payload[
-                                "summary_artifact_content_fingerprint"
-                            ]
+                            prepared_payload["summary_artifact_content_fingerprint"]
                         ),
                         "owned_summary_canonical_utf8": summary,
                     },
@@ -2009,9 +2007,7 @@ class ContextCompactionService:
                 status="suppressed_by_publication_latch",
                 **{
                     **empty,
-                    "prepared_input_fingerprint": (
-                        prepared.prepared_input_fingerprint
-                    ),
+                    "prepared_input_fingerprint": (prepared.prepared_input_fingerprint),
                 },
             )
         if (
@@ -2032,9 +2028,7 @@ class ContextCompactionService:
                 status="owner_installation_failed",
                 **{
                     **empty,
-                    "prepared_input_fingerprint": (
-                        prepared.prepared_input_fingerprint
-                    ),
+                    "prepared_input_fingerprint": (prepared.prepared_input_fingerprint),
                     "failure_stage": "owner_installation",
                     "failure_diagnostic": diagnostic,
                 },
@@ -2099,15 +2093,11 @@ class ContextCompactionService:
                     request_identity=admission.request_identity,
                     status="reconciliation_required",
                     owner_id=owner_id,
-                    prepared_input_fingerprint=(
-                        prepared.prepared_input_fingerprint
-                    ),
+                    prepared_input_fingerprint=(prepared.prepared_input_fingerprint),
                     failure_stage=None,
                     failure_diagnostic=None,
                     producer_event_id=current.producer_event_id,
-                    producer_payload_fingerprint=(
-                        current.producer_payload_fingerprint
-                    ),
+                    producer_payload_fingerprint=(current.producer_payload_fingerprint),
                     producer_event_reference=current.producer_event_reference,
                     outbox_item_accumulator=current.outbox_item_accumulator,
                     reconciliation_from_status=(

@@ -28,12 +28,16 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.capability.descriptor import (
     CapabilityAdvertisePolicy,
-    CapabilityArtifactMode,
     CapabilityAvailability,
     CapabilityDescriptor,
     CapabilityProviderKind,
 )
+from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
+from pulsara_agent.capability.builtin_catalog import (
+    builtin_tool_catalog,
+    builtin_tool_catalog_entry,
+)
 from pulsara_agent.capability.exposure import build_exposure_plan
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
@@ -42,7 +46,6 @@ from pulsara_agent.capability.provider import (
 from pulsara_agent.capability.render import render_active_skill_prompt
 from pulsara_agent.capability.result_contracts import (
     result_render_contract_for_tool,
-    terminal_process_result_render_contract,
 )
 from pulsara_agent.capability.result_semantics import (
     FrozenToolResultSemanticsRuntimeInput,
@@ -90,13 +93,9 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
-from pulsara_agent.runtime import (
-    AgentRuntime,
-    ApprovalResolution,
-    LoopState,
-    LoopStatus,
-    ToolApprovalDecision,
-)
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
@@ -123,22 +122,20 @@ from pulsara_agent.host.run_boundary import (
     derive_continuation_basis,
 )
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
-from pulsara_agent.runtime.tool_action import (
-    builtin_tool_action_policy,
-    terminal_process_tool_action_policy,
-)
+from pulsara_agent.capability.tool_action import builtin_tool_action_policy
 from pulsara_agent.runtime.run_entry import RunWorkingSet
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.tool_artifacts import (
-    InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactService,
+    artifact_processing_policy_for_descriptor,
 )
+from tests.support.artifacts import FakeToolResultArtifactIndex
 from pulsara_agent.runtime.long_horizon.run_contract import (
     empty_projection_state_fingerprint,
     prepare_root_long_horizon_run,
 )
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
 
 
@@ -264,8 +261,23 @@ def _descriptor(
     *,
     advertise_policy: CapabilityAdvertisePolicy = CapabilityAdvertisePolicy.DIRECT,
     availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE,
-    permission_category: str = "general",
+    permission_category: str | None = None,
 ) -> CapabilityDescriptor:
+    try:
+        descriptor = builtin_tool_catalog_entry(name).descriptor
+    except KeyError:
+        descriptor = None
+    if descriptor is not None:
+        if advertise_policy is not CapabilityAdvertisePolicy.DIRECT:
+            raise ValueError("built-in advertise policy must come from the catalog")
+        if availability is not CapabilityAvailability.AVAILABLE:
+            raise ValueError("built-in availability must come from the catalog")
+        if (
+            permission_category is not None
+            and permission_category != descriptor.permission_category
+        ):
+            raise ValueError("built-in permission category must come from the catalog")
+        return descriptor
     return CapabilityDescriptor(
         id=f"builtin:{name}",
         name=name,
@@ -279,7 +291,7 @@ def _descriptor(
         is_concurrency_safe=True,
         result_render_contract=result_render_contract_for_tool(name),
         long_horizon_policy=builtin_tool_action_policy(name),
-        permission_category=permission_category,
+        permission_category=permission_category or "general",
         advertise_policy=advertise_policy,
         availability=availability,
     )
@@ -305,6 +317,34 @@ def _runtime_for_descriptors(*descriptors: CapabilityDescriptor) -> CapabilityRu
 
 def _runtime_for_provider(provider: StaticCapabilityProvider) -> CapabilityRuntime:
     return CapabilityRuntime(providers=(provider,))
+
+
+def _install_test_registry(agent: AgentRuntime, registry: ToolRegistry) -> None:
+    descriptors_by_name = {
+        entry.name: entry.descriptor
+        for entry in builtin_tool_catalog()
+        if entry.name in registry.names()
+    }
+    descriptors_by_name.update(
+        {
+            descriptor.name: descriptor
+            for provider in agent.capability_runtime.providers
+            for descriptor in getattr(provider, "descriptors", ())
+            if descriptor.name in registry.names()
+        }
+    )
+    agent.tool_executor.registry = registry
+    agent.tool_executor.artifact_policies = {
+        descriptor.name: artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=ToolCall(
+                id=f"call:artifact-policy:{descriptor.name}",
+                name=descriptor.name,
+            ),
+            options=agent.runtime_session.artifact_service.options,
+        )
+        for descriptor in descriptors_by_name.values()
+    }
 
 
 def _firecrawl_active_injection(tmp_path: Path) -> ActiveSkillInjection:
@@ -587,7 +627,7 @@ def test_builtin_provider_uses_explicit_descriptor_truth_for_bound_core_tools() 
     )
     descriptors = {descriptor.name: descriptor for descriptor in output.descriptors}
 
-    assert descriptors["artifact_read"].artifact_mode is CapabilityArtifactMode.NEVER
+    assert descriptors["artifact_read"].artifact_mode is ToolArtifactMode.NEVER
     assert descriptors["artifact_read"].permission_category == "artifact_read"
     assert descriptors["terminal_process"].permission_category == "terminal"
     assert descriptors["terminal_process"].is_open_world is True
@@ -707,22 +747,7 @@ def test_capability_gate_denies_hidden_unavailable_and_not_callable_calls() -> N
 def test_capability_gate_preserves_terminal_process_observe_contract_and_terminal_off() -> (
     None
 ):
-    terminal_process = CapabilityDescriptor(
-        id="builtin:terminal_process",
-        name="terminal_process",
-        description="process",
-        input_schema={"type": "object", "properties": {}},
-        namespace=None,
-        provider_kind=CapabilityProviderKind.BUILTIN,
-        provider_id="builtin",
-        is_model_callable=True,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        result_render_contract=terminal_process_result_render_contract(),
-        long_horizon_policy=terminal_process_tool_action_policy(),
-        is_open_world=True,
-        permission_category="terminal",
-    )
+    terminal_process = builtin_tool_catalog_entry("terminal_process").descriptor
     exposure = _exposure_for_descriptors(terminal_process)
     observe = ToolCall(
         id="call:observe", name="terminal_process", arguments={"action": "list"}
@@ -760,6 +785,10 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
 def test_terminal_process_observe_gate_event_records_effective_category(
     tmp_path,
 ) -> None:
+    descriptor = _descriptor(
+        "terminal_process",
+        permission_category="terminal",
+    )
     transport = _ScriptedTransport(
         [
             {
@@ -777,16 +806,25 @@ def test_terminal_process_observe_gate_event_records_effective_category(
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=_runtime_for_descriptors(
-            _descriptor("terminal_process", permission_category="terminal")
-        ),
+        capability_runtime=_runtime_for_descriptors(descriptor),
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(
         DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
+    agent.tool_executor.artifact_policies = {
+        "terminal_process": artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=ToolCall(
+                id="call:observe",
+                name="terminal_process",
+                arguments={"action": "list"},
+            ),
+            options=agent.runtime_session.artifact_service.options,
+        )
+    }
 
     result = asyncio.run(run_agent_task(agent, "list processes"))
 
@@ -825,7 +863,7 @@ def test_wait_for_user_batch_suspension_reason_code(tmp_path) -> None:
     registry.register(
         DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "read and terminal"))
 
@@ -870,7 +908,7 @@ def test_multiple_independent_wait_calls_keep_own_reason_code(tmp_path) -> None:
     registry.register(
         DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "write and terminal"))
 
@@ -909,7 +947,7 @@ def test_permission_prepass_does_not_invoke_inner_gate_per_call(tmp_path) -> Non
     registry = ToolRegistry()
     registry.register(DummyTool("a", is_read_only=True, is_concurrency_safe=True))
     registry.register(DummyTool("b", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call two tools"))
 
@@ -944,7 +982,7 @@ def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_si
         DummyTool("enter_plan", is_read_only=False, is_concurrency_safe=True)
     )
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "enter plan and noop"))
 
@@ -999,7 +1037,7 @@ def test_hardline_terminal_reason_codes_are_stable_and_specific(tmp_path) -> Non
     registry.register(
         DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "dangerous terminal calls"))
 
@@ -1039,7 +1077,7 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
     registry.register(
         DummyTool("degraded", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call degraded"))
 
@@ -1051,7 +1089,7 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
 
 def test_artifact_policy_uses_descriptor_mode() -> None:
     archive = InMemoryArchiveStore()
-    index = InMemoryToolResultArtifactIndex()
+    index = FakeToolResultArtifactIndex()
     service = ToolResultArtifactService(
         archive=archive,
         index=index,
@@ -1065,10 +1103,11 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
         run_id="run:test", turn_id="turn:test", reply_id="reply:test"
     )
     artifact_read = _descriptor("artifact_read")
-    artifact_read = replace(artifact_read, artifact_mode=CapabilityArtifactMode.NEVER)
+    artifact_read = replace(artifact_read, artifact_mode=ToolArtifactMode.NEVER)
     always = _descriptor("small_json")
-    always = replace(always, artifact_mode=CapabilityArtifactMode.ALWAYS)
+    always = replace(always, artifact_mode=ToolArtifactMode.ALWAYS)
 
+    read_call = ToolCall(id="call:read", name="artifact_read")
     read_result, read_refs = service.process_result(
         ToolExecutionResult(
             call_id="call:read",
@@ -1077,9 +1116,14 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
             output="small",
         ),
         event_context=context,
-        tool_call=ToolCall(id="call:read", name="artifact_read"),
-        descriptor=artifact_read,
+        tool_call=read_call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=artifact_read,
+            tool_call=read_call,
+            options=service.options,
+        ),
     )
+    small_call = ToolCall(id="call:small", name="small_json")
     small_result, small_refs = service.process_result(
         ToolExecutionResult(
             call_id="call:small",
@@ -1088,8 +1132,12 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
             output="small",
         ),
         event_context=context,
-        tool_call=ToolCall(id="call:small", name="small_json"),
-        descriptor=always,
+        tool_call=small_call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=always,
+            tool_call=small_call,
+            options=service.options,
+        ),
     )
 
     assert read_result.output == "small"
@@ -1175,7 +1223,7 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
     )
     registry = ToolRegistry()
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "use noop"))
 
@@ -1242,7 +1290,7 @@ def test_terminal_gate_decision_records_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1286,7 +1334,7 @@ def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "run terminal"))
 
@@ -1326,7 +1374,7 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1366,7 +1414,7 @@ def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1424,7 +1472,7 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(
         run_agent_task(agent, "$huggingface-local-models list local model caches")
@@ -1478,7 +1526,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
     registry = ToolRegistry()
     ok_tool = DummyTool("ok", is_read_only=True, is_concurrency_safe=True)
     registry.register(ok_tool)
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call missing and ok"))
 

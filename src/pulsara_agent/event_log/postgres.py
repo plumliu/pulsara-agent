@@ -78,7 +78,7 @@ from pulsara_agent.storage.session_bootstrap import (
     PostgresRuntimeSessionOwnerBootstrapPort,
 )
 from pulsara_agent.message.message import AssistantMsg, Msg
-from pulsara_agent.message.reducer import (
+from pulsara_agent.replay.message_reducer import (
     MessageReducer,
     require_canonical_reply_control,
 )

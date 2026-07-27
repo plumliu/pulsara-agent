@@ -43,13 +43,22 @@ from pulsara_agent.storage.postgres_endpoint import (
     PostgresCanonicalEndpointFact,
     ResolvedPostgresConnectionFactory,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     PostgresMigrationProgressOutcomeFact,
 )
-from pulsara_agent.runtime.projection_jobs.migration_state import (
+from pulsara_agent.projection_jobs.migration_state import (
     migration_progress_outcome,
     next_projection_migration_requirement,
 )
+from pulsara_agent.ports.projection_jobs import (
+    ProjectionMigrationPreparationPort,
+    build_projection_migration_readiness_view,
+    build_projection_migration_transaction_identity,
+)
+from pulsara_agent.storage.projection_migration_transaction import (
+    PostgresProjectionMigrationTransactionCapability,
+)
+from pulsara_agent.storage.runtime_write_admission import read_runtime_write_epoch
 
 
 _LOCK_NAMESPACE = int.from_bytes(
@@ -144,6 +153,7 @@ class PostgresMigrationRunner:
         registry: PostgresMigrationRegistry = POSTGRES_MIGRATION_REGISTRY,
         application_version: str = __version__,
         grant_executor: PostgresRuntimeGrantExecutor | None = None,
+        projection_preparation_port: ProjectionMigrationPreparationPort | None = None,
     ) -> None:
         if not admin_dsn.strip():
             raise PostgresSchemaError(
@@ -165,6 +175,7 @@ class PostgresMigrationRunner:
         self._registry = registry
         self._application_version = application_version
         self._grant_executor = grant_executor or PostgresRuntimeGrantExecutor()
+        self._projection_preparation_port = projection_preparation_port
 
     def migrate(self, *, deadline_monotonic: float) -> PostgresMigrationReport:
         try:
@@ -210,24 +221,6 @@ class PostgresMigrationRunner:
             next_version = start_version
             while next_version < len(self._registry.definitions):
                 current_head_version = next_version - 1
-                if current_head_version >= 5:
-                    from pulsara_agent.runtime.projection_jobs.pre_activation import (
-                        projection_migration_readiness,
-                    )
-
-                    readiness = projection_migration_readiness(
-                        admin,
-                        current_head_version=current_head_version,
-                        database_target_fingerprint=(
-                            self._admin_factory.endpoint.endpoint_fingerprint
-                        ),
-                    )
-                else:
-                    from pulsara_agent.runtime.projection_jobs.pre_activation import (
-                        ProjectionMigrationReadiness,
-                    )
-
-                    readiness = ProjectionMigrationReadiness(False, False, False)
                 current_prefix = (
                     self._registry.definition(
                         current_head_version
@@ -235,6 +228,44 @@ class PostgresMigrationRunner:
                     if current_head_version >= 0
                     else ""
                 )
+                if current_head_version >= 5:
+                    port = self._require_projection_preparation_port()
+                    epoch = read_runtime_write_epoch(admin, privileged=True)
+                    identity = build_projection_migration_transaction_identity(
+                        database_target_fingerprint=(
+                            self._admin_factory.endpoint.endpoint_fingerprint
+                        ),
+                        database_oid=admin_identity.database_oid,
+                        backend_pid=admin.info.backend_pid,
+                        current_head_version=current_head_version,
+                        current_registry_prefix_fingerprint=current_prefix,
+                        maintenance_operation_id=(
+                            epoch.maintenance_operation_id or "readiness"
+                        ),
+                        maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
+                        transaction_generation=next_version + 1,
+                    )
+                    capability = PostgresProjectionMigrationTransactionCapability(
+                        connection=admin,
+                        identity=identity,
+                        authority=port.port_authority,
+                    )
+                    try:
+                        readiness = port.readiness(
+                            transaction=capability,
+                            current_head_version=current_head_version,
+                            database_target_fingerprint=(
+                                self._admin_factory.endpoint.endpoint_fingerprint
+                            ),
+                        )
+                    finally:
+                        capability.release()
+                else:
+                    readiness = build_projection_migration_readiness_view(
+                        legacy_surface_binding_plan_ready=False,
+                        timeline_coverage_ready=False,
+                        evidence_coverage_ready=False,
+                    )
                 preparation_requirement = next_projection_migration_requirement(
                     current_head_version=current_head_version,
                     target_head_version=self._registry.latest_version,
@@ -364,6 +395,17 @@ class PostgresMigrationRunner:
         finally:
             admin.close()
 
+    def _require_projection_preparation_port(
+        self,
+    ) -> ProjectionMigrationPreparationPort:
+        port = self._projection_preparation_port
+        if port is None:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.PROJECTION_PREPARATION_PORT_REQUIRED,
+                "projection migration preparation port is required for migrations 0006-0008",
+            )
+        return port
+
     def _require_pulsara_empty(self, connection: Connection) -> None:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -412,7 +454,6 @@ class PostgresMigrationRunner:
                     if definition.version >= 6:
                         from pulsara_agent.storage.runtime_write_admission import (
                             acquire_maintenance_runtime_write_guard,
-                            read_runtime_write_epoch,
                         )
 
                         maintenance_epoch = read_runtime_write_epoch(
@@ -439,18 +480,42 @@ class PostgresMigrationRunner:
                                 + str(maintenance_epoch.maintenance_operation_id)
                             ),
                         )
-                        from pulsara_agent.runtime.projection_jobs.migration_transform import (
-                            apply_projection_migration_transform,
-                        )
-
-                        apply_projection_migration_transform(
-                            connection,
-                            version=definition.version,
-                            maintenance_epoch=maintenance_epoch,
-                            resulting_registry_prefix_fingerprint=(
-                                definition.registry_prefix_fingerprint
+                        port = self._require_projection_preparation_port()
+                        previous = self._registry.definition(definition.version - 1)
+                        identity = build_projection_migration_transaction_identity(
+                            database_target_fingerprint=(
+                                self._admin_factory.endpoint.endpoint_fingerprint
                             ),
+                            database_oid=runtime_identity.database_oid,
+                            backend_pid=connection.info.backend_pid,
+                            current_head_version=definition.version - 1,
+                            current_registry_prefix_fingerprint=(
+                                previous.registry_prefix_fingerprint
+                            ),
+                            maintenance_operation_id=str(
+                                maintenance_epoch.maintenance_operation_id
+                            ),
+                            maintenance_epoch_fingerprint=(
+                                maintenance_epoch.epoch_fingerprint
+                            ),
+                            transaction_generation=definition.version + 1,
                         )
+                        capability = PostgresProjectionMigrationTransactionCapability(
+                            connection=connection,
+                            identity=identity,
+                            authority=port.port_authority,
+                        )
+                        try:
+                            port.apply_transform(
+                                transaction=capability,
+                                version=definition.version,
+                                maintenance_epoch=maintenance_epoch,
+                                resulting_registry_prefix_fingerprint=(
+                                    definition.registry_prefix_fingerprint
+                                ),
+                            )
+                        finally:
+                            capability.release()
                     connection.execute(definition.resource_text(), prepare=False)
                     if definition.version == 5:
                         from pulsara_agent.storage.runtime_write_admission import (
@@ -469,15 +534,12 @@ class PostgresMigrationRunner:
                         )
                     elif definition.version >= 6:
                         assert maintenance_epoch is not None
-                        from pulsara_agent.runtime.projection_jobs.migration_transform import (
-                            protected_relation_resource_for_version,
-                        )
                         from pulsara_agent.storage.runtime_write_admission import (
                             install_runtime_write_normal_epoch,
                             replace_runtime_write_protected_relation_registry,
                         )
 
-                        resource_name = protected_relation_resource_for_version(
+                        resource_name = self._require_projection_preparation_port().protected_relation_resource_for_version(
                             definition.version
                         )
                         replace_runtime_write_protected_relation_registry(
@@ -1015,7 +1077,7 @@ def _rebind_runtime_write_epoch_role(
     *,
     runtime_role: str,
 ) -> None:
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         RuntimeWriteAdmissionMode,
     )
     from pulsara_agent.storage.runtime_write_admission import (

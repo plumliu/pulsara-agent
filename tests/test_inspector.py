@@ -75,7 +75,10 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog as _PostgresEventLog
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.inspector.service import (
     _context_compilation_projection,
@@ -121,11 +124,11 @@ from pulsara_agent.primitives.governance_evidence import (
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     builtin_tool_action_policy,
     default_tool_action_classifier_registry,
 )
-from pulsara_agent.tools import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
 from pulsara_agent.runtime.compaction.candidates import (
     ContextCompactionMemoryCandidatePolicy,

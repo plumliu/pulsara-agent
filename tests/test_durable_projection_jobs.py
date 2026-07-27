@@ -10,7 +10,7 @@ from pulsara_agent.primitives._context_base import (
     FrozenJsonObjectFact,
     context_fingerprint,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionFailureKind,
     DurableProjectionJobCandidateFact,
@@ -84,9 +84,7 @@ def _source(
             ledger_continuity_accumulator=_fp(f"ledger:{sequence}"),
             ledger_payload_prefix_bytes=sequence * 10,
             transcript_semantic_prefix_count=sequence,
-            transcript_semantic_prefix_accumulator=_fp(
-                f"transcript:{sequence}"
-            ),
+            transcript_semantic_prefix_accumulator=_fp(f"transcript:{sequence}"),
         ),
     )
     return reference, horizon
@@ -133,9 +131,7 @@ def _candidate(
             activation_fingerprint=_fp(f"activation:{kind.value}"),
             seed_contract_fingerprint=seed.seed_contract_fingerprint,
             delivery_policy=seed.delivery_policy,
-            canonical_mutation_surface_plan=(
-                seed.canonical_mutation_surface_plan
-            ),
+            canonical_mutation_surface_plan=(seed.canonical_mutation_surface_plan),
         ),
     )
 
@@ -146,8 +142,7 @@ def _seed(
 ) -> None:
     kind = candidates[0].job_semantic.projection_kind
     sequence = max(
-        item.job_semantic.source_event_reference.sequence
-        for item in candidates
+        item.job_semantic.source_event_reference.sequence for item in candidates
     )
     _, scan_horizon = _source(
         sequence=sequence,
@@ -194,9 +189,7 @@ def _seed(
             projection_kind=kind,
             cutover_fingerprint=initial.cutover_fingerprint,
             through_sequence=sequence,
-            ledger_continuity_accumulator=(
-                scan_horizon.ledger_continuity_accumulator
-            ),
+            ledger_continuity_accumulator=(scan_horizon.ledger_continuity_accumulator),
             ledger_payload_prefix_bytes=scan_horizon.ledger_payload_prefix_bytes,
             transcript_semantic_prefix_count=(
                 scan_horizon.transcript_semantic_prefix_count
@@ -233,7 +226,9 @@ def _seed(
     )
 
 
-def _prepared(candidate: DurableProjectionJobCandidateFact) -> PreparedDurableProjectionResultFact:
+def _prepared(
+    candidate: DurableProjectionJobCandidateFact,
+) -> PreparedDurableProjectionResultFact:
     owner = cast(
         ProjectionJobResultOwnerFact,
         build_projection_fact(
@@ -241,9 +236,7 @@ def _prepared(candidate: DurableProjectionJobCandidateFact) -> PreparedDurablePr
             schema_version="projection_job_result_owner.v1",
             owner_kind="durable_projection_job",
             job_id=candidate.job_semantic.job_id,
-            job_semantic_fingerprint=(
-                candidate.job_semantic.job_semantic_fingerprint
-            ),
+            job_semantic_fingerprint=(candidate.job_semantic.job_semantic_fingerprint),
             job_candidate_fingerprint=candidate.candidate_fingerprint,
             source_event_reference_fingerprint=(
                 candidate.job_semantic.source_event_reference.reference_fingerprint
@@ -343,9 +336,7 @@ def test_result_document_union_rejects_unknown_and_cross_branch_fields() -> None
     with pytest.raises(ValidationError):
         adapter.validate_python(
             {
-                "schema_version": (
-                    "durable_projection_graph_relation_reference.v1"
-                ),
+                "schema_version": ("durable_projection_graph_relation_reference.v1"),
                 "document_kind": "graph_relation",
                 "relation_id": "relation:1",
                 "graph_id": "graph:default",
@@ -413,10 +404,8 @@ def test_tool_argument_evidence_treats_noncanonical_json_as_typed_malformed(
 
 
 def test_tool_argument_evidence_freezes_valid_object_recursively() -> None:
-    disposition, parsed, error, canonical, _summary = (
-        _strict_tool_arguments_evidence(
-            '{"nested": {"items": [1, {"ok": true}]}}'
-        )
+    disposition, parsed, error, canonical, _summary = _strict_tool_arguments_evidence(
+        '{"nested": {"items": [1, {"ok": true}]}}'
     )
     assert disposition == "valid_object"
     assert error is None

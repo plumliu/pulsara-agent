@@ -19,10 +19,10 @@ from pulsara_agent.primitives._context_base import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.canonical_mutation import (
+from pulsara_agent.runtime.projection_jobs.postgres_canonical_mutation_repository import (
     PostgresCanonicalMutationRepository,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationKind,
     CanonicalMutationPlannedSurfaceFact,
     CanonicalMutationSurface,
@@ -43,7 +43,7 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     RuntimeWriteAdmissionEpochFact,
     build_projection_fact,
 )
-from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+from pulsara_agent.projection_jobs.canonical_mutation import (
     build_canonical_mutation_bundle,
 )
 from pulsara_agent.runtime.projection_jobs.pre_activation import (
@@ -126,9 +126,7 @@ def _migrate_legacy_mutations(
         connection,
         maintenance_operation_id=operation_id,
     )
-    expected_authority = _maintenance_authority_fingerprint(
-        maintenance_epoch
-    )
+    expected_authority = _maintenance_authority_fingerprint(maintenance_epoch)
     if (
         plan.maintenance_authority_fingerprint != expected_authority
         or plan.database_target_fingerprint
@@ -142,7 +140,8 @@ def _migrate_legacy_mutations(
         by_outbox.setdefault(entry.legacy_outbox_id, {})[entry.surface] = entry
 
     rows = tuple(
-        connection.cursor(row_factory=dict_row).execute(
+        connection.cursor(row_factory=dict_row)
+        .execute(
             """
             SELECT outbox_id, graph_id, governance_batch_id, decision_id,
                    mutation_lane, sequence_key, target_entry_key,
@@ -151,7 +150,8 @@ def _migrate_legacy_mutations(
             FROM public.memory_write_outbox
             ORDER BY sequence_key, created_at, outbox_id
             """
-        ).fetchall()
+        )
+        .fetchall()
     )
     mutation_fingerprints: list[str] = []
     delivery_fingerprints: list[str] = []
@@ -171,14 +171,11 @@ def _migrate_legacy_mutations(
         payload_sha = _sha256_payload(row["payload"])
         entry_map = by_outbox.get(outbox_id, {})
         requested = tuple(
-            _legacy_surface(name)
-            for name in payload_model.surface_apply_status
+            _legacy_surface(name) for name in payload_model.surface_apply_status
         )
         if set(requested) != set(entry_map):
             raise ValueError("legacy binding plan does not classify every surface")
-        planned = tuple(
-            _planned_surface(entry_map[surface]) for surface in requested
-        )
+        planned = tuple(_planned_surface(entry_map[surface]) for surface in requested)
         surface_plan = cast(
             CanonicalMutationSurfacePlanFact,
             build_projection_fact(
@@ -188,8 +185,7 @@ def _migrate_legacy_mutations(
                 composition_fingerprint=context_fingerprint(
                     "canonical-mutation-surface-composition:v2",
                     tuple(
-                        item.handler_contract.contract_fingerprint
-                        for item in planned
+                        item.handler_contract.contract_fingerprint for item in planned
                     ),
                 ),
             ),
@@ -215,18 +211,15 @@ def _migrate_legacy_mutations(
             payloads=(body,),
             surface_plan=surface_plan,
             source_authority_fingerprints=tuple(
-                entry.entry_fingerprint
-                for entry in entry_map.values()
+                entry.entry_fingerprint for entry in entry_map.values()
             ),
             mutation_ids=(outbox_id,),
         )
-        receipts = (
-            PostgresCanonicalMutationRepository.append_candidates_in_transaction(
-                connection,
-                source_owner=owner,
-                surface_plan=surface_plan,
-                candidates=bundle.ordered_mutation_candidates,
-            )
+        receipts = PostgresCanonicalMutationRepository.append_candidates_in_transaction(
+            connection,
+            source_owner=owner,
+            surface_plan=surface_plan,
+            candidates=bundle.ordered_mutation_candidates,
         )
         if len(receipts) != 1:
             raise ValueError("legacy mutation transform cardinality drifted")
@@ -234,9 +227,7 @@ def _migrate_legacy_mutations(
         for surface in requested:
             entry = entry_map[surface]
             branch_counts[entry.binding_authority.binding_kind] += 1
-            status = payload_model.surface_apply_status[
-                _legacy_surface_name(surface)
-            ]
+            status = payload_model.surface_apply_status[_legacy_surface_name(surface)]
             state, mutation_sequence, sequence_key = _bind_legacy_delivery_state(
                 connection,
                 mutation_id=outbox_id,
@@ -261,9 +252,7 @@ def _migrate_legacy_mutations(
                     CanonicalMutationSurfaceTargetHeadFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceTargetHeadFact,
-                        schema_version=(
-                            "canonical_mutation_surface_target_head.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_target_head.v1"),
                         surface=surface,
                         sequence_key=sequence_key,
                         terminal_surface_sequence_number=(
@@ -272,8 +261,7 @@ def _migrate_legacy_mutations(
                         terminal_mutation_sequence_number=mutation_sequence,
                         terminal_mutation_id=outbox_id,
                         terminal_mutation_semantic_fingerprint=(
-                            state.delivery_identity
-                            .mutation_semantic_fingerprint
+                            state.delivery_identity.mutation_semantic_fingerprint
                         ),
                         terminal_disposition="applied",
                         terminal_receipt_fingerprint=(
@@ -293,20 +281,14 @@ def _migrate_legacy_mutations(
         LegacySurfaceMigrationBindingAppliedReceiptFact,
         build_projection_fact(
             LegacySurfaceMigrationBindingAppliedReceiptFact,
-            schema_version=(
-                "legacy_surface_migration_binding_applied_receipt.v1"
-            ),
+            schema_version=("legacy_surface_migration_binding_applied_receipt.v1"),
             plan_fingerprint=plan.plan_fingerprint,
             resulting_v6_registry_prefix_fingerprint=(
                 resulting_registry_prefix_fingerprint
             ),
-            historical_confirmed_count=branch_counts[
-                "historical_confirmed"
-            ],
+            historical_confirmed_count=branch_counts["historical_confirmed"],
             migration_rebound_count=branch_counts["migration_rebound"],
-            decommissioned_and_rebuilt_count=branch_counts[
-                "decommission_and_rebuild"
-            ],
+            decommissioned_and_rebuilt_count=branch_counts["decommission_and_rebuild"],
             ordered_surface_rebase_fingerprints=(),
             resulting_mutation_accumulator=context_fingerprint(
                 "legacy-v2-mutation-result-accumulator:v1",
@@ -346,9 +328,7 @@ def _install_pre_activation_authority(
     ).fetchone()[0]:
         raise ValueError("v6 cannot install with preexisting projection jobs")
     contracts = packaged_pre_activation_contracts(
-        resulting_v6_registry_prefix_fingerprint=(
-            resulting_registry_prefix_fingerprint
-        )
+        resulting_v6_registry_prefix_fingerprint=(resulting_registry_prefix_fingerprint)
     )
     for contract in contracts:
         connection.execute(
@@ -422,7 +402,7 @@ def _activate_projection_kind(
     ).fetchone()
     if contract_row is None:
         raise ValueError("projection activation lacks pre-activation contract")
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         PreActivationProjectionHookContractFact,
     )
 
@@ -463,19 +443,14 @@ def _activate_projection_kind(
     )
     if tuple(item.runtime_session_id for item in receipts) != session_ids:
         raise ValueError("pre-activation coverage session set is incomplete")
-    maintenance_authority = _maintenance_authority_fingerprint(
-        maintenance_epoch
-    )
+    maintenance_authority = _maintenance_authority_fingerprint(maintenance_epoch)
     for receipt in receipts:
         if (
             receipt.pre_activation_contract_fingerprint
             != pre_contract.contract_fingerprint
             or receipt.maintenance_operation_id != operation_id
-            or receipt.maintenance_authority_fingerprint
-            != maintenance_authority
-            or ledger_horizon_for_session(
-                connection, receipt.runtime_session_id
-            )
+            or receipt.maintenance_authority_fingerprint != maintenance_authority
+            or ledger_horizon_for_session(connection, receipt.runtime_session_id)
             != receipt.frozen_horizon
         ):
             raise ValueError("pre-activation coverage authority drifted")
@@ -586,8 +561,10 @@ def _bind_legacy_delivery_state(
     attempt_count: int,
     eligible_at: datetime,
 ) -> tuple[CanonicalMutationSurfaceDeliveryStateFact, int, str]:
-    row = connection.cursor(row_factory=dict_row).execute(
-        """
+    row = (
+        connection.cursor(row_factory=dict_row)
+        .execute(
+            """
         SELECT d.delivery_identity, d.delivery_policy,
                d.sequence_key, m.mutation_sequence_number
         FROM public.canonical_mutation_surface_deliveries d
@@ -596,20 +573,20 @@ def _bind_legacy_delivery_state(
         WHERE d.mutation_id = %s AND d.surface = %s
         FOR UPDATE
         """,
-        (mutation_id, surface.value),
-    ).fetchone()
+            (mutation_id, surface.value),
+        )
+        .fetchone()
+    )
     if row is None:
         raise ValueError("legacy migration surface delivery is absent")
     identity = CanonicalMutationSurfaceDeliveryIdentityFact.model_validate(
         row["delivery_identity"]
     )
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         DurableProjectionDeliveryPolicyFact,
     )
 
-    policy = DurableProjectionDeliveryPolicyFact.model_validate(
-        row["delivery_policy"]
-    )
+    policy = DurableProjectionDeliveryPolicyFact.model_validate(row["delivery_policy"])
     terminal = None
     next_attempt_at = None
     failure = None
@@ -639,9 +616,7 @@ def _bind_legacy_delivery_state(
         next_attempt_at = resolved.astimezone(timezone.utc)
         failure = build_bounded_runtime_failure_diagnostic(
             error=RuntimeError("legacy surface delivery failed"),
-            redaction_profile_id=(
-                "canonical_mutation_surface_delivery_error.v1"
-            ),
+            redaction_profile_id=("canonical_mutation_surface_delivery_error.v1"),
         )
     elif legacy_status == "pending":
         status = "pending"
@@ -784,9 +759,7 @@ def _require_empty_v2_mutation_tables(connection: Connection) -> None:
             f"SELECT count(*) FROM public.{relation}"
         ).fetchone()[0]
         if count:
-            raise ValueError(
-                f"migration 0006 requires empty V2 relation {relation}"
-            )
+            raise ValueError(f"migration 0006 requires empty V2 relation {relation}")
 
 
 def _maintenance_authority_fingerprint(

@@ -211,3 +211,14 @@ Restart恢复pending/retry/expired lease。Pre-cutover output只从durable recei
 - v4→v8 staged migration、coverage/cutover和historical golden stability；
 - Host run不等待projection，restart后backlog继续并由Inspector显示exact source/receipt；
 - architecture guards证明旧hooks/outbox/workers/evidence writer物理消失。
+
+---
+
+## 11. D4 Projection Module Ownership
+
+Durable projection facts与pure contracts位于top-level`projection_jobs`，lower-layer port位于
+`ports.projection_jobs`。PostgreSQL job/surface/seeder/worker implementation继续位于
+`runtime.projection_jobs`。`storage`、`graph`、`memory`不得import concrete runtime implementation。
+
+Canonical mutation拆成pure factory、PostgreSQL repository、mutation writer/transaction capability；
+D3 event/job/result/schema fingerprint与运行语义不变。Runtime publisher仍只执行O(1) wake。

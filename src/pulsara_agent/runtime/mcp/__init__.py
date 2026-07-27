@@ -1,7 +1,11 @@
 """MCP runtime support."""
 
-from pulsara_agent.runtime.mcp.manager import McpClientManager, MockMcpClientManager
-from pulsara_agent.runtime.mcp.sdk import SdkMcpClientManager, SdkMcpConnection, discover_mcp_server
+from pulsara_agent.runtime.mcp.manager import McpClientManager
+from pulsara_agent.runtime.mcp.sdk import (
+    SdkMcpClientManager,
+    SdkMcpConnection,
+    discover_mcp_server,
+)
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
     McpBindingIdentity,
@@ -50,7 +54,6 @@ __all__ = [
     "McpStreamableHttpConfig",
     "McpToolAnnotations",
     "McpToolResult",
-    "MockMcpClientManager",
     "McpInstalledCapabilitySnapshot",
     "McpServerSupervisor",
     "SdkMcpClientManager",

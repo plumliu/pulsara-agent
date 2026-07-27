@@ -291,3 +291,28 @@ OPEN -> CLOSING -> CLOSED
 每个managed process使用`SanitizedOutputJournal`作为唯一output authority：内存segment、disk spool、sanitized cursor和successfully-spooled cursor均有独立bound。Spool I/O由bounded async owner执行，不得反压child stdout reader；ENOSPC、permission failure、queue overflow、fsync timeout或retained eviction产生typed gap，不得伪造exact recovery。
 
 HostSession拥有monitor coordinator、notification account和UI-only stream。Close顺序固定为：关闭ingress/tool/process admission，停止active run，终结active monitors，kill/close owned processes并finalize journals，drain completion/monitor terminal owners，将剩余notification disposition为`session_closed`，再做final writer/projection drain并释放Host资源。Monitor/completion reservation在terminal disposition后必须release，且无pending owner的process head确定性retire；顺序运行超过account capacity的process不得泄漏slot。
+
+---
+
+## 13. D4 Terminal Port Boundary
+
+三个public tool只消费closed ports：`TerminalCommandPort`启动命令，`TerminalProcessPort`拥有
+`list/log/poll/wait/write/submit/close_stdin/kill`，`TerminalMonitorPort`拥有
+`register/list/cancel`。Port request/outcome、prepared reservation/registration/cancellation与kill
+completion receipt均typed并exact join。
+
+Concrete tool不持有manager、notification account或monitor coordinator。Monitor inventory lifecycle
+使用durable core同一closed alias；registered/cancelled outcome不复制prepared carrier字段。
+
+`TerminalRequest`只包含命令语义，不能通过自由`metadata`携带event context、callback、recorder或
+reservation requirement。上述live dependency由独立typed `TerminalExecutionOwner`传给TerminalSession，
+其owner/session/tool-call identity必须exact join。
+
+Host main run启动并准备返回`running`前，必须取得completion notification reservation。当前内核若已
+spawn/yield后才取得reservation，port不得把结果暴露给caller；capacity或reservation失败必须同步以
+teardown reason终止、join并从registry退休该process，再返回typed
+`PROCESS_CAPACITY_EXHAUSTED` rejection。不得留下`reservation_required=True`但未确认、且无法写completion
+event的live process。
+
+Host process resource lease是terminal外所有shared process resources的单一close owner。Projection
+physical owner先drain，随后retrieval/PostgreSQL释放；close blocked时保留exact lease和dependencies供重试。

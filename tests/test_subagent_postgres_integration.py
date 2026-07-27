@@ -41,7 +41,7 @@ from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.primitives.model_call import canonical_json_bytes, sha256_fingerprint
-from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.subagent import (
     PostgresEventLogLocator,
     SubagentGraphHydrator,
@@ -56,7 +56,6 @@ from pulsara_agent.settings import StorageConfig
 class _FailingObserver:
     async def on_published_event(self, _published) -> None:
         raise RuntimeError("synthetic observer failure")
-
 
 
 def _delete_sessions(dsn: str, session_ids: list[str]) -> None:

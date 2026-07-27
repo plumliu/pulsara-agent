@@ -16,7 +16,7 @@ from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionKindActivationFact,
     DurableProjectionSessionCutoverFact,
@@ -40,7 +40,9 @@ def build_runtime_session_owner_semantic(
     runtime_session_id: str,
     workspace_root: str | None,
 ) -> RuntimeSessionOwnerSemanticFact:
-    normalized_workspace = workspace_root.strip() if workspace_root is not None else None
+    normalized_workspace = (
+        workspace_root.strip() if workspace_root is not None else None
+    )
     if not runtime_session_id:
         raise ValueError("runtime_session_id must be non-empty")
     if normalized_workspace == "":
@@ -72,9 +74,7 @@ def build_runtime_session_bootstrap_candidate(
             RuntimeSessionOwnerBootstrapCandidateFact,
             schema_version="runtime_session_owner_bootstrap_candidate.v1",
             session_owner=owner,
-            expected_admission_epoch_fingerprint=(
-                expected_admission_epoch_fingerprint
-            ),
+            expected_admission_epoch_fingerprint=(expected_admission_epoch_fingerprint),
         ),
     )
 
@@ -98,8 +98,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             runtime_session_id=runtime_session_id,
             workspace_root=workspace_root,
             expected_admission_epoch_fingerprint=(
-                self._connection_provider.schema_binding
-                .runtime_write_admission_epoch_fingerprint
+                self._connection_provider.schema_binding.runtime_write_admission_epoch_fingerprint
             ),
         )
 
@@ -186,9 +185,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                 confirmation=DurableProjectionCommitConfirmation.FULL,
                 candidate=candidate,
                 resulting_state=state,
-                physical_disposition=(
-                    "inserted" if inserted else "exact_confirmed"
-                ),
+                physical_disposition=("inserted" if inserted else "exact_confirmed"),
             )
         except BaseException as error:
             return self._confirm_after_uncertain_write(
@@ -366,12 +363,8 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             PreActivationProjectionHookContractFact.model_validate(row[0])
             for row in pre_rows
         )
-        active_kinds = {
-            item.activation_semantic.projection_kind for item in active
-        }
-        pre_kinds = {
-            item.contract_semantic.projection_kind for item in pre_activation
-        }
+        active_kinds = {item.activation_semantic.projection_kind for item in active}
+        pre_kinds = {item.contract_semantic.projection_kind for item in pre_activation}
         if active_kinds & pre_kinds:
             raise ValueError("projection kind has active and pre-activation authority")
         expected_active: list[DurableProjectionSessionCutoverFact] = []
@@ -382,9 +375,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     DurableProjectionSessionCutoverFact,
                     schema_version="durable_projection_session_cutover.v1",
                     runtime_session_id=candidate.session_owner.runtime_session_id,
-                    projection_kind=(
-                        activation.activation_semantic.projection_kind
-                    ),
+                    projection_kind=(activation.activation_semantic.projection_kind),
                     cutover_through_sequence=0,
                     cutover_ledger_continuity_accumulator=(
                         EMPTY_LEDGER_CONTINUITY_ACCUMULATOR
@@ -400,30 +391,23 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     ),
                     activation_fingerprint=activation.activation_fingerprint,
                     seed_contract_fingerprint=(
-                        activation.activation_semantic.seed_contract
-                        .seed_contract_fingerprint
+                        activation.activation_semantic.seed_contract.seed_contract_fingerprint
                     ),
                     cutover_policy_id="post_cutover_events_only",
                 ),
             )
             expected_active.append(cutover)
-        expected_pre_activation: list[
-            PreActivationProjectionSessionCutoverFact
-        ] = []
+        expected_pre_activation: list[PreActivationProjectionSessionCutoverFact] = []
         for contract in pre_activation:
             semantic = contract.contract_semantic
             cutover = cast(
                 PreActivationProjectionSessionCutoverFact,
                 build_projection_fact(
                     PreActivationProjectionSessionCutoverFact,
-                    schema_version=(
-                        "pre_activation_projection_session_cutover.v1"
-                    ),
+                    schema_version=("pre_activation_projection_session_cutover.v1"),
                     runtime_session_id=candidate.session_owner.runtime_session_id,
                     projection_kind=semantic.projection_kind,
-                    pre_activation_contract_fingerprint=(
-                        contract.contract_fingerprint
-                    ),
+                    pre_activation_contract_fingerprint=(contract.contract_fingerprint),
                     cutover_through_sequence=0,
                     cutover_ledger_continuity_accumulator=(
                         EMPTY_LEDGER_CONTINUITY_ACCUMULATOR
@@ -502,15 +486,11 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             or len(pre_rows) != len(expected_pre)
             or any(
                 item.cutover_fingerprint != str(row[1])
-                for item, row in zip(
-                    active_cutovers, active_rows, strict=True
-                )
+                for item, row in zip(active_cutovers, active_rows, strict=True)
             )
             or any(
                 item.cutover_fingerprint != str(row[1])
-                for item, row in zip(
-                    pre_cutovers, pre_rows, strict=True
-                )
+                for item, row in zip(pre_cutovers, pre_rows, strict=True)
             )
             or active_cutovers != expected_active
             or pre_cutovers != expected_pre
@@ -519,9 +499,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
         active_fingerprints = tuple(
             item.cutover_fingerprint for item in active_cutovers
         )
-        pre_fingerprints = tuple(
-            item.cutover_fingerprint for item in pre_cutovers
-        )
+        pre_fingerprints = tuple(item.cutover_fingerprint for item in pre_cutovers)
         return cast(
             RuntimeSessionBootstrapStateFact,
             build_projection_fact(

@@ -41,7 +41,7 @@ from pulsara_agent.event.events import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
+from pulsara_agent.replay.message_assembler import BlockAssembler, BlockCompletion
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.message.blocks import (
     Base64Source,
@@ -54,7 +54,7 @@ from pulsara_agent.message.blocks import (
     ToolResultBlock,
 )
 from pulsara_agent.primitives._context_base import FrozenJsonObjectFact
-from pulsara_agent.message.reducer import (
+from pulsara_agent.replay.message_reducer import (
     MessageReplayControlError,
     accepted_main_reply_ids,
 )
@@ -547,11 +547,11 @@ def project_context_transcript(
 
     messages, calls, results, baseline_pairs, baseline_units = (
         _apply_window_compaction_projection(
-        messages=messages,
-        calls=calls,
-        results=results,
-        snapshot=snapshot,
-        source_document=window_compaction_source_document,
+            messages=messages,
+            calls=calls,
+            results=results,
+            snapshot=snapshot,
+            source_document=window_compaction_source_document,
         )
     )
     messages = _sort_messages(messages, results=results)
@@ -953,9 +953,7 @@ def _event_matches_block(event: AgentEvent, completion: BlockCompletion) -> bool
         return (
             isinstance(
                 event,
-                ToolCallStartEvent
-                | ToolCallArgumentsSegmentEvent
-                | ToolCallEndEvent,
+                ToolCallStartEvent | ToolCallArgumentsSegmentEvent | ToolCallEndEvent,
             )
             and event.tool_call_id == completion.block_id
         )
@@ -1133,7 +1131,9 @@ def _validate_window_compaction_source_document(
 ) -> None:
     window = snapshot.authority_slice_plan.transcript_window
     if window.window_kind != "window_compaction":
-        raise TranscriptNormalizationError("window terminal used by a prefix projection")
+        raise TranscriptNormalizationError(
+            "window terminal used by a prefix projection"
+        )
     if source_document is None:
         raise TranscriptNormalizationError(
             "window compaction requires its source document artifact"
@@ -1158,8 +1158,7 @@ def _validate_window_compaction_source_document(
         or source_document.document_fingerprint != plan.source_document_fingerprint
         or source_document.summarized_message_ids != plan.summarized_message_ids
         or source_document.retained_message_ids != plan.retained_message_ids
-        or source_document.summarized_pair_group_ids
-        != plan.summarized_pair_group_ids
+        or source_document.summarized_pair_group_ids != plan.summarized_pair_group_ids
         or source_document.retained_pair_group_ids != plan.retained_pair_group_ids
     ):
         raise TranscriptNormalizationError(
@@ -1262,9 +1261,7 @@ def _reposition_tool_result_units(
     pairs: tuple[ToolInteractionPairFact, ...],
     positions: dict[tuple[str, int], int],
 ) -> list[ToolResultRenderUnit]:
-    pair_by_call = {
-        (pair.call_message_id, pair.tool_call_id): pair for pair in pairs
-    }
+    pair_by_call = {(pair.call_message_id, pair.tool_call_id): pair for pair in pairs}
     repositioned: list[ToolResultRenderUnit] = []
     for unit in units:
         pair = pair_by_call.get((unit.call_message_id, unit.tool_call_id))
@@ -1274,9 +1271,7 @@ def _reposition_tool_result_units(
             )
         payload = unit.model_dump(mode="python", exclude={"unit_fingerprint"})
         payload.update(
-            call_position=positions[
-                (pair.call_message_id, pair.call_block_index)
-            ],
+            call_position=positions[(pair.call_message_id, pair.call_block_index)],
             result_position=positions[
                 (pair.result_message_id, pair.result_block_index)
             ],
@@ -1359,9 +1354,7 @@ def _run_ingress_notification_messages(
     )
     source_ref = stored.to_reference(event_slice.runtime_session_id)
     segment = (
-        "current_user"
-        if stored.sequence == current_start_sequence
-        else "prior_history"
+        "current_user" if stored.sequence == current_start_sequence else "prior_history"
     )
     messages: list[TranscriptMessageFact] = []
     for index, attachment in enumerate(attachments):

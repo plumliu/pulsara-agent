@@ -18,6 +18,7 @@ class PostgresSchemaFailureCode(StrEnum):
     HISTORY_CONFLICT = "schema_migration_history_conflict"
     RESOURCE_CHECKSUM_MISMATCH = "schema_migration_resource_checksum_mismatch"
     MIGRATION_FAILED = "schema_migration_failed"
+    PROJECTION_PREPARATION_PORT_REQUIRED = "schema_projection_preparation_port_required"
     MIGRATION_CONFIRMATION_CONFLICT = "schema_migration_confirmation_conflict"
     MIGRATION_CONFIRMATION_UNRESOLVED = "schema_migration_confirmation_unresolved"
     CATALOG_DRIFT = "schema_catalog_drift"
@@ -25,12 +26,8 @@ class PostgresSchemaFailureCode(StrEnum):
     EXTENSION_TOO_OLD = "schema_extension_too_old"
     PRIVILEGE_MISSING = "schema_runtime_privilege_missing"
     PRIVILEGE_RECONCILIATION_FAILED = "schema_privilege_reconciliation_failed"
-    PRIVILEGE_CONFIRMATION_CONFLICT = (
-        "schema_runtime_grant_confirmation_conflict"
-    )
-    PRIVILEGE_CONFIRMATION_UNRESOLVED = (
-        "schema_runtime_grant_confirmation_unresolved"
-    )
+    PRIVILEGE_CONFIRMATION_CONFLICT = "schema_runtime_grant_confirmation_conflict"
+    PRIVILEGE_CONFIRMATION_UNRESOLVED = "schema_runtime_grant_confirmation_unresolved"
     CONNINFO_UNSUPPORTED = "schema_conninfo_unsupported"
     ACCESS_LEASE_RELEASED = "schema_access_lease_released"
 

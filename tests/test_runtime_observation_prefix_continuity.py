@@ -19,7 +19,8 @@ from pulsara_agent.primitives.context_source import ContextSourceId
 from pulsara_agent.primitives.runtime_observation import (
     ContextSourceObservationProducerFact,
 )
-from pulsara_agent.runtime import AgentRuntime, LoopStatus
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import LoopStatus
 from pulsara_agent.runtime.context_input.sources.lifecycle import (
     default_context_source_lifecycle_registry,
     default_provider_user_carrier_protocol,
@@ -62,9 +63,7 @@ def test_provider_user_carrier_union_cannot_be_forged_by_human_text() -> None:
     assert set(json.loads(request.content[0])) == {"pulsara_runtime_request"}
     assert observation.role is MessageRole.RUNTIME_OBSERVATION
     observation_wire = json.loads(observation.content[0])
-    assert set(observation_wire) == {
-        "pulsara_runtime_observation"
-    }
+    assert set(observation_wire) == {"pulsara_runtime_observation"}
     clock_payload = observation_wire["pulsara_runtime_observation"]["payload"]
     assert clock_payload == {
         "local_date": "2026-07-20",
@@ -194,16 +193,26 @@ def test_observation_registry_is_producer_aware_and_source_exhaustive() -> None:
         if isinstance(producer, ContextSourceObservationProducerFact)
     }
     assert actual == expected
-    assert next(
-        item
-        for item in protocol.ordered_kind_contracts
-        if item.kind == "lifecycle_observation"
-    ).producers[0].producer_kind == "transcript_lifecycle"
-    assert next(
-        item
-        for item in protocol.ordered_kind_contracts
-        if item.kind == "runtime_observation_rewrite_projection"
-    ).producers[0].producer_kind == "long_horizon_rewrite"
+    assert (
+        next(
+            item
+            for item in protocol.ordered_kind_contracts
+            if item.kind == "lifecycle_observation"
+        )
+        .producers[0]
+        .producer_kind
+        == "transcript_lifecycle"
+    )
+    assert (
+        next(
+            item
+            for item in protocol.ordered_kind_contracts
+            if item.kind == "runtime_observation_rewrite_projection"
+        )
+        .producers[0]
+        .producer_kind
+        == "long_horizon_rewrite"
+    )
     by_kind = {item.kind: item for item in protocol.ordered_kind_contracts}
     assert by_kind["active_skill_snapshot"].authority_class == "runtime_guidance"
     assert by_kind["active_skill_snapshot"].lifecycle_class == "replacement_snapshot"
@@ -254,16 +263,13 @@ def test_long_horizon_observation_rewrite_protects_latest_clock_and_shrinks_hist
     result = asyncio.run(run_agent_task(agent, "exercise observation rewrite"))
 
     assert first.status is result.status is LoopStatus.FINISHED
-    snapshot = (
-        runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
-            call_lane="main_agent"
-        )
+    snapshot = runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+        call_lane="main_agent"
     )
     assert snapshot is not None and snapshot.core_state is not None
     assert snapshot.resident is not None
     assert (
-        snapshot.core_state.generation.compatibility.provider_visible
-        .provider_user_carrier_protocol_fingerprint
+        snapshot.core_state.generation.compatibility.provider_visible.provider_user_carrier_protocol_fingerprint
         == default_provider_user_carrier_protocol().contract_fingerprint
     )
     clock_ids = tuple(
@@ -278,9 +284,7 @@ def test_long_horizon_observation_rewrite_protects_latest_clock_and_shrinks_hist
         if item.wire_semantic.observation_kind == "runtime_clock"
     )
     parent = next(
-        event
-        for event in runtime_session.event_log.iter()
-        if event.sequence == 1
+        event for event in runtime_session.event_log.iter() if event.sequence == 1
     )
     frozen = freeze_event_write_candidate(parent.model_copy(update={"sequence": None}))
     parent_ref = ContextEventReferenceFact(
@@ -346,9 +350,7 @@ def test_long_horizon_observation_rewrite_protects_latest_clock_and_shrinks_hist
     tampered = rewrite.model_copy(
         update={
             "partition_proof": rewrite.partition_proof.model_copy(
-                update={
-                    "source_stable_state_fingerprint": "sha256:" + "2" * 64
-                }
+                update={"source_stable_state_fingerprint": "sha256:" + "2" * 64}
             )
         }
     )

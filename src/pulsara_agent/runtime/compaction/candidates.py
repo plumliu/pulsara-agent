@@ -8,9 +8,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event.events import ContextCompactionCompletedEvent
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, PooledMemoryCandidate
+from pulsara_agent.memory.candidates.pool import (
+    CandidateOrigin,
+    CandidatePool,
+    PooledMemoryCandidate,
+)
 from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.ontology import memory
@@ -235,7 +242,9 @@ def parse_compaction_memory_candidates(
 
     effective_policy = policy or ContextCompactionMemoryCandidatePolicy()
     if not effective_policy.enabled:
-        return CompactionCandidateParseResult(attempted_count=0, candidates=(), skipped=(), diagnostics=())
+        return CompactionCandidateParseResult(
+            attempted_count=0, candidates=(), skipped=(), diagnostics=()
+        )
     if workspace_kind == "transient":
         return CompactionCandidateParseResult(
             attempted_count=0,
@@ -271,7 +280,9 @@ def parse_compaction_memory_candidates(
                     message="Compaction candidate extraction was enabled but no memory candidate block was present.",
                 ),
             )
-        return CompactionCandidateParseResult(attempted_count=0, candidates=(), skipped=(), diagnostics=diagnostics)
+        return CompactionCandidateParseResult(
+            attempted_count=0, candidates=(), skipped=(), diagnostics=diagnostics
+        )
 
     try:
         parsed = json.loads(match.group(1).strip())
@@ -344,7 +355,9 @@ def parse_compaction_memory_candidates(
             )
             continue
         statement = statement_value.strip()
-        if _looks_secret_like(statement) or _looks_secret_like(str(raw_candidate.get("reason") or "")):
+        if _looks_secret_like(statement) or _looks_secret_like(
+            str(raw_candidate.get("reason") or "")
+        ):
             skipped.append(
                 CompactionCandidateSkippedItem(
                     code="compaction_candidate_secret_like_content",
@@ -474,7 +487,9 @@ def _intent_fingerprint(
         "statement": " ".join(statement.lower().split()),
         "extractor_version": extractor_version,
     }
-    encoded = json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -493,7 +508,9 @@ def _candidate_metadata_base(
         completed_event.included_artifact_ids,
         policy.max_provenance_ids,
     )
-    summary_excerpt, summary_excerpt_truncated = _clip_text(summary_text, policy.max_summary_excerpt_chars)
+    summary_excerpt, summary_excerpt_truncated = _clip_text(
+        summary_text, policy.max_summary_excerpt_chars
+    )
     return {
         "source": "context_compaction",
         "compaction_id": completed_event.compaction_id,
@@ -519,7 +536,9 @@ def _candidate_metadata_base(
     }
 
 
-def _bounded_tuple(values: list[str] | tuple[str, ...], max_items: int) -> tuple[tuple[str, ...], bool]:
+def _bounded_tuple(
+    values: list[str] | tuple[str, ...], max_items: int
+) -> tuple[tuple[str, ...], bool]:
     if max_items < 0:
         max_items = 0
     return tuple(values[:max_items]), len(values) > max_items

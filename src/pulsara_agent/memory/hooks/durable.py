@@ -16,7 +16,7 @@ from datetime import timedelta
 from time import monotonic
 
 from pulsara_agent.event import AgentEvent, EventType, RunEndEvent
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.memory.candidates.pool import (
@@ -237,23 +237,22 @@ class DurableMemoryHooks(NoopMemoryHooks):
         self,
         state: LoopState,
     ) -> WorkingContextSummary | None:
-        model_step_key = state.scratchpad.get(
-            "working_context_refresh_model_step_key"
-        )
+        model_step_key = state.scratchpad.get("working_context_refresh_model_step_key")
         if not isinstance(model_step_key, str) or not model_step_key:
             model_step_key = (
-                f"{state.run_id}:"
-                f"{state.scratchpad.get('model_call_index', 0)}"
+                f"{state.run_id}:{state.scratchpad.get('model_call_index', 0)}"
             )
         receipt_key = "working_context_refresh_attempted_model_step_key"
         if state.scratchpad.get(receipt_key) == model_step_key:
             return None
         state.scratchpad[receipt_key] = model_step_key
+
         def operation() -> WorkingContextSummary | None:
             return self._refresh_working_context_from_durable_timeline(
                 runtime_session_id=state.session_id,
                 current_run_id=state.run_id,
             )
+
         port = self.working_context_async_operation_port
         if port is None:
             return operation()
@@ -289,10 +288,7 @@ class DurableMemoryHooks(NoopMemoryHooks):
                 raise ValueError("RunEnd sparse read decoded another event type")
             if decoded.run_id == current_run_id:
                 continue
-            if (
-                existing is not None
-                and decoded.run_id == existing.source_run_id
-            ):
+            if existing is not None and decoded.run_id == existing.source_run_id:
                 return None
             refreshed = self._update_working_context_for_run(
                 runtime_session_id=runtime_session_id,

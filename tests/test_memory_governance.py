@@ -16,15 +16,15 @@ from tests.support.model_stream import (
 )
 
 from pulsara_agent.event import EventContext, EventType
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     InvalidAttemptPayload,
     PreferenceCandidate,
     ValidCandidatePayload,
 )
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.message.assembler import BlockAssembler
-from pulsara_agent.message.reducer import MessageReplayControlError
+from pulsara_agent.replay.message_assembler import BlockAssembler
+from pulsara_agent.replay.message_reducer import MessageReplayControlError
 from pulsara_agent.memory import (
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
@@ -61,7 +61,7 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
-from tests.support.memory_uow import fake_memory_uow_factory
+from tests.support.memory_uow import fake_memory_uow_factory, postgres_memory_uow
 
 
 def test_governance_executor_requires_explicit_uow_factory() -> None:
@@ -90,8 +90,9 @@ def test_governance_executor_requires_explicit_uow_factory() -> None:
 def test_postgres_uow_requires_explicit_artifact_store() -> None:
     with pytest.raises(TypeError, match="archive"):
         MemoryWriteUnitOfWork(  # type: ignore[call-arg]
-            connection_provider=object(),  # type: ignore[arg-type]
+            scope_factory=object(),  # type: ignore[arg-type]
             runtime_session_id="runtime:test",
+            session_bootstrap=object(),  # type: ignore[arg-type]
         )
 
 
@@ -529,7 +530,7 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
             runtime_session_id=runtime_session_id,
             event_commit_port=log.extend,
         ),
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(
@@ -622,7 +623,7 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
             runtime_session_id=runtime_session_id,
             event_commit_port=log.extend,
         ),
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(
@@ -751,7 +752,7 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
             runtime_session_id=runtime_session_id,
             event_commit_port=log.extend,
         ),
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(
@@ -799,7 +800,7 @@ def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) ->
         turn_id=f"turn:governance/test-uow-dedupe/{uuid4().hex}",
         reply_id=f"reply:governance/test-uow-dedupe/{uuid4().hex}",
     )
-    with MemoryWriteUnitOfWork(
+    with postgres_memory_uow(
         connection_provider=verified_postgres_provider(dsn),
         runtime_session_id=runtime_session_id,
         archive=PostgresArtifactStore(
@@ -881,7 +882,7 @@ def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
         event_outbox_dispatcher=dispatcher,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(

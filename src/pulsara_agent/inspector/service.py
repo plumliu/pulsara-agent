@@ -98,7 +98,7 @@ from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from pulsara_agent.message.reducer import MessageReducer
+from pulsara_agent.replay.message_reducer import MessageReducer
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
 from pulsara_agent.runtime.context_input.replay import (
     ContextInputReplayError,

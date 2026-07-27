@@ -66,6 +66,10 @@ from pulsara_agent.primitives.terminal_observation import (
     progress_limiter_decision,
     terminal_receipt_dominates_observation,
 )
+from pulsara_agent.ports.terminal import (
+    PreparedTerminalProcessMonitorCancellation,
+    PreparedTerminalProcessMonitorRegistration,
+)
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.event_write_service import (
     PendingRuntimeEventWriteError,
@@ -76,17 +80,13 @@ from pulsara_agent.runtime.terminal.output import (
     recover_terminal_output_delta,
 )
 from pulsara_agent.runtime.terminal.process import TerminalProcessState
-from pulsara_agent.runtime.terminal.models import TerminalResult
 from pulsara_agent.runtime.terminal.process import (
     snapshot_process_for_monitor_registration,
 )
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import RuntimeSession
-    from pulsara_agent.runtime.terminal.notification import (
-        PreparedTerminalNotificationReservation,
-    )
-    from pulsara_agent.tools.base import ToolRuntimeContext
+    from pulsara_agent.ports.tool_execution import ToolRuntimeContext
     from pulsara_agent.runtime.terminal.ui_stream import TerminalMonitorEventChannel
 
 
@@ -112,24 +112,6 @@ class TerminalMonitorContractError(RuntimeError):
 
 class TerminalMonitorRecoveryBlocked(TerminalMonitorContractError):
     """Restart recovery could not settle before the Host open deadline."""
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedTerminalProcessMonitorRegistration:
-    registration_semantic: TerminalProcessMonitorRegistrationSemanticFact
-    registration_attribution: TerminalProcessMonitorRegistrationAttributionFact
-    initial_core_state: TerminalProcessMonitorCoreStateFact
-    registered_event: TerminalProcessMonitorRegisteredEvent
-    notification_reservation: "PreparedTerminalNotificationReservation | None"
-    initial_observation_result: TerminalResult
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedTerminalProcessMonitorCancellation:
-    monitor_id: str
-    outcome: Literal["cancelled", "already_terminal"]
-    cancellation_semantic: TerminalProcessMonitorCancellationSemanticFact | None
-    stable_candidates: tuple[AgentEvent, ...]
 
 
 @dataclass(slots=True)
@@ -835,7 +817,7 @@ class TerminalMonitorCoordinator:
                 raise TerminalMonitorContractError(
                     "terminal monitor coordinator is closed"
                 )
-        if runtime_context.run_entry_kind != "host_main_run":
+        if runtime_context.owner_kind.value != "host_main_run":
             raise TerminalMonitorContractError(
                 "terminal_monitor_child_registration_unsupported"
             )
@@ -893,18 +875,18 @@ class TerminalMonitorCoordinator:
             run_start=run_start,
             run_reference=run_reference,
         )
-        permission_policy_fingerprint = context_fingerprint(
-            "terminal-monitor-permission-policy:v1",
-            runtime_context.permission_policy or {},
-        )
         permission = build_frozen_fact(
             TerminalAutonomyPermissionAuthorityFact,
             schema_version="terminal_autonomy_permission_authority.v1",
             registration_permission_snapshot_id=(
-                runtime_context.permission_snapshot_id or "permission:implicit"
+                runtime_context.permission.permission_snapshot_id
             ),
-            registration_permission_mode=(runtime_context.permission_mode or "default"),
-            registration_permission_policy_fingerprint=(permission_policy_fingerprint),
+            registration_permission_mode=(
+                runtime_context.permission.permission_mode.value
+            ),
+            registration_permission_policy_fingerprint=(
+                runtime_context.permission.permission_policy_fingerprint
+            ),
             scheduling_policy_id="terminal-monitor-autonomy",
             scheduling_policy_version=1,
             scheduling_policy_fingerprint=context_fingerprint(
@@ -1269,7 +1251,7 @@ class TerminalMonitorCoordinator:
         origin_tool_call_id: str,
         runtime_context: ToolRuntimeContext,
     ) -> PreparedTerminalProcessMonitorCancellation:
-        if runtime_context.run_entry_kind != "host_main_run":
+        if runtime_context.owner_kind.value != "host_main_run":
             raise TerminalMonitorContractError(
                 "terminal_monitor_child_cancellation_unsupported"
             )
@@ -2639,7 +2621,6 @@ def _add_seconds(value: str, seconds: int) -> str:
 
 
 __all__ = [
-    "PreparedTerminalProcessMonitorRegistration",
     "TerminalMonitorContractError",
     "TerminalMonitorCoordinator",
     "TerminalMonitorRecord",

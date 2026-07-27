@@ -19,7 +19,7 @@ from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY, EventLog
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.message import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message import AssistantMsg, Msg, SystemMsg, UserMsg
-from pulsara_agent.message.reducer import (
+from pulsara_agent.replay.message_reducer import (
     MessageReducer,
     MessageReplayControlError,
     require_canonical_reply_control,
@@ -202,7 +202,8 @@ def rebuild_prior_messages(
         events = [
             event
             for event in events
-            if event.sequence is not None and event.sequence > boundary.keep_after_sequence
+            if event.sequence is not None
+            and event.sequence > boundary.keep_after_sequence
         ]
     recovery = project_recovery_from_events(events)
     note_target = _last_terminal_run_note_target(events, recovery)
@@ -223,7 +224,11 @@ def rebuild_prior_messages(
                 )
             )
         if _should_emit_terminal_note(event, note_target, noted_runs):
-            messages.append(_note_message(note_target, recovery=recovery, created_at=event.created_at))
+            messages.append(
+                _note_message(
+                    note_target, recovery=recovery, created_at=event.created_at
+                )
+            )
             noted_runs.add(event.run_id)
         if isinstance(event, ReplyEndEvent):
             if event.reply_id in seen_replies:
@@ -240,7 +245,9 @@ def rebuild_prior_messages(
             if message is not None and event.run_id in terminal_run_ids:
                 message = _strip_unfinished_tool_calls(
                     message,
-                    completed_tool_call_ids=completed_tool_call_ids_by_run.get(event.run_id, set()),
+                    completed_tool_call_ids=completed_tool_call_ids_by_run.get(
+                        event.run_id, set()
+                    ),
                 )
             if message is not None:
                 messages.append(message)
@@ -248,7 +255,11 @@ def rebuild_prior_messages(
         if event.reply_id in seen_replies:
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
-        messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
+        messages.append(
+            _note_message(
+                note_target, recovery=recovery, created_at=note_target.created_at
+            )
+        )
     return prefix + messages
 
 
@@ -338,7 +349,11 @@ def _rebuild_messages_from_events(
                 )
             )
         if _should_emit_terminal_note(event, note_target, noted_runs):
-            messages.append(_note_message(note_target, recovery=recovery, created_at=event.created_at))
+            messages.append(
+                _note_message(
+                    note_target, recovery=recovery, created_at=event.created_at
+                )
+            )
             noted_runs.add(event.run_id)
         if isinstance(event, ReplyEndEvent):
             if event.reply_id in seen_replies:
@@ -359,7 +374,9 @@ def _rebuild_messages_from_events(
             if message is not None and event.run_id in terminal_run_ids:
                 message = _strip_unfinished_tool_calls(
                     message,
-                    completed_tool_call_ids=completed_tool_call_ids_by_run.get(event.run_id, set()),
+                    completed_tool_call_ids=completed_tool_call_ids_by_run.get(
+                        event.run_id, set()
+                    ),
                 )
             if message is not None:
                 messages.append(message)
@@ -367,7 +384,11 @@ def _rebuild_messages_from_events(
         if event.reply_id in seen_replies:
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
-        messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
+        messages.append(
+            _note_message(
+                note_target, recovery=recovery, created_at=note_target.created_at
+            )
+        )
     return messages
 
 
@@ -438,7 +459,9 @@ def _strip_unfinished_tool_calls(
     # A stopped pending-approval turn can end after the model emitted only a
     # tool call. Replaying that assistant turn without a following tool result
     # violates Chat Completions ordering, so keep only user input + stop note.
-    if not any(isinstance(block, (TextBlock, DataBlock, ToolResultBlock)) for block in filtered):
+    if not any(
+        isinstance(block, (TextBlock, DataBlock, ToolResultBlock)) for block in filtered
+    ):
         return None
     return message.model_copy(update={"content": filtered})
 

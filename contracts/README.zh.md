@@ -14,8 +14,10 @@ _Created: 2026-07-04_
 
 ## 1. Runtime 主循环与会话
 
+- [PACKAGE_DEPENDENCY_AND_PORTS_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/PACKAGE_DEPENDENCY_AND_PORTS_CONTRACT.zh.md)
+  - 覆盖 D4 target DAG、canonical AST import observations、ports/type ownership、Host/test-support hard cut与 residual SCC baseline。
 - [PACKAGE_FACADE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/PACKAGE_FACADE_CONTRACT.zh.md)
-  - 覆盖 Python package facade、lazy import 边界、public `__all__`、CLI script import 边界。
+  - 覆盖 Python package facade、direct owning-module import、public `__all__`、CLI script import 边界。
 - [APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md)
   - 覆盖 settings/env-file、CLI 命令面、Host run/repl/inspect、REPL plan/approval/resume/compaction UI、bundled skills 管理入口。
 - [AGENT_RUNTIME_LOOP_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/AGENT_RUNTIME_LOOP_CONTRACT.zh.md)

@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol, TypeAlias
 
 from pulsara_agent.event import AgentEvent, EventType
 from pulsara_agent.message import Msg, ToolResultBlock
-from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
+from pulsara_agent.replay.message_assembler import BlockAssembler, BlockCompletion
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
@@ -84,11 +84,19 @@ class RuntimeHookManager:
         self._assembler = BlockAssembler()
         self.errors: list[HookDispatchError] = []
 
-    def register_event(self, event_type: EventType | None, handler: EventObserverHook) -> None:
-        self._event_hooks.append(_EventHookRegistration(selector=event_type, handler=handler))
+    def register_event(
+        self, event_type: EventType | None, handler: EventObserverHook
+    ) -> None:
+        self._event_hooks.append(
+            _EventHookRegistration(selector=event_type, handler=handler)
+        )
 
-    def register_block(self, block_type: str | None, handler: BlockObserverHook) -> None:
-        self._block_hooks.append(_BlockHookRegistration(selector=block_type, handler=handler))
+    def register_block(
+        self, block_type: str | None, handler: BlockObserverHook
+    ) -> None:
+        self._block_hooks.append(
+            _BlockHookRegistration(selector=block_type, handler=handler)
+        )
 
     async def on_published_event(self, published: RuntimePublishedEvent) -> None:
         context = HookContext(
@@ -100,18 +108,27 @@ class RuntimeHookManager:
         )
         await self.dispatch_observer_event(context, published.event)
 
-    async def dispatch_observer_event(self, context: HookContext, event: AgentEvent) -> None:
+    async def dispatch_observer_event(
+        self, context: HookContext, event: AgentEvent
+    ) -> None:
         for registration in self._event_hooks:
-            if registration.selector is not None and registration.selector != event.type:
+            if (
+                registration.selector is not None
+                and registration.selector != event.type
+            ):
                 continue
             try:
-                await _maybe_await(registration.handler(context, event.model_copy(deep=True)))
+                await _maybe_await(
+                    registration.handler(context, event.model_copy(deep=True))
+                )
             except Exception as exc:
                 self.errors.append(
                     _dispatch_error(
                         context,
                         hook_kind="event",
-                        selector=registration.selector.value if registration.selector is not None else None,
+                        selector=registration.selector.value
+                        if registration.selector is not None
+                        else None,
                         handler=registration.handler,
                         exc=exc,
                         event_id=event.id,
@@ -124,9 +141,14 @@ class RuntimeHookManager:
         if event.type in _REPLY_CLEANUP_EVENT_TYPES:
             self._assembler.discard_reply(event.reply_id)
 
-    async def dispatch_observer_block(self, context: HookContext, completion: BlockCompletion) -> None:
+    async def dispatch_observer_block(
+        self, context: HookContext, completion: BlockCompletion
+    ) -> None:
         for registration in self._block_hooks:
-            if registration.selector is not None and registration.selector != completion.block_type:
+            if (
+                registration.selector is not None
+                and registration.selector != completion.block_type
+            ):
                 continue
             try:
                 await _maybe_await(registration.handler(context, completion))
@@ -191,11 +213,17 @@ class MemoryHooks(Protocol):
 
     async def on_session_start(self, state: LoopState, user_input: str) -> None: ...
 
-    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
+    def baseline_projection(
+        self, state: LoopState, *, token_budget: int
+    ) -> dict[str, Any] | None: ...
 
-    async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
+    async def project(
+        self, state: LoopState, *, token_budget: int
+    ) -> dict[str, Any] | None: ...
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]: ...
+    async def after_model_reply(
+        self, state: LoopState, assistant: Msg
+    ) -> list[AgentEvent]: ...
 
     async def after_tool_results(
         self, state: LoopState, results: list[ToolResultBlock]
@@ -209,7 +237,9 @@ class MemoryHooks(Protocol):
 
 
 class ToolResultPersistenceHook(Protocol):
-    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None: ...
+    async def after_tool_results(
+        self, state: LoopState, results: list[ToolResultBlock]
+    ) -> None: ...
 
 
 class NoopMemoryHooks:
@@ -223,13 +253,19 @@ class NoopMemoryHooks:
     async def on_turn_start(self, state: LoopState, user_input: str) -> None:
         return await self.on_session_start(state, user_input)
 
-    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
+    def baseline_projection(
+        self, state: LoopState, *, token_budget: int
+    ) -> dict[str, Any] | None:
         return None
 
-    async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
+    async def project(
+        self, state: LoopState, *, token_budget: int
+    ) -> dict[str, Any] | None:
         return None
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
+    async def after_model_reply(
+        self, state: LoopState, assistant: Msg
+    ) -> list[AgentEvent]:
         return []
 
     async def after_tool_results(

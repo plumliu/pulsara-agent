@@ -15,11 +15,11 @@ from pulsara_agent.event import (
     SubagentRunFailedEvent,
     TextBlockSegmentEvent,
 )
-from pulsara_agent.runtime import (
+from pulsara_agent.runtime.publisher import RuntimePublishedEvent
+from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
     EventReconciliationRequired,
     EventWriteConflict,
-    RuntimePublishedEvent,
 )
 from pulsara_agent.runtime.subagent.store import (
     SubagentGraphStateStore,
@@ -32,7 +32,9 @@ CTX = EventContext(run_id="run:writer", turn_id="turn:writer", reply_id="reply:w
 
 
 def _event(label: str) -> TextBlockSegmentEvent:
-    return make_text_block_segment_event(**CTX.event_fields(), block_id=f"text:{label}", delta=label)
+    return make_text_block_segment_event(
+        **CTX.event_fields(), block_id=f"text:{label}", delta=label
+    )
 
 
 class _RecordingSubscriber:
@@ -76,7 +78,9 @@ def test_reducer_catches_missing_interval_before_current_batch(tmp_path) -> None
     assert applied == [(1,), (2,)]
 
 
-def test_reducer_and_publisher_catch_up_from_independent_high_water_marks(tmp_path) -> None:
+def test_reducer_and_publisher_catch_up_from_independent_high_water_marks(
+    tmp_path,
+) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     applied: list[int] = []
     recording = _RecordingSubscriber()
@@ -96,7 +100,9 @@ def test_reducer_and_publisher_catch_up_from_independent_high_water_marks(tmp_pa
     assert [item.event.sequence for item in recording.events] == [1, 2]
 
 
-def test_write_conflict_catches_reducer_and_publisher_to_actual_high_water(tmp_path) -> None:
+def test_write_conflict_catches_reducer_and_publisher_to_actual_high_water(
+    tmp_path,
+) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     applied: list[int] = []
     recording = _RecordingSubscriber()
@@ -138,7 +144,9 @@ def test_async_and_thread_writes_share_session_write_coordinator(tmp_path) -> No
         await runtime.write_event(_event("bind"))
         threads = [
             threading.Thread(
-                target=lambda label=label: runtime.write_events_from_thread((_event(label),))
+                target=lambda label=label: runtime.write_events_from_thread(
+                    (_event(label),)
+                )
             )
             for label in ("thread-a", "thread-b")
         ]
@@ -295,7 +303,9 @@ def test_committed_reducer_reconciliation_uses_full_rebuild_callback(tmp_path) -
     assert runtime.reconciliation_required is False
 
 
-def test_inconsistent_full_rebuild_keeps_runtime_reconciliation_required(tmp_path) -> None:
+def test_inconsistent_full_rebuild_keeps_runtime_reconciliation_required(
+    tmp_path,
+) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     store = SubagentGraphStateStore()
     runtime.event_log.append(

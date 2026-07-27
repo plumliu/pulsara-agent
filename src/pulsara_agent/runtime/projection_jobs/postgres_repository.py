@@ -29,7 +29,7 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     BoundedRuntimeFailureDiagnosticFact,
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionDeliveryPolicyFact,
     DurableProjectionFailureKind,
@@ -163,7 +163,9 @@ def _raw_prefix_payload(
     }
 
 
-def _horizon_from_event_row(row: dict[str, object]) -> DurableProjectionLedgerHorizonFact:
+def _horizon_from_event_row(
+    row: dict[str, object],
+) -> DurableProjectionLedgerHorizonFact:
     prefix = RawTranscriptDomainPrefixFact(
         through_sequence=int(row["sequence"]),
         ledger_payload_bytes=int(row["ledger_payload_prefix_bytes"]),
@@ -218,7 +220,7 @@ def _bound_event_from_row(
     envelope = _raw_event_from_row(row)
     reference = source_event_reference(envelope)
     horizon = _horizon_from_event_row(row)
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         DurableProjectionStoredEventFact,
     )
 
@@ -231,9 +233,7 @@ def _bound_event_from_row(
             canonical_payload_json_utf8=(
                 envelope.canonical_payload_bytes.decode("utf-8")
             ),
-            canonical_payload_utf8_bytes=len(
-                envelope.canonical_payload_bytes
-            ),
+            canonical_payload_utf8_bytes=len(envelope.canonical_payload_bytes),
             canonical_payload_sha256=envelope.payload_fingerprint,
         ),
     )
@@ -278,11 +278,10 @@ class PostgresDurableProjectionRepository:
             activation = DurableProjectionKindActivationFact.model_validate(
                 row["activation_payload"]
             )
-            if (
-                activation.activation_semantic.projection_kind.value
-                != str(row["projection_kind"])
-                or activation.activation_fingerprint
-                != str(row["activation_fingerprint"])
+            if activation.activation_semantic.projection_kind.value != str(
+                row["projection_kind"]
+            ) or activation.activation_fingerprint != str(
+                row["activation_fingerprint"]
             ):
                 raise ValueError("projection activation row drifted")
             activations.append(activation)
@@ -347,8 +346,7 @@ class PostgresDurableProjectionRepository:
             if (
                 activation.activation_semantic.projection_kind
                 is not cutover.projection_kind
-                or activation.activation_fingerprint
-                != cutover.activation_fingerprint
+                or activation.activation_fingerprint != cutover.activation_fingerprint
                 or activation.activation_semantic.seed_contract.seed_contract_fingerprint
                 != cutover.seed_contract_fingerprint
             ):
@@ -364,10 +362,13 @@ class PostgresDurableProjectionRepository:
         runtime_session_id: str,
         projection_kind: DurableProjectionKind,
         deadline_monotonic: float | None = None,
-    ) -> tuple[
-        DurableProjectionKindActivationFact,
-        DurableProjectionSessionCutoverFact,
-    ] | None:
+    ) -> (
+        tuple[
+            DurableProjectionKindActivationFact,
+            DurableProjectionSessionCutoverFact,
+        ]
+        | None
+    ):
         deadline = deadline_monotonic or monotonic() + 20.0
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
@@ -383,9 +384,7 @@ class PostgresDurableProjectionRepository:
                     lock=False,
                 )
             except ValueError as error:
-                if str(error) == (
-                    "durable projection activation/cutover is absent"
-                ):
+                if str(error) == ("durable projection activation/cutover is absent"):
                     return None
                 raise
         return cast(DurableProjectionKindActivationFact, activation), cutover
@@ -513,9 +512,7 @@ class PostgresDurableProjectionRepository:
                 else None
             ),
             seed_repair_action_fingerprint=(
-                repair_action.action_fingerprint
-                if repair_action is not None
-                else None
+                repair_action.action_fingerprint if repair_action is not None else None
             ),
         )
 
@@ -839,8 +836,7 @@ class PostgresDurableProjectionRepository:
         if (
             cutover.cutover_fingerprint
             != candidate.expected_seed_state.cutover_fingerprint
-            or activation.activation_fingerprint
-            != cutover.activation_fingerprint
+            or activation.activation_fingerprint != cutover.activation_fingerprint
             or activation.activation_semantic.seed_contract.seed_contract_fingerprint
             != candidate.expected_seed_state.seed_contract_fingerprint
         ):
@@ -855,8 +851,7 @@ class PostgresDurableProjectionRepository:
             end_inclusive=candidate.scan_horizon.through_sequence,
         )
         expected_source_count = (
-            candidate.scan_horizon.through_sequence
-            - expected.through_sequence
+            candidate.scan_horizon.through_sequence - expected.through_sequence
         )
         expected_source_bytes = (
             candidate.scan_horizon.ledger_payload_prefix_bytes
@@ -1051,7 +1046,7 @@ class PostgresDurableProjectionRepository:
         ).fetchone()
         if activation_row is None or cutover_row is None:
             raise ValueError("durable projection activation/cutover is absent")
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             DurableProjectionKindActivationFact,
         )
 
@@ -1135,8 +1130,7 @@ class PostgresDurableProjectionRepository:
             or action.repair_generation != int(row["repair_generation"])
             or action.runtime_session_id != failure.runtime_session_id
             or action.projection_kind is not failure.projection_kind
-            or action.expected_seed_failure_fingerprint
-            != failure.failure_fingerprint
+            or action.expected_seed_failure_fingerprint != failure.failure_fingerprint
             or action.expected_seed_state_fingerprint
             != failure.expected_seed_state_fingerprint
         ):
@@ -1168,8 +1162,7 @@ class PostgresDurableProjectionRepository:
         if (
             action.action_fingerprint != str(row["action_fingerprint"])
             or action.repair_generation != int(row["repair_generation"])
-            or action.expected_seed_failure_fingerprint
-            != failure.failure_fingerprint
+            or action.expected_seed_failure_fingerprint != failure.failure_fingerprint
             or action.expected_seed_state_fingerprint
             != failure.expected_seed_state_fingerprint
         ):
@@ -1196,10 +1189,8 @@ class PostgresDurableProjectionRepository:
             row["resolution_payload"]
         )
         if (
-            resolution.resolution_fingerprint
-            != str(row["resolution_fingerprint"])
-            or resolution.seed_failure_fingerprint
-            != failure.failure_fingerprint
+            resolution.resolution_fingerprint != str(row["resolution_fingerprint"])
+            or resolution.seed_failure_fingerprint != failure.failure_fingerprint
         ):
             raise ValueError("projection seed failure resolution row drifted")
         return resolution
@@ -1292,9 +1283,7 @@ class PostgresDurableProjectionRepository:
                 schema_version="durable_projection_ledger_horizon.v1",
                 runtime_session_id=state.runtime_session_id,
                 through_sequence=state.through_sequence,
-                ledger_continuity_accumulator=(
-                    state.ledger_continuity_accumulator
-                ),
+                ledger_continuity_accumulator=(state.ledger_continuity_accumulator),
                 ledger_payload_prefix_bytes=state.ledger_payload_prefix_bytes,
                 transcript_semantic_prefix_count=(
                     state.transcript_semantic_prefix_count
@@ -1309,8 +1298,7 @@ class PostgresDurableProjectionRepository:
             or state.projection_kind is not projection_kind
             or state.through_sequence != int(row["through_sequence"])
             or state.state_fingerprint != str(row["payload_fingerprint"])
-            or _raw_prefix_payload(observed_horizon)
-            != dict(row["ledger_prefix"])
+            or _raw_prefix_payload(observed_horizon) != dict(row["ledger_prefix"])
         ):
             raise ValueError("projection seed checkpoint authority drifted")
         return state
@@ -1553,18 +1541,15 @@ class PostgresDurableProjectionRepository:
                         candidate,
                         failure=_diagnostic(error),
                     )
-                if (
-                    str(row["failure_fingerprint"])
-                    == candidate.failure.failure_fingerprint
-                    and dict(row["failure_payload"])
-                    == candidate.failure.model_dump(mode="json")
-                ):
+                if str(
+                    row["failure_fingerprint"]
+                ) == candidate.failure.failure_fingerprint and dict(
+                    row["failure_payload"]
+                ) == candidate.failure.model_dump(mode="json"):
                     return self._seed_outcome(
                         DurableProjectionCommitConfirmation.FULL,
                         candidate,
-                        committed_failure=(
-                            candidate.failure.failure_fingerprint
-                        ),
+                        committed_failure=(candidate.failure.failure_fingerprint),
                     )
                 return self._seed_outcome(
                     DurableProjectionCommitConfirmation.CONFLICT,
@@ -1660,9 +1645,7 @@ class PostgresDurableProjectionRepository:
                         candidate,
                         committed_state=current.state_fingerprint,
                         committed_resolution=committed_resolution,
-                        committed_jobs=tuple(
-                            item.job_semantic.job_id for item in jobs
-                        ),
+                        committed_jobs=tuple(item.job_semantic.job_id for item in jobs),
                     )
                 return self._seed_outcome(
                     DurableProjectionCommitConfirmation.CONFLICT,
@@ -1707,9 +1690,7 @@ class PostgresDurableProjectionRepository:
                 attempted_candidate_fingerprint=candidate.candidate_fingerprint,
                 committed_seed_state_fingerprint=committed_state,
                 committed_seed_failure_fingerprint=committed_failure,
-                committed_seed_failure_resolution_fingerprint=(
-                    committed_resolution
-                ),
+                committed_seed_failure_resolution_fingerprint=(committed_resolution),
                 committed_job_ids=committed_jobs,
                 failure=failure,
             ),
@@ -1773,10 +1754,8 @@ class PostgresDurableProjectionRepository:
                 state.status is DurableProjectionJobStatus.PENDING
                 and latest_action_row is not None
             ):
-                latest_action = (
-                    DurableProjectionRepairActionFact.model_validate(
-                        latest_action_row["action_payload"]
-                    )
+                latest_action = DurableProjectionRepairActionFact.model_validate(
+                    latest_action_row["action_payload"]
                 )
                 if (
                     latest_action.action_fingerprint
@@ -1790,9 +1769,8 @@ class PostgresDurableProjectionRepository:
                     for item in latest_action.authority_references
                     if item.authority_kind == "operator_command"
                 )
-                if (
-                    latest_action.operator_reason_code is reason
-                    and authority_ids == (operator_authority_id,)
+                if latest_action.operator_reason_code is reason and authority_ids == (
+                    operator_authority_id,
                 ):
                     return latest_action
             if state.status is not DurableProjectionJobStatus.DEAD_LETTER:
@@ -1859,9 +1837,7 @@ class PostgresDurableProjectionRepository:
                     schema_version="durable_repair_authority_reference.v1",
                     authority_kind="operator_command",
                     authority_id=operator_authority_id,
-                    authority_semantic_fingerprint=(
-                        authority_semantic_fingerprint
-                    ),
+                    authority_semantic_fingerprint=(authority_semantic_fingerprint),
                 ),
             )
             requested_at = connection.execute(
@@ -1910,9 +1886,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=DurableProjectionJobStatus.PENDING,
                     state_revision=state.state_revision + 1,
                     repair_generation=resulting_generation,
@@ -1965,16 +1939,14 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobSemanticFact,
                 schema_version="durable_projection_job_semantic.v1",
                 job_id=str(row["job_id"]),
-                projection_kind=DurableProjectionKind(
-                    str(row["projection_kind"])
-                ),
+                projection_kind=DurableProjectionKind(str(row["projection_kind"])),
                 target_key=str(row["target_key"]),
                 source_event_reference=source,
                 trigger_horizon=horizon,
                 handler_contract=handler,
             ),
         )
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             CanonicalMutationSurfacePlanFact,
         )
 
@@ -1985,9 +1957,7 @@ class PostgresDurableProjectionRepository:
                 schema_version="durable_projection_job_candidate.v1",
                 job_semantic=job,
                 activation_fingerprint=str(row["activation_fingerprint"]),
-                seed_contract_fingerprint=str(
-                    row["seed_contract_fingerprint"]
-                ),
+                seed_contract_fingerprint=str(row["seed_contract_fingerprint"]),
                 delivery_policy=DurableProjectionDeliveryPolicyFact.model_validate(
                     row["delivery_policy"]
                 ),
@@ -1999,10 +1969,8 @@ class PostgresDurableProjectionRepository:
             ),
         )
         if (
-            job.job_semantic_fingerprint
-            != str(row["job_semantic_fingerprint"])
-            or candidate.candidate_fingerprint
-            != str(row["job_candidate_fingerprint"])
+            job.job_semantic_fingerprint != str(row["job_semantic_fingerprint"])
+            or candidate.candidate_fingerprint != str(row["job_candidate_fingerprint"])
             or source.event_id != str(row["source_event_id"])
             or source.sequence != int(row["source_sequence"])
             or source.event_type != str(row["source_event_type"])
@@ -2015,9 +1983,7 @@ class PostgresDurableProjectionRepository:
         row: dict[str, object],
     ) -> DurableProjectionJobOperationalStateFact:
         last_failure = (
-            BoundedRuntimeFailureDiagnosticFact.model_validate(
-                row["last_failure"]
-            )
+            BoundedRuntimeFailureDiagnosticFact.model_validate(row["last_failure"])
             if row["last_failure"] is not None
             else None
         )
@@ -2161,9 +2127,7 @@ class PostgresDurableProjectionRepository:
                     DurableProjectionJobOperationalStateFact,
                     build_projection_fact(
                         DurableProjectionJobOperationalStateFact,
-                        schema_version=(
-                            "durable_projection_job_operational_state.v1"
-                        ),
+                        schema_version=("durable_projection_job_operational_state.v1"),
                         status=DurableProjectionJobStatus.LEASED,
                         state_revision=state.state_revision + 1,
                         repair_generation=state.repair_generation,
@@ -2180,9 +2144,7 @@ class PostgresDurableProjectionRepository:
                     DurableProjectionTargetExecutionLeaseFact,
                     build_projection_fact(
                         DurableProjectionTargetExecutionLeaseFact,
-                        schema_version=(
-                            "durable_projection_target_execution_lease.v1"
-                        ),
+                        schema_version=("durable_projection_target_execution_lease.v1"),
                         projection_kind=candidate.job_semantic.projection_kind,
                         target_key=candidate.job_semantic.target_key,
                         owner_job_id=candidate.job_semantic.job_id,
@@ -2236,9 +2198,7 @@ class PostgresDurableProjectionRepository:
                     or str(target_inserted["lease_fingerprint"])
                     != target_lease.lease_fingerprint
                 ):
-                    raise ValueError(
-                        "projection target lease compare-and-set failed"
-                    )
+                    raise ValueError("projection target lease compare-and-set failed")
                 leases.append(
                     cast(
                         LeasedDurableProjectionJob,
@@ -2246,12 +2206,8 @@ class PostgresDurableProjectionRepository:
                             LeasedDurableProjectionJob,
                             schema_version="leased_durable_projection_job.v1",
                             job=candidate.job_semantic,
-                            job_candidate_fingerprint=(
-                                candidate.candidate_fingerprint
-                            ),
-                            activation_fingerprint=(
-                                candidate.activation_fingerprint
-                            ),
+                            job_candidate_fingerprint=(candidate.candidate_fingerprint),
+                            activation_fingerprint=(candidate.activation_fingerprint),
                             seed_contract_fingerprint=(
                                 candidate.seed_contract_fingerprint
                             ),
@@ -2315,8 +2271,7 @@ class PostgresDurableProjectionRepository:
             ).fetchone()
             if (
                 active is not None
-                and cast(datetime, active["lease_expires_at"])
-                > database_now
+                and cast(datetime, active["lease_expires_at"]) > database_now
             ):
                 continue
             candidates = grouped[key]
@@ -2324,8 +2279,7 @@ class PostgresDurableProjectionRepository:
                 candidates[0]
             ).job_semantic.handler_contract.target_update_policy
             if (
-                policy
-                is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
+                policy is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
                 and head is not None
             ):
                 effective = self._read_applied_head_receipt_in_connection(
@@ -2366,8 +2320,7 @@ class PostgresDurableProjectionRepository:
                 if not candidates:
                     continue
             if (
-                policy
-                is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
+                policy is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
                 and head is not None
             ):
                 candidates.sort(
@@ -2402,8 +2355,7 @@ class PostgresDurableProjectionRepository:
                     str(item["job_id"]),
                 ),
                 reverse=(
-                    policy
-                    is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
+                    policy is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
                 ),
             )
             selected.append(candidates[0])
@@ -2437,9 +2389,7 @@ class PostgresDurableProjectionRepository:
                 lease_expires_at=None,
                 next_attempt_at=None,
                 last_failure=None,
-                result_receipt_reference=(
-                    head.applied_result_receipt_reference
-                ),
+                result_receipt_reference=(head.applied_result_receipt_reference),
             ),
         )
         self._write_job_state(
@@ -2483,9 +2433,7 @@ class PostgresDurableProjectionRepository:
             DurableProjectionJobOperationalStateFact,
             build_projection_fact(
                 DurableProjectionJobOperationalStateFact,
-                schema_version=(
-                    "durable_projection_job_operational_state.v1"
-                ),
+                schema_version=("durable_projection_job_operational_state.v1"),
                 status=DurableProjectionJobStatus.SUPERSEDED,
                 state_revision=state.state_revision + 1,
                 repair_generation=state.repair_generation,
@@ -2495,9 +2443,7 @@ class PostgresDurableProjectionRepository:
                 lease_expires_at=None,
                 next_attempt_at=None,
                 last_failure=None,
-                result_receipt_reference=(
-                    durable_result_receipt_reference(receipt)
-                ),
+                result_receipt_reference=(durable_result_receipt_reference(receipt)),
             ),
         )
         self._write_job_state(
@@ -2580,11 +2526,7 @@ class PostgresDurableProjectionRepository:
                 state.lease_owner_id,
                 state.lease_expires_at,
                 state.next_attempt_at,
-                (
-                    _json(state.last_failure)
-                    if state.last_failure is not None
-                    else None
-                ),
+                (_json(state.last_failure) if state.last_failure is not None else None),
                 (
                     _json(state.result_receipt_reference)
                     if state.result_receipt_reference is not None
@@ -2718,9 +2660,7 @@ class PostgresDurableProjectionRepository:
                         candidate=candidate,
                         state=state,
                         head=head,
-                        conflict_kind=(
-                            "distinct_source_for_single_assignment"
-                        ),
+                        conflict_kind=("distinct_source_for_single_assignment"),
                         candidate_result_semantic_fingerprint=None,
                     )
                 if not same_result:
@@ -2782,14 +2722,12 @@ class PostgresDurableProjectionRepository:
 
         self._persist_prepared_documents(
             connection,
-            source_event_reference=(
-                candidate.job_semantic.source_event_reference
-            ),
+            source_event_reference=(candidate.job_semantic.source_event_reference),
             prepared=prepared,
             expected_head=head,
         )
         if prepared.canonical_mutation_candidates:
-            from pulsara_agent.runtime.projection_jobs.canonical_mutation import (
+            from pulsara_agent.runtime.projection_jobs.postgres_canonical_mutation_repository import (
                 PostgresCanonicalMutationRepository,
             )
 
@@ -2868,10 +2806,8 @@ class PostgresDurableProjectionRepository:
         )
         if (
             contract.contract_fingerprint != stored_contract_fingerprint
-            or owner.hook_contract_fingerprint
-            != contract.contract_fingerprint
-            or contract.contract_semantic.projection_kind
-            is not owner.projection_kind
+            or owner.hook_contract_fingerprint != contract.contract_fingerprint
+            or contract.contract_semantic.projection_kind is not owner.projection_kind
             or prepared_result.result_semantic.projection_kind
             is not owner.projection_kind
         ):
@@ -2886,8 +2822,10 @@ class PostgresDurableProjectionRepository:
         if activated is not None:
             raise ValueError("pre-activation writer is disabled after activation")
 
-        event_row = connection.cursor(row_factory=dict_row).execute(
-            """
+        event_row = (
+            connection.cursor(row_factory=dict_row)
+            .execute(
+                """
             SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                    event_type, event_schema_version,
                    event_schema_fingerprint,
@@ -2900,8 +2838,10 @@ class PostgresDurableProjectionRepository:
             FROM agent_events
             WHERE id = %s
             """,
-            (owner.source_event_reference.event_id,),
-        ).fetchone()
+                (owner.source_event_reference.event_id,),
+            )
+            .fetchone()
+        )
         if event_row is None:
             raise ValueError("pre-activation source event is absent")
         bound = _bound_event_from_row(dict(event_row))
@@ -2919,9 +2859,7 @@ class PostgresDurableProjectionRepository:
             raise ValueError("pre-activation source schema is not accepted")
         decoded = bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
         tool_call_id = (
-            decoded.tool_call_id
-            if isinstance(decoded, ToolResultEndEvent)
-            else None
+            decoded.tool_call_id if isinstance(decoded, ToolResultEndEvent) else None
         )
         target_key = projection_target_key(
             projection_kind=owner.projection_kind,
@@ -2939,11 +2877,9 @@ class PostgresDurableProjectionRepository:
             for item in prepared_result.canonical_mutation_candidates
         )
         if (
-            prepared_result.result_semantic
-            .ordered_document_semantic_fingerprints
+            prepared_result.result_semantic.ordered_document_semantic_fingerprints
             != document_semantics
-            or prepared_result.result_semantic
-            .ordered_canonical_mutation_semantic_fingerprints
+            or prepared_result.result_semantic.ordered_canonical_mutation_semantic_fingerprints
             != mutation_semantics
             or any(
                 item.source_owner_fingerprint
@@ -2995,9 +2931,7 @@ class PostgresDurableProjectionRepository:
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=(
-                        head.applied_result_receipt_reference
-                    ),
+                    receipt_reference=(head.applied_result_receipt_reference),
                     head=head,
                     failure=None,
                 )
@@ -3013,9 +2947,7 @@ class PostgresDurableProjectionRepository:
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=durable_result_receipt_reference(
-                        superseded
-                    ),
+                    receipt_reference=durable_result_receipt_reference(superseded),
                     head=head,
                     failure=None,
                 )
@@ -3027,17 +2959,13 @@ class PostgresDurableProjectionRepository:
                         receipt_reference=None,
                         head=head,
                         failure=_diagnostic(
-                            ValueError(
-                                "same-sequence pre-activation result conflict"
-                            )
+                            ValueError("same-sequence pre-activation result conflict")
                         ),
                     )
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=(
-                        head.applied_result_receipt_reference
-                    ),
+                    receipt_reference=(head.applied_result_receipt_reference),
                     head=head,
                     failure=None,
                 )
@@ -3049,7 +2977,7 @@ class PostgresDurableProjectionRepository:
             expected_head=head,
         )
         if prepared_result.canonical_mutation_candidates:
-            from pulsara_agent.runtime.projection_jobs.canonical_mutation import (
+            from pulsara_agent.runtime.projection_jobs.postgres_canonical_mutation_repository import (
                 PostgresCanonicalMutationRepository,
             )
 
@@ -3125,9 +3053,7 @@ class PostgresDurableProjectionRepository:
             self._validate_or_issue_guard(
                 connection,
                 admission_guard=None,
-                transaction_owner_id=(
-                    "projection-failure:" + lease.lease_fingerprint
-                ),
+                transaction_owner_id=("projection-failure:" + lease.lease_fingerprint),
             )
             _, candidate, state = self._validated_lease_row(
                 connection,
@@ -3159,9 +3085,7 @@ class PostgresDurableProjectionRepository:
                     * multiplier,
                 )
                 status = DurableProjectionJobStatus.RETRY_WAIT
-                next_attempt_at = database_now + timedelta(
-                    milliseconds=delay
-                )
+                next_attempt_at = database_now + timedelta(milliseconds=delay)
                 confirmation = DurableProjectionCommitConfirmation.FULL
             else:
                 status = DurableProjectionJobStatus.DEAD_LETTER
@@ -3175,9 +3099,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=status,
                     state_revision=state.state_revision + 1,
                     repair_generation=state.repair_generation,
@@ -3220,9 +3142,7 @@ class PostgresDurableProjectionRepository:
             self._validate_or_issue_guard(
                 connection,
                 admission_guard=None,
-                transaction_owner_id=(
-                    "projection-release:" + lease.lease_fingerprint
-                ),
+                transaction_owner_id=("projection-release:" + lease.lease_fingerprint),
             )
             _, candidate, state = self._validated_lease_row(
                 connection,
@@ -3232,9 +3152,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=DurableProjectionJobStatus.RETRY_WAIT,
                     state_revision=state.state_revision + 1,
                     repair_generation=state.repair_generation,
@@ -3290,12 +3208,9 @@ class PostgresDurableProjectionRepository:
         )
         if (
             candidate.job_semantic != lease.job
-            or candidate.candidate_fingerprint
-            != lease.job_candidate_fingerprint
-            or candidate.activation_fingerprint
-            != lease.activation_fingerprint
-            or candidate.seed_contract_fingerprint
-            != lease.seed_contract_fingerprint
+            or candidate.candidate_fingerprint != lease.job_candidate_fingerprint
+            or candidate.activation_fingerprint != lease.activation_fingerprint
+            or candidate.seed_contract_fingerprint != lease.seed_contract_fingerprint
             or state.status is not DurableProjectionJobStatus.LEASED
             or state.state_revision != lease.expected_state_revision
             or state.repair_generation != lease.repair_generation
@@ -3306,9 +3221,7 @@ class PostgresDurableProjectionRepository:
             or target.lease_generation != lease.lease_generation
             or target.lease_owner_id != lease.lease_owner_id
             or target.state_revision != lease.expected_state_revision
-            or target.lease_fingerprint != str(
-                target_row["lease_fingerprint"]
-            )
+            or target.lease_fingerprint != str(target_row["lease_fingerprint"])
         ):
             raise ValueError("projection job lease is stale")
         return row, candidate, state
@@ -3322,7 +3235,7 @@ class PostgresDurableProjectionRepository:
         prepared: PreparedDurableProjectionResultFact,
         expected_head: DurableProjectionTargetHeadFact | None,
     ) -> None:
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             PreparedDurableProjectionArtifactDocumentFact,
             PreparedDurableProjectionGraphDocumentFact,
             PreparedDurableProjectionGraphRelationFact,
@@ -3376,9 +3289,7 @@ class PostgresDurableProjectionRepository:
                         SELECT media_type, text_body, digest, size_bytes
                         FROM artifacts WHERE id = %s
                         """,
-                        (
-                            document.artifact_reference.artifact_semantic_id,
-                        ),
+                        (document.artifact_reference.artifact_semantic_id,),
                     ).fetchone()
                     if row is None or (
                         str(row["media_type"]),
@@ -3391,18 +3302,14 @@ class PostgresDurableProjectionRepository:
                         digest,
                         document.content_utf8_bytes,
                     ):
-                        raise ValueError(
-                            "projection artifact identity conflict"
-                        )
+                        raise ValueError("projection artifact identity conflict")
             elif isinstance(
                 document,
                 PreparedDurableProjectionGraphDocumentFact,
             ):
                 payload = json.loads(document.canonical_json_utf8)
                 if not isinstance(payload, dict):
-                    raise ValueError(
-                        "projection graph document must be an object"
-                    )
+                    raise ValueError("projection graph document must be an object")
                 inserted = connection.execute(
                     """
                     INSERT INTO graph_documents (
@@ -3430,9 +3337,7 @@ class PostgresDurableProjectionRepository:
                         ),
                     ).fetchone()
                     if row is None:
-                        raise ValueError(
-                            "projection graph document disappeared"
-                        )
+                        raise ValueError("projection graph document disappeared")
                     current = (
                         str(row["type"]),
                         dict(row["payload"]),
@@ -3444,22 +3349,16 @@ class PostgresDurableProjectionRepository:
                         is not DurableProjectionKind.RUN_TIMELINE
                         or expected_head is None
                     ):
-                        raise ValueError(
-                            "projection graph document identity conflict"
-                        )
-                    expected_receipt = (
-                        cls._read_applied_head_receipt_in_connection(
-                            connection,
-                            expected_head,
-                        )
+                        raise ValueError("projection graph document identity conflict")
+                    expected_receipt = cls._read_applied_head_receipt_in_connection(
+                        connection,
+                        expected_head,
                     )
                     prior_refs = tuple(
                         item
                         for item in expected_receipt.result_document_references
-                        if getattr(item, "document_kind", None)
-                        == "graph_document"
-                        and getattr(item, "graph_id", None)
-                        == document.graph_id
+                        if getattr(item, "document_kind", None) == "graph_document"
+                        and getattr(item, "graph_id", None) == document.graph_id
                         and getattr(item, "semantic_document_id", None)
                         == document.semantic_document_id
                     )
@@ -3468,19 +3367,14 @@ class PostgresDurableProjectionRepository:
                             "timeline graph replacement lacks exact prior reference"
                         )
                     current_payload = canonical_json_bytes(current[1])
-                    current_sha = (
-                        f"sha256:{sha256(current_payload).hexdigest()}"
-                    )
+                    current_sha = f"sha256:{sha256(current_payload).hexdigest()}"
                     if (
                         current[0] != prior_refs[0].graph_document_type
-                        or current_sha
-                        != prior_refs[0].canonical_json_sha256
+                        or current_sha != prior_refs[0].canonical_json_sha256
                         or len(current_payload)
                         != prior_refs[0].canonical_json_utf8_bytes
                     ):
-                        raise ValueError(
-                            "timeline graph replacement prior CAS failed"
-                        )
+                        raise ValueError("timeline graph replacement prior CAS failed")
                     connection.execute(
                         """
                         UPDATE graph_documents
@@ -3508,9 +3402,7 @@ class PostgresDurableProjectionRepository:
                     ),
                 }
                 try:
-                    relation_kind = relation_kind_by_predicate[
-                        relation.predicate_iri
-                    ]
+                    relation_kind = relation_kind_by_predicate[relation.predicate_iri]
                 except KeyError as error:
                     raise ValueError(
                         "projection relation predicate is not registered"
@@ -3537,7 +3429,7 @@ class PostgresDurableProjectionRepository:
                         ),
                     ),
                 )
-                from pulsara_agent.runtime.projection_jobs.graph_relation import (
+                from pulsara_agent.graph.projection_relations import (
                     PostgresCanonicalGraphRelationRepository,
                 )
 
@@ -3566,9 +3458,7 @@ class PostgresDurableProjectionRepository:
         ).fetchone()
         if row is None:
             return None
-        head = DurableProjectionTargetHeadFact.model_validate(
-            row["head_payload"]
-        )
+        head = DurableProjectionTargetHeadFact.model_validate(row["head_payload"])
         if (
             head.projection_kind is not projection_kind
             or head.target_key != target_key
@@ -3620,9 +3510,7 @@ class PostgresDurableProjectionRepository:
             projection_kind = receipt.result_semantic.projection_kind
             candidate_sequence = receipt.source_sequence
             effective_sequence = receipt.source_sequence
-            semantic_fingerprint = (
-                receipt.result_semantic.result_semantic_fingerprint
-            )
+            semantic_fingerprint = receipt.result_semantic.result_semantic_fingerprint
         else:
             effective = cls._read_receipt_in_connection(
                 connection,
@@ -3636,9 +3524,7 @@ class PostgresDurableProjectionRepository:
             projection_kind = receipt.projection_kind
             candidate_sequence = receipt.candidate_source_sequence
             effective_sequence = effective.source_sequence
-            semantic_fingerprint = (
-                effective.result_semantic.result_semantic_fingerprint
-            )
+            semantic_fingerprint = effective.result_semantic.result_semantic_fingerprint
         inserted = connection.execute(
             """
             INSERT INTO durable_projection_result_receipts (
@@ -3714,10 +3600,7 @@ class PostgresDurableProjectionRepository:
                     expected.head_fingerprint,
                 ),
             ).fetchone()
-        if (
-            row is None
-            or str(row["head_fingerprint"]) != resulting.head_fingerprint
-        ):
+        if row is None or str(row["head_fingerprint"]) != resulting.head_fingerprint:
             raise ValueError("projection target head compare-and-set failed")
 
     def _terminalize_job(
@@ -3794,9 +3677,7 @@ class PostgresDurableProjectionRepository:
             DurableProjectionTargetExecutionLeaseFact,
             build_projection_fact(
                 DurableProjectionTargetExecutionLeaseFact,
-                schema_version=(
-                    "durable_projection_target_execution_lease.v1"
-                ),
+                schema_version=("durable_projection_target_execution_lease.v1"),
                 projection_kind=current.projection_kind,
                 target_key=current.target_key,
                 owner_job_id=current.owner_job_id,
@@ -3982,15 +3863,11 @@ class PostgresDurableProjectionRepository:
             DurableProjectionTargetAuthorityConflictFact,
             build_projection_fact(
                 DurableProjectionTargetAuthorityConflictFact,
-                schema_version=(
-                    "durable_projection_target_authority_conflict.v1"
-                ),
+                schema_version=("durable_projection_target_authority_conflict.v1"),
                 conflict_id=conflict_id,
                 projection_kind=job.projection_kind,
                 target_key=job.target_key,
-                target_update_policy=(
-                    job.handler_contract.target_update_policy
-                ),
+                target_update_policy=(job.handler_contract.target_update_policy),
                 conflict_kind=conflict_kind,
                 candidate_source_event_reference_fingerprint=(
                     job.source_event_reference.reference_fingerprint
@@ -4049,12 +3926,9 @@ class PostgresDurableProjectionRepository:
                     row["conflict_payload"]
                 )
                 != conflict
-                or str(row["conflict_fingerprint"])
-                != conflict.conflict_fingerprint
+                or str(row["conflict_fingerprint"]) != conflict.conflict_fingerprint
             ):
-                raise ValueError(
-                    "projection target conflict identity conflict"
-                )
+                raise ValueError("projection target conflict identity conflict")
 
     @staticmethod
     def _settlement_outcome(
@@ -4062,9 +3936,7 @@ class PostgresDurableProjectionRepository:
         confirmation: DurableProjectionCommitConfirmation,
         lease: LeasedDurableProjectionJob,
         state: DurableProjectionJobOperationalStateFact | None,
-        receipt_reference: (
-            DurableProjectionResultReceiptReferenceFact | None
-        ),
+        receipt_reference: (DurableProjectionResultReceiptReferenceFact | None),
         failure: BoundedRuntimeFailureDiagnosticFact | None,
     ) -> DurableProjectionSettlementOutcome:
         return cast(
@@ -4076,9 +3948,7 @@ class PostgresDurableProjectionRepository:
                 job_id=lease.job.job_id,
                 attempted_lease_fingerprint=lease.lease_fingerprint,
                 resulting_status=state.status if state else None,
-                resulting_state_revision=(
-                    state.state_revision if state else None
-                ),
+                resulting_state_revision=(state.state_revision if state else None),
                 resulting_repair_generation=(
                     state.repair_generation if state else None
                 ),
@@ -4128,10 +3998,7 @@ class PostgresDurableProjectionRepository:
                     )
                     else receipt.candidate_result_owner
                 )
-                if (
-                    owner.owner_fingerprint
-                    == prepared.result_owner.owner_fingerprint
-                ):
+                if owner.owner_fingerprint == prepared.result_owner.owner_fingerprint:
                     return self._settlement_outcome(
                         confirmation=DurableProjectionCommitConfirmation.FULL,
                         lease=lease,
@@ -4142,8 +4009,7 @@ class PostgresDurableProjectionRepository:
                 confirmation = DurableProjectionCommitConfirmation.CONFLICT
             elif (
                 record.state.status is DurableProjectionJobStatus.LEASED
-                and record.state.state_revision
-                == lease.expected_state_revision
+                and record.state.state_revision == lease.expected_state_revision
                 and record.state.lease_generation == lease.lease_generation
                 and record.state.lease_owner_id == lease.lease_owner_id
             ):

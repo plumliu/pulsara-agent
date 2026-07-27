@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ActionBoundaryCandidate,
     ClaimCandidate,
     DecisionCandidate,
@@ -34,7 +34,11 @@ def candidate_fingerprint(candidate: MemoryCandidate | Mapping[str, Any]) -> str
     normalized = _CANDIDATE_ADAPTER.validate_python(candidate)
     match normalized:
         case ClaimCandidate() | PreferenceCandidate() | ObservationCandidate():
-            parts = (normalized.kind, _normalize(normalized.statement), normalized.scope)
+            parts = (
+                normalized.kind,
+                _normalize(normalized.statement),
+                normalized.scope,
+            )
         case ActionBoundaryCandidate():
             parts = (
                 normalized.kind,
@@ -53,12 +57,16 @@ def candidate_fingerprint(candidate: MemoryCandidate | Mapping[str, Any]) -> str
     return json.dumps(parts, ensure_ascii=True, sort_keys=True)
 
 
-def already_exists(candidate: MemoryCandidate, graph: GraphStore, *, graph_id: str | None = None) -> bool:
+def already_exists(
+    candidate: MemoryCandidate, graph: GraphStore, *, graph_id: str | None = None
+) -> bool:
     term = _KIND_TO_TERM.get(candidate.kind)
     if term is None:
         return False
     for record in graph.find_by_type(term, graph_id=graph_id):
-        if _normalize(record.get(memory.STATEMENT.name)) != _normalize(candidate.statement):
+        if _normalize(record.get(memory.STATEMENT.name)) != _normalize(
+            candidate.statement
+        ):
             continue
         if str(record.get(memory.SCOPE.name, "")) != candidate.scope:
             continue

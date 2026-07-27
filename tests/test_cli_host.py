@@ -16,8 +16,8 @@ from pulsara_agent.event import (
     EventContext,
 )
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime import (
-    PendingApproval,
+from pulsara_agent.runtime.approval import PendingApproval
+from pulsara_agent.runtime.plan import (
     PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanQuestionOption,
@@ -38,6 +38,7 @@ from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.mcp import prepared_test_mcp_pending_handle
 from tests.support import (
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
@@ -134,9 +135,7 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
         captured.update(kwargs)
         return _CheckpointReport({"outcome": "rebuilt"})
 
-    monkeypatch.setattr(
-        cli, "verify_or_rebuild_subagent_graph_checkpoint", doctor
-    )
+    monkeypatch.setattr(cli, "verify_or_rebuild_subagent_graph_checkpoint", doctor)
 
     assert cli._checkpoint_command(args) == {"outcome": "rebuilt"}  # noqa: SLF001
     assert captured["runtime_session_id"] == "runtime:checkpoint:cli"
@@ -217,9 +216,7 @@ def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> 
         captured.update(kwargs)
         return _CheckpointReport({"deleted_checkpoint_ids": []})
 
-    monkeypatch.setattr(
-        cli, "garbage_collect_subagent_graph_checkpoint_artifacts", gc
-    )
+    monkeypatch.setattr(cli, "garbage_collect_subagent_graph_checkpoint_artifacts", gc)
 
     assert cli._checkpoint_command(args) == {  # noqa: SLF001
         "deleted_checkpoint_ids": []
@@ -378,6 +375,10 @@ class PendingPlanFakeSession(FakeSession):
 
 class FakeCore:
     instances: list["FakeCore"] = []
+
+    @classmethod
+    def production(cls, *, settings):
+        return cls(settings=settings)
 
     def __init__(self, *, settings):
         self.settings = settings
@@ -829,6 +830,7 @@ def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
         ),
         predecessor_resolution_submitted_event_reference=None,
     )
+    pending_handle = prepared_test_mcp_pending_handle(prepared)
     pending = PendingMcpInputRequired(
         interaction_id="mcp_input_required:test",
         kind="mcp_input_required",
@@ -851,7 +853,7 @@ def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
             ),
         ),
         suspension_fact=suspension,
-        prepared_suspension=prepared,
+        pending_handle=pending_handle,
         input_requests=(),
     )
     session.get_pending_interaction = lambda: pending

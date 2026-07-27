@@ -26,7 +26,8 @@ from pulsara_agent.primitives.context_source import (
     LedgerAuthorityHorizonFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.runtime import AgentRuntime, LoopStatus
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import LoopStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.context_input.sources.builder import (
     default_context_source_registry,

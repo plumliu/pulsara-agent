@@ -9,7 +9,7 @@ from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionJobCandidateFact,
     DurableProjectionLedgerHorizonFact,
     DurableProjectionSeedRepairActionFact,
@@ -74,9 +74,7 @@ def canonical_seed_state(
             ledger_continuity_accumulator=(
                 cutover.cutover_ledger_continuity_accumulator
             ),
-            ledger_payload_prefix_bytes=(
-                cutover.cutover_ledger_payload_prefix_bytes
-            ),
+            ledger_payload_prefix_bytes=(cutover.cutover_ledger_payload_prefix_bytes),
             transcript_semantic_prefix_count=(
                 cutover.cutover_transcript_semantic_prefix_count
             ),
@@ -132,8 +130,7 @@ def build_seed_commit_candidate(
             != expected_state.runtime_session_id
             or semantic.source_event_reference.sequence
             <= expected_state.through_sequence
-            or semantic.source_event_reference.sequence
-            > scan_horizon.through_sequence
+            or semantic.source_event_reference.sequence > scan_horizon.through_sequence
             or semantic.trigger_horizon.through_sequence
             != semantic.source_event_reference.sequence
             or item.seed_contract_fingerprint
@@ -150,12 +147,8 @@ def build_seed_commit_candidate(
             projection_kind=expected_state.projection_kind,
             cutover_fingerprint=expected_state.cutover_fingerprint,
             through_sequence=scan_horizon.through_sequence,
-            ledger_continuity_accumulator=(
-                scan_horizon.ledger_continuity_accumulator
-            ),
-            ledger_payload_prefix_bytes=(
-                scan_horizon.ledger_payload_prefix_bytes
-            ),
+            ledger_continuity_accumulator=(scan_horizon.ledger_continuity_accumulator),
+            ledger_payload_prefix_bytes=(scan_horizon.ledger_payload_prefix_bytes),
             transcript_semantic_prefix_count=(
                 scan_horizon.transcript_semantic_prefix_count
             ),
@@ -180,9 +173,7 @@ def build_seed_commit_candidate(
             expected_seed_state=expected_state,
             resulting_seed_state=resulting_state,
             scan_horizon=scan_horizon,
-            repaired_seed_failure_fingerprint=(
-                repaired_seed_failure_fingerprint
-            ),
+            repaired_seed_failure_fingerprint=(repaired_seed_failure_fingerprint),
             seed_repair_action_fingerprint=seed_repair_action_fingerprint,
             ordered_job_candidates=ordered_job_candidates,
             source_event_count=source_event_count,
@@ -247,12 +238,15 @@ def build_seed_failure_commit_candidate(
         ),
         "seed_contract_fingerprint": cutover.seed_contract_fingerprint,
     }
-    failure_id = "projection-seed-failure:" + sha256(
-        context_fingerprint(
-            "durable-projection-seed-failure-id:v1",
-            identity,
-        ).encode("ascii")
-    ).hexdigest()
+    failure_id = (
+        "projection-seed-failure:"
+        + sha256(
+            context_fingerprint(
+                "durable-projection-seed-failure-id:v1",
+                identity,
+            ).encode("ascii")
+        ).hexdigest()
+    )
     failure = cast(
         DurableProjectionSeedFailureFact,
         build_projection_fact(
@@ -281,9 +275,7 @@ def build_seed_failure_commit_candidate(
         DurableProjectionSeedFailureCommitCandidateFact,
         build_projection_fact(
             DurableProjectionSeedFailureCommitCandidateFact,
-            schema_version=(
-                "durable_projection_seed_failure_commit_candidate.v1"
-            ),
+            schema_version=("durable_projection_seed_failure_commit_candidate.v1"),
             runtime_session_id=cutover.runtime_session_id,
             projection_kind=cutover.projection_kind,
             activation_fingerprint=activation_fingerprint,
@@ -314,8 +306,7 @@ def build_seed_repair_action(
     if (
         failure.runtime_session_id != expected_state.runtime_session_id
         or failure.projection_kind is not expected_state.projection_kind
-        or failure.expected_seed_state_fingerprint
-        != expected_state.state_fingerprint
+        or failure.expected_seed_state_fingerprint != expected_state.state_fingerprint
     ):
         raise ValueError("seed repair state/failure authority mismatch")
     authority_semantic_fingerprint = context_fingerprint(
@@ -338,21 +329,24 @@ def build_seed_repair_action(
             authority_semantic_fingerprint=authority_semantic_fingerprint,
         ),
     )
-    repair_action_id = "projection-seed-repair:" + sha256(
-        context_fingerprint(
-            "durable-projection-seed-repair-action-id:v1",
-            {
-                "failure_fingerprint": failure.failure_fingerprint,
-                "expected_seed_state_fingerprint": expected_state.state_fingerprint,
-                "action": action,
-                "operator_authority_id": operator_authority_id,
-                "repair_generation": repair_generation,
-                "predecessor_repair_action_fingerprint": (
-                    predecessor_repair_action_fingerprint
-                ),
-            },
-        ).encode("ascii")
-    ).hexdigest()
+    repair_action_id = (
+        "projection-seed-repair:"
+        + sha256(
+            context_fingerprint(
+                "durable-projection-seed-repair-action-id:v1",
+                {
+                    "failure_fingerprint": failure.failure_fingerprint,
+                    "expected_seed_state_fingerprint": expected_state.state_fingerprint,
+                    "action": action,
+                    "operator_authority_id": operator_authority_id,
+                    "repair_generation": repair_generation,
+                    "predecessor_repair_action_fingerprint": (
+                        predecessor_repair_action_fingerprint
+                    ),
+                },
+            ).encode("ascii")
+        ).hexdigest()
+    )
     return cast(
         DurableProjectionSeedRepairActionFact,
         build_projection_fact(
@@ -395,9 +389,7 @@ def build_seed_failure_resolution(
         DurableProjectionSeedFailureResolutionFact,
         build_projection_fact(
             DurableProjectionSeedFailureResolutionFact,
-            schema_version=(
-                "durable_projection_seed_failure_resolution.v1"
-            ),
+            schema_version=("durable_projection_seed_failure_resolution.v1"),
             seed_failure_fingerprint=failure.failure_fingerprint,
             repair_action_fingerprint=repair_action.action_fingerprint,
             resulting_seed_state_fingerprint=resulting_state.state_fingerprint,

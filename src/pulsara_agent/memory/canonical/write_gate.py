@@ -7,6 +7,20 @@ from dataclasses import dataclass
 
 from pulsara_agent.memory.scope import is_valid_scope
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.context import context_fingerprint
+
+
+MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT = context_fingerprint(
+    "memory-write-gate-contract:v1",
+    {
+        "implementation": "MemoryWriteGate",
+        "claim_policy": "v1",
+        "preference_policy": "v1",
+        "action_boundary_policy": "v1",
+        "observation_policy": "v1",
+        "decision_policy": "v1",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +53,13 @@ class MemoryWriteGate:
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
         if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "claim needs scope")
-        if not evidence_ids and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "claim needs evidence")
+        if (
+            not evidence_ids
+            and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION
+        ):
+            return WriteDecision(
+                False, memory.NodeStatus.NEEDS_REVIEW, "claim needs evidence"
+            )
         confidence = _confidence_for(source_authority, verification_status)
         return WriteDecision(True, memory.NodeStatus.ACTIVE, "accepted", confidence)
 
@@ -57,9 +76,15 @@ class MemoryWriteGate:
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
         if not is_valid_scope(scope):
-            return WriteDecision(False, memory.NodeStatus.REJECTED, "preference needs scope")
+            return WriteDecision(
+                False, memory.NodeStatus.REJECTED, "preference needs scope"
+            )
         if source_authority is memory.SourceAuthority.MODEL_INFERENCE:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "preference needs user or tool authority")
+            return WriteDecision(
+                False,
+                memory.NodeStatus.NEEDS_REVIEW,
+                "preference needs user or tool authority",
+            )
         confidence = _confidence_for(source_authority, verification_status)
         return WriteDecision(True, memory.NodeStatus.ACTIVE, "accepted", confidence)
 
@@ -86,10 +111,14 @@ class MemoryWriteGate:
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
         if not is_valid_scope(scope):
-            return WriteDecision(False, memory.NodeStatus.REJECTED, "action boundary needs scope")
+            return WriteDecision(
+                False, memory.NodeStatus.REJECTED, "action boundary needs scope"
+            )
         if not applies_when.strip() or not do_not_apply_when.strip():
             return WriteDecision(
-                False, memory.NodeStatus.NEEDS_REVIEW, "action boundary needs appliesWhen and doNotApplyWhen"
+                False,
+                memory.NodeStatus.NEEDS_REVIEW,
+                "action boundary needs appliesWhen and doNotApplyWhen",
             )
         invalid_structured = _invalid_structured_trigger_fields(
             {
@@ -113,7 +142,11 @@ class MemoryWriteGate:
             memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
             memory.SourceAuthority.SYSTEM_RULE,
         }:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "action boundary needs authoritative source")
+            return WriteDecision(
+                False,
+                memory.NodeStatus.NEEDS_REVIEW,
+                "action boundary needs authoritative source",
+            )
         confidence = _confidence_for(source_authority, verification_status)
         return WriteDecision(True, memory.NodeStatus.ACTIVE, "accepted", confidence)
 
@@ -131,12 +164,16 @@ class MemoryWriteGate:
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
         if not is_valid_scope(scope):
-            return WriteDecision(False, memory.NodeStatus.REJECTED, "observation needs scope")
+            return WriteDecision(
+                False, memory.NodeStatus.REJECTED, "observation needs scope"
+            )
         if not evidence_ids and source_authority not in {
             memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
             memory.SourceAuthority.SYSTEM_RULE,
         }:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "observation needs evidence")
+            return WriteDecision(
+                False, memory.NodeStatus.NEEDS_REVIEW, "observation needs evidence"
+            )
         confidence = _confidence_for(source_authority, verification_status)
         return WriteDecision(True, memory.NodeStatus.ACTIVE, "accepted", confidence)
 
@@ -154,14 +191,25 @@ class MemoryWriteGate:
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
         if not is_valid_scope(scope):
-            return WriteDecision(False, memory.NodeStatus.REJECTED, "decision needs scope")
-        if not evidence_ids and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "decision needs evidence")
+            return WriteDecision(
+                False, memory.NodeStatus.REJECTED, "decision needs scope"
+            )
+        if (
+            not evidence_ids
+            and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION
+        ):
+            return WriteDecision(
+                False, memory.NodeStatus.NEEDS_REVIEW, "decision needs evidence"
+            )
         if source_authority not in {
             memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
             memory.SourceAuthority.SYSTEM_RULE,
         }:
-            return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "decision needs authoritative source")
+            return WriteDecision(
+                False,
+                memory.NodeStatus.NEEDS_REVIEW,
+                "decision needs authoritative source",
+            )
         confidence = _confidence_for(source_authority, verification_status)
         return WriteDecision(True, memory.NodeStatus.ACTIVE, "accepted", confidence)
 
@@ -174,7 +222,10 @@ def _confidence_for(
         return memory.ConfidenceLevel.VERIFIED
     if verification_status is memory.VerificationStatus.TOOL_VERIFIED:
         return memory.ConfidenceLevel.HIGH
-    if source_authority in {memory.SourceAuthority.TOOL_RESULT, memory.SourceAuthority.DOCUMENT_SOURCE}:
+    if source_authority in {
+        memory.SourceAuthority.TOOL_RESULT,
+        memory.SourceAuthority.DOCUMENT_SOURCE,
+    }:
         return memory.ConfidenceLevel.HIGH
     if source_authority is memory.SourceAuthority.CONVERSATION_EVIDENCE:
         return memory.ConfidenceLevel.MEDIUM
@@ -186,7 +237,9 @@ def _assert_enum(value: object, enum_type: type) -> None:
         raise TypeError(f"Expected {enum_type.__name__}, got {type(value).__name__}")
 
 
-def _invalid_structured_trigger_fields(fields: dict[str, Sequence[object]]) -> list[str]:
+def _invalid_structured_trigger_fields(
+    fields: dict[str, Sequence[object]],
+) -> list[str]:
     invalid: list[str] = []
     for name, values in fields.items():
         if any(not isinstance(value, str) or not value.strip() for value in values):

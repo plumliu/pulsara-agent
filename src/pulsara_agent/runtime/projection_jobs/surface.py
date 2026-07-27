@@ -14,7 +14,7 @@ from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationDocumentFact,
     CanonicalMutationSurface,
     CanonicalMutationSurfaceDecommissionedReceiptFact,
@@ -96,9 +96,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     CanonicalMutationSurfaceDeliveryStateFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceDeliveryStateFact,
-                        schema_version=(
-                            "canonical_mutation_surface_delivery_state.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_delivery_state.v1"),
                         delivery_identity=current.delivery_identity,
                         delivery_policy=current.delivery_policy,
                         status="pending",
@@ -160,9 +158,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     CanonicalMutationSurfaceDeliveryStateFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceDeliveryStateFact,
-                        schema_version=(
-                            "canonical_mutation_surface_delivery_state.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_delivery_state.v1"),
                         delivery_identity=identity,
                         delivery_policy=current.delivery_policy,
                         status="leased",
@@ -230,12 +226,8 @@ class PostgresCanonicalMutationSurfaceRepository:
                 receipt_kind="confirmed_applied",
                 mutation_id=identity.mutation_id,
                 surface=identity.surface,
-                mutation_semantic_fingerprint=(
-                    identity.mutation_semantic_fingerprint
-                ),
-                delivery_identity_fingerprint=(
-                    identity.delivery_identity_fingerprint
-                ),
+                mutation_semantic_fingerprint=(identity.mutation_semantic_fingerprint),
+                delivery_identity_fingerprint=(identity.delivery_identity_fingerprint),
                 target_semantic_identity=target_semantic_identity,
                 applied_document_semantic_fingerprint=(
                     applied_document_semantic_fingerprint
@@ -271,8 +263,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                 )
                 if (
                     prior_head is None
-                    or prior_head.terminal_surface_sequence_number
-                    != expected_prior
+                    or prior_head.terminal_surface_sequence_number != expected_prior
                     or prior_head.terminal_mutation_id
                     != prior_delivery.delivery_identity.mutation_id
                     or prior_head.terminal_mutation_semantic_fingerprint
@@ -280,16 +271,12 @@ class PostgresCanonicalMutationSurfaceRepository:
                     or identity.predecessor_surface_delivery_identity_fingerprint
                     != prior_delivery.delivery_identity.delivery_identity_fingerprint
                 ):
-                    raise ValueError(
-                        "surface predecessor target head is not terminal"
-                    )
+                    raise ValueError("surface predecessor target head is not terminal")
             state = cast(
                 CanonicalMutationSurfaceDeliveryStateFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceDeliveryStateFact,
-                    schema_version=(
-                        "canonical_mutation_surface_delivery_state.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_delivery_state.v1"),
                     delivery_identity=identity,
                     delivery_policy=current.delivery_policy,
                     status="applied",
@@ -314,14 +301,10 @@ class PostgresCanonicalMutationSurfaceRepository:
                 CanonicalMutationSurfaceTargetHeadFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceTargetHeadFact,
-                    schema_version=(
-                        "canonical_mutation_surface_target_head.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_target_head.v1"),
                     surface=identity.surface,
                     sequence_key=delivery.mutation.ordering.sequence_key,
-                    terminal_surface_sequence_number=(
-                        identity.surface_sequence_number
-                    ),
+                    terminal_surface_sequence_number=(identity.surface_sequence_number),
                     terminal_mutation_sequence_number=(
                         delivery.mutation.ordering.sequence_number
                     ),
@@ -331,14 +314,10 @@ class PostgresCanonicalMutationSurfaceRepository:
                     ),
                     terminal_disposition="applied",
                     terminal_receipt_fingerprint=receipt.receipt_fingerprint,
-                    head_revision=prior_head.head_revision + 1
-                    if prior_head
-                    else 1,
+                    head_revision=prior_head.head_revision + 1 if prior_head else 1,
                 ),
             )
-            self._write_target_head(
-                connection, previous=prior_head, resulting=head
-            )
+            self._write_target_head(connection, previous=prior_head, resulting=head)
         return state
 
     def settle_failure(
@@ -362,9 +341,7 @@ class PostgresCanonicalMutationSurfaceRepository:
             )
             diagnostic = build_bounded_runtime_failure_diagnostic(
                 error=error,
-                redaction_profile_id=(
-                    "canonical_mutation_surface_delivery_error.v1"
-                ),
+                redaction_profile_id=("canonical_mutation_surface_delivery_error.v1"),
             )
             next_at = None
             if retry:
@@ -374,16 +351,12 @@ class PostgresCanonicalMutationSurfaceRepository:
                     policy.base_delay_milliseconds
                     * (2 ** max(0, current.attempt_count - 1)),
                 )
-                next_at = datetime.now(timezone.utc) + timedelta(
-                    milliseconds=delay
-                )
+                next_at = datetime.now(timezone.utc) + timedelta(milliseconds=delay)
             state = cast(
                 CanonicalMutationSurfaceDeliveryStateFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceDeliveryStateFact,
-                    schema_version=(
-                        "canonical_mutation_surface_delivery_state.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_delivery_state.v1"),
                     delivery_identity=current.delivery_identity,
                     delivery_policy=current.delivery_policy,
                     status="retry_wait" if retry else "dead_letter",
@@ -493,10 +466,8 @@ class PostgresCanonicalMutationSurfaceRepository:
                     latest_row["action_payload"]
                 )
                 if (
-                    latest.action_fingerprint
-                    != str(latest_row["action_fingerprint"])
-                    or latest.resulting_repair_generation
-                    != state.repair_generation
+                    latest.action_fingerprint != str(latest_row["action_fingerprint"])
+                    or latest.resulting_repair_generation != state.repair_generation
                 ):
                     raise ValueError("surface repair lineage drifted")
                 operator_authorities = tuple(
@@ -544,9 +515,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     schema_version="durable_repair_authority_reference.v1",
                     authority_kind="operator_command",
                     authority_id=operator_authority_id,
-                    authority_semantic_fingerprint=(
-                        authority_semantic_fingerprint
-                    ),
+                    authority_semantic_fingerprint=(authority_semantic_fingerprint),
                 ),
             )
             authorities = (authority,)
@@ -555,9 +524,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     DurableRepairAuthorityReferenceFact,
                     build_projection_fact(
                         DurableRepairAuthorityReferenceFact,
-                        schema_version=(
-                            "durable_repair_authority_reference.v1"
-                        ),
+                        schema_version=("durable_repair_authority_reference.v1"),
                         authority_kind="projection_rebuild",
                         authority_id=rebuild_receipt_reference.receipt_id,
                         authority_semantic_fingerprint=(
@@ -574,9 +541,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     ),
                     "expected_state_revision": state.state_revision,
                     "expected_surface_head_fingerprint": (
-                        prior_head.head_fingerprint
-                        if prior_head is not None
-                        else None
+                        prior_head.head_fingerprint if prior_head is not None else None
                     ),
                     "expected_repair_generation": state.repair_generation,
                     "action": action,
@@ -590,25 +555,19 @@ class PostgresCanonicalMutationSurfaceRepository:
                 CanonicalMutationSurfaceRepairActionFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceRepairActionFact,
-                    schema_version=(
-                        "canonical_mutation_surface_repair_action.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_repair_action.v1"),
                     repair_action_id=action_id,
                     delivery_identity_fingerprint=(
                         state.delivery_identity.delivery_identity_fingerprint
                     ),
                     expected_state_revision=state.state_revision,
                     expected_surface_head_fingerprint=(
-                        prior_head.head_fingerprint
-                        if prior_head is not None
-                        else None
+                        prior_head.head_fingerprint if prior_head is not None else None
                     ),
                     expected_repair_generation=state.repair_generation,
                     action=action,
                     authority_references=authorities,
-                    rebuild_result_receipt_reference=(
-                        rebuild_receipt_reference
-                    ),
+                    rebuild_result_receipt_reference=(rebuild_receipt_reference),
                     resulting_repair_generation=resulting_generation,
                     requested_at=requested_at,
                 ),
@@ -635,9 +594,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     CanonicalMutationSurfaceDeliveryStateFact,
                     build_projection_fact(
                         CanonicalMutationSurfaceDeliveryStateFact,
-                        schema_version=(
-                            "canonical_mutation_surface_delivery_state.v1"
-                        ),
+                        schema_version=("canonical_mutation_surface_delivery_state.v1"),
                         delivery_identity=state.delivery_identity,
                         delivery_policy=state.delivery_policy,
                         status="pending",
@@ -694,9 +651,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                 CanonicalMutationSurfaceDeliveryStateFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceDeliveryStateFact,
-                    schema_version=(
-                        "canonical_mutation_surface_delivery_state.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_delivery_state.v1"),
                     delivery_identity=state.delivery_identity,
                     delivery_policy=state.delivery_policy,
                     status="decommissioned",
@@ -721,9 +676,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                 CanonicalMutationSurfaceTargetHeadFact,
                 build_projection_fact(
                     CanonicalMutationSurfaceTargetHeadFact,
-                    schema_version=(
-                        "canonical_mutation_surface_target_head.v1"
-                    ),
+                    schema_version=("canonical_mutation_surface_target_head.v1"),
                     surface=surface,
                     sequence_key=mutation.ordering.sequence_key,
                     terminal_surface_sequence_number=(
@@ -739,9 +692,7 @@ class PostgresCanonicalMutationSurfaceRepository:
                     terminal_disposition="decommissioned",
                     terminal_receipt_fingerprint=receipt.receipt_fingerprint,
                     head_revision=(
-                        prior_head.head_revision + 1
-                        if prior_head is not None
-                        else 1
+                        prior_head.head_revision + 1 if prior_head is not None else 1
                     ),
                 ),
             )
@@ -774,10 +725,8 @@ class PostgresCanonicalMutationSurfaceRepository:
         receipt = DurableProjectionAppliedResultReceiptFact.model_validate(
             row["receipt_payload"]
         )
-        if (
-            receipt.receipt_id != receipt_id
-            or receipt.receipt_fingerprint
-            != str(row["receipt_fingerprint"])
+        if receipt.receipt_id != receipt_id or receipt.receipt_fingerprint != str(
+            row["receipt_fingerprint"]
         ):
             raise ValueError("surface rebuild receipt identity drifted")
         matching_target_identities: set[str] = set()
@@ -869,9 +818,7 @@ class PostgresCanonicalMutationSurfaceRepository:
     def _state_from_row(row) -> CanonicalMutationSurfaceDeliveryStateFact:
         return CanonicalMutationSurfaceDeliveryStateFact.model_validate(
             {
-                "schema_version": (
-                    "canonical_mutation_surface_delivery_state.v1"
-                ),
+                "schema_version": ("canonical_mutation_surface_delivery_state.v1"),
                 "delivery_identity": row["delivery_identity"],
                 "delivery_policy": row["delivery_policy"],
                 "status": str(row["status"]),
@@ -1096,9 +1043,7 @@ class CanonicalMutationSurfaceWorker:
     handler: CanonicalMutationSurfaceHandler
     owner_id: str
 
-    def run_once(
-        self, *, limit: int = 4, deadline_monotonic: float
-    ) -> int:
+    def run_once(self, *, limit: int = 4, deadline_monotonic: float) -> int:
         deliveries = self.repository.claim_due(
             surface=self.handler.surface,
             owner_id=self.owner_id,
@@ -1110,8 +1055,7 @@ class CanonicalMutationSurfaceWorker:
             physical = delivery.lease.delivery_policy.physical_policy
             attempt_deadline = min(
                 deadline_monotonic,
-                monotonic()
-                + physical.external_surface_attempt_timeout_seconds,
+                monotonic() + physical.external_surface_attempt_timeout_seconds,
             )
             try:
                 target_identity, applied_fingerprint = self.handler.apply(
@@ -1121,13 +1065,10 @@ class CanonicalMutationSurfaceWorker:
                 self.repository.settle_applied(
                     delivery=delivery,
                     target_semantic_identity=target_identity,
-                    applied_document_semantic_fingerprint=(
-                        applied_fingerprint
-                    ),
+                    applied_document_semantic_fingerprint=(applied_fingerprint),
                     deadline_monotonic=min(
                         deadline_monotonic,
-                        monotonic()
-                        + physical.result_commit_timeout_seconds,
+                        monotonic() + physical.result_commit_timeout_seconds,
                     ),
                 )
                 completed += 1
@@ -1135,14 +1076,12 @@ class CanonicalMutationSurfaceWorker:
                 self.repository.settle_failure(
                     delivery=delivery,
                     failure_kind=(
-                        DurableProjectionFailureKind
-                        .TRANSIENT_STORAGE_UNAVAILABLE
+                        DurableProjectionFailureKind.TRANSIENT_STORAGE_UNAVAILABLE
                     ),
                     error=error,
                     deadline_monotonic=min(
                         deadline_monotonic,
-                        monotonic()
-                        + physical.result_commit_timeout_seconds,
+                        monotonic() + physical.result_commit_timeout_seconds,
                     ),
                 )
         return completed

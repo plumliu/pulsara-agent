@@ -23,7 +23,8 @@ from pulsara_agent.primitives.context_source import (
     InlineContextSourceContentSemanticFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.runtime import AgentRuntime, LoopBudget
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.context_input.candidate import (
     InMemoryContextLifecycleCache,
     build_context_candidate_source_selections,

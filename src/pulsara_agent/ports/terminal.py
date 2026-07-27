@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from pulsara_agent.event import (
+    AgentEvent,
+    EventContext,
+    TerminalProcessMonitorRegisteredEvent,
+)
 from pulsara_agent.primitives.context import (
+    ContextEventReferenceFact,
     FrozenJsonObjectFact,
     context_fingerprint,
     freeze_json,
@@ -17,12 +24,277 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.terminal_observation import (
+    TerminalMonitorLifecycleState,
+    TerminalNotificationReservationFact,
+    TerminalProcessMonitorCancellationSemanticFact,
     TerminalProcessMonitorConditionsFact,
+    TerminalProcessMonitorCoreStateFact,
     TerminalProcessMonitorDeliveryPolicyFact,
     TerminalProcessMonitorLifetimeFact,
     TerminalProcessMonitorOutputConditionFact,
     TerminalProcessMonitorPolicyFact,
+    TerminalProcessMonitorRegistrationAttributionFact,
+    TerminalProcessMonitorRegistrationSemanticFact,
+    TerminalProcessObservationReceiptFact,
+    TerminalProcessObservationSemanticFact,
 )
+from pulsara_agent.ports.tool_execution import (
+    ToolInvocationOwnerKind,
+    ToolPermissionInvocation,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTerminalNotificationReservation:
+    reservation: TerminalNotificationReservationFact
+    expected_account_revision: int
+    expected_account_state_fingerprint: str
+
+
+class TerminalBackendType(StrEnum):
+    LOCAL = "local"
+
+
+class TerminalIOMode(StrEnum):
+    PIPE = "pipe"
+    PTY = "pty"
+
+
+class TerminalStatus(StrEnum):
+    RUNNING = "running"
+    SUCCESS = "success"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    BLOCKED = "blocked"
+    KILLED = "killed"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalResult:
+    status: TerminalStatus
+    output: str
+    exit_code: int
+    cwd: str
+    timed_out: bool
+    truncated: bool
+    error: str | None
+    process_id: str | None
+    full_output_text: str | None
+    metadata: FrozenJsonObjectFact
+    observation_semantic: TerminalProcessObservationSemanticFact | None
+    completion_event_reference: ContextEventReferenceFact | None
+
+    def to_payload(
+        self,
+        *,
+        terminal_session_id: str,
+        backend_type: str,
+    ) -> dict[str, object]:
+        metadata = thaw_json(self.metadata)
+        payload: dict[str, object] = {
+            "status": self.status.value,
+            "output": self.output,
+            "exit_code": self.exit_code,
+            "cwd": self.cwd,
+            "timed_out": self.timed_out,
+            "truncated": self.truncated,
+            "error": self.error,
+            "process_id": self.process_id,
+            "yielded_to_background": (
+                self.status is TerminalStatus.RUNNING and self.process_id is not None
+            ),
+            "terminal_session_id": terminal_session_id,
+            "backend_type": backend_type,
+            "io_mode": metadata.get("io_mode"),
+        }
+        for key in (
+            "command",
+            "duration_seconds",
+            "stdin_closed",
+            "policy_code",
+            "suggested_args",
+            "shell",
+            "env",
+        ):
+            if key in metadata:
+                payload[key] = metadata[key]
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessInfo:
+    process_id: str
+    terminal_session_id: str
+    command: str
+    cwd: str
+    backend_type: TerminalBackendType
+    io_mode: TerminalIOMode
+    status: TerminalStatus
+    exit_code: int | None
+    timed_out: bool
+    stdin_closed: bool
+    started_at_monotonic: float
+    ended_at_monotonic: float | None
+    duration_seconds: float
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "process_id": self.process_id,
+            "terminal_session_id": self.terminal_session_id,
+            "command": self.command,
+            "cwd": self.cwd,
+            "backend_type": self.backend_type.value,
+            "io_mode": self.io_mode.value,
+            "status": self.status.value,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "stdin_closed": self.stdin_closed,
+            "duration_seconds": self.duration_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessLog:
+    process: TerminalProcessInfo
+    output: str
+    truncated: bool
+    full_output_text: str | None
+    observation_semantic: TerminalProcessObservationSemanticFact | None
+    completion_event_reference: ContextEventReferenceFact | None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "process": self.process.to_payload(),
+            "output": self.output,
+            "truncated": self.truncated,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTerminalProcessMonitorRegistration:
+    registration_semantic: TerminalProcessMonitorRegistrationSemanticFact
+    registration_attribution: TerminalProcessMonitorRegistrationAttributionFact
+    initial_core_state: TerminalProcessMonitorCoreStateFact
+    registered_event: TerminalProcessMonitorRegisteredEvent
+    notification_reservation: PreparedTerminalNotificationReservation | None
+    initial_observation_result: TerminalResult
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTerminalProcessMonitorCancellation:
+    monitor_id: str
+    outcome: Literal["cancelled", "already_terminal"]
+    cancellation_semantic: TerminalProcessMonitorCancellationSemanticFact | None
+    stable_candidates: tuple[AgentEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalPortInvocationOwner:
+    runtime_session_id: str
+    run_id: str
+    tool_call_id: str
+    tool_name: Literal["terminal", "terminal_process", "terminal_monitor"]
+    event_context: EventContext
+    owner_kind: ToolInvocationOwnerKind
+    permission: ToolPermissionInvocation
+    owner_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if self.event_context.run_id != self.run_id:
+            raise ValueError("terminal invocation owner run identity mismatch")
+        payload = asdict(self)
+        payload.pop("owner_fingerprint")
+        expected = context_fingerprint("terminal-port-invocation-owner:v1", payload)
+        if self.owner_fingerprint != expected:
+            raise ValueError("terminal invocation owner fingerprint mismatch")
+
+
+def build_terminal_port_invocation_owner(
+    *,
+    runtime_session_id: str,
+    tool_call_id: str,
+    tool_name: Literal["terminal", "terminal_process", "terminal_monitor"],
+    event_context: EventContext,
+    owner_kind: ToolInvocationOwnerKind,
+    permission: ToolPermissionInvocation,
+) -> TerminalPortInvocationOwner:
+    payload = {
+        "runtime_session_id": runtime_session_id,
+        "run_id": event_context.run_id,
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "event_context": asdict(event_context),
+        "owner_kind": owner_kind.value,
+        "permission": asdict(permission),
+    }
+    return TerminalPortInvocationOwner(
+        runtime_session_id=runtime_session_id,
+        run_id=event_context.run_id,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        event_context=event_context,
+        owner_kind=owner_kind,
+        permission=permission,
+        owner_fingerprint=context_fingerprint(
+            "terminal-port-invocation-owner:v1", payload
+        ),
+    )
+
+
+class TerminalPortRejectCode(StrEnum):
+    MALFORMED_ARGUMENTS = "malformed_arguments"
+    ACCESS_OFF = "terminal_access_off"
+    HARDLINE_COMMAND = "hardline_terminal_command"
+    HARDLINE_PROCESS_INPUT = "hardline_terminal_process_input"
+    PROCESS_NOT_FOUND = "process_not_found"
+    PROCESS_INPUT_REJECTED = "process_input_rejected"
+    PROCESS_CAPACITY_EXHAUSTED = "process_capacity_exhausted"
+    MONITOR_OWNER_UNAVAILABLE = "monitor_owner_unavailable"
+    MONITOR_CAPACITY_EXHAUSTED = "monitor_capacity_exhausted"
+    MONITOR_DUPLICATE = "monitor_duplicate"
+    MONITOR_NOT_FOUND = "monitor_not_found"
+    CHILD_MONITOR_UNSUPPORTED = "child_monitor_unsupported"
+    CONTRACT_MISMATCH = "contract_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalCommandRejectedOutcome:
+    outcome_kind: Literal["rejected"]
+    command: str | None
+    terminal_session_id: str | None
+    failure_stage: Literal[
+        "argument_validation",
+        "permission",
+        "adapter_initialization",
+        "execution",
+        "completion_reservation",
+    ]
+    reject_code: TerminalPortRejectCode
+    sanitized_message: str
+    outcome_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessRejectedOutcome:
+    outcome_kind: Literal["rejected"]
+    requested_action: str
+    process_id: str | None
+    status: Literal["malformed_arguments", "blocked", "not_found", "error"]
+    reject_code: TerminalPortRejectCode
+    sanitized_message: str
+    outcome_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorRejectedOutcome:
+    outcome_kind: Literal["rejected"]
+    requested_action: str
+    process_id: str | None
+    monitor_id: str | None
+    status: Literal["malformed_arguments", "blocked", "not_found", "error"]
+    reject_code: TerminalPortRejectCode
+    sanitized_message: str
+    outcome_fingerprint: str
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
@@ -475,6 +747,227 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     return inlined
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalCommandRequest:
+    command: str
+    workdir: str | None
+    terminal_session_id: str
+    yield_time_ms: int
+    max_output_chars: int
+    tty: bool
+    max_lifetime_seconds: int | None
+    request_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.command or not self.terminal_session_id:
+            raise ValueError("terminal command and session identity are required")
+        if self.yield_time_ms < 0 or self.max_output_chars < 1:
+            raise ValueError("terminal command bounds are invalid")
+        if self.max_lifetime_seconds is not None and self.max_lifetime_seconds < 1:
+            raise ValueError("terminal lifetime must be positive")
+        _validate_process_local_fingerprint(
+            self,
+            field_name="request_fingerprint",
+            namespace="terminal-command-request:v1",
+        )
+
+
+def build_terminal_command_request(
+    *,
+    command: str,
+    workdir: str | None,
+    terminal_session_id: str,
+    yield_time_ms: int,
+    max_output_chars: int,
+    tty: bool,
+    max_lifetime_seconds: int | None = None,
+) -> TerminalCommandRequest:
+    payload = {
+        "command": command,
+        "workdir": workdir,
+        "terminal_session_id": terminal_session_id,
+        "yield_time_ms": yield_time_ms,
+        "max_output_chars": max_output_chars,
+        "tty": tty,
+        "max_lifetime_seconds": max_lifetime_seconds,
+    }
+    return TerminalCommandRequest(
+        **payload,
+        request_fingerprint=context_fingerprint("terminal-command-request:v1", payload),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalCommandCompletedOutcome:
+    outcome_kind: Literal["completed"]
+    result: TerminalResult
+    terminal_session_id: str
+    backend_type: TerminalBackendType
+    prepared_completion_reservation: PreparedTerminalNotificationReservation | None
+    outcome_fingerprint: str
+
+
+TerminalCommandOutcome: TypeAlias = (
+    TerminalCommandCompletedOutcome | TerminalCommandRejectedOutcome
+)
+
+
+class TerminalOutputDeltaSink(Protocol):
+    def emit(self, text_delta: str) -> None: ...
+
+
+class TerminalCommandPort(Protocol):
+    def execute(
+        self,
+        *,
+        request: TerminalCommandRequest,
+        owner: TerminalPortInvocationOwner,
+        output_sink: TerminalOutputDeltaSink | None,
+    ) -> TerminalCommandOutcome: ...
+
+
+TerminalProcessRequest: TypeAlias = TerminalProcessInput
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessInventoryOutcome:
+    outcome_kind: Literal["inventory"]
+    processes: tuple[TerminalProcessInfo, ...]
+    live_process_count: int
+    finished_process_count: int
+    outcome_fingerprint: str
+
+    def __post_init__(self) -> None:
+        live = sum(item.status is TerminalStatus.RUNNING for item in self.processes)
+        if self.live_process_count != live:
+            raise ValueError("terminal process live count mismatch")
+        if self.finished_process_count != len(self.processes) - live:
+            raise ValueError("terminal process finished count mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessLogOutcome:
+    outcome_kind: Literal["log"]
+    log: TerminalProcessLog
+    observation_receipt: TerminalProcessObservationReceiptFact
+    outcome_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessObservationOutcome:
+    outcome_kind: Literal["observation"]
+    action: Literal["poll", "wait", "write", "submit", "close_stdin"]
+    result: TerminalResult
+    observation_receipt: TerminalProcessObservationReceiptFact | None
+    outcome_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProcessKilledOutcome:
+    outcome_kind: Literal["killed"]
+    action: Literal["kill"]
+    result: TerminalResult
+    completion_observation_receipt: TerminalProcessObservationReceiptFact
+    outcome_fingerprint: str
+
+
+TerminalProcessOutcome: TypeAlias = (
+    TerminalProcessInventoryOutcome
+    | TerminalProcessLogOutcome
+    | TerminalProcessObservationOutcome
+    | TerminalProcessKilledOutcome
+    | TerminalProcessRejectedOutcome
+)
+
+
+class TerminalProcessPort(Protocol):
+    def execute(
+        self,
+        *,
+        request: TerminalProcessRequest,
+        owner: TerminalPortInvocationOwner,
+    ) -> TerminalProcessOutcome: ...
+
+
+TerminalMonitorRequest: TypeAlias = TerminalMonitorInput
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorRegisteredOutcome:
+    outcome_kind: Literal["registered"]
+    prepared_registration: PreparedTerminalProcessMonitorRegistration
+    outcome_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorInventoryItem:
+    monitor_id: str
+    process_id: str
+    lifecycle_state: TerminalMonitorLifecycleState
+    observation_ordinal: int
+    has_pending_observation: bool
+    item_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorInventoryOutcome:
+    outcome_kind: Literal["inventory"]
+    items: tuple[TerminalMonitorInventoryItem, ...]
+    omitted_monitor_count: int
+    outcome_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if len(self.items) > 8 or self.omitted_monitor_count < 0:
+            raise ValueError("terminal monitor inventory bounds are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorCancelledOutcome:
+    outcome_kind: Literal["cancelled"]
+    prepared_cancellation: PreparedTerminalProcessMonitorCancellation
+    outcome_fingerprint: str
+
+
+TerminalMonitorOutcome: TypeAlias = (
+    TerminalMonitorRegisteredOutcome
+    | TerminalMonitorInventoryOutcome
+    | TerminalMonitorCancelledOutcome
+    | TerminalMonitorRejectedOutcome
+)
+
+
+class TerminalMonitorPort(Protocol):
+    def execute(
+        self,
+        *,
+        request: TerminalMonitorRequest,
+        owner: TerminalPortInvocationOwner,
+    ) -> TerminalMonitorOutcome: ...
+
+
+def process_local_fingerprint(namespace: str, value: object) -> str:
+    if hasattr(value, "model_dump"):
+        payload = value.model_dump(mode="json")
+    elif hasattr(value, "__dataclass_fields__"):
+        payload = asdict(value)
+    else:
+        payload = value
+    return context_fingerprint(namespace, payload)
+
+
+def _validate_process_local_fingerprint(
+    value: object,
+    *,
+    field_name: str,
+    namespace: str,
+) -> None:
+    payload = asdict(value)
+    actual = payload.pop(field_name)
+    expected = context_fingerprint(namespace, payload)
+    if actual != expected:
+        raise ValueError(f"{field_name} mismatch")
+
+
 __all__ = [
     "BuiltinToolInputContractBinding",
     "DEFAULT_MAX_OUTPUT_CHARS",
@@ -485,14 +978,46 @@ __all__ = [
     "MAXIMUM_MONITOR_PROGRESS_OBSERVATIONS_PER_WINDOW",
     "MIN_TERMINAL_OUTPUT_CHARS",
     "MONITOR_PROGRESS_RATE_WINDOW_SECONDS",
+    "PreparedTerminalNotificationReservation",
+    "PreparedTerminalProcessMonitorCancellation",
+    "PreparedTerminalProcessMonitorRegistration",
     "ResolvedTerminalMonitorPublicPolicy",
     "TERMINAL_MONITOR_TOOL_DESCRIPTION",
     "TERMINAL_PROCESS_TOOL_DESCRIPTION",
     "TERMINAL_TOOL_DESCRIPTION",
     "TerminalMonitorCancelInput",
+    "TerminalMonitorCancelledOutcome",
+    "TerminalMonitorInventoryItem",
+    "TerminalMonitorInventoryOutcome",
     "TerminalMonitorInput",
     "TerminalMonitorListInput",
     "TerminalMonitorRegisterInput",
+    "TerminalMonitorRegisteredOutcome",
+    "TerminalMonitorRejectedOutcome",
+    "TerminalMonitorPort",
+    "TerminalMonitorRequest",
+    "TerminalBackendType",
+    "TerminalCommandCompletedOutcome",
+    "TerminalCommandOutcome",
+    "TerminalCommandPort",
+    "TerminalCommandRejectedOutcome",
+    "TerminalCommandRequest",
+    "TerminalIOMode",
+    "TerminalOutputDeltaSink",
+    "TerminalPortInvocationOwner",
+    "TerminalPortRejectCode",
+    "TerminalProcessInfo",
+    "TerminalProcessInventoryOutcome",
+    "TerminalProcessKilledOutcome",
+    "TerminalProcessLog",
+    "TerminalProcessLogOutcome",
+    "TerminalProcessObservationOutcome",
+    "TerminalProcessOutcome",
+    "TerminalProcessPort",
+    "TerminalProcessRejectedOutcome",
+    "TerminalProcessRequest",
+    "TerminalResult",
+    "TerminalStatus",
     "TerminalProcessCloseStdinInput",
     "TerminalProcessInput",
     "TerminalProcessKillInput",
@@ -503,6 +1028,8 @@ __all__ = [
     "TerminalProcessWaitInput",
     "TerminalProcessWriteInput",
     "builtin_tool_input_contract_binding",
+    "build_terminal_command_request",
+    "build_terminal_port_invocation_owner",
     "parse_terminal_monitor_input",
     "parse_terminal_process_input",
     "resolve_terminal_monitor_public_policy",

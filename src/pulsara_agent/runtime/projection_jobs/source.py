@@ -13,7 +13,7 @@ from pulsara_agent.event_log.protocol import (
     RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionJobCandidateFact,
     DurableProjectionJobSemanticFact,
     DurableProjectionKind,
@@ -90,9 +90,7 @@ def exact_stored_event(
     deadline_monotonic: float | None = None,
 ) -> BoundDurableProjectionStoredEvent:
     deadline = deadline_monotonic or monotonic() + 20.0
-    selected = event_log.read_raw_events_by_id(
-        (event_id,), deadline_monotonic=deadline
-    )
+    selected = event_log.read_raw_events_by_id((event_id,), deadline_monotonic=deadline)
     if len(selected) != 1 or selected[0].event_id != event_id:
         raise ValueError("projection source event is unavailable")
     envelope = selected[0]
@@ -161,9 +159,7 @@ def build_job_candidate(
     ):
         raise ValueError("projection trigger event schema is unsupported")
     event = stored.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
-    tool_call_id = (
-        event.tool_call_id if isinstance(event, ToolResultEndEvent) else None
-    )
+    tool_call_id = event.tool_call_id if isinstance(event, ToolResultEndEvent) else None
     target_key = projection_target_key(
         projection_kind=projection_kind,
         runtime_session_id=stored.source_reference.runtime_session_id,

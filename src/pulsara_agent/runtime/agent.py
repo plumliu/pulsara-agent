@@ -128,6 +128,15 @@ from pulsara_agent.primitives.model_call import (
     sha256_fingerprint,
 )
 from pulsara_agent.primitives.long_horizon import ToolActionClassificationFact
+from pulsara_agent.ports.mcp import (
+    McpInvocationOwner,
+    McpPendingTerminalReason,
+    McpToolCompletedOutcome,
+    McpToolRejectedOutcome,
+    McpToolSuspendedOutcome,
+    build_mcp_tool_resume_request,
+)
+from pulsara_agent.ports.tool_registry import McpToolBindingContract
 from pulsara_agent.primitives.mcp import (
     McpBindingIdentityFact,
     McpInstallationReferenceFact,
@@ -135,12 +144,9 @@ from pulsara_agent.primitives.mcp import (
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     ContextCompactionRequestFact,
-    CurrentToolResultBatchReceipt,
-    CurrentToolResultReceiptItem,
     McpInputRequiredSuspensionFact,
     McpInputRequiredTerminalSourceFact,
     PreparedMcpInputRequiredResolution,
-    PreparedMcpInputRequiredSuspension,
     PublicationLatchedRunTerminationFact,
     RuntimeEventOperationDeadlineBudget,
     build_bounded_runtime_failure_diagnostic,
@@ -148,12 +154,16 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     ordered_fingerprint_accumulator,
     stable_runtime_event_id,
 )
+from pulsara_agent.replay.tool_result_receipts import (
+    CurrentToolResultBatchReceipt,
+    CurrentToolResultReceiptItem,
+)
 from pulsara_agent.runtime.context_engine.types import (
     CompiledContext,
     ContextBudgetExceeded,
     bind_compiled_context_to_provider_carrier,
 )
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     ToolActionClassifierRegistry,
     default_tool_action_classifier_registry,
 )
@@ -293,10 +303,6 @@ from pulsara_agent.runtime.plan import (
 )
 from pulsara_agent.runtime.mcp.types import (
     MAX_MCP_INPUT_REQUIRED_ROUNDS,
-    McpBindingIdentity,
-    McpInputRequestDTO,
-    McpInputRequiredResolution,
-    redact_mcp_error_message,
 )
 from pulsara_agent.runtime.recovery import (
     AbortKind,
@@ -304,6 +310,7 @@ from pulsara_agent.runtime.recovery import (
     InRunRecoveryState,
 )
 from pulsara_agent.runtime.session import (
+    EventBatchCommitOutcome,
     EventPublicationAfterCommitError,
     EventWriteConflict,
     RuntimeSession,
@@ -382,7 +389,7 @@ from pulsara_agent.runtime.subagent import (
     SubagentRuntimeError,
 )
 from pulsara_agent.runtime.subagent.run_entry import SubagentRunEntryDriver
-from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
+from pulsara_agent.capability.builtin_catalog import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
     _duplicate_tool_call_ids,
@@ -393,12 +400,18 @@ from pulsara_agent.runtime.tool_loop import (
     _tool_result_from_event_slice,
     build_tool_result_error_events,
 )
-from pulsara_agent.tools import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
     ToolExecutionSuspended,
-    ToolExecutor,
     ToolRuntimeContext,
+    ToolInvocationOwnerKind,
+    tool_permission_invocation_from_snapshot,
+)
+from pulsara_agent.runtime.tool_executor import ToolExecutor
+from pulsara_agent.runtime.tool_composition import (
+    build_runtime_tool_composition_input,
+    build_runtime_tool_executor,
 )
 
 WorkspaceKind = Literal["project", "transient"]
@@ -750,45 +763,23 @@ def _suppressed_by_workflow_control_decision(
     )
 
 
-def _mcp_input_requests_from_payload(value: object) -> tuple[McpInputRequestDTO, ...]:
-    if not isinstance(value, list):
-        return ()
-    requests: list[McpInputRequestDTO] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("key") or "")
-        method = str(item.get("method") or "")
-        params = item.get("params")
-        if not key or not method:
-            continue
-        requests.append(
-            McpInputRequestDTO(
-                key=key,
-                method=method,
-                params=dict(params) if isinstance(params, dict) else {},
-            )
-        )
-    return tuple(requests)
-
-
-def _mcp_binding_identity_fact(identity: McpBindingIdentity) -> McpBindingIdentityFact:
-    return McpBindingIdentityFact(
-        server_id=identity.server_id,
-        slot_id=identity.slot_id,
-        snapshot_id=identity.snapshot_id,
-        discovery_generation=identity.discovery_generation,
-    )
-
-
-def _mcp_resume_binding_changed(
-    suspension: McpInputRequiredSuspensionFact,
-    tool: object,
-) -> bool:
-    current_identity = getattr(tool, "binding_identity", None)
-    if not isinstance(current_identity, McpBindingIdentity):
-        return True
-    return suspension.binding_identity != _mcp_binding_identity_fact(current_identity)
+def _mcp_terminal_reason_from_projection(
+    *,
+    disposition_kind: Literal["expired", "binding_changed"] | None,
+    closure_reason: str | None,
+    result_state: ToolResultState,
+) -> McpPendingTerminalReason:
+    if disposition_kind == "expired":
+        return McpPendingTerminalReason.INTERACTION_EXPIRED
+    if disposition_kind == "binding_changed":
+        return McpPendingTerminalReason.BINDING_CHANGED
+    if closure_reason == "child_pending_unsupported":
+        return McpPendingTerminalReason.CHILD_PENDING_UNSUPPORTED
+    if closure_reason is not None:
+        return McpPendingTerminalReason.PUBLICATION_TERMINALIZATION
+    if result_state is ToolResultState.DENIED:
+        return McpPendingTerminalReason.PERMISSION_DENIED
+    return McpPendingTerminalReason.COMPLETED_RESULT
 
 
 def _optional_float(value: object) -> float | None:
@@ -891,6 +882,7 @@ class AgentRuntime:
             tuple[str, str],
             Literal["not_attempted", "attempting", "none", "full", "untrusted"],
         ] = {}
+        self._mcp_terminal_pending_handles: dict[tuple[str, str], object] = {}
         self.tool_action_classifier_registry: ToolActionClassifierRegistry = (
             default_tool_action_classifier_registry()
         )
@@ -912,7 +904,8 @@ class AgentRuntime:
                 "RuntimeSession carries an incompatible window compaction service"
             )
         self.window_compaction_service = existing_window_compactor
-        self.tool_executor = runtime_session.create_tool_executor(
+        self._tool_composition_input = build_runtime_tool_composition_input(
+            runtime_session,
             memory_proposal_sink=getattr(
                 self.memory_hooks, "memory_proposal_sink", None
             ),
@@ -920,8 +913,8 @@ class AgentRuntime:
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
             memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
-            permission_state=self._permission_state,
         )
+        self.tool_executor = build_runtime_tool_executor(self._tool_composition_input)
 
     def require_prevalidated_rollout_pair(
         self,
@@ -954,7 +947,8 @@ class AgentRuntime:
         if capability_runtime is None:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
         self.capability_runtime = capability_runtime
-        self.tool_executor = self.runtime_session.create_tool_executor(
+        self._tool_composition_input = build_runtime_tool_composition_input(
+            self.runtime_session,
             memory_proposal_sink=getattr(
                 self.memory_hooks, "memory_proposal_sink", None
             ),
@@ -962,8 +956,8 @@ class AgentRuntime:
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
             memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
-            permission_state=self._permission_state,
         )
+        self.tool_executor = build_runtime_tool_executor(self._tool_composition_input)
 
     @property
     def permission_policy(self) -> EffectivePermissionPolicy:
@@ -1056,9 +1050,13 @@ class AgentRuntime:
             "pending MCP tool_name",
         )
         commit_outcome_key = (state.run_id, tool_call_id)
+        pending_handle = state.pending_interaction_payload.get("mcp_pending_handle")
+        if pending_handle is None or not hasattr(pending_handle, "identity"):
+            raise RuntimeError("MCP resume lost its process-local pending handle")
         if commit_outcome_key in self._mcp_terminal_commit_outcomes:
             raise RuntimeError("MCP terminal result commit is already active")
         self._mcp_terminal_commit_outcomes[commit_outcome_key] = "not_attempted"
+        self._mcp_terminal_pending_handles[commit_outcome_key] = pending_handle
         try:
             async for event in self._stream_mcp_input_required_resolution(
                 state, resolution
@@ -1069,6 +1067,7 @@ class AgentRuntime:
                 commit_outcome_key,
                 "untrusted",
             )
+            self._mcp_terminal_pending_handles.pop(commit_outcome_key, None)
             if commit_outcome == "full":
                 committed_result_events = self._committed_tool_result_events(
                     state,
@@ -1091,15 +1090,12 @@ class AgentRuntime:
                 state.pending_interaction_payload = {}
                 state.status = LoopStatus.RUNNING
                 state.stop_reason = None
-                try:
-                    self._record_tool_result_events(
-                        state,
-                        stored_events=committed_result_events,
-                        tool_call_id=tool_call_id,
-                        tool_call_name=tool_name,
-                    )
-                finally:
-                    await self._complete_mcp_pending_lease(resolution.interaction_id)
+                self._record_tool_result_events(
+                    state,
+                    stored_events=committed_result_events,
+                    tool_call_id=tool_call_id,
+                    tool_call_name=tool_name,
+                )
             else:
                 state.pending_tool_calls = original_pending_tool_calls
                 state.pending_interaction_kind = original_pending_kind
@@ -1110,6 +1106,7 @@ class AgentRuntime:
             raise
         else:
             self._mcp_terminal_commit_outcomes.pop(commit_outcome_key, None)
+            self._mcp_terminal_pending_handles.pop(commit_outcome_key, None)
 
     async def abort_run(
         self,
@@ -1170,16 +1167,25 @@ class AgentRuntime:
                 yield event
             return
         if state.pending_interaction_kind == "mcp_input_required":
-            interaction_id = _required_str(
-                state.pending_interaction_payload.get("interaction_id"),
-                "pending MCP interaction id",
+            tool_call_id = _required_str(
+                state.pending_interaction_payload.get("tool_call_id"),
+                "pending MCP tool call id",
             )
-            async for event in self._terminalize_pending_mcp_for_abort(
-                state,
-                reason=reason,
-            ):
-                yield event
-            await self._complete_mcp_pending_lease(interaction_id)
+            handle = state.pending_interaction_payload.get("mcp_pending_handle")
+            if handle is None or not hasattr(handle, "identity"):
+                raise RuntimeError("pending MCP abort lost its physical owner")
+            key = (state.run_id, tool_call_id)
+            self._mcp_terminal_commit_outcomes[key] = "not_attempted"
+            self._mcp_terminal_pending_handles[key] = handle
+            try:
+                async for event in self._terminalize_pending_mcp_for_abort(
+                    state,
+                    reason=reason,
+                ):
+                    yield event
+            finally:
+                self._mcp_terminal_commit_outcomes.pop(key, None)
+                self._mcp_terminal_pending_handles.pop(key, None)
         elif state.pending_interaction_kind == "plan":
             async for event in self._terminalize_pending_plan_for_abort(
                 state,
@@ -1257,10 +1263,11 @@ class AgentRuntime:
             payload.get("tool_name"),
             "pending MCP tool name",
         )
-        prepared = payload.get("prepared_mcp_input_required")
-        if not isinstance(prepared, PreparedMcpInputRequiredSuspension):
-            raise RuntimeError("pending MCP abort lost its prepared suspension")
-        original_request = prepared.thaw_original_request()
+        pending_handle = payload.get("mcp_pending_handle")
+        if pending_handle is None or not hasattr(
+            pending_handle, "suspension_commit_view"
+        ):
+            raise RuntimeError("pending MCP abort lost its process-local handle")
         timing_seed = dict(payload.get("tool_observation_timing_seed") or {})
         terminal_source = None
         resolution_ref = (
@@ -1311,13 +1318,18 @@ class AgentRuntime:
                     f"owning run stopped ({reason.value})."
                 ),
                 result_state=ToolResultState.INTERRUPTED,
-                tool_arguments=dict(original_request.get("arguments") or {}),
+                tool_arguments={},
                 tool_observation_timing_seed=(
                     {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
                 ),
                 rollout_reservation=reservation,
                 mcp_input_required_terminal_source=terminal_source,
                 mcp_closure_reason=closure_reason,
+                mcp_terminal_reason=(
+                    McpPendingTerminalReason.PUBLICATION_TERMINALIZATION
+                    if closure_reason is not None
+                    else McpPendingTerminalReason.HOST_ABORT
+                ),
                 deadline_budget=deadline_budget,
             ):
                 committed = (*committed, event)
@@ -2167,23 +2179,17 @@ class AgentRuntime:
         return ToolRuntimeContext(
             runtime_session_id=self.runtime_session.runtime_session_id,
             event_context=self._event_context(state),
+            permission=tool_permission_invocation_from_snapshot(
+                snapshot.to_context_fact()
+            ),
+            owner_kind=(
+                ToolInvocationOwnerKind.SUBAGENT_CHILD
+                if self._is_subagent_child
+                else ToolInvocationOwnerKind.HOST_MAIN_RUN
+            ),
             context_id=context_id,
             model_call_index=model_call_index,
-            permission_snapshot_id=snapshot.snapshot_id,
-            permission_mode=snapshot.permission_mode.value,
-            permission_policy=dict(snapshot.permission_policy),
-            run_entry_kind=(
-                "subagent_child" if self._is_subagent_child else "host_main_run"
-            ),
         )
-
-    def _tool_permission_kwargs(self, state: LoopState) -> dict[str, object]:
-        snapshot = self._require_run_permission_snapshot(state)
-        return {
-            "permission_snapshot_id": snapshot.snapshot_id,
-            "permission_mode": snapshot.permission_mode.value,
-            "permission_policy": dict(snapshot.permission_policy),
-        }
 
     async def run_committed_entry(
         self,
@@ -2898,6 +2904,11 @@ class AgentRuntime:
         ) in self._mcp_terminal_commit_outcomes
         if track_mcp_terminal:
             self._mark_mcp_terminal_commit_attempt(state, call.id)
+        mcp_pending_handle = self._mcp_terminal_pending_handles.get(
+            (state.run_id, call.id)
+        )
+        if track_mcp_terminal and mcp_pending_handle is None:
+            raise RuntimeError("MCP denial lost its pending handle owner")
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if (
             rollout_reservation is not None
@@ -2917,12 +2928,28 @@ class AgentRuntime:
                 source=mcp_input_required_terminal_source,
                 disposition_kind=None,
             )
+        candidate_owner = None
+        prepared_mcp_settlement = None
         if rollout_reservation is not None:
-            terminal_registry.freeze_terminal(
+            candidate_owner = terminal_registry.freeze_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
                 candidates=write_candidates,
+                physical_owner_identity_fingerprint=(
+                    mcp_pending_handle.identity.identity_fingerprint
+                    if mcp_pending_handle is not None
+                    else None
+                ),
             )
+            if mcp_pending_handle is not None:
+                mcp_port = self.runtime_session.mcp_tool_execution_port
+                if mcp_port is None:
+                    raise RuntimeError("MCP denial lost its execution port")
+                prepared_mcp_settlement = mcp_port.prepare_terminal_settlement(
+                    pending_handle=mcp_pending_handle,
+                    reason=McpPendingTerminalReason.PERMISSION_DENIED,
+                    candidate_owner_identity=candidate_owner,
+                )
         try:
             if rollout_reservation is not None:
                 result = await RuntimeSessionToolExecutionEventCommitPort(
@@ -2968,10 +2995,20 @@ class AgentRuntime:
                     account_id=account_id,
                 )
         except BaseException as exc:
-            if (
-                rollout_reservation is not None
-                and self.runtime_session.reconciliation_required
-            ):
+            outcome = self.runtime_session.resolved_event_write_outcome(exc)
+            if candidate_owner is not None and prepared_mcp_settlement is not None:
+                receipt = terminal_registry.confirm_stable_candidate_write(
+                    owner_identity=candidate_owner,
+                    outcome=outcome,
+                )
+                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
+                    settlement=prepared_mcp_settlement,
+                    commit_receipt=receipt,
+                )
+                terminal_registry.accept_physical_owner_handoff(
+                    transition.handoff_receipt
+                )
+            elif rollout_reservation is not None and outcome.status == "unknown":
                 terminal_registry.mark_commit_outcome_unknown(
                     run_id=state.run_id,
                     reservation=rollout_reservation,
@@ -2984,16 +3021,36 @@ class AgentRuntime:
                     error=exc,
                 )
             raise
+        if candidate_owner is not None and prepared_mcp_settlement is not None:
+            receipt = terminal_registry.confirm_stable_candidate_write(
+                owner_identity=candidate_owner,
+                outcome=EventBatchCommitOutcome(
+                    status="full",
+                    deadline_monotonic=(
+                        deadline_budget.terminal_deadline_monotonic
+                        if deadline_budget is not None
+                        else time.monotonic()
+                    ),
+                    result=result,
+                ),
+            )
+            transition = (
+                self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
+                    settlement=prepared_mcp_settlement,
+                    commit_receipt=receipt,
+                )
+            )
+            terminal_registry.accept_physical_owner_handoff(transition.handoff_receipt)
         if track_mcp_terminal:
             self._mark_mcp_terminal_commit_full(state, call.id)
         if result.reconciliation_required:
-            if rollout_reservation is not None:
+            if rollout_reservation is not None and prepared_mcp_settlement is None:
                 terminal_registry.mark_commit_outcome_unknown(
                     run_id=state.run_id,
                     reservation=rollout_reservation,
                 )
             raise RuntimeError("tool denial committed without a healthy reducer fold")
-        if rollout_reservation is not None:
+        if rollout_reservation is not None and prepared_mcp_settlement is None:
             terminal_registry.complete_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
@@ -4872,12 +4929,12 @@ class AgentRuntime:
                 "MCP input-required interaction id does not match the pending interaction"
             )
 
-        prepared_suspension = payload.get("prepared_mcp_input_required")
-        if not isinstance(
-            prepared_suspension,
-            PreparedMcpInputRequiredSuspension,
+        pending_handle = payload.get("mcp_pending_handle")
+        if pending_handle is None or not hasattr(
+            pending_handle, "suspension_commit_view"
         ):
-            raise ValueError("pending MCP interaction lost its prepared owner")
+            raise ValueError("pending MCP interaction lost its process-local owner")
+        suspension_view = pending_handle.suspension_commit_view
         suspension_fact = payload.get("suspension_fact")
         if not isinstance(suspension_fact, McpInputRequiredSuspensionFact):
             raise ValueError("pending MCP interaction lost its typed suspension fact")
@@ -4888,26 +4945,11 @@ class AgentRuntime:
             != suspension_fact.suspension_fact_fingerprint
         ):
             raise ValueError("MCP resolution source suspension drifted")
-        tool_call_id = prepared_suspension.interaction.tool_call_id
-        tool_name = prepared_suspension.interaction.tool_name
-        original_request = prepared_suspension.thaw_original_request()
-        request_state = prepared_suspension.thaw_request_state()
-        input_requests = _mcp_input_requests_from_payload(
-            tuple(
-                {
-                    "key": item.key,
-                    "method": item.method,
-                    "params": thaw_json(item.user_visible_params),
-                }
-                for item in (
-                    prepared_suspension.request_envelope.ordered_user_visible_input_requests
-                )
-            )
-        )
-        round_count = prepared_suspension.interaction.round_count
-        deadline_monotonic = prepared_suspension.deadline_monotonic
+        tool_call_id = suspension_view.interaction.tool_call_id
+        tool_name = suspension_view.interaction.tool_name
+        original_arguments: dict[str, Any] = {}
+        deadline_monotonic = suspension_view.deadline_monotonic
         timing_seed = dict(payload.get("tool_observation_timing_seed") or {})
-        responses = resolution.thaw_responses()
         original_pending_payload = dict(state.pending_interaction_payload)
         rollout_reservation = self._pending_tool_rollout_reservation(
             payload,
@@ -4931,7 +4973,7 @@ class AgentRuntime:
                 tool_call_name=tool_name,
                 output="MCP input-required interaction expired before it was resumed.",
                 result_state=ToolResultState.ERROR,
-                tool_arguments=dict(original_request.get("arguments") or {}),
+                tool_arguments=original_arguments,
                 tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()}
                 if timing_seed
                 else None,
@@ -4951,21 +4993,16 @@ class AgentRuntime:
         gate_call = ToolCall(
             id=tool_call_id,
             name=tool_name,
-            arguments=dict(original_request.get("arguments") or {}),
+            arguments=original_arguments,
         )
-        try:
-            current_tool = self.tool_executor.registry.get(tool_name)
-        except KeyError:
-            current_tool = None
-        if current_tool is not None and _mcp_resume_binding_changed(
-            suspension_fact,
-            current_tool,
+        current_binding = self.tool_executor.registry.binding_contract(tool_name)
+        if isinstance(current_binding, McpToolBindingContract) and (
+            current_binding.binding_identity != suspension_fact.binding_identity
         ):
             state.pending_interaction_kind = None
             state.pending_interaction_payload = {}
             state.status = LoopStatus.RUNNING
             state.stop_reason = None
-            current_binding = getattr(current_tool, "binding_identity")
             async for event in self._emit_tool_result_and_record(
                 state,
                 tool_call_id=tool_call_id,
@@ -4983,7 +5020,7 @@ class AgentRuntime:
                 mcp_input_required_terminal_source=terminal_source,
                 mcp_disposition_kind="binding_changed",
                 mcp_source_binding=suspension_fact.binding_identity,
-                mcp_effective_binding=_mcp_binding_identity_fact(current_binding),
+                mcp_effective_binding=current_binding.binding_identity,
                 deadline_budget=deadline_budget,
             ):
                 yield event
@@ -5063,9 +5100,7 @@ class AgentRuntime:
                 ):
                     yield event
             else:
-                tool = self.tool_executor.registry.get(tool_name)
-                resume = getattr(tool, "resume_input_required", None)
-                if resume is None:
+                if not isinstance(current_binding, McpToolBindingContract):
                     state.pending_interaction_kind = None
                     state.pending_interaction_payload = {}
                     state.status = LoopStatus.RUNNING
@@ -5084,66 +5119,61 @@ class AgentRuntime:
                     ):
                         yield event
                 else:
-                    try:
-                        result = await resume(
-                            original_request=original_request,
-                            request_state=request_state,
-                            resolution=McpInputRequiredResolution(
-                                interaction_id=resolution.interaction_id,
-                                responses={
-                                    key: dict(value) for key, value in responses.items()
-                                },
-                                cancelled=resolution.cancelled,
+                    mcp_port = self.runtime_session.mcp_tool_execution_port
+                    if mcp_port is None:
+                        raise RuntimeError("MCP resume lost its execution port owner")
+                    descriptor = exposure.descriptors_by_name.get(tool_name)
+                    timeout_ms = (
+                        descriptor.timeout_ms
+                        if descriptor is not None and descriptor.timeout_ms is not None
+                        else 30_000
+                    )
+                    runtime_context = self._tool_runtime_context(state)
+                    outcome = await mcp_port.resume(
+                        build_mcp_tool_resume_request(
+                            owner=McpInvocationOwner(
+                                runtime_session_id=runtime_context.runtime_session_id,
+                                run_id=runtime_context.event_context.run_id,
                                 tool_call_id=tool_call_id,
-                                input_requests=input_requests,
-                                round_count=round_count,
-                                deadline_monotonic=deadline_monotonic,
+                                event_context=runtime_context.event_context,
                             ),
-                            runtime_context=self._tool_runtime_context(state),
+                            pending_handle=pending_handle,
+                            binding=current_binding,
+                            source_suspension_event_reference=(
+                                resolution.source_suspension_event_reference
+                            ),
+                            source_suspension=suspension_fact,
+                            prepared_resolution=resolution,
+                            timeout_ms=timeout_ms,
                         )
-                    except Exception as exc:
-                        supervisor = self.runtime_session.mcp_supervisor
-                        if supervisor is None:
-                            raise RuntimeError(
-                                "MCP resume failure lost its Supervisor owner"
-                            ) from exc
-                        pending_lease = supervisor.pending_lease_reservation(
-                            resolution.interaction_id
-                        )
-                        if (
-                            pending_lease.reservation_id
-                            != prepared_suspension.pending_lease_reservation.reservation_id
-                            or _mcp_binding_identity_fact(
-                                pending_lease.binding_identity
-                            )
-                            != suspension_fact.binding_identity
-                        ):
-                            raise RuntimeError(
-                                "MCP resume failure cannot prove the pending lease"
-                            ) from exc
+                    )
+                    if isinstance(outcome, McpToolRejectedOutcome) and (
+                        outcome.retryable_in_same_live_owner
+                    ):
                         resolution_ref = (
                             terminal_source.source_resolution_submitted_event_reference
                         )
                         if resolution_ref is None:
                             raise RuntimeError(
                                 "MCP resume failure lost its resolution reference"
-                            ) from exc
+                            )
+                        diagnostic_error = RuntimeError(outcome.sanitized_message)
                         resume_failed = McpInputRequiredResumeFailedEvent(
                             id=stable_runtime_event_id(
                                 "mcp-input-required-resume-failed-event:v1",
                                 resolution_ref.event_id,
-                                type(exc).__name__,
-                                redact_mcp_error_message(exc),
+                                outcome.error_code.value,
+                                outcome.sanitized_message,
                             ),
                             **self._event_context(state).event_fields(),
                             resolution_submitted_event_reference=resolution_ref,
                             failure_reason="adapter_resume_error",
                             diagnostic=build_bounded_runtime_failure_diagnostic(
-                                error=exc,
+                                error=diagnostic_error,
                                 redaction_profile_id=(
                                     "mcp_input_required_resume_error.v1"
                                 ),
-                                redacted_message=redact_mcp_error_message(exc),
+                                redacted_message=outcome.sanitized_message,
                             ),
                         )
                         audit_receipt = await self.runtime_session.mandatory_runtime_audit_owner.commit(
@@ -5157,7 +5187,7 @@ class AgentRuntime:
                         ):
                             raise RuntimeError(
                                 "MCP resume-failed audit requires reconciliation"
-                            ) from exc
+                            )
                         working_set = self._require_run_working_set(state)
                         working_set.latest_mcp_resume_failure_event_ref = (
                             audit_receipt.committed_event_reference
@@ -5231,11 +5261,12 @@ class AgentRuntime:
                     state.pending_interaction_payload = {}
                     state.status = LoopStatus.RUNNING
                     state.stop_reason = None
-                    if isinstance(result, ToolExecutionSuspended):
-                        next_round = (
-                            result.prepared_mcp_input_required.interaction.round_count
-                        )
+                    if isinstance(outcome, McpToolSuspendedOutcome):
+                        next_round = outcome.pending_handle.suspension_commit_view.interaction.round_count
                         if next_round > MAX_MCP_INPUT_REQUIRED_ROUNDS:
+                            self._mcp_terminal_pending_handles[
+                                (state.run_id, tool_call_id)
+                            ] = outcome.pending_handle
                             async for event in self._emit_tool_result_and_record(
                                 state,
                                 tool_call_id=tool_call_id,
@@ -5250,6 +5281,9 @@ class AgentRuntime:
                                 ),
                                 rollout_reservation=rollout_reservation,
                                 mcp_input_required_terminal_source=terminal_source,
+                                mcp_terminal_reason=(
+                                    McpPendingTerminalReason.MAXIMUM_ROUNDS_EXCEEDED
+                                ),
                                 deadline_budget=deadline_budget,
                             ):
                                 yield event
@@ -5261,11 +5295,48 @@ class AgentRuntime:
                             return
                         async for event in self._suspend_tool_execution(
                             state,
-                            result,
+                            ToolExecutionSuspended(
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                interaction_kind="mcp_input_required",
+                                mcp_pending_handle=outcome.pending_handle,
+                                tool_observation_timing_seed=(
+                                    freeze_json(resume_timing_seed)
+                                    if resume_timing_seed is not None
+                                    else None
+                                ),
+                            ),
                             reservation=rollout_reservation,
                         ):
                             yield event
                         return
+                    if isinstance(outcome, McpToolRejectedOutcome):
+                        result = ToolExecutionResult(
+                            call_id=tool_call_id,
+                            tool_name=tool_name,
+                            status=ToolResultState.ERROR,
+                            output=(
+                                f"[MCP_ERROR:{outcome.error_code.value}] "
+                                f"{outcome.sanitized_message}"
+                            ),
+                            metadata={
+                                "provider_kind": "mcp",
+                                "mcp_reject_code": outcome.error_code.value,
+                            },
+                        )
+                    elif isinstance(outcome, McpToolCompletedOutcome):
+                        result = ToolExecutionResult(
+                            call_id=tool_call_id,
+                            tool_name=tool_name,
+                            status=outcome.result_state,
+                            output=outcome.normalized_output,
+                            metadata=outcome.normalized_metadata,
+                            artifact_candidates=outcome.artifact_candidates,
+                            display_payload=outcome.frozen_display_payload,
+                            semantics_input=outcome.semantics_input,
+                        )
+                    else:
+                        raise TypeError("MCP resume returned an unknown outcome")
                     async for event in self._emit_tool_result_and_record(
                         state,
                         tool_call_id=tool_call_id,
@@ -5298,7 +5369,7 @@ class AgentRuntime:
         *,
         interaction_id: str,
     ) -> AsyncIterator[AgentEvent]:
-        await self._complete_mcp_pending_lease(interaction_id)
+        del interaction_id
         async for event in self._after_tool_results(state):
             yield event
         if state.status is not LoopStatus.RUNNING:
@@ -7066,6 +7137,7 @@ class AgentRuntime:
         | None = None,
         mcp_source_binding: McpBindingIdentityFact | None = None,
         mcp_effective_binding: McpBindingIdentityFact | None = None,
+        mcp_terminal_reason: McpPendingTerminalReason | None = None,
         deadline_budget: RuntimeEventOperationDeadlineBudget | None = None,
     ) -> AsyncIterator[AgentEvent]:
         prior_result_events = _tool_result_boundary_events(
@@ -7202,6 +7274,11 @@ class AgentRuntime:
         ) in self._mcp_terminal_commit_outcomes
         if track_mcp_terminal:
             self._mark_mcp_terminal_commit_attempt(state, tool_call_id)
+        mcp_pending_handle = self._mcp_terminal_pending_handles.get(
+            (state.run_id, tool_call_id)
+        )
+        if track_mcp_terminal and mcp_pending_handle is None:
+            raise RuntimeError("MCP terminal candidate lost its pending handle owner")
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if (
             rollout_reservation is not None
@@ -7224,13 +7301,37 @@ class AgentRuntime:
                 source_binding=mcp_source_binding,
                 effective_binding=mcp_effective_binding,
             )
+        candidate_owner = None
+        prepared_mcp_settlement = None
         if rollout_reservation is not None:
-            terminal_registry.freeze_terminal(
+            candidate_owner = terminal_registry.freeze_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
                 candidates=write_candidates,
+                physical_owner_identity_fingerprint=(
+                    mcp_pending_handle.identity.identity_fingerprint
+                    if mcp_pending_handle is not None
+                    else None
+                ),
             )
+            if mcp_pending_handle is not None:
+                mcp_port = self.runtime_session.mcp_tool_execution_port
+                if mcp_port is None:
+                    raise RuntimeError("MCP terminal candidate lost its execution port")
+                prepared_mcp_settlement = mcp_port.prepare_terminal_settlement(
+                    pending_handle=mcp_pending_handle,
+                    reason=(
+                        mcp_terminal_reason
+                        or _mcp_terminal_reason_from_projection(
+                            disposition_kind=mcp_disposition_kind,
+                            closure_reason=mcp_closure_reason,
+                            result_state=result_state,
+                        )
+                    ),
+                    candidate_owner_identity=candidate_owner,
+                )
         publication_maintenance_lease = None
+        mcp_handoff_confirmed = False
         if (
             mcp_closure_reason is not None
             and self.runtime_session.publication_reconciliation_required
@@ -7295,17 +7396,63 @@ class AgentRuntime:
                 )
                 stored_events = list(result.committed_events)
                 if result.reconciliation_required:
-                    terminal_registry.mark_commit_outcome_unknown(
-                        run_id=state.run_id,
-                        reservation=rollout_reservation,
-                    )
-                    raise RuntimeError(
-                        "MCP terminal committed without a healthy reducer fold"
-                    )
+                    self.runtime_session.latch_event_commit_outcome_unknown()
+            if candidate_owner is not None and prepared_mcp_settlement is not None:
+                receipt = terminal_registry.confirm_stable_candidate_write(
+                    owner_identity=candidate_owner,
+                    outcome=EventBatchCommitOutcome(
+                        status="full",
+                        deadline_monotonic=(
+                            deadline_budget.terminal_deadline_monotonic
+                            if deadline_budget is not None
+                            else time.monotonic()
+                        ),
+                        result=result,
+                    ),
+                )
+                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
+                    settlement=prepared_mcp_settlement,
+                    commit_receipt=receipt,
+                )
+                terminal_registry.accept_physical_owner_handoff(
+                    transition.handoff_receipt
+                )
+                mcp_handoff_confirmed = True
             if result.publication_errors or result.publication_status == "unavailable":
                 raise EventPublicationAfterCommitError(result)
         except EventPublicationAfterCommitError as exc:
-            if rollout_reservation is not None:
+            if (
+                candidate_owner is not None
+                and prepared_mcp_settlement is not None
+                and not mcp_handoff_confirmed
+            ):
+                receipt = terminal_registry.confirm_stable_candidate_write(
+                    owner_identity=candidate_owner,
+                    outcome=EventBatchCommitOutcome(
+                        status="full",
+                        deadline_monotonic=(
+                            deadline_budget.terminal_deadline_monotonic
+                            if deadline_budget is not None
+                            else time.monotonic()
+                        ),
+                        result=exc.result,
+                    ),
+                )
+                mcp_port = self.runtime_session.mcp_tool_execution_port
+                if mcp_port is None:
+                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    raise RuntimeError(
+                        "MCP terminal publication failure lost its execution port"
+                    ) from exc
+                transition = mcp_port.confirm_terminal_commit(
+                    settlement=prepared_mcp_settlement,
+                    commit_receipt=receipt,
+                )
+                terminal_registry.accept_physical_owner_handoff(
+                    transition.handoff_receipt
+                )
+                mcp_handoff_confirmed = True
+            if rollout_reservation is not None and prepared_mcp_settlement is None:
                 terminal_registry.complete_terminal(
                     run_id=state.run_id,
                     reservation=rollout_reservation,
@@ -7331,10 +7478,26 @@ class AgentRuntime:
             raise
         except BaseException as error:
             outcome = self.runtime_session.resolved_event_write_outcome(error)
+            if (
+                candidate_owner is not None
+                and prepared_mcp_settlement is not None
+                and not mcp_handoff_confirmed
+            ):
+                receipt = terminal_registry.confirm_stable_candidate_write(
+                    owner_identity=candidate_owner,
+                    outcome=outcome,
+                )
+                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
+                    settlement=prepared_mcp_settlement,
+                    commit_receipt=receipt,
+                )
+                terminal_registry.accept_physical_owner_handoff(
+                    transition.handoff_receipt
+                )
             if outcome.status == "unknown":
                 if track_mcp_terminal:
                     self._mark_mcp_terminal_commit_untrusted(state, tool_call_id)
-                if rollout_reservation is not None:
+                if rollout_reservation is not None and prepared_mcp_settlement is None:
                     terminal_registry.mark_commit_outcome_unknown(
                         run_id=state.run_id,
                         reservation=rollout_reservation,
@@ -7348,7 +7511,7 @@ class AgentRuntime:
                 raise
             if track_mcp_terminal:
                 self._mark_mcp_terminal_commit_full(state, tool_call_id)
-            if rollout_reservation is not None:
+            if rollout_reservation is not None and prepared_mcp_settlement is None:
                 terminal_registry.complete_terminal(
                     run_id=state.run_id,
                     reservation=rollout_reservation,
@@ -7372,7 +7535,7 @@ class AgentRuntime:
             raise
         if track_mcp_terminal:
             self._mark_mcp_terminal_commit_full(state, tool_call_id)
-        if rollout_reservation is not None:
+        if rollout_reservation is not None and prepared_mcp_settlement is None:
             terminal_registry.complete_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
@@ -7393,16 +7556,6 @@ class AgentRuntime:
             ),
             tool_call_id=tool_call_id,
             tool_call_name=tool_call_name,
-        )
-
-    async def _complete_mcp_pending_lease(self, interaction_id: str) -> None:
-        supervisor = self.runtime_session.mcp_supervisor
-        if supervisor is None:
-            return
-        supervisor.complete_pending_lease(interaction_id)
-        await supervisor.close_retiring_slots(
-            timeout_seconds=5.0,
-            wait_for_borrowers=False,
         )
 
     def _pending_tool_rollout_reservation(
@@ -8312,6 +8465,7 @@ class AgentRuntime:
             registry=self.tool_executor.registry,
             record_event=self.runtime_session.make_thread_recorder(state=state),
             artifact_service=self.tool_executor.artifact_service,
+            artifact_policies=self.tool_executor.artifact_policies,
             runtime_session_id=self.runtime_session.runtime_session_id,
             semantics_registry=self.tool_executor.semantics_registry,
             essential_capture_policy=(self.tool_executor.essential_capture_policy),
@@ -8361,12 +8515,15 @@ class AgentRuntime:
                         model_call_index=_optional_scratchpad_int(
                             state, "current_model_call_index"
                         ),
-                        run_entry_kind=(
-                            "subagent_child"
-                            if self._is_subagent_child
-                            else "host_main_run"
+                        runtime_context=self._tool_runtime_context(
+                            state,
+                            context_id=_optional_scratchpad_str(
+                                state, "current_context_id"
+                            ),
+                            model_call_index=_optional_scratchpad_int(
+                                state, "current_model_call_index"
+                            ),
                         ),
-                        **self._tool_permission_kwargs(state),
                     )
                 finally:
                     release_borrow()
@@ -8383,10 +8540,15 @@ class AgentRuntime:
                     model_call_index=_optional_scratchpad_int(
                         state, "current_model_call_index"
                     ),
-                    run_entry_kind=(
-                        "subagent_child" if self._is_subagent_child else "host_main_run"
+                    runtime_context=self._tool_runtime_context(
+                        state,
+                        context_id=_optional_scratchpad_str(
+                            state, "current_context_id"
+                        ),
+                        model_call_index=_optional_scratchpad_int(
+                            state, "current_model_call_index"
+                        ),
                     ),
-                    **self._tool_permission_kwargs(state),
                 ),
                 release_borrow=release_borrow,
             )
@@ -8541,16 +8703,17 @@ class AgentRuntime:
             total_timeout_seconds=30.0,
             terminal_reserve_seconds=10.0,
         )
-        prepared = suspended.prepared_mcp_input_required
-        interaction = prepared.interaction
+        pending_handle = suspended.mcp_pending_handle
+        view = pending_handle.suspension_commit_view
+        interaction = view.interaction
         if (
             interaction.tool_call_id != suspended.tool_call_id
             or interaction.tool_name != suspended.tool_name
         ):
             raise ValueError("prepared MCP suspension tool identity drifted")
         deadline_utc = None
-        if prepared.deadline_monotonic is not None:
-            remaining = max(0.0, prepared.deadline_monotonic - time.monotonic())
+        if view.deadline_monotonic is not None:
+            remaining = max(0.0, view.deadline_monotonic - time.monotonic())
             deadline_utc = (
                 (datetime.now(timezone.utc) + timedelta(seconds=remaining))
                 .isoformat()
@@ -8565,9 +8728,9 @@ class AgentRuntime:
             McpInputRequiredSuspensionFact,
             schema_version="mcp_input_required_suspension.v1",
             interaction=interaction,
-            binding_identity=prepared.binding_identity,
-            pending_lease_reservation=prepared.pending_lease_reservation,
-            request_envelope=prepared.request_envelope,
+            binding_identity=view.binding_identity,
+            pending_lease_reservation=view.pending_lease_reservation,
+            request_envelope=view.request_envelope,
             rollout_reservation_id=reservation.reservation_id,
             rollout_reservation_fingerprint=reservation.semantic_fingerprint,
             source_mcp_installation_id=self.runtime_session.mcp_installation_id,
@@ -8586,12 +8749,12 @@ class AgentRuntime:
             "tool_name": suspended.tool_name,
             "server_id": interaction.server_id,
             "round_count": interaction.round_count,
-            "prepared_mcp_input_required": prepared,
+            "mcp_pending_handle": pending_handle,
             "suspension_fact": suspension_fact,
-            "deadline_monotonic": prepared.deadline_monotonic,
+            "deadline_monotonic": view.deadline_monotonic,
             "tool_observation_timing_seed": (
-                thaw_json(prepared.tool_observation_timing_seed)
-                if prepared.tool_observation_timing_seed is not None
+                thaw_json(suspended.tool_observation_timing_seed)
+                if suspended.tool_observation_timing_seed is not None
                 else {}
             ),
             "rollout_reservation_id": reservation.reservation_id,
@@ -8623,16 +8786,24 @@ class AgentRuntime:
             tool_name=suspended.tool_name,
             suspension=suspension_fact,
         )
-        supervisor = self.runtime_session.mcp_supervisor
-        reservation_id = prepared.pending_lease_reservation.reservation_id
-        interaction_id = interaction.interaction_id
+        mcp_port = self.runtime_session.mcp_tool_execution_port
+        if mcp_port is None:
+            raise RuntimeError("MCP suspension lost its execution port owner")
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
-        terminal_registry.freeze_suspension(
+        candidate_owner = terminal_registry.freeze_suspension(
             run_id=state.run_id,
             reservation=reservation,
             candidates=(suspension_event,),
+            physical_owner_identity_fingerprint=(
+                pending_handle.identity.identity_fingerprint
+            ),
+        )
+        mcp_port.bind_suspension_candidate(
+            pending_handle=pending_handle,
+            candidate_owner_identity=candidate_owner,
         )
         suspension_publication_unavailable = False
+        suspension_reconciliation_required = False
         try:
             commit_result = await RuntimeSessionToolExecutionEventCommitPort(
                 runtime_session=self.runtime_session,
@@ -8644,10 +8815,12 @@ class AgentRuntime:
                 deadline_monotonic=deadline_budget.ordinary_deadline_monotonic,
             )
             stored = commit_result.committed_events[0]
-            if commit_result.reconciliation_required:
-                raise RuntimeError(
-                    "tool suspension committed without a healthy reducer fold"
-                )
+            write_outcome = EventBatchCommitOutcome(
+                status="full",
+                deadline_monotonic=deadline_budget.ordinary_deadline_monotonic,
+                result=commit_result,
+            )
+            suspension_reconciliation_required = commit_result.reconciliation_required
             suspension_publication_unavailable = (
                 commit_result.publication_status == "unavailable"
                 or bool(commit_result.publication_errors)
@@ -8662,17 +8835,25 @@ class AgentRuntime:
                 if event.id == suspension_event.id
             )
             suspension_publication_unavailable = True
+            write_outcome = EventBatchCommitOutcome(
+                status="full",
+                deadline_monotonic=deadline_budget.ordinary_deadline_monotonic,
+                result=exc.result,
+            )
         except BaseException as suspension_error:
             outcome = self.runtime_session.resolved_event_write_outcome(
                 suspension_error
             )
+            receipt = terminal_registry.confirm_stable_candidate_write(
+                owner_identity=candidate_owner,
+                outcome=outcome,
+            )
+            transition = mcp_port.confirm_suspension_commit(
+                pending_handle=pending_handle,
+                commit_receipt=receipt,
+            )
+            terminal_registry.accept_physical_owner_handoff(transition.handoff_receipt)
             if outcome.status == "unknown":
-                # UNKNOWN keeps both the WAITING_USER carrier and the sole
-                # Supervisor reservation, then fails closed.
-                terminal_registry.mark_commit_outcome_unknown(
-                    run_id=state.run_id,
-                    reservation=reservation,
-                )
                 raise
             if outcome.status == "none":
                 state.pending_tool_calls = original_pending_tool_calls
@@ -8681,8 +8862,6 @@ class AgentRuntime:
                 state.status = original_status
                 state.stop_reason = original_stop_reason
                 state.last_transition = original_transition
-                if supervisor is not None:
-                    supervisor.abort_pending_lease(interaction_id, reservation_id)
                 async for _event in self._emit_tool_result_and_record(
                     state,
                     tool_call_id=suspended.tool_call_id,
@@ -8695,9 +8874,7 @@ class AgentRuntime:
                     tool_observation_timing_seed=(
                         dict(payload.get("tool_observation_timing_seed") or {}) or None
                     ),
-                    tool_arguments=dict(
-                        prepared.thaw_original_request().get("arguments", {})
-                    ),
+                    tool_arguments={},
                     rollout_reservation=reservation,
                 ):
                     pass
@@ -8707,23 +8884,24 @@ class AgentRuntime:
                 for event in outcome.committed_events
                 if event.id == suspension_event.id
             )
-            terminal_registry.mark_suspended(
-                run_id=state.run_id,
-                reservation=reservation,
-            )
-            if supervisor is not None:
-                supervisor.confirm_pending_lease(interaction_id, reservation_id)
             raise
+        receipt = terminal_registry.confirm_stable_candidate_write(
+            owner_identity=candidate_owner,
+            outcome=write_outcome,
+        )
+        transition = mcp_port.confirm_suspension_commit(
+            pending_handle=pending_handle,
+            commit_receipt=receipt,
+        )
+        terminal_registry.accept_physical_owner_handoff(transition.handoff_receipt)
+        if suspension_reconciliation_required:
+            raise RuntimeError(
+                "tool suspension committed without a healthy reducer fold"
+            )
         payload["source_suspension_event_reference"] = event_reference_from_stored(
             stored,
             runtime_session_id=self.runtime_session.runtime_session_id,
         )
-        terminal_registry.mark_suspended(
-            run_id=state.run_id,
-            reservation=reservation,
-        )
-        if supervisor is not None:
-            supervisor.confirm_pending_lease(interaction_id, reservation_id)
         yield stored
         if suspension_publication_unavailable:
             state.scratchpad["mcp_input_required_publication_closure_reason"] = (
@@ -8731,12 +8909,19 @@ class AgentRuntime:
             )
             state.scratchpad["publication_terminal_deadline_budget"] = deadline_budget
             closure_events: tuple[AgentEvent, ...] = ()
-            async for event in self._terminalize_pending_mcp_for_abort(
-                state,
-                reason=AbortKind.HOST_TEARDOWN,
-            ):
-                closure_events = (*closure_events, event)
-                yield event
+            terminal_key = (state.run_id, suspended.tool_call_id)
+            self._mcp_terminal_commit_outcomes[terminal_key] = "not_attempted"
+            self._mcp_terminal_pending_handles[terminal_key] = pending_handle
+            try:
+                async for event in self._terminalize_pending_mcp_for_abort(
+                    state,
+                    reason=AbortKind.HOST_TEARDOWN,
+                ):
+                    closure_events = (*closure_events, event)
+                    yield event
+            finally:
+                self._mcp_terminal_commit_outcomes.pop(terminal_key, None)
+                self._mcp_terminal_pending_handles.pop(terminal_key, None)
             if "publication_latched_run_termination" not in state.scratchpad:
                 self._install_mcp_publication_latched_termination(
                     state,
@@ -8744,7 +8929,6 @@ class AgentRuntime:
                     reason="mcp_active_interaction_publication_unavailable",
                     deadline_budget=deadline_budget,
                 )
-            await self._complete_mcp_pending_lease(interaction_id)
             state.status = LoopStatus.ABORTED
             state.stop_reason = RunStopReason.ABORTED
             state.error_message = None

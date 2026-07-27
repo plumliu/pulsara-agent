@@ -2,214 +2,147 @@
 
 _Created: 2026-07-04_
 
-本文档冻结 Pulsara Python package facade 的长期契约。它不把所有内部模块声明为稳定 public API；它只冻结当前 `__init__.py` 暴露面、lazy import 边界和 import-cycle 防线。
+_D4 hard cut: 2026-07-26_
 
-相关代码：
+本文档冻结 Pulsara Python package facade 的长期契约。Facade 是极小、无副作用的公开导入面，
+不是 composition root，也不得被用来隐藏 package dependency cycle。
 
-- [src/pulsara_agent/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/__init__.py)
-- [src/pulsara_agent/runtime/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/__init__.py)
-- [src/pulsara_agent/tools/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/tools/__init__.py)
-- [src/pulsara_agent/capability/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/capability/__init__.py)
-- [src/pulsara_agent/host/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/__init__.py)
-- [src/pulsara_agent/llm/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/llm/__init__.py)
-- [src/pulsara_agent/memory/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/memory/__init__.py)
-- [src/pulsara_agent/event/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/event/__init__.py)
-- [src/pulsara_agent/message/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/message/__init__.py)
-- [src/pulsara_agent/graph/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/graph/__init__.py)
-- [src/pulsara_agent/jsonld/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/jsonld/__init__.py)
-- [src/pulsara_agent/entities/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/entities/__init__.py)
-- [src/pulsara_agent/ontology/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/ontology/__init__.py)
-- [src/pulsara_agent/storage/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/storage/__init__.py)
-- [src/pulsara_agent/retrieval/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/retrieval/__init__.py)
-- [src/pulsara_agent/inspector/__init__.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/inspector/__init__.py)
+相关实现：
+
+- `src/pulsara_agent/runtime/__init__.py`
+- `src/pulsara_agent/tools/__init__.py`
+- `src/pulsara_agent/ports/`
+- `tests/test_package_facade.py`
+- `tests/test_dependency_architecture.py`
 
 ---
 
-## 1. 核心立场
-
-Pulsara package facade 是开发者便利层，不是第二套 runtime composition root。
-
-硬规则：
+## 1. 核心规则
 
 - `pulsara_agent.__version__` 是根包唯一顶层 public symbol。
-- 子包 `__all__` 中列出的名称是该子包 facade 的 public import surface。
-- 未列入 `__all__` 的内部模块/名称不承诺稳定 facade import。
-- facade 不得做 I/O、读取配置、初始化 provider、打开数据库连接、启动 terminal supervisor 或 sync bundled skills。
-- facade 不得绕过 capability/runtime/host composition root 构造生产对象。
+- 子包 `__all__` 是该 facade 的唯一公开面；未列入的内部 symbol 不承诺稳定。
+- facade import 不得执行 I/O、读取 settings/env、连接数据库、启动 worker、构造 Host/runtime，
+  或同步 workspace skills。
+- facade 不得含 `_LAZY_EXPORTS`、`__getattr__`、dynamic import、local import router或
+  `TYPE_CHECKING` compatibility branch。
+- package 内部调用方必须从 symbol 的 owning module direct import。
+- 新 facade export必须是 eager、无副作用，并由 dependency scanner证明不会形成 D4 forbidden edge。
 
 ---
 
-## 2. Lazy facade 边界
+## 2. Runtime Facade
 
-以下两个子包必须保持 lazy facade：
+`pulsara_agent.runtime` V1 是空 facade：
 
-- `pulsara_agent.runtime`
-- `pulsara_agent.tools`
+```python
+__all__: list[str] = []
+```
 
-原因：
+以下旧 convenience imports 已硬切且不提供兼容 shim：
 
-- runtime submodules 依赖 tools、memory、permission；
-- tool built-ins 又依赖 runtime session、permission、terminal primitives；
-- eager re-export 会重新引入 import cycle。
+- `AgentRuntime`、`RuntimeSession`；
+- `ToolCall`、`ToolExecutor`；
+- wiring builders；
+- permission、plan、approval、recovery、terminal、context helpers；
+- `build_in_memory_runtime_wiring`。
 
-lazy facade 契约：
+调用方必须直接导入，例如：
 
-- 用 `_LAZY_EXPORTS: dict[str, tuple[module, attr]]` 维护 public names。
-- `__all__ = list(_LAZY_EXPORTS)`。
-- `__getattr__(name)` 只在访问时 import target module。
-- 成功解析后可以 cache 到 `globals()`。
-- unknown name 必须抛 `AttributeError(name)`。
+```python
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.tool_executor import ToolExecutor
+from pulsara_agent.ports.tool_execution import ToolCall
+```
 
-不得把 `runtime` 或 `tools` 改回 eager import，除非先证明所有 import-cycle tests 和 CLI startup smoke tests 仍通过，并更新本契约。
-
----
-
-## 3. Eager facade 边界
-
-以下子包当前是 eager facade：
-
-- `capability`
-- `host`
-- `llm`
-- `memory`
-- `event`
-- `event_log`
-- `message`
-- `graph`
-- `jsonld`
-- `entities`
-- `ontology`
-- `storage`
-- `retrieval`
-- `inspector`
-
-这些 facade 可以从内部模块 re-export 常用类型/函数，但必须遵守：
-
-- import 过程不得触达外部服务；
-- import 过程不得要求 Postgres/Oxigraph/LLM provider 可用；
-- import 过程不得读取 `.env` 或用户 home 配置；
-- import 过程不得产生 durable side effect；
-- `__all__` 必须与实际可导入名称保持一致。
-
-若某 eager facade 新增 re-export 引入 import cycle，应优先改该子包为 lazy facade，而不是在内部模块里增加局部 hack。
+恢复 runtime facade symbol需要单独契约修改；不能因为出现 cycle 就恢复 lazy routing。
 
 ---
 
-## 4. Runtime facade 特别规则
+## 3. Tools Facade
 
-`pulsara_agent.runtime` 是最容易发生 import cycle 的 facade。其 public surface 包括但不限于：
+`pulsara_agent.tools` 只 eager export：
 
-- `AgentRuntime`
-- `RuntimeSession`
-- `build_agent_runtime_wiring`
-- `build_durable_runtime_wiring`
-- `build_in_memory_runtime_wiring`
-- permission policy types；
-- plan / approval / recovery types；
-- terminal runtime types；
-- context / transcript helpers；
-- publisher / hook / timeline helpers。
+```python
+from pulsara_agent.tools.registry import ToolRegistry
 
-规则：
+__all__ = ["ToolRegistry"]
+```
 
-- 新增 runtime public symbol 时，必须加入 `_LAZY_EXPORTS`。
-- 不得在 `runtime/__init__.py` 顶层 import runtime submodule object。
-- 不得从 facade 初始化 `CapabilityRuntime`、`HostCore` 或 `RuntimeSession`。
-- facade 只做 symbol routing。
+以下旧 exports 已硬切：
 
----
+- Tool/AsyncTool execution contracts；
+- `ToolCall`、result/suspension DTO；
+- `ToolExecutor`；
+- `build_core_tool_registry`；
+- built-in concrete classes。
 
-## 5. Tools facade 特别规则
-
-`pulsara_agent.tools` 是工具协议和 built-in binding 的 developer convenience facade。
-
-public surface 包括：
-
-- `Tool` / `AsyncTool`
-- `ToolCall`
-- `ToolExecutionResult`
-- `ToolExecutionSuspended`
-- `ToolRuntimeContext`
-- `ToolResultArtifactCandidate`
-- `ToolExecutor`
-- `ToolRegistry`
-- built-in tool classes；
-- `build_core_tool_registry`
-
-规则：
-
-- 新增 built-in tool 若要成为 facade public import，必须加入 `_LAZY_EXPORTS` 与 `__all__`。
-- facade import 不得构造 `RuntimeSession` 或 `ToolRegistry`。
-- facade import 不得读取 workspace、terminal state 或 memory state。
-- built-in tool 行为契约见 `BUILTIN_TOOLS_CONTRACT`。
+Tool contracts从 `pulsara_agent.ports.*` 导入，concrete built-in从其具体 module导入，runtime
+orchestration从 `pulsara_agent.runtime.*` owning module导入。
 
 ---
 
-## 6. Capability facade 特别规则
+## 4. 其他 Facade
 
-`pulsara_agent.capability` 是 unified capability surface 的 developer convenience facade。
+其他子包可以保留有限 eager re-export，但必须满足：
 
-它可以 re-export：
+- `__all__` 与实际可导入名称逐字一致；
+- import不触达外部资源；
+- 不把 test support、production fake、composition selector或 concrete lower-layer owner暴露为
+  产品 fallback；
+- schema facade不得导入 replay/reducer；
+- capability facade不得反向导入 concrete runtime/tools implementation。
 
-- bundled skill management API；
-- `BuiltinToolCapabilityProvider`；
-- `LocalSkillCapabilityProvider`；
-- descriptor / provider / exposure types；
-- render helpers；
-- skill health resolver；
-- call classifier。
-
-它不得重新引入旧 `CapabilityResolver` / `ResolvedCapabilitySet` / `NoopCapabilityResolver` API。`LocalSkillCapabilityProvider` 是 unified provider，不是旧 resolver fallback。
+出现 cycle时，应移动 contract ownership或注入 port，禁止把 eager facade改成 lazy router。
 
 ---
 
-## 7. InMemory / test-only re-export 边界
+## 5. Test-Support Boundary
 
-部分 facade 仍 re-export `InMemory*` 类型，用于测试与兼容。
+以下对象只允许位于 `tests/support`：
 
-规则：
+- whole in-memory runtime composition；
+- component Host composition；
+- `MockMcpClientManager`；
+- fake governance UOW；
+- in-memory artifact index等 component fake。
 
-- InMemory 类型出现在 facade 不代表 production fallback 合法。
-- 生产 runtime storage authority 仍是 Postgres/Oxigraph/real UOW。
-- 新 production integration tests 不应依赖 InMemory substrate。
-- 若移除某个 InMemory facade export，必须先迁移旧测试或提供明确 deprecation commit。
-
-相关生产边界见：
-
-- `APP_SETTINGS_CLI_ENTRY_CONTRACT`
-- `GRAPH_JSONLD_STORAGE_CONTRACT`
-- `GOVERNANCE_WRITE_OUTBOX_CONTRACT`
-- `ARTIFACT_STORE_CONTRACT`
+`src/`、production benchmarks和packaged exports不得 import `tests`。低层通用 deterministic
+in-memory data structure可以保留在其 owning production module，但它不构成可选产品 composition。
 
 ---
 
-## 8. CLI script entry
+## 6. CLI 与 Import Smoke
 
-`pyproject.toml` 中唯一 console script：
+`pyproject.toml` 唯一 console script仍为：
 
 ```toml
 pulsara = "pulsara_agent.cli:main"
 ```
 
-CLI entry 的运行语义由 `APP_SETTINGS_CLI_ENTRY_CONTRACT` 冻结。本文件只冻结 import surface：
+import `pulsara_agent.cli` 不启动 Host；调用 `main()` 后才解析参数和构造 production composition。
 
-- import `pulsara_agent.cli` 不应启动 HostCore；
-- 调用 `main()` 才开始解析 argv / env-file / settings。
+最低 smoke：
+
+- `import pulsara_agent.runtime` 得到空 `__all__`，无 lazy router；
+- `import pulsara_agent.tools` 只得到 exact `ToolRegistry`；
+- 不同 direct owning-module import顺序不触发 cycle；
+- removed convenience symbol稳定不可见；
+- production source没有 `from pulsara_agent.runtime import ...`；
+- production source从 tools facade最多导入 exact `ToolRegistry`。
 
 ---
 
-## 9. 测试守卫
+## 7. Architecture Gate
 
-以下 smoke checks 是 package facade 的最低守卫：
+`tests/test_package_facade.py` 与 `tests/test_dependency_architecture.py` 是强制 gate。它们检查：
 
-- `import pulsara_agent; pulsara_agent.__version__` 可用；
-- `from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_durable_runtime_wiring` 不触发 import cycle；
-- `from pulsara_agent.tools import ToolCall, ToolExecutor, build_core_tool_registry` 不触发 import cycle；
-- `from pulsara_agent.capability import CapabilityDescriptor, BuiltinToolCapabilityProvider, LocalSkillCapabilityProvider` 可用；
-- `from pulsara_agent.host import HostCore, HostWorkspaceInput` 可用；
-- `from pulsara_agent.llm import LLMRuntime, LLMConfig, ModelRole` 可用；
-- `from pulsara_agent.memory import MemoryGovernanceEngine, MemoryRecallService, MemoryWriteUnitOfWork` 可用；
-- `from pulsara_agent.event import RunStartEvent, ToolResultEndEvent` 可用；
-- `from pulsara_agent.message import ToolResultArtifactRef, ToolResultBlock` 可用。
+- runtime/tools facade形状；
+- removed router/module物理不存在；
+- production/test-support隔离；
+- direct owning-module imports；
+- canonical AST dependency observation；
+- D4 target DAG forbidden edge为零。
 
-这些 checks 不证明业务行为正确；它们只证明 public facade 没有被 import-cycle 或 missing export 破坏。
+全局 package SCC 尚未承诺在 D4 消失。剩余 SCC 以 canonical observation fingerprint冻结，交由
+D5/D6继续收口；新增同一 package pair下的 module import仍会使 baseline失败。

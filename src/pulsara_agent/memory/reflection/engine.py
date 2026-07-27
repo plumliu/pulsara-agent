@@ -18,7 +18,7 @@ from pulsara_agent.event import (
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
 )
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
 from pulsara_agent.llm import LLMRuntime, ModelRole

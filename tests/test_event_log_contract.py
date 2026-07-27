@@ -70,12 +70,11 @@ from pulsara_agent.llm.diagnostic_materialize import (
     materialize_committed_model_call_result,
 )
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     builtin_tool_action_policy,
     default_tool_action_classifier_registry,
 )
-from pulsara_agent.tools.base import ToolCall
-
+from pulsara_agent.ports.tool_execution import ToolCall
 
 
 def _cleanup_session(dsn: str, runtime_session_id: str) -> None:

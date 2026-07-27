@@ -17,7 +17,7 @@ from pulsara_agent.event.events import (
     UserConfirmResultEvent,
 )
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
-from pulsara_agent.message.assembler import BlockAssembler
+from pulsara_agent.replay.message_assembler import BlockAssembler
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolCallState,
@@ -222,7 +222,9 @@ def accepted_main_reply_ids(events: tuple[AgentEvent, ...]) -> frozenset[str]:
         if winner.disposition is ModelCallControlDisposition.ACCEPTED:
             accepted.add(start.reply_id)
 
-    orphan_reply_ids = (set(reply_starts) | set(reply_ends)) - referenced_reply_event_ids
+    orphan_reply_ids = (
+        set(reply_starts) | set(reply_ends)
+    ) - referenced_reply_event_ids
     if orphan_reply_ids:
         raise MessageReplayControlError(
             "reply lifecycle is not owned by a main model-call start"

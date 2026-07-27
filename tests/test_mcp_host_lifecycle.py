@@ -6,7 +6,7 @@ import time
 from dataclasses import replace
 
 import pytest
-from tests.support import unverified_test_postgres_access_lease
+from tests.support.host import replace_component_manifest_store
 
 from tests.test_agent_runtime_loop import _pending_mcp_installation_audit
 from tests.test_host_lifecycle_contract import (
@@ -22,8 +22,8 @@ from pulsara_agent.host import (
     ResumableSessionSummary,
 )
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
-from pulsara_agent.runtime import EventPublicationAfterCommitError
-from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.session import EventPublicationAfterCommitError
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
@@ -33,7 +33,7 @@ from pulsara_agent.event import (
     RunStartEvent,
 )
 from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
-from pulsara_agent.runtime.mcp.manager import MockMcpClientManager
+from tests.support.mcp import MockMcpClientManager
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
 from pulsara_agent.runtime.mcp.types import (
     McpDiscoveredTool,
@@ -84,60 +84,17 @@ def _install_config(monkeypatch: pytest.MonkeyPatch, config: McpServerConfig) ->
     )
 
 
+def _installed_tool_names(installation) -> tuple[str, ...]:
+    return tuple(item.tool.name for item in installation.ordered_binding_installations)
+
+
 def _enable_fake_durable_manifest(
     core: HostCore,
     monkeypatch: pytest.MonkeyPatch,
     store,
 ) -> None:
-    import pulsara_agent.host.core as host_core
-
-    original_build = host_core.build_agent_runtime_wiring
-
-    def build_without_durable_storage(settings, workspace_root, **kwargs):
-        kwargs["durable"] = False
-        kwargs["retrieval_resources"] = None
-        kwargs["governance_coordinator"] = None
-        return original_build(settings, workspace_root, **kwargs)
-
-    async def no_retrieval_resources(_self):
-        return None
-
-    async def no_projection_service(
-        _self,
-        _access_lease,
-        *,
-        retrieval_resources,
-    ):
-        del retrieval_resources
-        return None
-
-    access_lease = unverified_test_postgres_access_lease()
-
-    async def fake_postgres_access_lease(_self):
-        return access_lease
-
-    core.durable = True
-    monkeypatch.setattr(
-        host_core,
-        "build_agent_runtime_wiring",
-        build_without_durable_storage,
-    )
-    monkeypatch.setattr(
-        HostCore,
-        "_get_retrieval_resources",
-        no_retrieval_resources,
-    )
-    monkeypatch.setattr(
-        HostCore,
-        "_get_projection_service",
-        no_projection_service,
-    )
-    monkeypatch.setattr(
-        HostCore,
-        "_get_postgres_access_lease",
-        fake_postgres_access_lease,
-    )
-    monkeypatch.setattr(HostCore, "_manifest_store", lambda _self: store)
+    del monkeypatch
+    replace_component_manifest_store(core, store)
 
 
 async def _queue_ready_candidate(
@@ -464,7 +421,7 @@ def test_background_ready_installs_only_at_next_safe_point_and_is_audited(
         session = await _open(core, tmp_path)
         initial = session.wiring.runtime_wiring.mcp_installation
         assert initial.snapshots[0].status is McpServerStatus.STARTING
-        assert not initial.tools
+        assert not initial.ordered_binding_installations
 
         worker_release.set()
         await asyncio.wait_for(candidate_ready.wait(), timeout=0.2)
@@ -477,7 +434,7 @@ def test_background_ready_installs_only_at_next_safe_point_and_is_audited(
         installed = session.wiring.runtime_wiring.mcp_installation
         assert installed.installation_id != initial.installation_id
         assert installed.snapshots[0].status is McpServerStatus.READY
-        assert [tool.name for tool in installed.tools] == ["mcp__slow-docs__lookup"]
+        assert _installed_tool_names(installed) == ("mcp__slow-docs__lookup",)
 
         events = session.wiring.runtime_wiring.runtime_session.event_log.iter()
         run_start = next(event for event in events if isinstance(event, RunStartEvent))
@@ -615,7 +572,9 @@ def test_optional_reconfigure_revokes_old_surface_without_waiting_for_discovery(
         )
         await session.run_turn("install first generation")
         old_slot = session.mcp_supervisor.slots()[0]
-        assert session.wiring.runtime_wiring.mcp_installation.tools
+        assert (
+            session.wiring.runtime_wiring.mcp_installation.ordered_binding_installations
+        )
 
         configs[0] = replace(configs[0], tool_timeout_ms=2_000)
         result = await session.run_turn("do not wait for optional replacement")
@@ -624,7 +583,7 @@ def test_optional_reconfigure_revokes_old_surface_without_waiting_for_discovery(
 
         installation = session.wiring.runtime_wiring.mcp_installation
         assert installation.snapshots[0].status is McpServerStatus.STARTING
-        assert not installation.tools
+        assert not installation.ordered_binding_installations
         assert old_slot.lifecycle == "closed"
 
         second_release.set()
@@ -1105,7 +1064,9 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         assert session.get_pending_interaction() is None
         assert session.mcp_supervisor.pending_completion_count == 0
         assert old_slot.lifecycle == "closed"
-        assert session.wiring.runtime_wiring.mcp_installation.tools
+        assert (
+            session.wiring.runtime_wiring.mcp_installation.ordered_binding_installations
+        )
         audits = [
             event
             for event in event_log.iter()

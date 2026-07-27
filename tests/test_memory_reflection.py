@@ -27,7 +27,10 @@ from pulsara_agent.event import (
     MemoryReflectionFailedEvent,
     RunErrorEvent,
 )
-from pulsara_agent.event.candidates import InvalidAttemptPayload, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    InvalidAttemptPayload,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMRuntime
@@ -57,7 +60,8 @@ from pulsara_agent.memory.reflection.engine import (
 )
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact

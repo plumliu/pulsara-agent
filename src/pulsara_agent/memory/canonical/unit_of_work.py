@@ -1,4 +1,4 @@
-"""Transactional memory write unit of work."""
+"""Owner-scoped canonical-memory write unit of work."""
 
 from __future__ import annotations
 
@@ -6,93 +6,45 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from types import TracebackType
-from collections.abc import Sequence
-from typing import Any, ContextManager, Protocol, Self
+from typing import Self, Protocol
+from uuid import uuid4
 
-from psycopg import Connection
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
-from pydantic import TypeAdapter
-
-from pulsara_agent.event import AgentEvent, EventContext
-from pulsara_agent.event.candidates import CandidatePayload
-from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
-from pulsara_agent.graph.postgres import PostgresGraphStore
-from pulsara_agent.memory.candidates.pool import (
-    CandidatePool,
-    GovernanceDecision,
-    GovernanceWriteOutcome,
-    MemoryGovernanceDecisionRecord,
-    PooledMemoryCandidate,
-    WriteSucceededOutcome,
-    decision_target_entry_ids,
+from pulsara_agent.event import EventContext
+from pulsara_agent.graph import DEFAULT_GRAPH_ID
+from pulsara_agent.memory.canonical.uow_contracts import (
+    MemoryUowDecisionFacade,
+    MemoryUowGraphFacade,
+    MemoryUowLifecycleFacade,
+    MemoryUowMutationOutboxFacade,
+    MemoryUowRuntimeEventOutboxFacade,
+    MemoryUowTransactionScope,
+    MemoryUowTransactionScopeFactory,
+    MemoryUowWriteServiceFacade,
+    build_memory_uow_scope_request,
 )
-from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
-from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
-from pulsara_agent.runtime.projection_jobs.contracts import (
-    CanonicalMutationSurface,
-    CanonicalMutationSurfacePlanFact,
-)
-from pulsara_agent.runtime.projection_jobs.mutation_writer import (
-    CanonicalMutationV2Writer,
-    build_surface_plan,
-)
-from pulsara_agent.memory.governance.event_outbox import (
-    EphemeralGovernanceEventOutboxRepository,
-    GovernanceEventDispatchTicket,
-    GovernanceEventOutboxRepository,
+from pulsara_agent.memory.canonical.write_gate import (
+    MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT,
 )
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.storage.postgres_connection_provider import (
-    PostgresConnectionLane,
-    VerifiedPostgresConnectionProviderProtocol,
+from pulsara_agent.ports.projection_jobs import RuntimeSessionOwnerBootstrapPort
+from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.projection_jobs.canonical_mutation import build_surface_plan
+from pulsara_agent.projection_jobs.contracts import (
+    CanonicalMutationSurface,
+    CanonicalMutationSurfacePlanFact,
+    DurableProjectionCommitConfirmation,
 )
-from pulsara_agent.storage.session_bootstrap import (
-    PostgresRuntimeSessionOwnerBootstrapPort,
-)
-
-
-class GovernanceDecisionRepository(Protocol):
-    def append_candidate(
-        self, candidate: PooledMemoryCandidate
-    ) -> PooledMemoryCandidate: ...
-
-    def append_decision(
-        self, record: MemoryGovernanceDecisionRecord
-    ) -> MemoryGovernanceDecisionRecord: ...
-
-
-class GovernanceOutboxRepository(Protocol):
-    def append_decision(
-        self,
-        record: MemoryGovernanceDecisionRecord,
-        *,
-        graph_id: str,
-        requested_surfaces: tuple[CanonicalMutationSurface, ...],
-    ) -> str | None: ...
-
-
-class GovernanceRuntimeEventOutboxRepository(Protocol):
-    def append_batch(
-        self,
-        events: Sequence[AgentEvent],
-        *,
-        governance_batch_id: str,
-        decision_id: str,
-    ) -> GovernanceEventDispatchTicket: ...
 
 
 class GovernanceWriteUnitOfWork(Protocol):
-    """Structural contract required by the single governance executor path."""
+    """Structural contract required by the governance executor."""
 
-    graph: GraphStore
-    decisions: GovernanceDecisionRepository
-    outbox: GovernanceOutboxRepository
-    runtime_events: GovernanceRuntimeEventOutboxRepository
-    lifecycle: MemoryLifecycle
-    memory_write_service: MemoryWriteService
+    graph: MemoryUowGraphFacade
+    decisions: MemoryUowDecisionFacade
+    outbox: MemoryUowMutationOutboxFacade
+    runtime_events: MemoryUowRuntimeEventOutboxFacade
+    lifecycle: MemoryUowLifecycleFacade
+    memory_write_service: MemoryUowWriteServiceFacade
 
     @property
     def resolved_graph_id(self) -> str: ...
@@ -101,7 +53,7 @@ class GovernanceWriteUnitOfWork(Protocol):
 
     def lock_canonical_memory(
         self, memory_id: str
-    ) -> tuple[dict[str, Any], int] | None: ...
+    ) -> tuple[dict[str, object], int] | None: ...
 
     def __enter__(self) -> Self: ...
 
@@ -115,15 +67,14 @@ class GovernanceWriteUnitOfWork(Protocol):
 
 @dataclass(slots=True)
 class MemoryWriteUnitOfWork:
-    """Bind canonical graph, decision rows, and outbox writes to one connection."""
+    """Borrow one revocable repository bundle from a transaction scope."""
 
-    connection_provider: VerifiedPostgresConnectionProviderProtocol
+    scope_factory: MemoryUowTransactionScopeFactory
     runtime_session_id: str
     archive: ArtifactStore
+    session_bootstrap: RuntimeSessionOwnerBootstrapPort
     graph_id: str | None = None
     workspace_root: str | Path | None = None
-    gate: MemoryWriteGate = field(default_factory=MemoryWriteGate)
-    session_bootstrap: PostgresRuntimeSessionOwnerBootstrapPort | None = None
     canonical_mutation_surface_plan: CanonicalMutationSurfacePlanFact = field(
         default_factory=lambda: build_surface_plan(
             (
@@ -133,61 +84,62 @@ class MemoryWriteUnitOfWork:
         )
     )
 
-    connection: Connection | None = field(init=False, default=None)
-    _connection_owner: ContextManager[Connection] | None = field(
-        init=False,
-        default=None,
-        repr=False,
+    graph: MemoryUowGraphFacade = field(init=False)
+    decisions: MemoryUowDecisionFacade = field(init=False)
+    outbox: MemoryUowMutationOutboxFacade = field(init=False)
+    runtime_events: MemoryUowRuntimeEventOutboxFacade = field(init=False)
+    lifecycle: MemoryUowLifecycleFacade = field(init=False)
+    memory_write_service: MemoryUowWriteServiceFacade = field(init=False)
+    _scope: MemoryUowTransactionScope | None = field(
+        init=False, default=None, repr=False
     )
-    graph: PostgresGraphStore = field(init=False)
-    decisions: "CandidateDecisionRepository" = field(init=False)
-    outbox: "OutboxRepository" = field(init=False)
-    runtime_events: GovernanceEventOutboxRepository = field(init=False)
-    lifecycle: MemoryLifecycle = field(init=False)
-    memory_write_service: MemoryWriteService = field(init=False)
+    _scope_owner: object | None = field(init=False, default=None, repr=False)
 
     def __enter__(self) -> "MemoryWriteUnitOfWork":
-        bootstrap = self.session_bootstrap or PostgresRuntimeSessionOwnerBootstrapPort(
-            self.connection_provider
+        deadline = monotonic() + 30.0
+        workspace_root = (
+            str(self.workspace_root) if self.workspace_root is not None else None
         )
-        candidate = bootstrap.candidate(
+        candidate = self.session_bootstrap.candidate(
             runtime_session_id=self.runtime_session_id,
-            workspace_root=(
-                str(self.workspace_root) if self.workspace_root is not None else None
-            ),
+            workspace_root=workspace_root,
         )
-        outcome = bootstrap.bootstrap(
+        outcome = self.session_bootstrap.bootstrap(
             candidate=candidate,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=deadline,
         )
-        if outcome.confirmation.value != "full":
+        if (
+            outcome.confirmation is not DurableProjectionCommitConfirmation.FULL
+            or outcome.resulting_state is None
+        ):
             raise RuntimeError(
                 "runtime session owner bootstrap did not reach FULL: "
                 f"{outcome.confirmation.value}"
             )
-        self._connection_owner = self.connection_provider.connection(
-            lane=PostgresConnectionLane.MEMORY_UOW,
-            deadline_monotonic=monotonic() + 30.0,
-        )
-        self.connection = self._connection_owner.__enter__()
-        resolved_graph_id = self.graph_id or DEFAULT_GRAPH_ID
-        self.graph = PostgresGraphStore(connection=self.connection)
-        self.decisions = CandidateDecisionRepository(self.connection)
-        self.outbox = OutboxRepository(
-            self.connection,
-            surface_plan=self.canonical_mutation_surface_plan,
-        )
-        self.runtime_events = GovernanceEventOutboxRepository(
-            self.connection,
+        request = build_memory_uow_scope_request(
             runtime_session_id=self.runtime_session_id,
+            workspace_root=workspace_root,
+            graph_id=self.resolved_graph_id,
+            session_bootstrap_state=outcome.resulting_state,
+            transaction_owner_id=f"memory-uow:{uuid4().hex}",
+            transaction_generation=1,
+            surface_plan=self.canonical_mutation_surface_plan,
+            memory_write_gate_contract_fingerprint=(
+                MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT
+            ),
+            deadline_monotonic=deadline,
         )
-        self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
-        ledger = CanonicalMemoryLedger(
-            graph=self.graph,
-            gate=self.gate,
-            graph_id=resolved_graph_id,
-        )
-        self.memory_write_service = MemoryWriteService(ledger=ledger)
+        scope_owner = self.scope_factory.open_scope(request=request)
+        scope = scope_owner.__enter__()
+        self._scope_owner = scope_owner
+        self._scope = scope
+        repositories = scope.repositories
+        self.graph = repositories.graph
+        self.decisions = repositories.decisions
+        self.outbox = repositories.outbox
+        self.runtime_events = repositories.runtime_events
+        self.lifecycle = repositories.lifecycle
+        self.memory_write_service = repositories.memory_write_service
         return self
 
     def __exit__(
@@ -196,384 +148,39 @@ class MemoryWriteUnitOfWork:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        assert self.connection is not None
-        try:
-            if exc_type is None:
-                self.connection.commit()
-            else:
-                self.connection.rollback()
-        finally:
-            assert self._connection_owner is not None
-            self._connection_owner.__exit__(exc_type, exc, traceback)
-            self.connection = None
-            self._connection_owner = None
+        owner = self._scope_owner
+        self._scope_owner = None
+        self._scope = None
+        if owner is not None:
+            owner.__exit__(exc_type, exc, traceback)  # type: ignore[attr-defined]
 
     @property
     def resolved_graph_id(self) -> str:
         return self.graph_id or DEFAULT_GRAPH_ID
 
     def ensure_event_context_rows(self, context: EventContext) -> None:
-        """Create session/run/turn parent rows for synthetic governance events."""
-
-        assert self.connection is not None
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT workspace_root FROM sessions WHERE id = %s",
-                (self.runtime_session_id,),
-            )
-            session_row = cursor.fetchone()
-            expected_workspace = (
-                str(self.workspace_root) if self.workspace_root is not None else None
-            )
-            if session_row is None or session_row[0] != expected_workspace:
-                raise RuntimeError(
-                    "memory UOW requires an exact bootstrapped session owner"
-                )
-            cursor.execute(
-                """
-                INSERT INTO runs (id, session_id)
-                VALUES (%s, %s)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                (context.run_id, self.runtime_session_id),
-            )
-            cursor.execute(
-                "SELECT session_id FROM runs WHERE id = %s", (context.run_id,)
-            )
-            row = cursor.fetchone()
-            if row is not None and row[0] != self.runtime_session_id:
-                raise ValueError(
-                    f"run_id {context.run_id!r} already belongs to runtime session {row[0]!r}"
-                )
-            cursor.execute(
-                """
-                INSERT INTO turns (id, session_id, run_id, turn_index)
-                SELECT %s, %s, %s, coalesce(max(turn_index), 0) + 1
-                FROM turns
-                WHERE run_id = %s
-                ON CONFLICT (id) DO NOTHING
-                """,
-                (
-                    context.turn_id,
-                    self.runtime_session_id,
-                    context.run_id,
-                    context.run_id,
-                ),
-            )
-            cursor.execute(
-                "SELECT session_id, run_id FROM turns WHERE id = %s", (context.turn_id,)
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return
-            session_id, run_id = row
-            if session_id != self.runtime_session_id or run_id != context.run_id:
-                raise ValueError(
-                    f"turn_id {context.turn_id!r} already belongs to runtime session {session_id!r} "
-                    f"and run {run_id!r}"
-                )
+        self._require_scope().ensure_event_context_rows(context)
 
     def lock_canonical_memory(
         self, memory_id: str
-    ) -> tuple[dict[str, Any], int] | None:
-        """Lock one canonical document and its projection revision in write order."""
-
-        assert self.connection is not None
-        with self.connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                """
-                SELECT payload
-                FROM graph_documents
-                WHERE graph_id = %s AND id = %s
-                FOR UPDATE
-                """,
-                (self.resolved_graph_id, memory_id),
-            )
-            document_row = cursor.fetchone()
-            if document_row is None:
-                return None
-            payload = document_row["payload"]
-            if not isinstance(payload, dict):
-                raise TypeError(
-                    f"stored canonical memory payload is not an object: {memory_id}"
-                )
-            cursor.execute(
-                """
-                SELECT node_revision
-                FROM memory_nodes
-                WHERE graph_id = %s AND id = %s
-                FOR UPDATE
-                """,
-                (self.resolved_graph_id, memory_id),
-            )
-            projection_row = cursor.fetchone()
-            if projection_row is None:
-                raise ValueError(
-                    "canonical memory projection is missing for locked document "
-                    f"{memory_id}"
-                )
-        return payload, int(projection_row["node_revision"])
-
-
-@dataclass(slots=True)
-class _PoolDecisionRepository:
-    """Route in-memory UOW decisions/candidates back into the shared pool."""
-
-    candidate_pool: CandidatePool
-
-    def append_candidate(
-        self, candidate: PooledMemoryCandidate
-    ) -> PooledMemoryCandidate:
-        return self.candidate_pool.append_candidate(candidate)
-
-    def append_decision(
-        self, record: MemoryGovernanceDecisionRecord
-    ) -> MemoryGovernanceDecisionRecord:
-        return self.candidate_pool.append_decision(record)
-
-
-@dataclass(slots=True)
-class _NoopOutboxRepository:
-    """No async materialization off the in-memory test-double substrate."""
-
-    def append_decision(
-        self,
-        record: MemoryGovernanceDecisionRecord,
-        *,
-        graph_id: str,
-        requested_surfaces: tuple[CanonicalMutationSurface, ...],
-    ) -> str | None:
-        return None
-
-
-@dataclass(slots=True)
-class InMemoryMemoryWriteUnitOfWork:
-    """Compatibility-only UOW for the deprecated in-memory runtime.
-
-    This is never selected as a fallback and does not provide production
-    durability, transaction atomicity, or async materialization. New production
-    work must use ``MemoryWriteUnitOfWork`` backed by PostgreSQL. It remains only
-    so existing explicit in-memory/test wiring can share the executor decision
-    path during its compatibility window.
-    """
-
-    graph: GraphStore
-    candidate_pool: CandidatePool
-    memory_write_service: MemoryWriteService
-    graph_id: str | None = None
-    runtime_session_id: str = "runtime:in-memory-governance"
-    decisions: _PoolDecisionRepository = field(init=False)
-    outbox: _NoopOutboxRepository = field(init=False)
-    runtime_events: EphemeralGovernanceEventOutboxRepository = field(init=False)
-    lifecycle: MemoryLifecycle = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.decisions = _PoolDecisionRepository(self.candidate_pool)
-        self.outbox = _NoopOutboxRepository()
-        self.runtime_events = EphemeralGovernanceEventOutboxRepository(
-            runtime_session_id=self.runtime_session_id
-        )
-        self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
-
-    def __enter__(self) -> "InMemoryMemoryWriteUnitOfWork":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        return None
-
-    @property
-    def resolved_graph_id(self) -> str:
-        return self.graph_id or DEFAULT_GRAPH_ID
-
-    def ensure_event_context_rows(self, context: EventContext) -> None:
-        return None
-
-    def lock_canonical_memory(
-        self, memory_id: str
-    ) -> tuple[dict[str, Any], int] | None:
-        try:
-            document = self.graph.get_jsonld(memory_id, graph_id=self.graph_id)
-        except KeyError:
+    ) -> tuple[dict[str, object], int] | None:
+        view = self._require_scope().lock_canonical_memory(memory_id)
+        if view is None:
             return None
-        return document, 1
+        document = thaw_json(view.frozen_document)
+        if not isinstance(document, dict):
+            raise TypeError("locked canonical memory must thaw to an object")
+        return document, view.revision
+
+    def _require_scope(self) -> MemoryUowTransactionScope:
+        scope = self._scope
+        if scope is None:
+            raise RuntimeError("memory UOW is not active")
+        scope.assert_active()
+        return scope
 
 
-@dataclass(slots=True)
-class CandidateDecisionRepository:
-    connection: Connection
-
-    def append_candidate(
-        self, candidate: PooledMemoryCandidate
-    ) -> PooledMemoryCandidate:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO memory_candidates (
-                    entry_id,
-                    payload,
-                    origin,
-                    source_session_id,
-                    source_run_id,
-                    source_turn_id,
-                    source_reply_id,
-                    source_tool_call_id,
-                    user_quote,
-                    quoted_evidence_locator,
-                    source_event_id,
-                    source_artifact_id,
-                    intent_fingerprint,
-                    metadata,
-                    created_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
-                """,
-                (
-                    candidate.entry_id,
-                    Jsonb(_payload_adapter.dump_python(candidate.payload, mode="json")),
-                    candidate.origin.value,
-                    candidate.source_session_id,
-                    candidate.source_run_id,
-                    candidate.source_turn_id,
-                    candidate.source_reply_id,
-                    candidate.source_tool_call_id,
-                    candidate.user_quote,
-                    Jsonb(
-                        candidate.quoted_evidence_locator.model_dump(mode="json")
-                        if candidate.quoted_evidence_locator is not None
-                        else None
-                    ),
-                    candidate.source_event_id,
-                    candidate.source_artifact_id,
-                    candidate.intent_fingerprint,
-                    Jsonb(candidate.metadata),
-                    candidate.created_at,
-                ),
-            )
-        return candidate
-
-    def append_decision(
-        self, record: MemoryGovernanceDecisionRecord
-    ) -> MemoryGovernanceDecisionRecord:
-        self._validate_decision_targets(record)
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO memory_governance_decisions (
-                    decision_id,
-                    governance_batch_id,
-                    batch_input_fingerprint,
-                    batch_input_reference_fingerprint,
-                    governance_model_call_id,
-                    decision_index,
-                    requested_decision_payload_fingerprint,
-                    decision_payload_fingerprint,
-                    decision,
-                    write_outcome,
-                    created_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
-                """,
-                (
-                    record.decision_id,
-                    record.governance_batch_id,
-                    record.batch_input_fingerprint,
-                    record.batch_input_reference_fingerprint,
-                    record.governance_model_call_id,
-                    record.decision_index,
-                    record.requested_decision_payload_fingerprint,
-                    record.decision_payload_fingerprint,
-                    Jsonb(_decision_adapter.dump_python(record.decision, mode="json")),
-                    Jsonb(
-                        _outcome_adapter.dump_python(record.write_outcome, mode="json")
-                    ),
-                    record.created_at,
-                ),
-            )
-        return record
-
-    def _validate_decision_targets(
-        self, record: MemoryGovernanceDecisionRecord
-    ) -> None:
-        target_ids = decision_target_entry_ids(record.decision)
-        if not target_ids:
-            return
-        with self.connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                """
-                SELECT entry_id
-                FROM memory_candidates
-                WHERE entry_id = ANY(%s)
-                """,
-                (list(target_ids),),
-            )
-            existing = {row["entry_id"] for row in cursor.fetchall()}
-        missing = [entry_id for entry_id in target_ids if entry_id not in existing]
-        if missing:
-            raise KeyError(
-                f"governance decision references missing candidate entries: {missing}"
-            )
-
-
-@dataclass(slots=True)
-class OutboxRepository:
-    connection: Connection
-    surface_plan: CanonicalMutationSurfacePlanFact
-
-    def append_decision(
-        self,
-        record: MemoryGovernanceDecisionRecord,
-        *,
-        graph_id: str,
-        requested_surfaces: tuple[CanonicalMutationSurface, ...],
-    ) -> str | None:
-        if not isinstance(record.write_outcome, WriteSucceededOutcome):
-            return None
-        affected_ids = tuple(
-            dict.fromkeys(
-                (
-                    record.write_outcome.memory_id,
-                    *record.write_outcome.superseded_memory_ids,
-                    *record.write_outcome.contradicted_memory_ids,
-                )
-            )
-        )
-        documents = tuple(
-            {
-                "node_id": node_id,
-                "document": PostgresGraphStore(connection=self.connection).get_jsonld(
-                    node_id, graph_id=graph_id
-                ),
-            }
-            for node_id in affected_ids
-        )
-        payload = {
-            "schema_version": "governed-memory-mutation-payload.v2",
-            "mutation_lane": "governed_memory",
-            "decision_record": record.model_dump(mode="json"),
-            "dirty_memory_ids": affected_ids,
-            "documents": documents,
-        }
-        writer = CanonicalMutationV2Writer(
-            connection=self.connection,
-            surface_plan=self.surface_plan,
-        )
-        return writer.append_governance_mutation(
-            payload=payload,
-            graph_id=graph_id,
-            governance_batch_id=record.governance_batch_id,
-            governance_batch_input_fingerprint=(record.batch_input_fingerprint),
-            decision_id=record.decision_id,
-            decision_semantic_fingerprint=(record.decision_payload_fingerprint),
-            source_authority_fingerprints=(record.write_outcome.write_event_ids),
-            requested_surfaces=requested_surfaces,
-        )
-
-
-_payload_adapter = TypeAdapter(CandidatePayload)
-_decision_adapter = TypeAdapter(GovernanceDecision)
-_outcome_adapter = TypeAdapter(GovernanceWriteOutcome)
+__all__ = [
+    "GovernanceWriteUnitOfWork",
+    "MemoryWriteUnitOfWork",
+]

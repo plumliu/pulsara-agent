@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
-from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityProvider,
-    build_mcp_installation,
+from pulsara_agent.capability.providers.mcp import McpCapabilityProvider
+from pulsara_agent.runtime.mcp.installation import (
+    build_mcp_installation as _build_mcp_installation,
     empty_mcp_installation,
 )
+from pulsara_agent.runtime.mcp.tool_execution_port import RuntimeMcpToolExecutionPort
+from pulsara_agent.ports.artifact import ToolResultArtifactOptions
 from pulsara_agent.capability.types import (
     CapabilityExecutionSurfaceSnapshotContext,
     CapabilityProjectionResolveContext,
@@ -24,7 +26,8 @@ from pulsara_agent.primitives.mcp import (
     McpServerLifecycleTimingFact,
     McpServerSnapshotFact,
 )
-from pulsara_agent.runtime.mcp.manager import MockMcpClientManager
+from tests.support.mcp import MockMcpClientManager
+from tests.support.capability import tool_runtime_context
 from pulsara_agent.runtime.mcp.store import McpConfigStore
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
@@ -49,8 +52,97 @@ from pulsara_agent.runtime.mcp.types import (
     snapshot_semantic_fingerprint,
 )
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
-from pulsara_agent.tools.base import ToolCall, ToolExecutionSuspended, ToolRuntimeContext
+from pulsara_agent.ports.tool_execution import (
+    ToolCall,
+    ToolExecutionCandidateConfirmationKind,
+    ToolExecutionNonePolicy,
+    ToolExecutionStableCandidateCommitReceipt,
+    ToolExecutionStableCandidateKind,
+    ToolExecutionStableCandidateOwnerIdentity,
+    ToolExecutionSuspended,
+    ToolRuntimeContext,
+)
 from pulsara_agent.event import EventContext
+from pulsara_agent.primitives.context import context_fingerprint
+
+
+_TEST_EXECUTION_PORTS: dict[int, RuntimeMcpToolExecutionPort] = {}
+
+
+def build_mcp_installation(*, supervisor: McpServerSupervisor, **kwargs):
+    execution_port = _TEST_EXECUTION_PORTS.setdefault(
+        id(supervisor), RuntimeMcpToolExecutionPort(supervisor)
+    )
+    return _build_mcp_installation(
+        execution_port=execution_port,
+        artifact_options=ToolResultArtifactOptions(),
+        **kwargs,
+    )
+
+
+def _installation_tools(installation):
+    return tuple(item.tool for item in installation.ordered_binding_installations)
+
+
+def _confirm_pending_suspension(
+    *,
+    port: RuntimeMcpToolExecutionPort,
+    suspended: ToolExecutionSuspended,
+) -> None:
+    handle = suspended.mcp_pending_handle
+    owner_payload = {
+        "registry_instance_id": "tool_execution_registry:test",
+        "owner_id": "tool_terminal_owner:run:test:call:1",
+        "owner_generation": 1,
+        "runtime_session_id": "runtime:test",
+        "run_id": "run:test",
+        "tool_call_id": "call:1",
+        "rollout_reservation_id": "rollout_reservation:test",
+        "rollout_reservation_fingerprint": "sha256:" + "4" * 64,
+        "candidate_kind": ToolExecutionStableCandidateKind.SUSPENSION,
+        "none_policy": ToolExecutionNonePolicy.ABANDON_ON_NONE,
+        "ordered_candidate_event_ids": ("tool_execution_suspended:test",),
+        "candidate_batch_fingerprint": "sha256:" + "5" * 64,
+        "physical_owner_kind": "mcp_pending",
+        "physical_owner_identity_fingerprint": handle.identity.identity_fingerprint,
+    }
+    owner = ToolExecutionStableCandidateOwnerIdentity(
+        **owner_payload,
+        identity_fingerprint=context_fingerprint(
+            "tool-execution-stable-candidate-owner:v1", owner_payload
+        ),
+    )
+    port.bind_suspension_candidate(
+        pending_handle=handle,
+        candidate_owner_identity=owner,
+    )
+    receipt_payload = {
+        "owner_identity": asdict(owner),
+        "confirmation_kind": ToolExecutionCandidateConfirmationKind.FULL.value,
+        "write_attempt_generation": 1,
+        "committed_event_references": (),
+        "publication_summary": "completed",
+        "retry_scheduled": False,
+        "reconciliation_required": False,
+    }
+    receipt = ToolExecutionStableCandidateCommitReceipt(
+        owner_identity=owner,
+        confirmation_kind=ToolExecutionCandidateConfirmationKind.FULL,
+        write_attempt_generation=1,
+        committed_event_references=(),
+        publication_summary="completed",
+        retry_scheduled=False,
+        reconciliation_required=False,
+        receipt_fingerprint=context_fingerprint(
+            "tool-execution-stable-candidate-commit-receipt:v1",
+            receipt_payload,
+        ),
+    )
+    transition = port.confirm_suspension_commit(
+        pending_handle=handle,
+        commit_receipt=receipt,
+    )
+    assert transition.resulting_state.value == "pending_confirmed"
 
 
 def _config(
@@ -156,7 +248,9 @@ def _installed_surface(
     installation = build_mcp_installation(
         supervisor=supervisor,
         config_epoch=1,
-        event_safe_config_set_fingerprint=mcp_config_set_fingerprint((config,), event_safe=True),
+        event_safe_config_set_fingerprint=mcp_config_set_fingerprint(
+            (config,), event_safe=True
+        ),
         snapshots=(snapshot,),
         configs_by_server={"docs": config},
         slots_by_server={"docs": slot},
@@ -165,7 +259,7 @@ def _installed_surface(
 
 
 def _runtime_context() -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return tool_runtime_context(
         runtime_session_id="runtime:test",
         event_context=EventContext(
             run_id="run:test",
@@ -213,7 +307,9 @@ def test_runtime_fingerprint_detects_secret_rotation_but_event_safe_does_not() -
         ),
     )
     assert runtime_mcp_config_fingerprint(left) != runtime_mcp_config_fingerprint(right)
-    assert event_safe_mcp_config_fingerprint(left) == event_safe_mcp_config_fingerprint(right)
+    assert event_safe_mcp_config_fingerprint(left) == event_safe_mcp_config_fingerprint(
+        right
+    )
 
 
 def test_runtime_fingerprint_detects_environment_secret_rotation(
@@ -246,7 +342,9 @@ def test_snapshot_semantic_fingerprint_ignores_random_identity_and_timing() -> N
         reconcile_attempt_id="mcp_attempt:other",
         timing=_timing().model_copy(update={"total_duration_seconds": 9.0}),
     )
-    assert snapshot.snapshot_semantic_fingerprint == changed.snapshot_semantic_fingerprint
+    assert (
+        snapshot.snapshot_semantic_fingerprint == changed.snapshot_semantic_fingerprint
+    )
 
 
 def test_snapshot_semantic_fingerprint_changes_with_catalog_semantics() -> None:
@@ -282,9 +380,7 @@ def test_mcp_snapshot_status_timing_invariants() -> None:
             discovery_generation=1,
             status="failed",
             required=False,
-            timing=McpServerLifecycleTimingFact(
-                queued_at_utc="2026-01-01T00:00:00Z"
-            ),
+            timing=McpServerLifecycleTimingFact(queued_at_utc="2026-01-01T00:00:00Z"),
         )
 
 
@@ -358,7 +454,7 @@ def test_mcp_nested_json_is_recursively_immutable_and_serializable() -> None:
 def test_empty_installation_is_canonical() -> None:
     installation = empty_mcp_installation()
     assert installation.installation_id == "mcp_installation:empty"
-    assert not installation.tools
+    assert not _installation_tools(installation)
     assert not installation.binding_identities
 
 
@@ -367,9 +463,14 @@ def test_installation_builds_descriptor_and_exact_binding() -> None:
     assert [descriptor.name for descriptor in installation.descriptors] == [
         "mcp__docs__lookup"
     ]
-    tool = installation.tools[0]
+    tool = _installation_tools(installation)[0]
     assert isinstance(tool, McpCapabilityTool)
-    assert tool.binding_identity == slot.binding_identity
+    assert tool.binding.binding_identity.model_dump(mode="json") == {
+        "server_id": slot.binding_identity.server_id,
+        "slot_id": slot.binding_identity.slot_id,
+        "snapshot_id": slot.binding_identity.snapshot_id,
+        "discovery_generation": slot.binding_identity.discovery_generation,
+    }
     assert not hasattr(tool, "installation_id")
     provider = McpCapabilityProvider(installation)
     descriptors = provider.snapshot_descriptors(
@@ -396,8 +497,7 @@ def test_installation_builds_descriptor_and_exact_binding() -> None:
     assert descriptors.descriptors == installation.descriptors
     assert projection.catalog_prompt is not None
     assert (
-        "server=docs; status=ready; installed_tool_count=1"
-        in projection.catalog_prompt
+        "server=docs; status=ready; installed_tool_count=1" in projection.catalog_prompt
     )
     assert "actual tool schema remains the sole authority" in projection.catalog_prompt
     asyncio.run(supervisor.aclose(timeout_seconds=1))
@@ -418,9 +518,7 @@ def test_starting_mcp_prompt_strongly_freezes_current_run_availability() -> None
         discovery_generation=1,
         status=McpServerStatus.STARTING,
         required=False,
-        timing=McpServerLifecycleTimingFact(
-            queued_at_utc="2026-01-01T00:00:00Z"
-        ),
+        timing=McpServerLifecycleTimingFact(queued_at_utc="2026-01-01T00:00:00Z"),
     )
     supervisor = McpServerSupervisor()
     installation = build_mcp_installation(
@@ -462,7 +560,9 @@ def test_starting_mcp_prompt_strongly_freezes_current_run_availability() -> None
     assert "tools are NOT available in this run" in prompt
     assert "Do not infer current MCP availability from prior messages" in prompt
     assert "Do not describe status=starting as a configuration failure" in prompt
-    assert "may become available in a later run after a HostSession safe point" in prompt
+    assert (
+        "may become available in a later run after a HostSession safe point" in prompt
+    )
     assert "do not promise that the next run will succeed" in prompt
     asyncio.run(supervisor.aclose(timeout_seconds=1))
 
@@ -481,7 +581,7 @@ def test_unchanged_server_reuses_exact_descriptor_and_binding_objects() -> None:
         installation_id="mcp_installation:unrelated-change",
         previous_installation=installation,
     )
-    assert rebuilt.tools[0] is installation.tools[0]
+    assert _installation_tools(rebuilt)[0] is _installation_tools(installation)[0]
     assert rebuilt.descriptors[0] is installation.descriptors[0]
 
     replacement_manager = MockMcpClientManager(_snapshots=(snapshot,))
@@ -505,9 +605,17 @@ def test_unchanged_server_reuses_exact_descriptor_and_binding_objects() -> None:
         installation_id="mcp_installation:slot-change",
         previous_installation=installation,
     )
-    assert changed.tools[0] is not installation.tools[0]
-    assert changed.tools[0].binding_identity == replacement_slot.binding_identity
-    assert not hasattr(changed.tools[0], "installation_id")
+    changed_tool = _installation_tools(changed)[0]
+    assert changed_tool is not _installation_tools(installation)[0]
+    assert changed_tool.binding.binding_identity.model_dump(mode="json") == {
+        "server_id": replacement_slot.binding_identity.server_id,
+        "slot_id": replacement_slot.binding_identity.slot_id,
+        "snapshot_id": replacement_slot.binding_identity.snapshot_id,
+        "discovery_generation": (
+            replacement_slot.binding_identity.discovery_generation
+        ),
+    }
+    assert not hasattr(changed_tool, "installation_id")
 
     asyncio.run(supervisor.aclose(timeout_seconds=1))
     asyncio.run(replacement_manager.aclose(timeout_seconds=1))
@@ -516,7 +624,7 @@ def test_unchanged_server_reuses_exact_descriptor_and_binding_objects() -> None:
 
 def test_tool_call_uses_and_releases_slot_lease() -> None:
     supervisor, installation, manager, slot = _installed_surface()
-    tool = installation.tools[0]
+    tool = _installation_tools(installation)[0]
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -553,7 +661,7 @@ def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
         )
 
     supervisor, installation, _manager, slot = _installed_surface(handler=handler)
-    tool = installation.tools[0]
+    tool = _installation_tools(installation)[0]
 
     async def run() -> None:
         suspended = await tool.execute_async(
@@ -561,12 +669,15 @@ def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
             runtime_context=_runtime_context(),
         )
         assert isinstance(suspended, ToolExecutionSuspended)
-        reservation_id = (
-            suspended.prepared_mcp_input_required.pending_lease_reservation.reservation_id
+        handle = suspended.mcp_pending_handle
+        reservation_id = handle.identity.pending_lease_reservation.reservation_id
+        assert reservation_id
+        _confirm_pending_suspension(
+            port=_TEST_EXECUTION_PORTS[id(supervisor)],
+            suspended=suspended,
         )
-        supervisor.confirm_pending_lease("mcp_input_required:1", reservation_id)
         borrowed = supervisor.borrow_pending_lease(
-            "mcp_input_required:1", tool.binding_identity
+            "mcp_input_required:1", slot.binding_identity
         )
         assert borrowed.slot_id == slot.slot_id
         supervisor.return_pending_borrow("mcp_input_required:1")
@@ -599,7 +710,7 @@ def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
         )
 
     supervisor, installation, _manager, slot = _installed_surface(handler=handler)
-    tool = installation.tools[0]
+    tool = _installation_tools(installation)[0]
 
     async def run() -> None:
         first = await tool.execute_async(
@@ -615,11 +726,11 @@ def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
         )
         assert not isinstance(second, ToolExecutionSuspended)
         assert second.status.value == "error"
-        assert "pending input ownership failed" in second.output
+        assert "MCP interaction already owns a lease" in second.output
         assert slot.borrower_count == 1
 
         reservation_id = (
-            first.prepared_mcp_input_required.pending_lease_reservation.reservation_id
+            first.mcp_pending_handle.identity.pending_lease_reservation.reservation_id
         )
         supervisor.abort_pending_lease(
             "mcp_input_required:duplicate",
@@ -633,7 +744,7 @@ def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
 
 def test_retiring_slot_rejects_new_acquisition_until_borrower_releases() -> None:
     supervisor, installation, _manager, slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
     supervisor.commit_slot_transition(candidates=(), retiring_slot_ids=(slot.slot_id,))
     with pytest.raises(RuntimeError, match="generation_unavailable"):
@@ -646,7 +757,7 @@ def test_retiring_slot_rejects_new_acquisition_until_borrower_releases() -> None
 
 def test_retiring_slot_closes_when_last_async_borrower_releases() -> None:
     supervisor, installation, manager, slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    identity = slot.binding_identity
 
     async def run() -> None:
         lease = supervisor.acquire_binding_lease(identity)
@@ -667,8 +778,8 @@ def test_retiring_slot_closes_when_last_async_borrower_releases() -> None:
 
 
 def test_pending_lease_prevents_close_until_completed() -> None:
-    supervisor, installation, _manager, _slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    supervisor, _installation, _manager, slot = _installed_surface()
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
     reservation = supervisor.promote_lease_to_pending(lease, "interaction:1")
     supervisor.confirm_pending_lease("interaction:1", reservation.reservation_id)
@@ -682,7 +793,9 @@ def test_pending_lease_prevents_close_until_completed() -> None:
     asyncio.run(run())
 
 
-def test_prepare_optional_returns_before_background_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_optional_returns_before_background_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -697,7 +810,10 @@ def test_prepare_optional_returns_before_background_worker(monkeypatch: pytest.M
         ticket = supervisor.prepare((_config(),), trigger="initial")
         assert ticket.optional_server_ids == ("docs",)
         await asyncio.wait_for(entered.wait(), timeout=1)
-        assert supervisor.current_starting_snapshots()[0].status is McpServerStatus.STARTING
+        assert (
+            supervisor.current_starting_snapshots()[0].status
+            is McpServerStatus.STARTING
+        )
         release.set()
         await supervisor.await_ticket_snapshots(ticket)
         await supervisor.aclose(timeout_seconds=1)
@@ -886,7 +1002,7 @@ def test_reconfigure_does_not_retire_old_slot_before_install_commit(
 
     monkeypatch.setattr(McpServerSupervisor, "_run_attempt", slow_run)
     supervisor, installation, _manager, old_slot = _installed_surface()
-    old_identity = installation.tools[0].binding_identity
+    old_identity = old_slot.binding_identity
 
     async def run() -> None:
         changed = replace(_config(), tool_timeout_ms=2_000)
@@ -1086,8 +1202,8 @@ def test_mixed_server_ticket_waits_only_for_required_worker(
 
 
 def test_concurrent_close_waiters_share_failure_and_retry_same_supervisor() -> None:
-    supervisor, installation, _manager, _slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    supervisor, _installation, _manager, slot = _installed_surface()
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
     reservation = supervisor.promote_lease_to_pending(lease, "interaction:close")
     supervisor.confirm_pending_lease(
@@ -1113,10 +1229,12 @@ def test_concurrent_close_waiters_share_failure_and_retry_same_supervisor() -> N
 
 
 def test_cancelled_close_waiter_does_not_cancel_shared_owner_attempt() -> None:
-    supervisor, installation, _manager, _slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    supervisor, _installation, _manager, slot = _installed_surface()
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
-    reservation = supervisor.promote_lease_to_pending(lease, "interaction:cancel-waiter")
+    reservation = supervisor.promote_lease_to_pending(
+        lease, "interaction:cancel-waiter"
+    )
     supervisor.confirm_pending_lease(
         "interaction:cancel-waiter",
         reservation.reservation_id,
@@ -1260,7 +1378,7 @@ def test_unrelated_required_failure_preserves_pending_binding_and_lease(
 
     monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fail_without_candidate)
     supervisor, installation, _manager, slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
     reservation = supervisor.promote_lease_to_pending(lease, "interaction:unrelated")
     supervisor.confirm_pending_lease(
@@ -1298,7 +1416,7 @@ def test_same_config_refresh_failure_preserves_valid_pending_binding(
 
     monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fail_without_candidate)
     supervisor, installation, _manager, slot = _installed_surface()
-    identity = installation.tools[0].binding_identity
+    identity = slot.binding_identity
     lease = supervisor.acquire_binding_lease(identity)
     reservation = supervisor.promote_lease_to_pending(lease, "interaction:refresh")
     supervisor.confirm_pending_lease("interaction:refresh", reservation.reservation_id)
@@ -1417,10 +1535,10 @@ def test_required_failed_candidate_retries_in_background_with_retry_trigger(
         assert before_due.server_attempts == {}
 
         for _ in range(20):
-            if (
-                supervisor._generation_by_server["docs"] == 2
-                and triggers == ["initial", "retry"]
-            ):
+            if supervisor._generation_by_server["docs"] == 2 and triggers == [
+                "initial",
+                "retry",
+            ]:
                 break
             await asyncio.sleep(0.01)
         assert supervisor._generation_by_server["docs"] == 2
@@ -1494,10 +1612,7 @@ def test_safe_point_joins_running_required_background_retry_attempt(
             (config,),
             trigger="config_change",
         )
-        assert (
-            safe_point_ticket.server_attempts["docs"]
-            == retry_runtime.attempt
-        )
+        assert safe_point_ticket.server_attempts["docs"] == retry_runtime.attempt
         assert (
             safe_point_ticket.server_attempts["docs"].reconcile_attempt_id
             != first.server_attempts["docs"].reconcile_attempt_id

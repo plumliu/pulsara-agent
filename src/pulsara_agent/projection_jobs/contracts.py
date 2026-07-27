@@ -57,9 +57,7 @@ class DurableProjectionCommitConfirmation(StrEnum):
 
 class DurableProjectionFailureKind(StrEnum):
     TRANSIENT_STORAGE_UNAVAILABLE = "transient_storage_unavailable"
-    TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE = (
-        "transient_external_surface_unavailable"
-    )
+    TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE = "transient_external_surface_unavailable"
     DEADLINE_EXCEEDED = "deadline_exceeded"
     SOURCE_NOT_READY = "source_not_ready"
     SOURCE_AUTHORITY_CONFLICT = "source_authority_conflict"
@@ -71,9 +69,7 @@ class DurableProjectionFailureKind(StrEnum):
     PROJECTION_OUTPUT_OVERSIZE = "projection_output_oversize"
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
     RESULT_IDENTITY_CONFLICT = "result_identity_conflict"
-    EXTERNAL_SURFACE_CONTRACT_MISMATCH = (
-        "external_surface_contract_mismatch"
-    )
+    EXTERNAL_SURFACE_CONTRACT_MISMATCH = "external_surface_contract_mismatch"
 
 
 class RuntimeWriteAdmissionMode(StrEnum):
@@ -96,9 +92,7 @@ class CanonicalMutationSurface(StrEnum):
 
 class PostgresMigrationPreparationKind(StrEnum):
     LEGACY_SURFACE_BINDING_PLAN = "legacy_surface_binding_plan.v1"
-    RUN_TIMELINE_PRE_ACTIVATION_COVERAGE = (
-        "run_timeline_pre_activation_coverage.v1"
-    )
+    RUN_TIMELINE_PRE_ACTIVATION_COVERAGE = "run_timeline_pre_activation_coverage.v1"
     TOOL_RESULT_EVIDENCE_PRE_ACTIVATION_COVERAGE = (
         "tool_result_evidence_pre_activation_coverage.v1"
     )
@@ -187,11 +181,9 @@ class DurableProjectionHandlerContractFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _validate_contract(self) -> "DurableProjectionHandlerContractFact":
-        if (
-            not self.accepted_source_event_types
-            or len(self.accepted_source_event_types)
-            != len(set(self.accepted_source_event_types))
-        ):
+        if not self.accepted_source_event_types or len(
+            self.accepted_source_event_types
+        ) != len(set(self.accepted_source_event_types)):
             raise ValueError("handler source event types must be non-empty and unique")
         expected_policy = {
             DurableProjectionKind.RUN_TIMELINE: (
@@ -232,13 +224,16 @@ class DurableProjectionRetryPolicyFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _validate_retry(self) -> "DurableProjectionRetryPolicyFact":
-        if min(
-            self.maximum_attempts,
-            self.base_delay_milliseconds,
-            self.maximum_delay_milliseconds,
-            self.lease_duration_seconds,
-            self.claim_batch_size,
-        ) < 1:
+        if (
+            min(
+                self.maximum_attempts,
+                self.base_delay_milliseconds,
+                self.maximum_delay_milliseconds,
+                self.lease_duration_seconds,
+                self.claim_batch_size,
+            )
+            < 1
+        ):
             raise ValueError("projection retry policy values must be positive")
         if self.base_delay_milliseconds > self.maximum_delay_milliseconds:
             raise ValueError("projection retry delay bounds are inverted")
@@ -255,9 +250,9 @@ class DurableProjectionDeliveryPolicyFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceHandlerContractFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_handler_contract.v1"] = (
         "canonical_mutation_surface_handler_contract.v1"
-    ] = "canonical_mutation_surface_handler_contract.v1"
+    )
     surface: CanonicalMutationSurface
     handler_id: str
     handler_version: str
@@ -340,9 +335,9 @@ class DurableProjectionJobCandidateFact(FrozenFactBase):
 
 
 class DurableContentAddressedArtifactReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_content_addressed_artifact_reference.v1"] = (
         "durable_content_addressed_artifact_reference.v1"
-    ] = "durable_content_addressed_artifact_reference.v1"
+    )
     artifact_semantic_id: str
     content_sha256: str
     content_utf8_bytes: int
@@ -366,9 +361,9 @@ class DurableProjectionArtifactResultDocumentReferenceFact(FrozenFactBase):
 
 
 class DurableProjectionGraphResultDocumentReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_graph_result_document_reference.v1"] = (
         "durable_projection_graph_result_document_reference.v1"
-    ] = "durable_projection_graph_result_document_reference.v1"
+    )
     document_kind: Literal["graph_document"]
     graph_id: str
     semantic_document_id: str
@@ -381,9 +376,9 @@ class DurableProjectionGraphResultDocumentReferenceFact(FrozenFactBase):
 
 
 class DurableProjectionGraphRelationReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_graph_relation_reference.v1"] = (
         "durable_projection_graph_relation_reference.v1"
-    ] = "durable_projection_graph_relation_reference.v1"
+    )
     document_kind: Literal["graph_relation"]
     relation_id: str
     graph_id: str
@@ -404,9 +399,9 @@ DurableProjectionResultDocumentReferenceFact: TypeAlias = Annotated[
 
 
 class DurableProjectionCanonicalMutationReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_canonical_mutation_reference.v1"] = (
         "durable_projection_canonical_mutation_reference.v1"
-    ] = "durable_projection_canonical_mutation_reference.v1"
+    )
     mutation_id: str
     mutation_semantic_fingerprint: str
     ordered_surface_delivery_identity_fingerprints: tuple[str, ...]
@@ -454,18 +449,18 @@ DurableProjectionResultOwner: TypeAlias = Annotated[
 
 
 class DurableProjectionResultReceiptReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_result_receipt_reference.v1"] = (
         "durable_projection_result_receipt_reference.v1"
-    ] = "durable_projection_result_receipt_reference.v1"
+    )
     receipt_id: str
     receipt_fingerprint: str
     reference_fingerprint: str
 
 
 class DurableProjectionAppliedResultReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_applied_result_receipt.v1"] = (
         "durable_projection_applied_result_receipt.v1"
-    ] = "durable_projection_applied_result_receipt.v1"
+    )
     receipt_kind: Literal["applied"]
     receipt_id: str
     result_owner: DurableProjectionResultOwner
@@ -474,9 +469,7 @@ class DurableProjectionAppliedResultReceiptFact(FrozenFactBase):
     source_event_reference_fingerprint: str
     source_sequence: int
     target_head_revision: int
-    result_document_references: tuple[
-        DurableProjectionResultDocumentReferenceFact, ...
-    ]
+    result_document_references: tuple[DurableProjectionResultDocumentReferenceFact, ...]
     canonical_mutation_references: tuple[
         DurableProjectionCanonicalMutationReferenceFact, ...
     ]
@@ -484,9 +477,9 @@ class DurableProjectionAppliedResultReceiptFact(FrozenFactBase):
 
 
 class DurableProjectionSupersededResultReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_superseded_result_receipt.v1"] = (
         "durable_projection_superseded_result_receipt.v1"
-    ] = "durable_projection_superseded_result_receipt.v1"
+    )
     receipt_kind: Literal["superseded"]
     receipt_id: str
     candidate_result_owner: DurableProjectionResultOwner
@@ -509,9 +502,9 @@ DurableProjectionResultReceiptFact: TypeAlias = Annotated[
 
 
 class DurableProjectionJobOperationalStateFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_job_operational_state.v1"] = (
         "durable_projection_job_operational_state.v1"
-    ] = "durable_projection_job_operational_state.v1"
+    )
     status: DurableProjectionJobStatus
     state_revision: int
     repair_generation: int
@@ -526,12 +519,15 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _validate_state(self) -> "DurableProjectionJobOperationalStateFact":
-        if min(
-            self.state_revision,
-            self.repair_generation,
-            self.attempt_count,
-            self.lease_generation,
-        ) < 0:
+        if (
+            min(
+                self.state_revision,
+                self.repair_generation,
+                self.attempt_count,
+                self.lease_generation,
+            )
+            < 0
+        ):
             raise ValueError("projection state counters must be non-negative")
         leased = self.status is DurableProjectionJobStatus.LEASED
         if leased != bool(self.lease_owner_id and self.lease_expires_at):
@@ -540,10 +536,14 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
             self.next_attempt_at is None or self.last_failure is None
         ):
             raise ValueError("retry_wait requires next attempt and failure")
-        if self.status in {
-            DurableProjectionJobStatus.SUCCEEDED,
-            DurableProjectionJobStatus.SUPERSEDED,
-        } and self.result_receipt_reference is None:
+        if (
+            self.status
+            in {
+                DurableProjectionJobStatus.SUCCEEDED,
+                DurableProjectionJobStatus.SUPERSEDED,
+            }
+            and self.result_receipt_reference is None
+        ):
             raise ValueError("successful projection state requires result receipt")
         if (
             self.status is DurableProjectionJobStatus.DEAD_LETTER
@@ -573,9 +573,9 @@ class LeasedDurableProjectionJob(FrozenFactBase):
 
 
 class PreparedDurableProjectionArtifactDocumentFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["prepared_durable_projection_artifact_document.v1"] = (
         "prepared_durable_projection_artifact_document.v1"
-    ] = "prepared_durable_projection_artifact_document.v1"
+    )
     document_kind: Literal["artifact"]
     semantic_document_id: str
     document_semantic_fingerprint: str
@@ -590,9 +590,9 @@ class PreparedDurableProjectionArtifactDocumentFact(FrozenFactBase):
 
 
 class PreparedDurableProjectionGraphDocumentFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["prepared_durable_projection_graph_document.v1"] = (
         "prepared_durable_projection_graph_document.v1"
-    ] = "prepared_durable_projection_graph_document.v1"
+    )
     document_kind: Literal["graph_document"]
     graph_id: str
     semantic_document_id: str
@@ -606,9 +606,9 @@ class PreparedDurableProjectionGraphDocumentFact(FrozenFactBase):
 
 
 class PreparedDurableProjectionGraphRelationFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["prepared_durable_projection_graph_relation.v1"] = (
         "prepared_durable_projection_graph_relation.v1"
-    ] = "prepared_durable_projection_graph_relation.v1"
+    )
     document_kind: Literal["graph_relation"]
     relation_reference: DurableProjectionGraphRelationReferenceFact
     source_authority_fingerprint: str
@@ -635,9 +635,9 @@ class CanonicalInlineJsonDocumentFact(FrozenFactBase):
 
 
 class CanonicalArtifactDocumentReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_artifact_document_reference.v1"] = (
         "canonical_artifact_document_reference.v1"
-    ] = "canonical_artifact_document_reference.v1"
+    )
     carrier_kind: Literal["artifact_reference"] = "artifact_reference"
     document_semantic_fingerprint: str
     artifact_reference: DurableContentAddressedArtifactReferenceFact
@@ -686,9 +686,9 @@ class CanonicalMemoryMutationOperationKind(StrEnum):
 
 
 class ProjectionResultCanonicalMutationOwnerFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["projection_result_canonical_mutation_owner.v1"] = (
         "projection_result_canonical_mutation_owner.v1"
-    ] = "projection_result_canonical_mutation_owner.v1"
+    )
     owner_kind: Literal["projection_result"]
     result_owner: DurableProjectionResultOwner
     projection_kind: DurableProjectionKind
@@ -778,9 +778,9 @@ class CanonicalMutationDocumentFact(FrozenFactBase):
 
 
 class PreparedDurableProjectionResultFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["prepared_durable_projection_result.v1"] = (
         "prepared_durable_projection_result.v1"
-    ] = "prepared_durable_projection_result.v1"
+    )
     result_owner: DurableProjectionResultOwner
     result_semantic: DurableProjectionResultSemanticFact
     ordered_documents: tuple[PreparedDurableProjectionDocumentFact, ...]
@@ -789,9 +789,9 @@ class PreparedDurableProjectionResultFact(FrozenFactBase):
 
 
 class DurableProjectionSettlementOutcome(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_settlement_outcome.v1"] = (
         "durable_projection_settlement_outcome.v1"
-    ] = "durable_projection_settlement_outcome.v1"
+    )
     confirmation: DurableProjectionCommitConfirmation
     job_id: str
     attempted_lease_fingerprint: str
@@ -831,9 +831,9 @@ class DurableProjectionSeedContractFact(FrozenFactBase):
 
 
 class DurableProjectionKindActivationSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_kind_activation_semantic.v1"] = (
         "durable_projection_kind_activation_semantic.v1"
-    ] = "durable_projection_kind_activation_semantic.v1"
+    )
     activation_id: str
     projection_kind: DurableProjectionKind
     seed_contract: DurableProjectionSeedContractFact
@@ -891,8 +891,7 @@ class RuntimeWriteAdmissionEpochFact(FrozenFactBase):
             raise ValueError("runtime write epoch counters must be positive")
         maintenance = self.mode is RuntimeWriteAdmissionMode.MAINTENANCE
         if maintenance != bool(
-            self.maintenance_operation_id
-            and self.target_migration_version is not None
+            self.maintenance_operation_id and self.target_migration_version is not None
         ):
             raise ValueError("runtime write admission mode/authority mismatch")
         return self
@@ -917,9 +916,7 @@ class RuntimeWriteProtectedRelationFact(FrozenFactBase):
     schema_name: str
     relation_name: str
     allowed_normal_operations: tuple[Literal["insert", "update", "delete"], ...]
-    allowed_maintenance_operations: tuple[
-        Literal["insert", "update", "delete"], ...
-    ]
+    allowed_maintenance_operations: tuple[Literal["insert", "update", "delete"], ...]
     owning_write_domains: tuple[str, ...]
     guard_trigger_name: str
     guard_trigger_contract_fingerprint: str
@@ -927,9 +924,9 @@ class RuntimeWriteProtectedRelationFact(FrozenFactBase):
 
 
 class RuntimeWriteProtectedRelationRegistryFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_write_protected_relation_registry.v1"] = (
         "runtime_write_protected_relation_registry.v1"
-    ] = "runtime_write_protected_relation_registry.v1"
+    )
     registry_version: str
     ordered_relations: tuple[RuntimeWriteProtectedRelationFact, ...]
     relation_count: int
@@ -962,9 +959,9 @@ class RuntimeSessionOwnerSemanticFact(FrozenFactBase):
 
 
 class RuntimeSessionOwnerBootstrapCandidateFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_session_owner_bootstrap_candidate.v1"] = (
         "runtime_session_owner_bootstrap_candidate.v1"
-    ] = "runtime_session_owner_bootstrap_candidate.v1"
+    )
     session_owner: RuntimeSessionOwnerSemanticFact
     expected_admission_epoch_fingerprint: str
     candidate_fingerprint: str
@@ -983,9 +980,9 @@ class RuntimeSessionBootstrapStateFact(FrozenFactBase):
 
 
 class RuntimeSessionBootstrapCommitOutcomeFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_session_bootstrap_commit_outcome.v1"] = (
         "runtime_session_bootstrap_commit_outcome.v1"
-    ] = "runtime_session_bootstrap_commit_outcome.v1"
+    )
     confirmation: DurableProjectionCommitConfirmation
     attempted_candidate_fingerprint: str
     resulting_state: RuntimeSessionBootstrapStateFact | None
@@ -1022,12 +1019,15 @@ class DurableProjectionSeedStateFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _validate_seed_state(self) -> "DurableProjectionSeedStateFact":
-        if min(
-            self.through_sequence,
-            self.ledger_payload_prefix_bytes,
-            self.transcript_semantic_prefix_count,
-            self.admitted_job_candidate_count,
-        ) < 0:
+        if (
+            min(
+                self.through_sequence,
+                self.ledger_payload_prefix_bytes,
+                self.transcript_semantic_prefix_count,
+                self.admitted_job_candidate_count,
+            )
+            < 0
+        ):
             raise ValueError("projection seed state counters must be non-negative")
         return self
 
@@ -1102,9 +1102,9 @@ class DurableProjectionSeedRepairActionFact(FrozenFactBase):
 
 
 class DurableProjectionSeedFailureResolutionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_seed_failure_resolution.v1"] = (
         "durable_projection_seed_failure_resolution.v1"
-    ] = "durable_projection_seed_failure_resolution.v1"
+    )
     seed_failure_fingerprint: str
     repair_action_fingerprint: str
     resulting_seed_state_fingerprint: str
@@ -1113,9 +1113,9 @@ class DurableProjectionSeedFailureResolutionFact(FrozenFactBase):
 
 
 class DurableProjectionSeedCommitCandidateFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_seed_commit_candidate.v1"] = (
         "durable_projection_seed_commit_candidate.v1"
-    ] = "durable_projection_seed_commit_candidate.v1"
+    )
     runtime_session_id: str
     projection_kind: DurableProjectionKind
     expected_seed_state: DurableProjectionSeedStateFact
@@ -1141,18 +1141,14 @@ class DurableProjectionSeedCommitCandidateFact(FrozenFactBase):
         if len(self.ordered_job_candidates) > 512:
             raise ValueError("seed batch exceeds the job bound")
         if (
-            self.runtime_session_id
-            != self.expected_seed_state.runtime_session_id
-            or self.runtime_session_id
-            != self.resulting_seed_state.runtime_session_id
+            self.runtime_session_id != self.expected_seed_state.runtime_session_id
+            or self.runtime_session_id != self.resulting_seed_state.runtime_session_id
             or self.runtime_session_id != self.scan_horizon.runtime_session_id
         ):
             raise ValueError("seed candidate runtime identity drifted")
         if (
-            self.projection_kind
-            is not self.expected_seed_state.projection_kind
-            or self.projection_kind
-            is not self.resulting_seed_state.projection_kind
+            self.projection_kind is not self.expected_seed_state.projection_kind
+            or self.projection_kind is not self.resulting_seed_state.projection_kind
         ):
             raise ValueError("seed candidate projection kind drifted")
         if (
@@ -1166,17 +1162,17 @@ class DurableProjectionSeedCommitCandidateFact(FrozenFactBase):
             self.scan_horizon.through_sequence
         ):
             raise ValueError("resulting seed state must reach scan horizon")
-        if (
-            self.repaired_seed_failure_fingerprint is None
-        ) != (self.seed_repair_action_fingerprint is None):
+        if (self.repaired_seed_failure_fingerprint is None) != (
+            self.seed_repair_action_fingerprint is None
+        ):
             raise ValueError("seed repair fields must be jointly present")
         return self
 
 
 class DurableProjectionSeedFailureCommitCandidateFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_seed_failure_commit_candidate.v1"] = (
         "durable_projection_seed_failure_commit_candidate.v1"
-    ] = "durable_projection_seed_failure_commit_candidate.v1"
+    )
     runtime_session_id: str
     projection_kind: DurableProjectionKind
     activation_fingerprint: str
@@ -1230,9 +1226,9 @@ class DurableProjectionSeedCommitPort(Protocol):
 
 
 class DurableProjectionTargetExecutionLeaseFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_target_execution_lease.v1"] = (
         "durable_projection_target_execution_lease.v1"
-    ] = "durable_projection_target_execution_lease.v1"
+    )
     projection_kind: DurableProjectionKind
     target_key: str
     owner_job_id: str
@@ -1252,17 +1248,15 @@ class DurableProjectionTargetHeadFact(FrozenFactBase):
     target_key: str
     applied_source_sequence: int
     applied_source_event_reference_fingerprint: str
-    applied_result_receipt_reference: (
-        DurableProjectionResultReceiptReferenceFact
-    )
+    applied_result_receipt_reference: DurableProjectionResultReceiptReferenceFact
     head_revision: int
     head_fingerprint: str
 
 
 class DurableProjectionTargetAuthorityConflictFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_projection_target_authority_conflict.v1"] = (
         "durable_projection_target_authority_conflict.v1"
-    ] = "durable_projection_target_authority_conflict.v1"
+    )
     conflict_id: str
     projection_kind: DurableProjectionKind
     target_key: str
@@ -1299,9 +1293,9 @@ class DurableProjectionTargetAuthorityConflictFact(FrozenFactBase):
 
 
 class PreActivationProjectionHookContractSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_hook_contract_semantic.v1"] = (
         "pre_activation_projection_hook_contract_semantic.v1"
-    ] = "pre_activation_projection_hook_contract_semantic.v1"
+    )
     projection_kind: DurableProjectionKind
     hook_contract_id: str
     hook_contract_version: str
@@ -1315,9 +1309,9 @@ class PreActivationProjectionHookContractSemanticFact(FrozenFactBase):
 
 
 class PreActivationProjectionHookContractFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_hook_contract.v1"] = (
         "pre_activation_projection_hook_contract.v1"
-    ] = "pre_activation_projection_hook_contract.v1"
+    )
     contract_semantic: PreActivationProjectionHookContractSemanticFact
     installation_migration_version: int
     resulting_migration_registry_prefix_fingerprint: str
@@ -1325,9 +1319,9 @@ class PreActivationProjectionHookContractFact(FrozenFactBase):
 
 
 class PreActivationProjectionSessionCutoverFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_session_cutover.v1"] = (
         "pre_activation_projection_session_cutover.v1"
-    ] = "pre_activation_projection_session_cutover.v1"
+    )
     runtime_session_id: str
     projection_kind: DurableProjectionKind
     pre_activation_contract_fingerprint: str
@@ -1342,9 +1336,9 @@ class PreActivationProjectionSessionCutoverFact(FrozenFactBase):
 
 
 class PreActivationProjectionTargetCoverageItemFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_target_coverage_item.v1"] = (
         "pre_activation_projection_target_coverage_item.v1"
-    ] = "pre_activation_projection_target_coverage_item.v1"
+    )
     projection_kind: DurableProjectionKind
     target_key: str
     latest_trigger_event_reference: DurableProjectionSourceEventReferenceFact
@@ -1353,9 +1347,9 @@ class PreActivationProjectionTargetCoverageItemFact(FrozenFactBase):
 
 
 class PreActivationProjectionCoveragePageFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_coverage_page.v1"] = (
         "pre_activation_projection_coverage_page.v1"
-    ] = "pre_activation_projection_coverage_page.v1"
+    )
     runtime_session_id: str
     projection_kind: DurableProjectionKind
     page_index: int
@@ -1368,9 +1362,9 @@ class PreActivationProjectionCoveragePageFact(FrozenFactBase):
 
 
 class PreActivationProjectionCoverageSetReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_coverage_set_reference.v1"] = (
         "pre_activation_projection_coverage_set_reference.v1"
-    ] = "pre_activation_projection_coverage_set_reference.v1"
+    )
     page_count: int
     target_count: int
     ordered_page_fingerprint_accumulator: str
@@ -1380,9 +1374,9 @@ class PreActivationProjectionCoverageSetReferenceFact(FrozenFactBase):
 
 
 class PreActivationProjectionCoverageReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_coverage_receipt.v1"] = (
         "pre_activation_projection_coverage_receipt.v1"
-    ] = "pre_activation_projection_coverage_receipt.v1"
+    )
     coverage_receipt_id: str
     runtime_session_id: str
     projection_kind: DurableProjectionKind
@@ -1398,9 +1392,9 @@ class PreActivationProjectionCoverageReceiptFact(FrozenFactBase):
 
 
 class PreActivationProjectionCommitOutcomeFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["pre_activation_projection_commit_outcome.v1"] = (
         "pre_activation_projection_commit_outcome.v1"
-    ] = "pre_activation_projection_commit_outcome.v1"
+    )
     confirmation: DurableProjectionCommitConfirmation
     attempted_result_owner_fingerprint: str
     result_receipt_reference: DurableProjectionResultReceiptReferenceFact | None
@@ -1420,9 +1414,9 @@ class PreActivationProjectionCommitPort(Protocol):
 
 
 class PostgresMigrationPreparationRequirementFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["postgres_migration_preparation_requirement.v1"] = (
         "postgres_migration_preparation_requirement.v1"
-    ] = "postgres_migration_preparation_requirement.v1"
+    )
     current_head_version: int
     next_migration_version: int
     preparation_kind: PostgresMigrationPreparationKind
@@ -1447,9 +1441,9 @@ class PostgresMigrationProgressOutcomeFact(FrozenFactBase):
 
 
 class LegacySurfaceHistoricalBindingProofFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_historical_binding_proof.v1"] = (
         "legacy_surface_historical_binding_proof.v1"
-    ] = "legacy_surface_historical_binding_proof.v1"
+    )
     binding_kind: Literal["historical_confirmed"]
     surface: CanonicalMutationSurface
     historical_handler_contract: CanonicalMutationSurfaceHandlerContractFact
@@ -1460,9 +1454,9 @@ class LegacySurfaceHistoricalBindingProofFact(FrozenFactBase):
 
 
 class LegacySurfaceMigrationRebindAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_rebind_authority.v1"] = (
         "legacy_surface_migration_rebind_authority.v1"
-    ] = "legacy_surface_migration_rebind_authority.v1"
+    )
     binding_kind: Literal["migration_rebound"]
     authority_id: str
     database_target_fingerprint: str
@@ -1476,9 +1470,9 @@ class LegacySurfaceMigrationRebindAuthorityFact(FrozenFactBase):
 
 
 class LegacySurfaceDecommissionAndRebuildAuthorityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_decommission_and_rebuild_authority.v1"] = (
         "legacy_surface_decommission_and_rebuild_authority.v1"
-    ] = "legacy_surface_decommission_and_rebuild_authority.v1"
+    )
     binding_kind: Literal["decommission_and_rebuild"]
     authority_id: str
     database_target_fingerprint: str
@@ -1500,9 +1494,9 @@ LegacySurfaceMigrationBindingAuthority: TypeAlias = Annotated[
 
 
 class LegacySurfaceMigrationBindingEntryFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_binding_entry.v1"] = (
         "legacy_surface_migration_binding_entry.v1"
-    ] = "legacy_surface_migration_binding_entry.v1"
+    )
     legacy_outbox_id: str
     legacy_payload_sha256: str
     surface: CanonicalMutationSurface
@@ -1525,9 +1519,9 @@ class LegacySurfaceMigrationBindingEntryFact(FrozenFactBase):
 
 
 class LegacySurfaceMigrationBindingPageFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_binding_page.v1"] = (
         "legacy_surface_migration_binding_page.v1"
-    ] = "legacy_surface_migration_binding_page.v1"
+    )
     page_index: int
     previous_page_fingerprint: str | None
     ordered_entries: tuple[LegacySurfaceMigrationBindingEntryFact, ...]
@@ -1538,9 +1532,9 @@ class LegacySurfaceMigrationBindingPageFact(FrozenFactBase):
 
 
 class LegacySurfaceMigrationBindingPlanFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_binding_plan.v1"] = (
         "legacy_surface_migration_binding_plan.v1"
-    ] = "legacy_surface_migration_binding_plan.v1"
+    )
     plan_id: str
     database_target_fingerprint: str
     expected_v5_registry_prefix_fingerprint: str
@@ -1556,9 +1550,9 @@ class LegacySurfaceMigrationBindingPlanFact(FrozenFactBase):
 
 
 class LegacySurfaceMigrationRebaseFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_rebase.v1"] = (
         "legacy_surface_migration_rebase.v1"
-    ] = "legacy_surface_migration_rebase.v1"
+    )
     surface: CanonicalMutationSurface
     sequence_key: str
     covered_through_legacy_outbox_id: str
@@ -1571,9 +1565,9 @@ class LegacySurfaceMigrationRebaseFact(FrozenFactBase):
 
 
 class LegacySurfaceMigrationBindingAppliedReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_surface_migration_binding_applied_receipt.v1"] = (
         "legacy_surface_migration_binding_applied_receipt.v1"
-    ] = "legacy_surface_migration_binding_applied_receipt.v1"
+    )
     plan_fingerprint: str
     resulting_v6_registry_prefix_fingerprint: str
     historical_confirmed_count: int
@@ -1586,9 +1580,9 @@ class LegacySurfaceMigrationBindingAppliedReceiptFact(FrozenFactBase):
 
 
 class PostgresMigrationDataTransformContractFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["postgres_migration_data_transform_contract.v1"] = (
         "postgres_migration_data_transform_contract.v1"
-    ] = "postgres_migration_data_transform_contract.v1"
+    )
     transform_id: Literal[
         "bind_canonical_mutation_v1_to_v2",
         "bind_legacy_surface_contracts_v1_to_v2",
@@ -1605,9 +1599,9 @@ class PostgresMigrationDataTransformContractFact(FrozenFactBase):
 
 
 class DurableRepairAuthorityReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["durable_repair_authority_reference.v1"] = (
         "durable_repair_authority_reference.v1"
-    ] = "durable_repair_authority_reference.v1"
+    )
     authority_kind: Literal[
         "operator_command",
         "deployment_configuration",
@@ -1637,9 +1631,9 @@ class DurableProjectionRepairActionFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceRepairActionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_repair_action.v1"] = (
         "canonical_mutation_surface_repair_action.v1"
-    ] = "canonical_mutation_surface_repair_action.v1"
+    )
     repair_action_id: str
     delivery_identity_fingerprint: str
     expected_state_revision: int
@@ -1651,9 +1645,7 @@ class CanonicalMutationSurfaceRepairActionFact(FrozenFactBase):
         "decommission_after_rebuild",
     ]
     authority_references: tuple[DurableRepairAuthorityReferenceFact, ...]
-    rebuild_result_receipt_reference: (
-        DurableProjectionResultReceiptReferenceFact | None
-    )
+    rebuild_result_receipt_reference: DurableProjectionResultReceiptReferenceFact | None
     resulting_repair_generation: int
     requested_at: datetime
     action_fingerprint: str
@@ -1698,9 +1690,9 @@ class CanonicalMutationSequenceHeadFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceDeliveryIdentityFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_delivery_identity.v1"] = (
         "canonical_mutation_surface_delivery_identity.v1"
-    ] = "canonical_mutation_surface_delivery_identity.v1"
+    )
     mutation_id: str
     surface: CanonicalMutationSurface
     mutation_semantic_fingerprint: str
@@ -1714,9 +1706,9 @@ class CanonicalMutationSurfaceDeliveryIdentityFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceSequenceHeadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_sequence_head.v1"] = (
         "canonical_mutation_surface_sequence_head.v1"
-    ] = "canonical_mutation_surface_sequence_head.v1"
+    )
     surface: CanonicalMutationSurface
     sequence_key: str
     last_surface_sequence_number: int
@@ -1743,9 +1735,9 @@ class ConfirmedCanonicalMutationSurfaceAppliedReceiptFact(FrozenFactBase):
 
 
 class LegacyRecordedSurfaceAppliedReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["legacy_recorded_surface_applied_receipt.v1"] = (
         "legacy_recorded_surface_applied_receipt.v1"
-    ] = "legacy_recorded_surface_applied_receipt.v1"
+    )
     receipt_kind: Literal["legacy_applied"] = "legacy_applied"
     mutation_id: str
     surface: CanonicalMutationSurface
@@ -1757,9 +1749,9 @@ class LegacyRecordedSurfaceAppliedReceiptFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceDecommissionedReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_decommissioned_receipt.v1"] = (
         "canonical_mutation_surface_decommissioned_receipt.v1"
-    ] = "canonical_mutation_surface_decommissioned_receipt.v1"
+    )
     receipt_kind: Literal["decommissioned"] = "decommissioned"
     mutation_id: str
     surface: CanonicalMutationSurface
@@ -1782,9 +1774,9 @@ CanonicalMutationSurfaceTerminalReceipt: TypeAlias = Annotated[
 
 
 class CanonicalMutationSurfaceDeliveryStateFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_delivery_state.v1"] = (
         "canonical_mutation_surface_delivery_state.v1"
-    ] = "canonical_mutation_surface_delivery_state.v1"
+    )
     delivery_identity: CanonicalMutationSurfaceDeliveryIdentityFact
     delivery_policy: DurableProjectionDeliveryPolicyFact
     status: Literal[
@@ -1808,9 +1800,9 @@ class CanonicalMutationSurfaceDeliveryStateFact(FrozenFactBase):
 
 
 class LeasedCanonicalMutationSurfaceDeliveryFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["leased_canonical_mutation_surface_delivery.v1"] = (
         "leased_canonical_mutation_surface_delivery.v1"
-    ] = "leased_canonical_mutation_surface_delivery.v1"
+    )
     delivery_identity: CanonicalMutationSurfaceDeliveryIdentityFact
     delivery_policy: DurableProjectionDeliveryPolicyFact
     expected_state_revision: int
@@ -1823,9 +1815,9 @@ class LeasedCanonicalMutationSurfaceDeliveryFact(FrozenFactBase):
 
 
 class CanonicalMutationSurfaceTargetHeadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_surface_target_head.v1"] = (
         "canonical_mutation_surface_target_head.v1"
-    ] = "canonical_mutation_surface_target_head.v1"
+    )
     surface: CanonicalMutationSurface
     sequence_key: str
     terminal_surface_sequence_number: int
@@ -1862,36 +1854,12 @@ class PreparedCanonicalMutationBundleFact(FrozenFactBase):
 
 
 class CanonicalMutationBundleAppendReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_mutation_bundle_append_receipt.v1"] = (
         "canonical_mutation_bundle_append_receipt.v1"
-    ] = "canonical_mutation_bundle_append_receipt.v1"
+    )
     attempted_bundle_fingerprint: str
     ordered_mutation_receipts: tuple[CanonicalMutationAppendReceipt, ...]
     receipt_fingerprint: str
-
-
-class VerifiedPostgresTransactionHandle(Protocol):
-    @property
-    def schema_binding_fingerprint(self) -> str: ...
-
-    @property
-    def transaction_owner_id(self) -> str: ...
-
-    @property
-    def transaction_generation(self) -> int: ...
-
-    @property
-    def connection_provider_borrower_id(self) -> str: ...
-
-
-class CanonicalMutationCommitPort(Protocol):
-    def append_bundle_in_transaction(
-        self,
-        *,
-        connection: VerifiedPostgresTransactionHandle,
-        admission_guard: RuntimeWriteAdmissionGuard,
-        bundle: PreparedCanonicalMutationBundleFact,
-    ) -> CanonicalMutationBundleAppendReceiptFact: ...
 
 
 class DurableProjectionStoredEventFact(FrozenFactBase):
@@ -1940,9 +1908,9 @@ class RawRunProjectionSourcePage(FrozenFactBase):
 
 
 class RunTimelinePersistentStateSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["run_timeline_persistent_state_semantic.v1"] = (
         "run_timeline_persistent_state_semantic.v1"
-    ] = "run_timeline_persistent_state_semantic.v1"
+    )
     runtime_session_id: str
     run_id: str
     through_sequence: int
@@ -1998,9 +1966,9 @@ class RunTimelineProjectionCommitPort(Protocol):
 
 
 class ToolCallArgumentsEvidenceProjectionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["tool_call_arguments_evidence_projection.v1"] = (
         "tool_call_arguments_evidence_projection.v1"
-    ] = "tool_call_arguments_evidence_projection.v1"
+    )
     tool_call_start_reference: DurableProjectionSourceEventReferenceFact
     tool_call_end_reference: DurableProjectionSourceEventReferenceFact
     arguments_segment_count: int
@@ -2014,12 +1982,15 @@ class ToolCallArgumentsEvidenceProjectionFact(FrozenFactBase):
         "non_object_json",
     ]
     parsed_arguments_object: FrozenJsonObjectFact | None
-    parse_error_code: Literal[
-        "json_decode_error",
-        "duplicate_object_key",
-        "non_finite_number",
-        "top_level_non_object",
-    ] | None
+    parse_error_code: (
+        Literal[
+            "json_decode_error",
+            "duplicate_object_key",
+            "non_finite_number",
+            "top_level_non_object",
+        ]
+        | None
+    )
     canonical_arguments_json_sha256: str | None
     canonical_arguments_json_utf8_bytes: int | None
     bounded_input_summary: str
@@ -2034,8 +2005,7 @@ class ToolCallArgumentsEvidenceProjectionFact(FrozenFactBase):
         encoded = self.raw_arguments_json.encode("utf-8")
         if (
             self.raw_arguments_json_utf8_bytes != len(encoded)
-            or self.raw_arguments_json_sha256
-            != f"sha256:{sha256(encoded).hexdigest()}"
+            or self.raw_arguments_json_sha256 != f"sha256:{sha256(encoded).hexdigest()}"
         ):
             raise ValueError("tool argument raw JSON identity drifted")
         valid = self.parse_disposition == "valid_object"
@@ -2061,9 +2031,7 @@ class ToolCallArgumentsEvidenceProjectionFact(FrozenFactBase):
         if not valid_error:
             raise ValueError("tool argument parse error matrix mismatch")
         if self.parsed_arguments_object is not None:
-            canonical = canonical_json_bytes(
-                thaw_json(self.parsed_arguments_object)
-            )
+            canonical = canonical_json_bytes(thaw_json(self.parsed_arguments_object))
             if (
                 self.canonical_arguments_json_sha256
                 != f"sha256:{sha256(canonical).hexdigest()}"
@@ -2074,9 +2042,9 @@ class ToolCallArgumentsEvidenceProjectionFact(FrozenFactBase):
 
 
 class ToolResultEvidenceOutputProjectionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["tool_result_evidence_output_projection.v1"] = (
         "tool_result_evidence_output_projection.v1"
-    ] = "tool_result_evidence_output_projection.v1"
+    )
     result_state: ToolResultState
     result_semantic_fingerprint: str
     bounded_output_summary: str
@@ -2088,9 +2056,9 @@ class ToolResultEvidenceOutputProjectionFact(FrozenFactBase):
 
 
 class ToolResultExecutionEvidenceSourceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["tool_result_execution_evidence_source.v1"] = (
         "tool_result_execution_evidence_source.v1"
-    ] = "tool_result_execution_evidence_source.v1"
+    )
     tool_result_start_reference: DurableProjectionSourceEventReferenceFact
     tool_result_end_reference: DurableProjectionSourceEventReferenceFact
     terminal_projection: ToolResultTerminalProjectionEndReferenceFact
@@ -2142,9 +2110,9 @@ class ToolResultArtifactRelationFact(FrozenFactBase):
 
 
 class CanonicalGraphRelationLoweringContractFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["canonical_graph_relation_lowering_contract.v1"] = (
         "canonical_graph_relation_lowering_contract.v1"
-    ] = "canonical_graph_relation_lowering_contract.v1"
+    )
     contract_id: Literal["canonical-graph-relation-lowering.v1"]
     accepted_relation_schema_fingerprints: tuple[str, ...]
     postgres_relation_schema_fingerprint: str
@@ -2224,124 +2192,563 @@ class RuntimeWriteAdmissionGuardHandle(FrozenRuntimeStateBase):
 
 
 _FACT_FINGERPRINTS: tuple[tuple[type[FrozenFactBase], str, str], ...] = (
-    (DurableProjectionSourceEventReferenceFact, "reference_fingerprint", "durable-projection-source-event-reference:v1"),
-    (DurableProjectionLedgerHorizonFact, "horizon_fingerprint", "durable-projection-ledger-horizon:v1"),
-    (DurableProjectionHandlerContractFact, "contract_fingerprint", "durable-projection-handler-contract:v1"),
-    (DurableProjectionPhysicalPolicyFact, "policy_fingerprint", "durable-projection-physical-policy:v1"),
-    (DurableProjectionRetryPolicyFact, "policy_fingerprint", "durable-projection-retry-policy:v1"),
-    (DurableProjectionDeliveryPolicyFact, "delivery_policy_fingerprint", "durable-projection-delivery-policy:v1"),
-    (CanonicalMutationSurfaceHandlerContractFact, "contract_fingerprint", "canonical-mutation-surface-handler-contract:v1"),
-    (CanonicalMutationPlannedSurfaceFact, "planned_surface_fingerprint", "canonical-mutation-planned-surface:v1"),
-    (CanonicalMutationSurfacePlanFact, "plan_fingerprint", "canonical-mutation-surface-plan:v1"),
-    (DurableProjectionJobSemanticFact, "job_semantic_fingerprint", "durable-projection-job-semantic:v1"),
-    (DurableProjectionJobCandidateFact, "candidate_fingerprint", "durable-projection-job-candidate:v1"),
-    (DurableContentAddressedArtifactReferenceFact, "reference_fingerprint", "durable-content-addressed-artifact-reference:v1"),
-    (DurableProjectionArtifactResultDocumentReferenceFact, "reference_fingerprint", "durable-projection-artifact-result-document-reference:v1"),
-    (DurableProjectionGraphResultDocumentReferenceFact, "reference_fingerprint", "durable-projection-graph-result-document-reference:v1"),
-    (DurableProjectionGraphRelationReferenceFact, "reference_fingerprint", "durable-projection-graph-relation-reference:v1"),
-    (DurableProjectionCanonicalMutationReferenceFact, "reference_fingerprint", "durable-projection-canonical-mutation-reference:v1"),
-    (DurableProjectionResultSemanticFact, "result_semantic_fingerprint", "durable-projection-result-semantic:v1"),
-    (ProjectionJobResultOwnerFact, "owner_fingerprint", "projection-job-result-owner:v1"),
-    (PreActivationHookResultOwnerFact, "owner_fingerprint", "pre-activation-hook-result-owner:v1"),
-    (DurableProjectionResultReceiptReferenceFact, "reference_fingerprint", "durable-projection-result-receipt-reference:v1"),
-    (DurableProjectionAppliedResultReceiptFact, "receipt_fingerprint", "durable-projection-applied-result-receipt:v1"),
-    (DurableProjectionSupersededResultReceiptFact, "receipt_fingerprint", "durable-projection-superseded-result-receipt:v1"),
-    (DurableProjectionJobOperationalStateFact, "state_fingerprint", "durable-projection-job-operational-state:v1"),
-    (LeasedDurableProjectionJob, "lease_fingerprint", "leased-durable-projection-job:v1"),
-    (PreparedDurableProjectionArtifactDocumentFact, "document_fingerprint", "prepared-durable-projection-artifact-document:v1"),
-    (PreparedDurableProjectionGraphDocumentFact, "document_fingerprint", "prepared-durable-projection-graph-document:v1"),
-    (PreparedDurableProjectionGraphRelationFact, "relation_fingerprint", "prepared-durable-projection-graph-relation:v1"),
-    (CanonicalInlineJsonDocumentFact, "document_semantic_fingerprint", "canonical-inline-json-document:v1"),
-    (CanonicalArtifactDocumentReferenceFact, "reference_fingerprint", "canonical-artifact-document-reference:v1"),
-    (CanonicalMutationDocumentFact, "mutation_fact_fingerprint", "canonical-mutation-document:v2"),
-    (CanonicalMutationOrderingFact, "ordering_fingerprint", "canonical-mutation-ordering:v1"),
-    (CanonicalMutationSemanticFact, "mutation_semantic_fingerprint", "canonical-mutation-semantic:v2"),
-    (ProjectionResultCanonicalMutationOwnerFact, "owner_fingerprint", "projection-result-canonical-mutation-owner:v1"),
-    (GovernanceCanonicalMutationOwnerFact, "owner_fingerprint", "governance-canonical-mutation-owner:v1"),
-    (CanonicalMemoryWriteMutationOwnerFact, "owner_fingerprint", "canonical-memory-write-mutation-owner:v1"),
-    (GraphMaintenanceMutationOwnerFact, "owner_fingerprint", "graph-maintenance-mutation-owner:v1"),
-    (LegacyCanonicalMutationOwnerFact, "owner_fingerprint", "legacy-canonical-mutation-owner:v1"),
-    (CanonicalMutationCandidateFact, "candidate_fingerprint", "canonical-mutation-candidate:v2"),
-    (PreparedDurableProjectionResultFact, "prepared_result_fingerprint", "prepared-durable-projection-result:v1"),
-    (DurableProjectionSettlementOutcome, "outcome_fingerprint", "durable-projection-settlement-outcome:v1"),
-    (DurableProjectionTriggerBindingFact, "binding_fingerprint", "durable-projection-trigger-binding:v1"),
-    (DurableProjectionSeedContractFact, "seed_contract_fingerprint", "durable-projection-seed-contract:v1"),
-    (DurableProjectionKindActivationSemanticFact, "activation_semantic_fingerprint", "durable-projection-kind-activation-semantic:v1"),
-    (DurableProjectionKindActivationFact, "activation_fingerprint", "durable-projection-kind-activation:v1"),
-    (DurableProjectionSessionCutoverFact, "cutover_fingerprint", "durable-projection-session-cutover:v1"),
-    (RuntimeWriteAdmissionEpochFact, "epoch_fingerprint", "runtime-write-admission-epoch:v1"),
-    (RuntimeWriteMaintenanceAuthorityFact, "authority_fingerprint", "runtime-write-maintenance-authority:v1"),
-    (RuntimeWriteProtectedRelationFact, "relation_fingerprint", "runtime-write-protected-relation:v1"),
-    (RuntimeWriteProtectedRelationRegistryFact, "registry_fingerprint", "runtime-write-protected-relation-registry:v1"),
-    (RuntimeSessionOwnerSemanticFact, "owner_semantic_fingerprint", "runtime-session-owner-semantic:v1"),
-    (RuntimeSessionOwnerBootstrapCandidateFact, "candidate_fingerprint", "runtime-session-owner-bootstrap-candidate:v1"),
-    (RuntimeSessionBootstrapStateFact, "state_fingerprint", "runtime-session-bootstrap-state:v1"),
-    (RuntimeSessionBootstrapCommitOutcomeFact, "outcome_fingerprint", "runtime-session-bootstrap-commit-outcome:v1"),
-    (DurableProjectionSeedStateFact, "state_fingerprint", "durable-projection-seed-state:v1"),
-    (DurableProjectionSeedFailureFact, "failure_fingerprint", "durable-projection-seed-failure:v1"),
-    (DurableProjectionSeedRepairActionFact, "action_fingerprint", "durable-projection-seed-repair-action:v1"),
-    (DurableProjectionSeedFailureResolutionFact, "resolution_fingerprint", "durable-projection-seed-failure-resolution:v1"),
-    (DurableProjectionSeedCommitCandidateFact, "candidate_fingerprint", "durable-projection-seed-commit-candidate:v1"),
-    (DurableProjectionSeedFailureCommitCandidateFact, "candidate_fingerprint", "durable-projection-seed-failure-commit-candidate:v1"),
-    (DurableProjectionSeedCommitOutcome, "outcome_fingerprint", "durable-projection-seed-commit-outcome:v1"),
-    (DurableProjectionTargetExecutionLeaseFact, "lease_fingerprint", "durable-projection-target-execution-lease:v1"),
-    (DurableProjectionTargetHeadFact, "head_fingerprint", "durable-projection-target-head:v1"),
-    (DurableProjectionTargetAuthorityConflictFact, "conflict_fingerprint", "durable-projection-target-authority-conflict:v1"),
-    (PreActivationProjectionHookContractSemanticFact, "contract_semantic_fingerprint", "pre-activation-projection-hook-contract-semantic:v1"),
-    (PreActivationProjectionHookContractFact, "contract_fingerprint", "pre-activation-projection-hook-contract:v1"),
-    (PreActivationProjectionSessionCutoverFact, "cutover_fingerprint", "pre-activation-projection-session-cutover:v1"),
-    (PreActivationProjectionTargetCoverageItemFact, "item_fingerprint", "pre-activation-projection-target-coverage-item:v1"),
-    (PreActivationProjectionCoveragePageFact, "page_fingerprint", "pre-activation-projection-coverage-page:v1"),
-    (PreActivationProjectionCoverageSetReferenceFact, "reference_fingerprint", "pre-activation-projection-coverage-set-reference:v1"),
-    (PreActivationProjectionCoverageReceiptFact, "receipt_fingerprint", "pre-activation-projection-coverage-receipt:v1"),
-    (PreActivationProjectionCommitOutcomeFact, "outcome_fingerprint", "pre-activation-projection-commit-outcome:v1"),
-    (PostgresMigrationPreparationRequirementFact, "requirement_fingerprint", "postgres-migration-preparation-requirement:v1"),
-    (PostgresMigrationProgressOutcomeFact, "outcome_fingerprint", "postgres-migration-progress-outcome:v1"),
-    (LegacySurfaceHistoricalBindingProofFact, "proof_fingerprint", "legacy-surface-historical-binding-proof:v1"),
-    (LegacySurfaceMigrationRebindAuthorityFact, "authority_fingerprint", "legacy-surface-migration-rebind-authority:v1"),
-    (LegacySurfaceDecommissionAndRebuildAuthorityFact, "authority_fingerprint", "legacy-surface-decommission-and-rebuild-authority:v1"),
-    (LegacySurfaceMigrationBindingEntryFact, "entry_fingerprint", "legacy-surface-migration-binding-entry:v1"),
-    (LegacySurfaceMigrationBindingPageFact, "page_fingerprint", "legacy-surface-migration-binding-page:v1"),
-    (LegacySurfaceMigrationBindingPlanFact, "plan_fingerprint", "legacy-surface-migration-binding-plan:v1"),
-    (LegacySurfaceMigrationRebaseFact, "rebase_fingerprint", "legacy-surface-migration-rebase:v1"),
-    (LegacySurfaceMigrationBindingAppliedReceiptFact, "receipt_fingerprint", "legacy-surface-migration-binding-applied-receipt:v1"),
-    (PostgresMigrationDataTransformContractFact, "transform_contract_fingerprint", "postgres-migration-data-transform-contract:v1"),
-    (DurableRepairAuthorityReferenceFact, "reference_fingerprint", "durable-repair-authority-reference:v1"),
-    (DurableProjectionRepairActionFact, "action_fingerprint", "durable-projection-repair-action:v1"),
-    (CanonicalMutationSurfaceRepairActionFact, "action_fingerprint", "canonical-mutation-surface-repair-action:v1"),
-    (CanonicalMutationSequenceHeadFact, "head_fingerprint", "canonical-mutation-sequence-head:v1"),
-    (CanonicalMutationSurfaceDeliveryIdentityFact, "delivery_identity_fingerprint", "canonical-mutation-surface-delivery-identity:v1"),
-    (CanonicalMutationSurfaceSequenceHeadFact, "head_fingerprint", "canonical-mutation-surface-sequence-head:v1"),
-    (ConfirmedCanonicalMutationSurfaceAppliedReceiptFact, "receipt_fingerprint", "confirmed-canonical-mutation-surface-applied-receipt:v1"),
-    (LegacyRecordedSurfaceAppliedReceiptFact, "receipt_fingerprint", "legacy-recorded-surface-applied-receipt:v1"),
-    (CanonicalMutationSurfaceDecommissionedReceiptFact, "receipt_fingerprint", "canonical-mutation-surface-decommissioned-receipt:v1"),
-    (CanonicalMutationSurfaceDeliveryStateFact, "state_fingerprint", "canonical-mutation-surface-delivery-state:v1"),
-    (LeasedCanonicalMutationSurfaceDeliveryFact, "lease_fingerprint", "leased-canonical-mutation-surface-delivery:v1"),
-    (CanonicalMutationSurfaceTargetHeadFact, "head_fingerprint", "canonical-mutation-surface-target-head:v1"),
-    (CanonicalMutationAppendReceipt, "receipt_fingerprint", "canonical-mutation-append-receipt:v1"),
-    (PreparedCanonicalMutationBundleFact, "bundle_fingerprint", "prepared-canonical-mutation-bundle:v1"),
-    (CanonicalMutationBundleAppendReceiptFact, "receipt_fingerprint", "canonical-mutation-bundle-append-receipt:v1"),
-    (DurableProjectionStoredEventFact, "stored_event_fingerprint", "durable-projection-stored-event:v1"),
+    (
+        DurableProjectionSourceEventReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-source-event-reference:v1",
+    ),
+    (
+        DurableProjectionLedgerHorizonFact,
+        "horizon_fingerprint",
+        "durable-projection-ledger-horizon:v1",
+    ),
+    (
+        DurableProjectionHandlerContractFact,
+        "contract_fingerprint",
+        "durable-projection-handler-contract:v1",
+    ),
+    (
+        DurableProjectionPhysicalPolicyFact,
+        "policy_fingerprint",
+        "durable-projection-physical-policy:v1",
+    ),
+    (
+        DurableProjectionRetryPolicyFact,
+        "policy_fingerprint",
+        "durable-projection-retry-policy:v1",
+    ),
+    (
+        DurableProjectionDeliveryPolicyFact,
+        "delivery_policy_fingerprint",
+        "durable-projection-delivery-policy:v1",
+    ),
+    (
+        CanonicalMutationSurfaceHandlerContractFact,
+        "contract_fingerprint",
+        "canonical-mutation-surface-handler-contract:v1",
+    ),
+    (
+        CanonicalMutationPlannedSurfaceFact,
+        "planned_surface_fingerprint",
+        "canonical-mutation-planned-surface:v1",
+    ),
+    (
+        CanonicalMutationSurfacePlanFact,
+        "plan_fingerprint",
+        "canonical-mutation-surface-plan:v1",
+    ),
+    (
+        DurableProjectionJobSemanticFact,
+        "job_semantic_fingerprint",
+        "durable-projection-job-semantic:v1",
+    ),
+    (
+        DurableProjectionJobCandidateFact,
+        "candidate_fingerprint",
+        "durable-projection-job-candidate:v1",
+    ),
+    (
+        DurableContentAddressedArtifactReferenceFact,
+        "reference_fingerprint",
+        "durable-content-addressed-artifact-reference:v1",
+    ),
+    (
+        DurableProjectionArtifactResultDocumentReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-artifact-result-document-reference:v1",
+    ),
+    (
+        DurableProjectionGraphResultDocumentReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-graph-result-document-reference:v1",
+    ),
+    (
+        DurableProjectionGraphRelationReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-graph-relation-reference:v1",
+    ),
+    (
+        DurableProjectionCanonicalMutationReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-canonical-mutation-reference:v1",
+    ),
+    (
+        DurableProjectionResultSemanticFact,
+        "result_semantic_fingerprint",
+        "durable-projection-result-semantic:v1",
+    ),
+    (
+        ProjectionJobResultOwnerFact,
+        "owner_fingerprint",
+        "projection-job-result-owner:v1",
+    ),
+    (
+        PreActivationHookResultOwnerFact,
+        "owner_fingerprint",
+        "pre-activation-hook-result-owner:v1",
+    ),
+    (
+        DurableProjectionResultReceiptReferenceFact,
+        "reference_fingerprint",
+        "durable-projection-result-receipt-reference:v1",
+    ),
+    (
+        DurableProjectionAppliedResultReceiptFact,
+        "receipt_fingerprint",
+        "durable-projection-applied-result-receipt:v1",
+    ),
+    (
+        DurableProjectionSupersededResultReceiptFact,
+        "receipt_fingerprint",
+        "durable-projection-superseded-result-receipt:v1",
+    ),
+    (
+        DurableProjectionJobOperationalStateFact,
+        "state_fingerprint",
+        "durable-projection-job-operational-state:v1",
+    ),
+    (
+        LeasedDurableProjectionJob,
+        "lease_fingerprint",
+        "leased-durable-projection-job:v1",
+    ),
+    (
+        PreparedDurableProjectionArtifactDocumentFact,
+        "document_fingerprint",
+        "prepared-durable-projection-artifact-document:v1",
+    ),
+    (
+        PreparedDurableProjectionGraphDocumentFact,
+        "document_fingerprint",
+        "prepared-durable-projection-graph-document:v1",
+    ),
+    (
+        PreparedDurableProjectionGraphRelationFact,
+        "relation_fingerprint",
+        "prepared-durable-projection-graph-relation:v1",
+    ),
+    (
+        CanonicalInlineJsonDocumentFact,
+        "document_semantic_fingerprint",
+        "canonical-inline-json-document:v1",
+    ),
+    (
+        CanonicalArtifactDocumentReferenceFact,
+        "reference_fingerprint",
+        "canonical-artifact-document-reference:v1",
+    ),
+    (
+        CanonicalMutationDocumentFact,
+        "mutation_fact_fingerprint",
+        "canonical-mutation-document:v2",
+    ),
+    (
+        CanonicalMutationOrderingFact,
+        "ordering_fingerprint",
+        "canonical-mutation-ordering:v1",
+    ),
+    (
+        CanonicalMutationSemanticFact,
+        "mutation_semantic_fingerprint",
+        "canonical-mutation-semantic:v2",
+    ),
+    (
+        ProjectionResultCanonicalMutationOwnerFact,
+        "owner_fingerprint",
+        "projection-result-canonical-mutation-owner:v1",
+    ),
+    (
+        GovernanceCanonicalMutationOwnerFact,
+        "owner_fingerprint",
+        "governance-canonical-mutation-owner:v1",
+    ),
+    (
+        CanonicalMemoryWriteMutationOwnerFact,
+        "owner_fingerprint",
+        "canonical-memory-write-mutation-owner:v1",
+    ),
+    (
+        GraphMaintenanceMutationOwnerFact,
+        "owner_fingerprint",
+        "graph-maintenance-mutation-owner:v1",
+    ),
+    (
+        LegacyCanonicalMutationOwnerFact,
+        "owner_fingerprint",
+        "legacy-canonical-mutation-owner:v1",
+    ),
+    (
+        CanonicalMutationCandidateFact,
+        "candidate_fingerprint",
+        "canonical-mutation-candidate:v2",
+    ),
+    (
+        PreparedDurableProjectionResultFact,
+        "prepared_result_fingerprint",
+        "prepared-durable-projection-result:v1",
+    ),
+    (
+        DurableProjectionSettlementOutcome,
+        "outcome_fingerprint",
+        "durable-projection-settlement-outcome:v1",
+    ),
+    (
+        DurableProjectionTriggerBindingFact,
+        "binding_fingerprint",
+        "durable-projection-trigger-binding:v1",
+    ),
+    (
+        DurableProjectionSeedContractFact,
+        "seed_contract_fingerprint",
+        "durable-projection-seed-contract:v1",
+    ),
+    (
+        DurableProjectionKindActivationSemanticFact,
+        "activation_semantic_fingerprint",
+        "durable-projection-kind-activation-semantic:v1",
+    ),
+    (
+        DurableProjectionKindActivationFact,
+        "activation_fingerprint",
+        "durable-projection-kind-activation:v1",
+    ),
+    (
+        DurableProjectionSessionCutoverFact,
+        "cutover_fingerprint",
+        "durable-projection-session-cutover:v1",
+    ),
+    (
+        RuntimeWriteAdmissionEpochFact,
+        "epoch_fingerprint",
+        "runtime-write-admission-epoch:v1",
+    ),
+    (
+        RuntimeWriteMaintenanceAuthorityFact,
+        "authority_fingerprint",
+        "runtime-write-maintenance-authority:v1",
+    ),
+    (
+        RuntimeWriteProtectedRelationFact,
+        "relation_fingerprint",
+        "runtime-write-protected-relation:v1",
+    ),
+    (
+        RuntimeWriteProtectedRelationRegistryFact,
+        "registry_fingerprint",
+        "runtime-write-protected-relation-registry:v1",
+    ),
+    (
+        RuntimeSessionOwnerSemanticFact,
+        "owner_semantic_fingerprint",
+        "runtime-session-owner-semantic:v1",
+    ),
+    (
+        RuntimeSessionOwnerBootstrapCandidateFact,
+        "candidate_fingerprint",
+        "runtime-session-owner-bootstrap-candidate:v1",
+    ),
+    (
+        RuntimeSessionBootstrapStateFact,
+        "state_fingerprint",
+        "runtime-session-bootstrap-state:v1",
+    ),
+    (
+        RuntimeSessionBootstrapCommitOutcomeFact,
+        "outcome_fingerprint",
+        "runtime-session-bootstrap-commit-outcome:v1",
+    ),
+    (
+        DurableProjectionSeedStateFact,
+        "state_fingerprint",
+        "durable-projection-seed-state:v1",
+    ),
+    (
+        DurableProjectionSeedFailureFact,
+        "failure_fingerprint",
+        "durable-projection-seed-failure:v1",
+    ),
+    (
+        DurableProjectionSeedRepairActionFact,
+        "action_fingerprint",
+        "durable-projection-seed-repair-action:v1",
+    ),
+    (
+        DurableProjectionSeedFailureResolutionFact,
+        "resolution_fingerprint",
+        "durable-projection-seed-failure-resolution:v1",
+    ),
+    (
+        DurableProjectionSeedCommitCandidateFact,
+        "candidate_fingerprint",
+        "durable-projection-seed-commit-candidate:v1",
+    ),
+    (
+        DurableProjectionSeedFailureCommitCandidateFact,
+        "candidate_fingerprint",
+        "durable-projection-seed-failure-commit-candidate:v1",
+    ),
+    (
+        DurableProjectionSeedCommitOutcome,
+        "outcome_fingerprint",
+        "durable-projection-seed-commit-outcome:v1",
+    ),
+    (
+        DurableProjectionTargetExecutionLeaseFact,
+        "lease_fingerprint",
+        "durable-projection-target-execution-lease:v1",
+    ),
+    (
+        DurableProjectionTargetHeadFact,
+        "head_fingerprint",
+        "durable-projection-target-head:v1",
+    ),
+    (
+        DurableProjectionTargetAuthorityConflictFact,
+        "conflict_fingerprint",
+        "durable-projection-target-authority-conflict:v1",
+    ),
+    (
+        PreActivationProjectionHookContractSemanticFact,
+        "contract_semantic_fingerprint",
+        "pre-activation-projection-hook-contract-semantic:v1",
+    ),
+    (
+        PreActivationProjectionHookContractFact,
+        "contract_fingerprint",
+        "pre-activation-projection-hook-contract:v1",
+    ),
+    (
+        PreActivationProjectionSessionCutoverFact,
+        "cutover_fingerprint",
+        "pre-activation-projection-session-cutover:v1",
+    ),
+    (
+        PreActivationProjectionTargetCoverageItemFact,
+        "item_fingerprint",
+        "pre-activation-projection-target-coverage-item:v1",
+    ),
+    (
+        PreActivationProjectionCoveragePageFact,
+        "page_fingerprint",
+        "pre-activation-projection-coverage-page:v1",
+    ),
+    (
+        PreActivationProjectionCoverageSetReferenceFact,
+        "reference_fingerprint",
+        "pre-activation-projection-coverage-set-reference:v1",
+    ),
+    (
+        PreActivationProjectionCoverageReceiptFact,
+        "receipt_fingerprint",
+        "pre-activation-projection-coverage-receipt:v1",
+    ),
+    (
+        PreActivationProjectionCommitOutcomeFact,
+        "outcome_fingerprint",
+        "pre-activation-projection-commit-outcome:v1",
+    ),
+    (
+        PostgresMigrationPreparationRequirementFact,
+        "requirement_fingerprint",
+        "postgres-migration-preparation-requirement:v1",
+    ),
+    (
+        PostgresMigrationProgressOutcomeFact,
+        "outcome_fingerprint",
+        "postgres-migration-progress-outcome:v1",
+    ),
+    (
+        LegacySurfaceHistoricalBindingProofFact,
+        "proof_fingerprint",
+        "legacy-surface-historical-binding-proof:v1",
+    ),
+    (
+        LegacySurfaceMigrationRebindAuthorityFact,
+        "authority_fingerprint",
+        "legacy-surface-migration-rebind-authority:v1",
+    ),
+    (
+        LegacySurfaceDecommissionAndRebuildAuthorityFact,
+        "authority_fingerprint",
+        "legacy-surface-decommission-and-rebuild-authority:v1",
+    ),
+    (
+        LegacySurfaceMigrationBindingEntryFact,
+        "entry_fingerprint",
+        "legacy-surface-migration-binding-entry:v1",
+    ),
+    (
+        LegacySurfaceMigrationBindingPageFact,
+        "page_fingerprint",
+        "legacy-surface-migration-binding-page:v1",
+    ),
+    (
+        LegacySurfaceMigrationBindingPlanFact,
+        "plan_fingerprint",
+        "legacy-surface-migration-binding-plan:v1",
+    ),
+    (
+        LegacySurfaceMigrationRebaseFact,
+        "rebase_fingerprint",
+        "legacy-surface-migration-rebase:v1",
+    ),
+    (
+        LegacySurfaceMigrationBindingAppliedReceiptFact,
+        "receipt_fingerprint",
+        "legacy-surface-migration-binding-applied-receipt:v1",
+    ),
+    (
+        PostgresMigrationDataTransformContractFact,
+        "transform_contract_fingerprint",
+        "postgres-migration-data-transform-contract:v1",
+    ),
+    (
+        DurableRepairAuthorityReferenceFact,
+        "reference_fingerprint",
+        "durable-repair-authority-reference:v1",
+    ),
+    (
+        DurableProjectionRepairActionFact,
+        "action_fingerprint",
+        "durable-projection-repair-action:v1",
+    ),
+    (
+        CanonicalMutationSurfaceRepairActionFact,
+        "action_fingerprint",
+        "canonical-mutation-surface-repair-action:v1",
+    ),
+    (
+        CanonicalMutationSequenceHeadFact,
+        "head_fingerprint",
+        "canonical-mutation-sequence-head:v1",
+    ),
+    (
+        CanonicalMutationSurfaceDeliveryIdentityFact,
+        "delivery_identity_fingerprint",
+        "canonical-mutation-surface-delivery-identity:v1",
+    ),
+    (
+        CanonicalMutationSurfaceSequenceHeadFact,
+        "head_fingerprint",
+        "canonical-mutation-surface-sequence-head:v1",
+    ),
+    (
+        ConfirmedCanonicalMutationSurfaceAppliedReceiptFact,
+        "receipt_fingerprint",
+        "confirmed-canonical-mutation-surface-applied-receipt:v1",
+    ),
+    (
+        LegacyRecordedSurfaceAppliedReceiptFact,
+        "receipt_fingerprint",
+        "legacy-recorded-surface-applied-receipt:v1",
+    ),
+    (
+        CanonicalMutationSurfaceDecommissionedReceiptFact,
+        "receipt_fingerprint",
+        "canonical-mutation-surface-decommissioned-receipt:v1",
+    ),
+    (
+        CanonicalMutationSurfaceDeliveryStateFact,
+        "state_fingerprint",
+        "canonical-mutation-surface-delivery-state:v1",
+    ),
+    (
+        LeasedCanonicalMutationSurfaceDeliveryFact,
+        "lease_fingerprint",
+        "leased-canonical-mutation-surface-delivery:v1",
+    ),
+    (
+        CanonicalMutationSurfaceTargetHeadFact,
+        "head_fingerprint",
+        "canonical-mutation-surface-target-head:v1",
+    ),
+    (
+        CanonicalMutationAppendReceipt,
+        "receipt_fingerprint",
+        "canonical-mutation-append-receipt:v1",
+    ),
+    (
+        PreparedCanonicalMutationBundleFact,
+        "bundle_fingerprint",
+        "prepared-canonical-mutation-bundle:v1",
+    ),
+    (
+        CanonicalMutationBundleAppendReceiptFact,
+        "receipt_fingerprint",
+        "canonical-mutation-bundle-append-receipt:v1",
+    ),
+    (
+        DurableProjectionStoredEventFact,
+        "stored_event_fingerprint",
+        "durable-projection-stored-event:v1",
+    ),
     (RunTimelineReducerBaseFact, "base_fingerprint", "run-timeline-reducer-base:v1"),
-    (RawRunProjectionSourcePage, "page_fingerprint", "raw-run-projection-source-page:v1"),
-    (RunTimelinePersistentStateSemanticFact, "state_semantic_fingerprint", "run-timeline-persistent-state-semantic:v1"),
-    (PreparedRunTimelineProjectionFact, "preparation_fingerprint", "prepared-run-timeline-projection:v1"),
-    (ToolCallArgumentsEvidenceProjectionFact, "projection_fingerprint", "tool-call-arguments-evidence-projection:v1"),
-    (ToolResultEvidenceOutputProjectionFact, "projection_fingerprint", "tool-result-evidence-output-projection:v1"),
-    (ToolResultExecutionEvidenceSourceFact, "source_fingerprint", "tool-result-execution-evidence-source:v1"),
-    (TurnProducedToolResultRelationFact, "relation_semantic_fingerprint", "turn-produced-tool-result-relation:v1"),
-    (ToolResultArtifactRelationFact, "relation_semantic_fingerprint", "tool-result-artifact-relation:v1"),
-    (CanonicalGraphRelationLoweringContractFact, "contract_fingerprint", "canonical-graph-relation-lowering-contract:v1"),
-    (CanonicalGraphRelationRowFact, "row_fingerprint", "canonical-graph-relation-row:v1"),
-    (CanonicalGraphRelationReadPageFact, "page_fingerprint", "canonical-graph-relation-read-page:v1"),
-    (CanonicalGraphNodeReadViewFact, "view_fingerprint", "canonical-graph-node-read-view:v1"),
+    (
+        RawRunProjectionSourcePage,
+        "page_fingerprint",
+        "raw-run-projection-source-page:v1",
+    ),
+    (
+        RunTimelinePersistentStateSemanticFact,
+        "state_semantic_fingerprint",
+        "run-timeline-persistent-state-semantic:v1",
+    ),
+    (
+        PreparedRunTimelineProjectionFact,
+        "preparation_fingerprint",
+        "prepared-run-timeline-projection:v1",
+    ),
+    (
+        ToolCallArgumentsEvidenceProjectionFact,
+        "projection_fingerprint",
+        "tool-call-arguments-evidence-projection:v1",
+    ),
+    (
+        ToolResultEvidenceOutputProjectionFact,
+        "projection_fingerprint",
+        "tool-result-evidence-output-projection:v1",
+    ),
+    (
+        ToolResultExecutionEvidenceSourceFact,
+        "source_fingerprint",
+        "tool-result-execution-evidence-source:v1",
+    ),
+    (
+        TurnProducedToolResultRelationFact,
+        "relation_semantic_fingerprint",
+        "turn-produced-tool-result-relation:v1",
+    ),
+    (
+        ToolResultArtifactRelationFact,
+        "relation_semantic_fingerprint",
+        "tool-result-artifact-relation:v1",
+    ),
+    (
+        CanonicalGraphRelationLoweringContractFact,
+        "contract_fingerprint",
+        "canonical-graph-relation-lowering-contract:v1",
+    ),
+    (
+        CanonicalGraphRelationRowFact,
+        "row_fingerprint",
+        "canonical-graph-relation-row:v1",
+    ),
+    (
+        CanonicalGraphRelationReadPageFact,
+        "page_fingerprint",
+        "canonical-graph-relation-read-page:v1",
+    ),
+    (
+        CanonicalGraphNodeReadViewFact,
+        "view_fingerprint",
+        "canonical-graph-node-read-view:v1",
+    ),
 )
 
 for _fact_type, _fingerprint_field, _domain in _FACT_FINGERPRINTS:
     if _fingerprint_field not in _fact_type.model_fields:
         raise RuntimeError(
-            f"{_fact_type.__name__} does not declare "
-            f"{_fingerprint_field}"
+            f"{_fact_type.__name__} does not declare {_fingerprint_field}"
         )
     register_durable_fact(
         schema_version=str(_fact_type.model_fields["schema_version"].default),

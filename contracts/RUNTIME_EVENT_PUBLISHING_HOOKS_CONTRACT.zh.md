@@ -361,3 +361,12 @@ observer failure只产生 operational diagnostic，不能撤销 durable disposit
 start/semantic/terminal 的 CAS 语义不同：semantic NONE 可用同一 stable bytes重试；terminal必须在 latest rollout account state上重做 guard，
 但不得改变 event IDs/payload；PARTIAL/UNKNOWN 保留 owner并 latch。publication waiter cancellation只 detach，commit worker与physical operation
 继续完成。observer回调触发 stop/close不得 self-join或在 control lock 内重入。
+
+---
+
+## 13. D4 Projection Service Ownership
+
+Projection service implementation位于`runtime.projection_jobs`，Host通过窄
+`RuntimeProjectionServicePort`持有。Publisher subscriber只调用`wake(runtime_session_id)`，不依赖
+job repository/handler concrete type。Service与PostgreSQL/retrieval dependencies来自同一个
+Host process resource lease；close必须drain physical operation，超时保持blocked而不能越过依赖释放。

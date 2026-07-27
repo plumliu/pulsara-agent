@@ -6,7 +6,7 @@ from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
-from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
+from tests.support.runtime_factory import build_component_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 from tests.support.settings import compatibility_storage_config
 
@@ -24,10 +24,9 @@ def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(
             ),
             storage=compatibility_storage_config(),
         )
-        wiring = build_agent_runtime_wiring(
+        wiring = build_component_agent_runtime_wiring(
             settings,
             tmp_path,
-            durable=False,
             model_role=ModelRole.FLASH,
         )
         session = HostSession(

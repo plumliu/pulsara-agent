@@ -421,3 +421,22 @@ Working-context在RunEnd时只消费已经durable applied的timeline receipt。�
 hook返回而不从EventLog重建；后续model compile通过session-owned bounded auxiliary operation
 执行一次latest-RunEnd sparse read，同一planned model-step复用attempt receipt，不得在baseline与
 async projection各做一次同步I/O。Timeline receipt可见后再lazy refresh。
+
+---
+
+## 20. D4 Execution Composition
+
+Runtime composition唯一构造`ToolExecutor`；`RuntimeSession`不再提供`create_tool_executor()`，
+AgentRuntime也不从tools facade取得execution contracts。Tool execution输入来自
+`ports.tool_execution`，concrete tools按artifact/terminal/MCP/subagent窄port注入。
+
+`ToolExecutionTerminalRegistry`是suspension/terminal stable event tuple的唯一owner。NONE复用exact
+candidate retry；FULL receipt与MCP pending handle exact join并完成physical handoff后才清除candidate；
+UNKNOWN/PARTIAL同时保留registry与physical owner并latch。MCP manager active borrow总在physical call
+的`finally`归还，不等待durable settlement。
+
+Subagent spawn与batch materialization在durable child-start batch前取得的capacity reservation必须按typed
+commit outcome结算。Caller cancellation不能跳过该矩阵：NONE释放reservation且不创建handle；FULL继续
+安装与已提交child对应的execution handle；UNKNOWN保留process-local reservation并要求reconciliation，
+Host close不得只遍历active child graph而漏过它。任何pending/unknown capacity owner存在时，close必须
+fail closed；不得把无durable child的裸reservation永久计入容量。

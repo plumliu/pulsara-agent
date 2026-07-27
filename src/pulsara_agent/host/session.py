@@ -204,10 +204,8 @@ from pulsara_agent.runtime.mcp.types import (
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.terminal.ui_stream import TerminalMonitorUISubscription
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
-from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityProvider,
-    build_mcp_installation,
-)
+from pulsara_agent.capability.providers.mcp import McpCapabilityProvider
+from pulsara_agent.runtime.mcp.installation import build_mcp_installation
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.runtime import (
     CapabilityRuntime,
@@ -218,7 +216,6 @@ from pulsara_agent.capability.types import (
     CapabilityProjectionResolveContext,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
-from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionInvocationFailed,
     ContextCompactionPublicationFailedAfterCommit,
@@ -258,15 +255,6 @@ class HostSessionLifecycle(StrEnum):
 
 
 _STREAM_QUEUE_MAX_ITEMS = 128
-
-
-def _replace_mcp_tool_bindings(
-    current: tuple[object, ...], mcp_tools: tuple[object, ...]
-) -> tuple[object, ...]:
-    return (
-        *(tool for tool in current if not isinstance(tool, McpCapabilityTool)),
-        *mcp_tools,
-    )
 
 
 def _replace_mcp_capability_provider(
@@ -394,7 +382,7 @@ def _mcp_pending_audit(
         coalesced_attempt_summaries=(),
         coalesced_attempt_summaries_omitted=0,
         server_snapshots=tuple(server_facts),
-        total_installed_tool_count=len(new.tools),
+        total_installed_tool_count=len(new.ordered_binding_installations),
         added_tool_count=len(new_names.difference(old_names)),
         revoked_tool_count=len(old_names.difference(new_names)),
         changed_tool_names_bounded=bounded_names,
@@ -786,9 +774,14 @@ class HostSession:
 
         installation_id = f"mcp_installation:{uuid4().hex}"
         stale_discard_counts = supervisor.stale_discard_counts()
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        execution_port = runtime_session.mcp_tool_execution_port
+        if execution_port is None:
+            raise RuntimeError("MCP execution port is unavailable during installation")
         try:
             new_installation = build_mcp_installation(
-                supervisor=supervisor,
+                execution_port=execution_port,
+                artifact_options=runtime_session.artifact_service.options,
                 config_epoch=ticket.config_epoch,
                 event_safe_config_set_fingerprint=ticket.event_safe_config_set_fingerprint,
                 snapshots=new_snapshots,
@@ -800,11 +793,6 @@ class HostSession:
             new_capability_runtime = _replace_mcp_capability_provider(
                 self.wiring.agent_runtime.capability_runtime,
                 new_installation,
-            )
-            runtime_session = self.wiring.runtime_wiring.runtime_session
-            new_extra_bindings = _replace_mcp_tool_bindings(
-                runtime_session.extra_tool_bindings,
-                tuple(new_installation.tools),
             )
             pending_audit = _mcp_pending_audit(
                 old=old_installation,
@@ -844,7 +832,9 @@ class HostSession:
                 candidates=tuple(latest_candidates.values()),
                 retiring_slot_ids=tuple(retiring_slot_ids),
             )
-            runtime_session.extra_tool_bindings = new_extra_bindings
+            runtime_session.dynamic_tool_installations = (
+                new_installation.ordered_binding_installations
+            )
             self.wiring = replace(
                 self.wiring,
                 runtime_wiring=replace(
@@ -3517,7 +3507,6 @@ class HostSession:
                             preparing_state, reason=reason
                         )
                         self._fold_run_owner_terminal(result)
-                        self._complete_pending_mcp_lease_for_state(preparing_state)
                         if self._suspended_state is preparing_state:
                             self._suspended_state = None
                             self.suspended_run_id = None
@@ -3573,7 +3562,6 @@ class HostSession:
                             state, reason=reason
                         )
                         self._fold_run_owner_terminal(result)
-                        self._complete_pending_mcp_lease_for_state(state)
                         self._capture_pending_interaction(result.state)
                         if result.state.finalized:
                             self._retire_confirmed_run_owner(state.run_id)
@@ -3622,18 +3610,7 @@ class HostSession:
             # on a stop_request; abort_run is idempotent and yields the result.
             result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
             self._fold_run_owner_terminal(result)
-            self._complete_pending_mcp_lease_for_state(state)
             return result
-
-    def _complete_pending_mcp_lease_for_state(self, state: LoopState) -> None:
-        if (
-            state.pending_interaction_kind != "mcp_input_required"
-            or self.mcp_supervisor is None
-        ):
-            return
-        interaction_id = state.pending_interaction_payload.get("interaction_id")
-        if isinstance(interaction_id, str) and interaction_id:
-            self.mcp_supervisor.complete_pending_lease(interaction_id)
 
     async def _install_run_termination_intent(
         self,
@@ -3929,6 +3906,11 @@ class HostSession:
                 cancelled_by="host_shutdown",
                 timeout_seconds=drain_timeout_seconds,
             )
+        mcp_tool_execution_port = runtime_session.mcp_tool_execution_port
+        if mcp_tool_execution_port is not None:
+            await mcp_tool_execution_port.stop_admission_and_drain(
+                deadline_monotonic=close_deadline,
+            )
         runtime_session.require_mutation_allowed()
         if self.mcp_supervisor is not None:
             await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
@@ -4116,17 +4098,9 @@ class HostSession:
         state = self._suspended_state
         if state is None:
             return
-        interaction_id = (
-            str(state.pending_interaction_payload.get("interaction_id"))
-            if state.pending_interaction_kind == "mcp_input_required"
-            and state.pending_interaction_payload.get("interaction_id") is not None
-            else None
-        )
         await self._install_run_termination_intent(state, reason)
         result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
         self._fold_run_owner_terminal(result)
-        if interaction_id is not None and self.mcp_supervisor is not None:
-            self.mcp_supervisor.complete_pending_lease(interaction_id)
         if result.state.finalized:
             self._retire_confirmed_run_owner(state.run_id)
         self._suspended_state = None
@@ -5094,20 +5068,15 @@ class HostSession:
                 binding_identity=source_fact.binding_identity,
                 pending_lease_reservation=source_fact.pending_lease_reservation,
                 request_envelope_semantic_fingerprint=(
-                    source_fact.request_envelope
-                    .request_envelope_semantic_fingerprint
+                    source_fact.request_envelope.request_envelope_semantic_fingerprint
                 ),
                 rollout_reservation_id=source_fact.rollout_reservation_id,
                 rollout_reservation_fingerprint=(
                     source_fact.rollout_reservation_fingerprint
                 ),
-                source_mcp_installation_id=(
-                    source_fact.source_mcp_installation_id
-                ),
+                source_mcp_installation_id=(source_fact.source_mcp_installation_id),
                 durable_deadline_utc=source_fact.durable_deadline_utc,
-                deadline_policy_fingerprint=(
-                    source_fact.deadline_policy_fingerprint
-                ),
+                deadline_policy_fingerprint=(source_fact.deadline_policy_fingerprint),
                 predecessor_resolution_submitted_event_reference=(
                     source_fact.predecessor_resolution_submitted_event_reference
                 ),
@@ -5125,9 +5094,7 @@ class HostSession:
             predecessor_resolution = (
                 working_set.latest_mcp_input_required_resolution_ref
             )
-            predecessor_failure = (
-                working_set.latest_mcp_resume_failure_event_ref
-            )
+            predecessor_failure = working_set.latest_mcp_resume_failure_event_ref
             if predecessor_failure is None:
                 attempt = build_frozen_fact(
                     McpInputRequiredResolutionAttemptFact,
@@ -5142,10 +5109,8 @@ class HostSession:
                     raise RuntimeError(
                         "MCP resume-failed state lost its predecessor resolution"
                     )
-                previous_resolution = (
-                    self.wiring.runtime_wiring.event_log.get_by_id(
-                        predecessor_resolution.event_id
-                    )
+                previous_resolution = self.wiring.runtime_wiring.event_log.get_by_id(
+                    predecessor_resolution.event_id
                 )
                 previous_failure = self.wiring.runtime_wiring.event_log.get_by_id(
                     predecessor_failure.event_id
@@ -5302,9 +5267,9 @@ class HostSession:
                 and interaction_kind == "mcp_input_required"
             )
             if mcp_boundary_publication_failed:
-                state.scratchpad[
-                    "mcp_input_required_publication_closure_reason"
-                ] = "resume_boundary_publication_unavailable"
+                state.scratchpad["mcp_input_required_publication_closure_reason"] = (
+                    "resume_boundary_publication_unavailable"
+                )
                 state.scratchpad["publication_terminal_deadline_budget"] = (
                     prepared.deadline_budget
                 )
@@ -5399,10 +5364,7 @@ class HostSession:
             or boundary_event.sequence is None
             or (
                 prepared.mcp_input_required_resolution_event_id is not None
-                and (
-                    resolution_event is None
-                    or resolution_event.sequence is None
-                )
+                and (resolution_event is None or resolution_event.sequence is None)
             )
         ):
             raise RuntimeError("resume boundary batch was not fully committed")
@@ -5498,9 +5460,9 @@ class HostSession:
                 mcp_input_required_resolution_ref=resolution_ref,
             )
             if resolution_ref is not None:
-                state.scratchpad[
-                    "latest_mcp_input_required_resolution_reference"
-                ] = resolution_ref
+                state.scratchpad["latest_mcp_input_required_resolution_reference"] = (
+                    resolution_ref
+                )
         state.scratchpad.pop("suspended_state_token", None)
         return CommittedInteractionResumeBoundary(
             prepared=prepared,

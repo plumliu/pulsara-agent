@@ -645,3 +645,15 @@ Dispatcher失败保留 pending outbox并由 session-owned owner重试；不得�
 `UNKNOWN` 只允许 exact-ID confirm/handoff，caller cancellation 只 detach。Host close必须先
 停止该 port 的新 admission并drain owner，再投影已 durable 的 pending outbox；blocked
 reconciliation owner不得被静默退休。
+
+---
+
+## 15. D4 Memory UOW Scope
+
+Memory UOW不接收concrete projection writer。它从唯一owner-scoped transaction scope取得graph、
+decision、event outbox、mutation outbox、lifecycle、write-service六个borrower facade及只含append的
+canonical mutation commit port。全部对象共享exact physical transaction identity与revocable lease。
+
+每个public operation先验证ACTIVE scope/owner/generation/facade kind；scope先停止新borrow并drain，
+再revoke全部facade/commit port，随后commit/rollback并归还connection。公开bundle不暴露raw
+connection、cursor、generic SQL或concrete repository；保留任一facade到scope外必须在SQL前fail closed。

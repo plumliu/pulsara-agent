@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from threading import RLock
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Literal, Sequence
+from uuid import uuid4
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -23,6 +23,20 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.event_log.serialization import (
+    FrozenEventWriteCandidate,
+    decode_event_write_candidate,
+    freeze_event_write_candidate,
+)
+from pulsara_agent.ports.tool_execution import (
+    ToolExecutionCandidateConfirmationKind,
+    ToolExecutionNonePolicy,
+    ToolExecutionPhysicalOwnerHandoffReceipt,
+    ToolExecutionStableCandidateCommitReceipt,
+    ToolExecutionStableCandidateKind,
+    ToolExecutionStableCandidateOwnerIdentity,
+    ToolExecutionStableCandidateOwnerState,
+)
 from pulsara_agent.runtime.long_horizon.accounting import (
     resolve_run_rollout_binding,
 )
@@ -34,11 +48,12 @@ from pulsara_agent.runtime.authority_materialization import (
     PhysicalOneShotReservationRequest,
 )
 from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
     from pulsara_agent.runtime.state import LoopState
-    from pulsara_agent.tools.base import PreparedToolTerminalResult
+    from pulsara_agent.ports.tool_execution import PreparedToolTerminalResult
 
 
 class ToolExecutionCommitContractError(RuntimeError):
@@ -49,12 +64,7 @@ class ToolExecutionTerminalDrainBlocked(RuntimeError):
     """A tool call still owns physical or unconfirmed durable terminal work."""
 
 
-class ToolExecutionTerminalOwnerState(StrEnum):
-    ADMITTED = "admitted"
-    SUSPENSION_CANDIDATE_FROZEN = "suspension_candidate_frozen"
-    SUSPENDED = "suspended"
-    TERMINAL_CANDIDATE_FROZEN = "terminal_candidate_frozen"
-    COMMIT_OUTCOME_UNKNOWN = "commit_outcome_unknown"
+ToolExecutionTerminalOwnerState = ToolExecutionStableCandidateOwnerState
 
 
 @dataclass(slots=True)
@@ -66,7 +76,15 @@ class ToolExecutionTerminalOwner:
     reservation_fingerprint: str
     state: ToolExecutionTerminalOwnerState
     stable_candidates: tuple[AgentEvent, ...] = ()
+    sealed_candidates: tuple[FrozenEventWriteCandidate, ...] = ()
     attempt_generation: int = 0
+    write_attempt_generation: int = 0
+    candidate_kind: ToolExecutionStableCandidateKind | None = None
+    none_policy: ToolExecutionNonePolicy | None = None
+    candidate_batch_fingerprint: str | None = None
+    physical_owner_kind: Literal["mcp_pending"] | None = None
+    physical_owner_identity_fingerprint: str | None = None
+    last_commit_receipt_fingerprint: str | None = None
 
 
 class ToolExecutionTerminalRegistry:
@@ -74,6 +92,7 @@ class ToolExecutionTerminalRegistry:
 
     def __init__(self, runtime_session: RuntimeSession) -> None:
         self._runtime_session = runtime_session
+        self._registry_instance_id = f"tool_execution_registry:{uuid4().hex}"
         self._lock = RLock()
         self._owners: dict[str, ToolExecutionTerminalOwner] = {}
         self._owner_id_by_call: dict[tuple[str, str], str] = {}
@@ -151,13 +170,27 @@ class ToolExecutionTerminalRegistry:
         run_id: str,
         reservation: RolloutReservationFact,
         candidates: Sequence[AgentEvent],
-    ) -> ToolExecutionTerminalOwner:
+        physical_owner_identity_fingerprint: str | None = None,
+    ) -> ToolExecutionStableCandidateOwnerIdentity:
+        with self._lock:
+            current = self._require_owner_locked(run_id, reservation.owner_id)
+            successor = current.state is ToolExecutionTerminalOwnerState.SUSPENDED
         return self._freeze(
             run_id=run_id,
             reservation=reservation,
             candidates=candidates,
             target=ToolExecutionTerminalOwnerState.SUSPENSION_CANDIDATE_FROZEN,
-            allowed=(ToolExecutionTerminalOwnerState.ADMITTED,),
+            allowed=(
+                ToolExecutionTerminalOwnerState.ADMITTED,
+                ToolExecutionTerminalOwnerState.SUSPENDED,
+            ),
+            candidate_kind=ToolExecutionStableCandidateKind.SUSPENSION,
+            none_policy=(
+                ToolExecutionNonePolicy.RETRY_SAME_CANDIDATE
+                if successor
+                else ToolExecutionNonePolicy.ABANDON_ON_NONE
+            ),
+            physical_owner_identity_fingerprint=physical_owner_identity_fingerprint,
         )
 
     def mark_suspended(
@@ -178,6 +211,217 @@ class ToolExecutionTerminalRegistry:
                 )
             owner.state = ToolExecutionTerminalOwnerState.SUSPENDED
             owner.stable_candidates = ()
+            owner.sealed_candidates = ()
+
+    def confirm_stable_candidate_write(
+        self,
+        *,
+        owner_identity: ToolExecutionStableCandidateOwnerIdentity,
+        outcome: object,
+    ) -> ToolExecutionStableCandidateCommitReceipt:
+        """Lower one RuntimeSession-owned write outcome into an exact receipt.
+
+        Callers cannot construct this receipt themselves: the registry owns the
+        frozen event tuple and rebinds every committed reference before a
+        physical owner may settle its lease.
+        """
+
+        from pulsara_agent.runtime.session import EventBatchCommitOutcome
+
+        if not isinstance(outcome, EventBatchCommitOutcome):
+            raise TypeError("stable candidate confirmation requires a write outcome")
+        with self._lock:
+            owner = self._owners.get(owner_identity.owner_id)
+            if owner is None or self._identity_locked(owner) != owner_identity:
+                raise ToolExecutionCommitContractError(
+                    "stable candidate confirmation owner identity mismatch"
+                )
+            self._assert_candidate_integrity_locked(owner)
+            expected_ids = owner_identity.ordered_candidate_event_ids
+            sealed_by_id = {
+                candidate.event_id: candidate for candidate in owner.sealed_candidates
+            }
+            committed_by_id: dict[str, AgentEvent] = {}
+            result = outcome.result
+            if result is not None:
+                for event in result.committed_events:
+                    if event.id in committed_by_id:
+                        raise ToolExecutionCommitContractError(
+                            "stable candidate confirmation contains duplicate event IDs"
+                        )
+                    committed_by_id[event.id] = event
+                    sealed = sealed_by_id.get(event.id)
+                    if sealed is not None:
+                        unsequenced = event.model_copy(update={"sequence": None})
+                        if freeze_event_write_candidate(unsequenced) != sealed:
+                            raise ToolExecutionCommitContractError(
+                                "stable candidate committed payload does not match "
+                                "the sealed candidate"
+                            )
+            observed_expected_ids = tuple(
+                event.id
+                for event in (result.committed_events if result is not None else ())
+                if event.id in sealed_by_id
+            )
+            expected_observed_order = tuple(
+                event_id for event_id in expected_ids if event_id in committed_by_id
+            )
+            if observed_expected_ids != expected_observed_order:
+                raise ToolExecutionCommitContractError(
+                    "stable candidate committed event order mismatch"
+                )
+            committed_ids = tuple(
+                event_id for event_id in expected_ids if event_id in committed_by_id
+            )
+            if outcome.status == "full":
+                confirmation = (
+                    ToolExecutionCandidateConfirmationKind.FULL
+                    if committed_ids == expected_ids
+                    else ToolExecutionCandidateConfirmationKind.PARTIAL
+                )
+            elif committed_ids:
+                confirmation = ToolExecutionCandidateConfirmationKind.PARTIAL
+            elif outcome.status == "none":
+                confirmation = ToolExecutionCandidateConfirmationKind.NONE
+            else:
+                confirmation = ToolExecutionCandidateConfirmationKind.UNKNOWN
+
+            references = tuple(
+                event_reference_from_stored(
+                    committed_by_id[event_id],
+                    runtime_session_id=self._runtime_session.runtime_session_id,
+                )
+                for event_id in committed_ids
+            )
+            publication_summary = "not_applicable"
+            if result is not None:
+                if result.publication_errors:
+                    publication_summary = "failed_after_commit"
+                else:
+                    publication_summary = result.publication_status
+            retry_scheduled = (
+                confirmation is ToolExecutionCandidateConfirmationKind.NONE
+                and owner.none_policy is ToolExecutionNonePolicy.RETRY_SAME_CANDIDATE
+            )
+            reconciliation_required = confirmation in {
+                ToolExecutionCandidateConfirmationKind.UNKNOWN,
+                ToolExecutionCandidateConfirmationKind.PARTIAL,
+            } or bool(result is not None and result.reconciliation_required)
+            owner.write_attempt_generation += 1
+            if confirmation is ToolExecutionCandidateConfirmationKind.FULL:
+                owner.state = ToolExecutionTerminalOwnerState.DURABLE_FULL_AWAITING_PHYSICAL_HANDOFF
+            elif retry_scheduled:
+                owner.state = ToolExecutionTerminalOwnerState.RETRY_WAIT
+            elif confirmation is ToolExecutionCandidateConfirmationKind.NONE:
+                owner.state = ToolExecutionTerminalOwnerState.DURABLE_FULL_AWAITING_PHYSICAL_HANDOFF
+            else:
+                owner.state = ToolExecutionTerminalOwnerState.RECONCILIATION_REQUIRED
+            payload = {
+                "owner_identity_fingerprint": owner_identity.identity_fingerprint,
+                "confirmation_kind": confirmation.value,
+                "write_attempt_generation": owner.write_attempt_generation,
+                "committed_event_references": tuple(
+                    item.model_dump(mode="json") for item in references
+                ),
+                "publication_summary": publication_summary,
+                "retry_scheduled": retry_scheduled,
+                "reconciliation_required": reconciliation_required,
+            }
+            receipt = ToolExecutionStableCandidateCommitReceipt(
+                owner_identity=owner_identity,
+                confirmation_kind=confirmation,
+                write_attempt_generation=owner.write_attempt_generation,
+                committed_event_references=references,
+                publication_summary=publication_summary,  # type: ignore[arg-type]
+                retry_scheduled=retry_scheduled,
+                reconciliation_required=reconciliation_required,
+                receipt_fingerprint=context_fingerprint(
+                    "tool-execution-stable-candidate-commit-receipt:v1", payload
+                ),
+            )
+            owner.last_commit_receipt_fingerprint = receipt.receipt_fingerprint
+            return receipt
+
+    def accept_physical_owner_handoff(
+        self,
+        receipt: ToolExecutionPhysicalOwnerHandoffReceipt,
+    ) -> None:
+        """Complete registry ownership only after the physical owner responds."""
+
+        with self._lock:
+            owner = self._owners.get(receipt.candidate_owner_identity.owner_id)
+            if owner is None:
+                raise ToolExecutionCommitContractError(
+                    "physical owner handoff refers to a missing candidate owner"
+                )
+            identity = self._identity_locked(owner)
+            if (
+                identity != receipt.candidate_owner_identity
+                or identity.physical_owner_kind != receipt.physical_owner_kind
+                or identity.physical_owner_identity_fingerprint
+                != receipt.physical_owner_identity_fingerprint
+                or receipt.handoff_generation != owner.write_attempt_generation
+                or receipt.source_commit_receipt_fingerprint
+                != owner.last_commit_receipt_fingerprint
+            ):
+                raise ToolExecutionCommitContractError(
+                    "physical owner handoff identity mismatch"
+                )
+            handoff_payload = {
+                "candidate_owner_identity": asdict(identity),
+                "source_commit_receipt_fingerprint": (
+                    receipt.source_commit_receipt_fingerprint
+                ),
+                "physical_owner_kind": receipt.physical_owner_kind,
+                "physical_owner_identity_fingerprint": (
+                    receipt.physical_owner_identity_fingerprint
+                ),
+                "handoff_generation": receipt.handoff_generation,
+                "physical_disposition": receipt.physical_disposition,
+                "exact_retry_required": receipt.exact_retry_required,
+                "reconciliation_required": receipt.reconciliation_required,
+            }
+            if receipt.receipt_fingerprint != context_fingerprint(
+                "tool-execution-physical-owner-handoff:v1", handoff_payload
+            ):
+                raise ToolExecutionCommitContractError(
+                    "physical owner handoff receipt fingerprint mismatch"
+                )
+            if receipt.reconciliation_required:
+                owner.state = ToolExecutionTerminalOwnerState.RECONCILIATION_REQUIRED
+                return
+            if receipt.exact_retry_required:
+                owner.state = ToolExecutionTerminalOwnerState.RETRY_WAIT
+                return
+            if owner.candidate_kind is ToolExecutionStableCandidateKind.TERMINAL:
+                if receipt.physical_disposition != "released":
+                    raise ToolExecutionCommitContractError(
+                        "terminal candidate must release its physical owner"
+                    )
+                self._remove_locked(owner)
+                return
+            if receipt.physical_disposition == "confirmed":
+                owner.state = ToolExecutionTerminalOwnerState.SUSPENDED
+                owner.stable_candidates = ()
+                owner.sealed_candidates = ()
+                return
+            if (
+                owner.none_policy is ToolExecutionNonePolicy.ABANDON_ON_NONE
+                and receipt.physical_disposition == "released"
+            ):
+                owner.state = ToolExecutionTerminalOwnerState.ADMITTED
+                owner.stable_candidates = ()
+                owner.sealed_candidates = ()
+                owner.candidate_kind = None
+                owner.none_policy = None
+                owner.candidate_batch_fingerprint = None
+                owner.physical_owner_kind = None
+                owner.physical_owner_identity_fingerprint = None
+                owner.last_commit_receipt_fingerprint = None
+                return
+            raise ToolExecutionCommitContractError(
+                "physical owner handoff disposition is invalid for suspension"
+            )
 
     def freeze_terminal(
         self,
@@ -185,7 +429,8 @@ class ToolExecutionTerminalRegistry:
         run_id: str,
         reservation: RolloutReservationFact,
         candidates: Sequence[AgentEvent],
-    ) -> ToolExecutionTerminalOwner:
+        physical_owner_identity_fingerprint: str | None = None,
+    ) -> ToolExecutionStableCandidateOwnerIdentity:
         self._validate_mcp_terminal_batch(candidates)
         return self._freeze(
             run_id=run_id,
@@ -198,6 +443,9 @@ class ToolExecutionTerminalRegistry:
                 ToolExecutionTerminalOwnerState.SUSPENSION_CANDIDATE_FROZEN,
                 ToolExecutionTerminalOwnerState.COMMIT_OUTCOME_UNKNOWN,
             ),
+            candidate_kind=ToolExecutionStableCandidateKind.TERMINAL,
+            none_policy=ToolExecutionNonePolicy.RETRY_SAME_CANDIDATE,
+            physical_owner_identity_fingerprint=physical_owner_identity_fingerprint,
         )
 
     def _validate_mcp_terminal_batch(
@@ -261,8 +509,7 @@ class ToolExecutionTerminalRegistry:
             if (
                 closure.source_suspension_event_reference
                 != source.source_suspension_event_reference
-                or closure.source_resolution_submitted_event_reference
-                != resolution_ref
+                or closure.source_resolution_submitted_event_reference != resolution_ref
                 or closure.terminal_tool_result_event_identity
                 != expected_terminal_identity
             ):
@@ -329,8 +576,11 @@ class ToolExecutionTerminalRegistry:
         tasks: list[asyncio.Task[None]] = []
         for owner in owners:
             if owner.state not in {
+                ToolExecutionTerminalOwnerState.SUSPENSION_CANDIDATE_FROZEN,
                 ToolExecutionTerminalOwnerState.TERMINAL_CANDIDATE_FROZEN,
+                ToolExecutionTerminalOwnerState.RETRY_WAIT,
                 ToolExecutionTerminalOwnerState.COMMIT_OUTCOME_UNKNOWN,
+                ToolExecutionTerminalOwnerState.RECONCILIATION_REQUIRED,
             }:
                 continue
             with self._lock:
@@ -377,71 +627,149 @@ class ToolExecutionTerminalRegistry:
         deadline_monotonic: float,
     ) -> None:
         try:
-            candidates = owner.stable_candidates
-            if not candidates:
-                return
-            terminals = tuple(
-                event for event in candidates if isinstance(event, ToolResultEndEvent)
-            )
-            if len(terminals) != 1:
-                self._runtime_session.latch_event_commit_outcome_unknown()
-                return
-            terminal = terminals[0]
-            physical_reservation = (
-                self._runtime_session.physical_reservation_for_owner(
-                    operation_kind=PhysicalOperationKind.TOOL_CALL,
-                    owner_id=owner.tool_call_id,
+            backoff_seconds = 0.01
+            while time.monotonic() < deadline_monotonic:
+                candidates = owner.stable_candidates
+                if not candidates:
+                    return
+                identity = self._identity_locked(owner)
+                try:
+                    result = await self._write_frozen_candidate_once(
+                        owner,
+                        candidates=candidates,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    from pulsara_agent.runtime.session import EventBatchCommitOutcome
+
+                    outcome = EventBatchCommitOutcome(
+                        status="full",
+                        deadline_monotonic=deadline_monotonic,
+                        result=result,
+                    )
+                except BaseException as error:
+                    outcome = self._runtime_session.resolved_event_write_outcome(error)
+                receipt = self.confirm_stable_candidate_write(
+                    owner_identity=identity,
+                    outcome=outcome,
                 )
-            )
-            if physical_reservation is not None:
-                terminal_outcome = {
-                    "success": "completed",
-                    "denied": "denied",
-                    "interrupted": "cancelled",
-                    "error": "runtime_error",
-                }[terminal.state.value]
-                result = await _execute_runtime_event_write(
-                    self._runtime_session,
-                    lambda: (
-                        self._runtime_session.settle_physical_operation_from_thread(
-                            candidates,
-                            reservation=physical_reservation,
-                            terminal_outcome=terminal_outcome,
-                            state=None,
-                        )
-                    ),
-                    deadline_monotonic=deadline_monotonic,
-                    operation_kind=PhysicalOperationKind.TOOL_CALL,
-                    operation_owner_id=owner.tool_call_id,
-                )
-            else:
-                account = self._runtime_session.materialization_account_store.snapshot()
-                if account is not None and any(
-                    item.owner_kind is PhysicalOperationKind.TOOL_CALL
-                    and item.owner_id == owner.tool_call_id
-                    for item in account.active_reservations
+                if identity.physical_owner_kind == "mcp_pending":
+                    port = self._runtime_session.mcp_tool_execution_port
+                    if port is None:
+                        self._runtime_session.latch_event_commit_outcome_unknown()
+                        return
+                    transition = port.confirm_owned_candidate_commit(
+                        candidate_owner_identity=identity,
+                        commit_receipt=receipt,
+                    )
+                    self.accept_physical_owner_handoff(transition.handoff_receipt)
+                elif (
+                    receipt.confirmation_kind
+                    is ToolExecutionCandidateConfirmationKind.FULL
+                ):
+                    with self._lock:
+                        current = self._owners.get(owner.owner_id)
+                        if current is owner:
+                            self._remove_locked(owner)
+                    return
+                if (
+                    receipt.confirmation_kind
+                    is ToolExecutionCandidateConfirmationKind.FULL
+                ):
+                    return
+                if (
+                    receipt.confirmation_kind
+                    is not ToolExecutionCandidateConfirmationKind.NONE
                 ):
                     self._runtime_session.latch_event_commit_outcome_unknown()
                     return
-                result = await _execute_runtime_event_write(
-                    self._runtime_session,
-                    lambda: (
-                        self._runtime_session.confirm_and_handoff_event_batch_from_thread(
-                            candidates,
-                            state=None,
-                        )
-                    ),
-                    deadline_monotonic=deadline_monotonic,
-                )
-            if result.reconciliation_required or result.reducer_errors:
-                return
-            with self._lock:
-                current = self._owners.get(owner.owner_id)
-                if current is owner:
-                    self._remove_locked(owner)
+                if not receipt.retry_scheduled:
+                    return
+                remaining = deadline_monotonic - time.monotonic()
+                if remaining <= 0:
+                    return
+                await asyncio.sleep(min(backoff_seconds, remaining))
+                backoff_seconds = min(0.25, backoff_seconds * 2)
         finally:
             with self._lock:
                 self._drain_in_flight.discard(owner.owner_id)
+
+    async def _write_frozen_candidate_once(
+        self,
+        owner: ToolExecutionTerminalOwner,
+        *,
+        candidates: tuple[AgentEvent, ...],
+        deadline_monotonic: float,
+    ) -> EventWriteResult:
+        with self._lock:
+            self._assert_candidate_integrity_locked(owner)
+        suspensions = tuple(
+            event
+            for event in candidates
+            if isinstance(event, ToolExecutionSuspendedEvent)
+        )
+        if owner.candidate_kind is ToolExecutionStableCandidateKind.SUSPENSION:
+            if len(suspensions) != 1 or len(candidates) != 1:
+                raise ToolExecutionCommitContractError(
+                    "suspension candidate owner lost its exact event tuple"
+                )
+            return await RuntimeSessionToolExecutionEventCommitPort(
+                runtime_session=self._runtime_session,
+                state=None,  # type: ignore[arg-type]
+            ).commit_suspension(
+                suspension_candidate=suspensions[0],
+                reservation_id=owner.reservation_id,
+                expected_reservation_fingerprint=owner.reservation_fingerprint,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+        terminals = tuple(
+            event for event in candidates if isinstance(event, ToolResultEndEvent)
+        )
+        if len(terminals) != 1:
+            raise ToolExecutionCommitContractError(
+                "terminal candidate owner lost its ToolResultEnd"
+            )
+        terminal = terminals[0]
+        physical_reservation = self._runtime_session.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=owner.tool_call_id,
+        )
+        if physical_reservation is not None:
+            terminal_outcome = {
+                "success": "completed",
+                "denied": "denied",
+                "interrupted": "cancelled",
+                "error": "runtime_error",
+            }[terminal.state.value]
+            return await _execute_runtime_event_write(
+                self._runtime_session,
+                lambda: self._runtime_session.settle_physical_operation_from_thread(
+                    candidates,
+                    reservation=physical_reservation,
+                    terminal_outcome=terminal_outcome,
+                    state=None,
+                ),
+                deadline_monotonic=deadline_monotonic,
+                operation_kind=PhysicalOperationKind.TOOL_CALL,
+                operation_owner_id=owner.tool_call_id,
+            )
+        account = self._runtime_session.materialization_account_store.snapshot()
+        if account is not None and any(
+            item.owner_kind is PhysicalOperationKind.TOOL_CALL
+            and item.owner_id == owner.tool_call_id
+            for item in account.active_reservations
+        ):
+            raise ToolExecutionCommitContractError(
+                "terminal candidate physical reservation cannot be rebound"
+            )
+        return await _execute_runtime_event_write(
+            self._runtime_session,
+            lambda: self._runtime_session.confirm_and_handoff_event_batch_from_thread(
+                candidates,
+                state=None,
+            ),
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def _freeze(
         self,
@@ -451,8 +779,12 @@ class ToolExecutionTerminalRegistry:
         candidates: Sequence[AgentEvent],
         target: ToolExecutionTerminalOwnerState,
         allowed: tuple[ToolExecutionTerminalOwnerState, ...],
-    ) -> ToolExecutionTerminalOwner:
-        frozen = tuple(candidates)
+        candidate_kind: ToolExecutionStableCandidateKind,
+        none_policy: ToolExecutionNonePolicy,
+        physical_owner_identity_fingerprint: str | None,
+    ) -> ToolExecutionStableCandidateOwnerIdentity:
+        sealed = tuple(freeze_event_write_candidate(item) for item in candidates)
+        frozen = tuple(decode_event_write_candidate(item) for item in sealed)
         if not frozen:
             raise ToolExecutionCommitContractError(
                 "tool owner cannot freeze an empty candidate batch"
@@ -466,8 +798,96 @@ class ToolExecutionTerminalRegistry:
                 )
             owner.state = target
             owner.stable_candidates = frozen
+            owner.sealed_candidates = sealed
             owner.attempt_generation += 1
-            return owner
+            owner.write_attempt_generation = 0
+            owner.candidate_kind = candidate_kind
+            owner.none_policy = none_policy
+            owner.candidate_batch_fingerprint = context_fingerprint(
+                "tool-execution-stable-candidate-batch:v1",
+                tuple(item.fingerprint_payload() for item in sealed),
+            )
+            owner.physical_owner_kind = (
+                "mcp_pending"
+                if physical_owner_identity_fingerprint is not None
+                else None
+            )
+            owner.physical_owner_identity_fingerprint = (
+                physical_owner_identity_fingerprint
+            )
+            owner.last_commit_receipt_fingerprint = None
+            return self._identity_locked(owner)
+
+    @staticmethod
+    def _assert_candidate_integrity_locked(
+        owner: ToolExecutionTerminalOwner,
+    ) -> None:
+        if len(owner.stable_candidates) != len(owner.sealed_candidates):
+            raise ToolExecutionCommitContractError(
+                "tool candidate owner lost its sealed event tuple"
+            )
+        for event, sealed in zip(
+            owner.stable_candidates,
+            owner.sealed_candidates,
+            strict=True,
+        ):
+            if freeze_event_write_candidate(event) != sealed:
+                raise ToolExecutionCommitContractError(
+                    "tool candidate owner payload changed after freeze"
+                )
+
+    def _identity_locked(
+        self, owner: ToolExecutionTerminalOwner
+    ) -> ToolExecutionStableCandidateOwnerIdentity:
+        if (
+            owner.candidate_kind is None
+            or owner.none_policy is None
+            or owner.candidate_batch_fingerprint is None
+        ):
+            raise ToolExecutionCommitContractError(
+                "tool candidate owner identity requested before candidate freeze"
+            )
+        payload = {
+            "registry_instance_id": self._registry_instance_id,
+            "owner_id": owner.owner_id,
+            "owner_generation": owner.attempt_generation,
+            "runtime_session_id": self._runtime_session.runtime_session_id,
+            "run_id": owner.run_id,
+            "tool_call_id": owner.tool_call_id,
+            "rollout_reservation_id": owner.reservation_id,
+            "rollout_reservation_fingerprint": owner.reservation_fingerprint,
+            "candidate_kind": owner.candidate_kind.value,
+            "none_policy": owner.none_policy.value,
+            "ordered_candidate_event_ids": tuple(
+                event.id for event in owner.stable_candidates
+            ),
+            "candidate_batch_fingerprint": owner.candidate_batch_fingerprint,
+            "physical_owner_kind": owner.physical_owner_kind,
+            "physical_owner_identity_fingerprint": (
+                owner.physical_owner_identity_fingerprint
+            ),
+        }
+        return ToolExecutionStableCandidateOwnerIdentity(
+            registry_instance_id=self._registry_instance_id,
+            owner_id=owner.owner_id,
+            owner_generation=owner.attempt_generation,
+            runtime_session_id=self._runtime_session.runtime_session_id,
+            run_id=owner.run_id,
+            tool_call_id=owner.tool_call_id,
+            rollout_reservation_id=owner.reservation_id,
+            rollout_reservation_fingerprint=owner.reservation_fingerprint,
+            candidate_kind=owner.candidate_kind,
+            none_policy=owner.none_policy,
+            ordered_candidate_event_ids=payload["ordered_candidate_event_ids"],
+            candidate_batch_fingerprint=owner.candidate_batch_fingerprint,
+            physical_owner_kind=owner.physical_owner_kind,
+            physical_owner_identity_fingerprint=(
+                owner.physical_owner_identity_fingerprint
+            ),
+            identity_fingerprint=context_fingerprint(
+                "tool-execution-stable-candidate-owner-identity:v1", payload
+            ),
+        )
 
     def _owner_for_call_locked(
         self,
@@ -567,7 +987,6 @@ def _tool_physical_reservation_id(*, run_id: str, tool_call_id: str) -> str:
     return f"tool_physical:{digest}"
 
 
-
 def build_tool_result_terminal_event(
     *,
     event_context: EventContext,
@@ -577,10 +996,7 @@ def build_tool_result_terminal_event(
 
     semantics = prepared.semantics
     return ToolResultEndCandidate(
-        id=(
-            f"tool_result_end:{event_context.run_id}:"
-            f"{prepared.tool_call_id}"
-        ),
+        id=(f"tool_result_end:{event_context.run_id}:{prepared.tool_call_id}"),
         run_id=event_context.run_id,
         turn_id=event_context.turn_id,
         reply_id=event_context.reply_id,
@@ -881,9 +1297,11 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 events.append(reservation)
             events.extend(denied)
         deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
-        prepared = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-            tuple(events),
-            deadline_monotonic=deadline,
+        prepared = (
+            await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                tuple(events),
+                deadline_monotonic=deadline,
+            )
         )
         by_call: dict[str, list[AgentEvent]] = {
             tool_call_id: [] for tool_call_id in decisions
@@ -897,11 +1315,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     "prepared tool gate fact cannot be attributed to one call"
                 )
             by_call[tool_call_id].append(event)
-        tool_contract = (
-            self.runtime_session.authority_materialization_contracts.burst_registry
-            .unique_binding_for_operation(PhysicalOperationKind.TOOL_CALL)
-            .contract
-        )
+        tool_contract = self.runtime_session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+            PhysicalOperationKind.TOOL_CALL
+        ).contract
         dispatch_requests = tuple(
             PhysicalDispatchReservationRequest(
                 reservation_id=_tool_physical_reservation_id(
@@ -926,13 +1342,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
         one_shot_request = None
         if denied_event_ids:
             denied_digest = sha256("\x1f".join(denied_event_ids).encode()).hexdigest()
-            runtime_contract = (
-                self.runtime_session.authority_materialization_contracts.burst_registry
-                .unique_binding_for_operation(
-                    PhysicalOperationKind.RUNTIME_INTERNAL_WRITE
-                )
-                .contract
-            )
+            runtime_contract = self.runtime_session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.RUNTIME_INTERNAL_WRITE
+            ).contract
             one_shot_request = PhysicalOneShotReservationRequest(
                 reservation_id=f"tool_deny_physical:{denied_digest}",
                 owner_id=f"tool-deny-batch:{denied_digest}",
@@ -943,11 +1355,13 @@ class RuntimeSessionToolExecutionEventCommitPort:
         self.runtime_session.publisher.bind_running_loop()
 
         def commit_gate_batch():
-            _, result = self.runtime_session.reserve_physical_operation_batch_from_thread(
-                prepared,
-                dispatch_requests=dispatch_requests,
-                one_shot_request=one_shot_request,
-                state=self.state,
+            _, result = (
+                self.runtime_session.reserve_physical_operation_batch_from_thread(
+                    prepared,
+                    dispatch_requests=dispatch_requests,
+                    one_shot_request=one_shot_request,
+                    state=self.state,
+                )
             )
             return result
 
@@ -1045,9 +1459,11 @@ class RuntimeSessionToolExecutionEventCommitPort:
             deadline_monotonic=deadline,
             lease=publication_terminal_maintenance_lease,
         )
-        prepared = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-            events,
-            deadline_monotonic=deadline,
+        prepared = (
+            await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                events,
+                deadline_monotonic=deadline,
+            )
         )
         maintenance_attempt = (
             self.runtime_session._admit_publication_terminal_maintenance(
@@ -1115,14 +1531,17 @@ class RuntimeSessionToolExecutionEventCommitPort:
     ) -> EventWriteResult:
         self.runtime_session.publisher.bind_running_loop()
         deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
-        events = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-            events,
-            deadline_monotonic=deadline,
+        events = (
+            await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                events,
+                deadline_monotonic=deadline,
+            )
         )
         for attempt in range(8):
             expected_sequence = (
                 self.runtime_session.long_horizon_state_store.through_sequence
             )
+
             def commit_or_confirm() -> EventWriteResult:
                 try:
                     return self.runtime_session.write_events_from_thread(
@@ -1143,6 +1562,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                             raise original
                         self.runtime_session.latch_event_commit_outcome_unknown()
                         raise
+
             try:
                 return await _execute_runtime_event_write(
                     self.runtime_session,
