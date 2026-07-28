@@ -286,6 +286,13 @@ class SessionManifestStore:
                             started_at,
                             completed_at
                         from runs
+                        where exists (
+                            select 1
+                            from agent_events
+                            where agent_events.session_id = runs.session_id
+                              and agent_events.run_id = runs.id
+                              and agent_events.event_type = 'RUN_START'
+                        )
                         order by session_id, coalesce(completed_at, started_at) desc, id desc
                     ),
                     latest_event as (

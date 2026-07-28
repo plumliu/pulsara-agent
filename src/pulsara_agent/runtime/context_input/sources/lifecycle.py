@@ -521,6 +521,11 @@ def default_runtime_request_protocol() -> RuntimeRequestProtocolContractFact:
             "invocation_scoped_only",
             ("summarizer_operation",),
         ),
+        "compaction_memory_extraction_request": (
+            "one_shot_invocation",
+            "invocation_scoped_only",
+            ("compaction_memory_extraction_job",),
+        ),
     }
     kinds = tuple(
         build_frozen_fact(

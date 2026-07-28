@@ -102,6 +102,7 @@ _POSTGRES_TEST_MODULES = frozenset(
     {
         "test_action_boundary_trigger.py",
         "test_artifact_store_contract.py",
+        "test_compaction_memory_extraction_postgres.py",
         "test_durable_memory.py",
         "test_durable_memory_contract.py",
         "test_event_log_contract.py",

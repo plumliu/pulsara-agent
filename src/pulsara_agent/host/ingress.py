@@ -472,6 +472,16 @@ class HostIngressCoordinator:
                 and not self._queues["resume"]
             )
 
+    def can_borrow_background_model_call(self) -> bool:
+        """Return whether lower-priority derived work may reserve the Host."""
+
+        with self._state_lock:
+            return (
+                self._lifecycle_state == "open_idle"
+                and self._active is None
+                and all(not queue for queue in self._queues.values())
+            )
+
     async def update_permission_policy(self, fingerprint: str) -> None:
         async with self._condition:
             with self._state_lock:

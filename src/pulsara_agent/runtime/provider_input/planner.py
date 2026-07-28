@@ -405,6 +405,9 @@ def plan_one_shot_provider_input(
         "direct_model_call": "direct_one_shot",
         "window_summarizer": "window_summarizer",
         "governance_model_call": "governance_one_shot",
+        "compaction_memory_extraction_model_call": (
+            "compaction_memory_extraction_one_shot"
+        ),
     }[operation_kind]
     generation = build_frozen_fact(
         ProviderInputGenerationFact,

@@ -145,4 +145,4 @@ import `pulsara_agent.cli` 不启动 Host；调用 `main()` 后才解析参数�
 - D4 target DAG forbidden edge为零。
 
 全局 package SCC 尚未承诺在 D4 消失。剩余 SCC 以 canonical observation fingerprint冻结，交由
-D5/D6继续收口；新增同一 package pair下的 module import仍会使 baseline失败。
+D5 已完成并向下收缩该 baseline；D6继续收口。新增同一 package pair下的 module import仍会使 baseline失败。

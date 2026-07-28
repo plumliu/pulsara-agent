@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from functools import partial
 from threading import BoundedSemaphore
@@ -15,13 +16,27 @@ from uuid import uuid4
 from pulsara_agent.runtime.blocking_executor import (
     projection_maintenance_executor,
 )
+from pulsara_agent.runtime.projection_jobs.compaction_memory_driver_registry import (
+    PROCESS_COMPACTION_MEMORY_EXTRACTION_DRIVER_REGISTRY,
+    ProcessCompactionMemoryExtractionDriverRegistry,
+)
+from pulsara_agent.ports.model_lifecycle import ModelLifecycleContractError
+from pulsara_agent.runtime.provider_input.coordinator import (
+    ProviderInputPreparationStale,
+)
 from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
     DurableProjectionCommitConfirmation,
+    DurableProjectionFailureKind,
     DurableProjectionKind,
+    DurableProjectionJobStatus,
     LeasedDurableProjectionJob,
 )
+from pulsara_agent.primitives.runtime_event_vocabulary import (
+    build_bounded_runtime_failure_diagnostic,
+)
 from pulsara_agent.runtime.projection_jobs.postgres_repository import (
+    ClaimedCompactionMemoryExtractionSettlement,
     DurableProjectionSeedBlockedError,
     PostgresDurableProjectionRepository,
 )
@@ -103,6 +118,11 @@ class DurableProjectionJobService:
 
     connection_provider: VerifiedPostgresConnectionProviderProtocol
     executable_registry: DurableProjectionExecutableRegistry
+    session_driver_registry: ProcessCompactionMemoryExtractionDriverRegistry = field(
+        default_factory=lambda: (
+            PROCESS_COMPACTION_MEMORY_EXTRACTION_DRIVER_REGISTRY
+        )
+    )
     surface_handlers: tuple[CanonicalMutationSurfaceHandler, ...] = ()
     repository: PostgresDurableProjectionRepository = field(init=False)
     service_id: str = field(
@@ -203,16 +223,17 @@ class DurableProjectionJobService:
                 raise ValueError(
                     "active projection contract differs from executable registry"
                 )
-            binding = self.executable_registry.resolve(
-                kind,
-                contract_fingerprint=(
-                    seed_contract.handler_contract.contract_fingerprint
-                ),
-            )
-            if binding.contract != seed_contract.handler_contract:
-                raise ValueError(
-                    "active projection handler contract differs from registry"
+            if kind is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION:
+                binding = self.executable_registry.resolve(
+                    kind,
+                    contract_fingerprint=(
+                        seed_contract.handler_contract.contract_fingerprint
+                    ),
                 )
+                if binding.contract != seed_contract.handler_contract:
+                    raise ValueError(
+                        "active projection handler contract differs from registry"
+                    )
         self._closing = False
         self._accepting = True
         self._runner = asyncio.create_task(
@@ -237,6 +258,13 @@ class DurableProjectionJobService:
             self._dirty_authority_hints.append(
                 (published.runtime_session_id, projection_kind)
             )
+            if (
+                projection_kind
+                is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+            ):
+                self.session_driver_registry.mark_dirty(
+                    published.runtime_session_id
+                )
         self._wake_count += 1
         self._wake_event.set()
 
@@ -439,15 +467,21 @@ class DurableProjectionJobService:
                 "durable projection activation differs from executable registry",
                 failure_kind="trigger_contract_mismatch",
             )
-        binding = self.executable_registry.resolve(
-            typed_cutover.projection_kind,
-            contract_fingerprint=(seed_contract.handler_contract.contract_fingerprint),
-        )
-        if binding.contract != seed_contract.handler_contract:
-            raise DurableProjectionSeedAuthorityError(
-                "active durable projection handler contract drifted",
-                failure_kind="trigger_contract_mismatch",
+        if (
+            typed_cutover.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+        ):
+            binding = self.executable_registry.resolve(
+                typed_cutover.projection_kind,
+                contract_fingerprint=(
+                    seed_contract.handler_contract.contract_fingerprint
+                ),
             )
+            if binding.contract != seed_contract.handler_contract:
+                raise DurableProjectionSeedAuthorityError(
+                    "active durable projection handler contract drifted",
+                    failure_kind="trigger_contract_mismatch",
+                )
         try:
             candidate = self.repository.prepare_next_seed_candidate(
                 runtime_session_id=typed_cutover.runtime_session_id,
@@ -477,27 +511,276 @@ class DurableProjectionJobService:
 
     async def _claim_cycle(self) -> bool:
         loop = asyncio.get_running_loop()
-        leases = await loop.run_in_executor(
-            projection_maintenance_executor(),
-            partial(
-                self.repository.claim_due,
+        live_runtime_session_ids = (
+            self.session_driver_registry.available_runtime_session_ids(
+                now_monotonic=monotonic()
+            )
+        )
+
+        def claim() -> tuple[
+            tuple[LeasedDurableProjectionJob, ...],
+            tuple[LeasedDurableProjectionJob, ...],
+            tuple[ClaimedCompactionMemoryExtractionSettlement, ...],
+        ]:
+            database_leases = self.repository.claim_due(
                 owner_id=self.service_id,
                 limit=4,
                 deadline_monotonic=monotonic() + 10.0,
-            ),
+            )
+            model_leases = (
+                self.repository.claim_due_session_model(
+                    owner_id=self.service_id,
+                    runtime_session_ids=live_runtime_session_ids,
+                    limit=4,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+                if live_runtime_session_ids
+                else ()
+            )
+            settlement_claims = (
+                self.repository.claim_compaction_memory_settlements(
+                    runtime_session_ids=live_runtime_session_ids,
+                    limit=4,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+                if live_runtime_session_ids
+                else ()
+            )
+            return database_leases, model_leases, settlement_claims
+
+        database_leases, model_leases, settlement_claims = await loop.run_in_executor(
+            projection_maintenance_executor(),
+            claim,
         )
-        if not leases:
+        leases = (*database_leases, *model_leases)
+        if not leases and not settlement_claims:
             return False
-        self._claimed_job_count += len(leases)
+        self._claimed_job_count += len(leases) + len(settlement_claims)
         self._health = DurableProjectionServiceHealth.BACKLOGGED
         for lease in leases:
+            target = (
+                self._execute_session_model_lease
+                if lease.job.projection_kind
+                is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+                else self._execute_lease
+            )
             task = asyncio.create_task(
-                self._execute_lease(lease),
+                target(lease),
                 name=f"pulsara-projection-job:{lease.job.job_id}",
             )
             self._active_attempts.add(task)
             task.add_done_callback(self._consume_attempt)
+        for claim in settlement_claims:
+            task = asyncio.create_task(
+                self._execute_session_model_settlement(claim),
+                name=(
+                    "pulsara-projection-settlement:"
+                    f"{claim.result_candidate.job_id}:"
+                    f"{claim.state.settlement_generation}"
+                ),
+            )
+            self._active_attempts.add(task)
+            task.add_done_callback(self._consume_attempt)
         return True
+
+    async def _execute_session_model_lease(
+        self,
+        lease: LeasedDurableProjectionJob,
+    ) -> None:
+        runtime_session_id = lease.job.source_event_reference.runtime_session_id
+        borrow = self.session_driver_registry.borrow(runtime_session_id)
+        if borrow is None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                projection_maintenance_executor(),
+                partial(
+                    self.repository.release_session_model_lease_without_attempt,
+                    lease,
+                    reason="driver_busy",
+                    deadline_monotonic=monotonic() + 10.0,
+                ),
+            )
+            return
+        try:
+            lease_remaining = max(
+                0.0,
+                (
+                    lease.lease_expires_at - datetime.now(timezone.utc)
+                ).total_seconds(),
+            )
+            await borrow.driver.execute_leased_job(
+                lease,
+                deadline_monotonic=min(
+                    monotonic()
+                    + lease.delivery_policy.physical_policy.maximum_physical_attempt_seconds,
+                    monotonic() + lease_remaining,
+                ),
+            )
+        except BaseException as error:
+            await self._settle_session_model_driver_failure(lease, error=error)
+            raise
+        finally:
+            borrow.release()
+            await self._refresh_session_model_eligibility(
+                runtime_session_id=runtime_session_id,
+            )
+
+    async def _settle_session_model_driver_failure(
+        self,
+        lease: LeasedDurableProjectionJob,
+        *,
+        error: BaseException,
+    ) -> None:
+        """Ensure a failed driver attempt never strands its durable lease."""
+
+        deterministic = isinstance(
+            error,
+            (
+                ValueError,
+                TypeError,
+                AttributeError,
+                AssertionError,
+                ModelLifecycleContractError,
+            ),
+        ) and not isinstance(error, ProviderInputPreparationStale)
+        loop = asyncio.get_running_loop()
+        operation = (
+            partial(
+                self.repository.dead_letter_session_model_job_before_attempt,
+                lease,
+                failure_kind=(
+                    DurableProjectionFailureKind.HANDLER_CONTRACT_MISMATCH
+                    if isinstance(error, ModelLifecycleContractError)
+                    else DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT
+                ),
+                error=error,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            if deterministic
+            else partial(
+                self.repository.release_session_model_lease_without_attempt,
+                lease,
+                reason="safe_point_stale",
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        )
+        confirmation = await loop.run_in_executor(
+            projection_maintenance_executor(),
+            operation,
+        )
+        if confirmation not in {
+            DurableProjectionCommitConfirmation.FULL,
+            DurableProjectionCommitConfirmation.CONFLICT,
+        }:
+            raise RuntimeError(
+                "session-model driver failure settlement was "
+                f"{confirmation.value}"
+            ) from error
+
+    async def _execute_session_model_settlement(
+        self,
+        claim: ClaimedCompactionMemoryExtractionSettlement,
+    ) -> None:
+        job = self.repository.read_job(
+            claim.result_candidate.job_id,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        if job is None:
+            raise ValueError("extraction settlement job disappeared")
+        runtime_session_id = job.candidate.job_semantic.source_event_reference.runtime_session_id
+        borrow = self.session_driver_registry.borrow(runtime_session_id)
+        if borrow is None:
+            failure = build_bounded_runtime_failure_diagnostic(
+                error=RuntimeError("extraction settlement session driver is absent"),
+                redaction_profile_id="durable_projection_job_error.v1",
+            )
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                projection_maintenance_executor(),
+                partial(
+                    self.repository.defer_compaction_memory_settlement,
+                    result_candidate=claim.result_candidate,
+                    settlement_generation=claim.state.settlement_generation,
+                    failure=failure,
+                    delay_seconds=1.0,
+                    reconciliation_required=False,
+                    deadline_monotonic=monotonic() + 10.0,
+                ),
+            )
+            return
+        try:
+            await borrow.driver.settle_result_candidate(
+                claim.result_candidate,
+                settlement_generation=claim.state.settlement_generation,
+                deadline_monotonic=monotonic() + 20.0,
+            )
+        except BaseException as error:
+            current = self.repository.read_job(
+                claim.result_candidate.job_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            if (
+                current is not None
+                and current.state.status
+                is DurableProjectionJobStatus.SETTLEMENT_WRITING
+                and current.state.settlement_generation
+                == claim.state.settlement_generation
+            ):
+                failure = build_bounded_runtime_failure_diagnostic(
+                    error=error,
+                    redaction_profile_id="durable_projection_job_error.v1",
+                )
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    projection_maintenance_executor(),
+                    partial(
+                        self.repository.defer_compaction_memory_settlement,
+                        result_candidate=claim.result_candidate,
+                        settlement_generation=claim.state.settlement_generation,
+                        failure=failure,
+                        delay_seconds=1.0,
+                        reconciliation_required=False,
+                        deadline_monotonic=monotonic() + 10.0,
+                    ),
+                )
+            raise
+        finally:
+            borrow.release()
+            await self._refresh_session_model_eligibility(
+                runtime_session_id=runtime_session_id,
+            )
+
+    async def _refresh_session_model_eligibility(
+        self,
+        *,
+        runtime_session_id: str,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        schedule = await loop.run_in_executor(
+            projection_maintenance_executor(),
+            partial(
+                self.repository.session_model_work_schedule,
+                runtime_session_id=runtime_session_id,
+                deadline_monotonic=monotonic() + 10.0,
+            ),
+        )
+        if schedule.immediate:
+            self.session_driver_registry.mark_dirty(runtime_session_id)
+            self._wake_event.set()
+            return
+        if schedule.next_eligible_at is not None:
+            remaining = max(
+                0.001,
+                (
+                    schedule.next_eligible_at - schedule.database_now
+                ).total_seconds(),
+            )
+            self.session_driver_registry.defer(
+                runtime_session_id,
+                not_before_monotonic=monotonic() + remaining,
+            )
+            return
+        self.session_driver_registry.mark_clean(runtime_session_id)
 
     async def _surface_cycle(self) -> bool:
         loop = asyncio.get_running_loop()

@@ -320,6 +320,11 @@ class CoreDogfoodRunner:
                     root_run_texts,
                     f"{scenario.contract.scenario_id}:post-compaction",
                 )
+                await self._wait_for_compaction_memory_extraction(
+                    runtime_session_id=runtime_session_id,
+                    compaction_id=str(compaction.get("compaction_id")),
+                    scenario_id=scenario.contract.scenario_id,
+                )
             elif isinstance(workflow, SubagentDelegationWorkflow):
                 await self._run_turn(
                     session,
@@ -528,6 +533,79 @@ class CoreDogfoodRunner:
             f"{label}: run {result.status.value.upper()} run_id={result.state.run_id}"
         )
         return result
+
+    async def _wait_for_compaction_memory_extraction(
+        self,
+        *,
+        runtime_session_id: str,
+        compaction_id: str,
+        scenario_id: str,
+    ) -> None:
+        lease = await asyncio.to_thread(
+            acquire_verified_postgres_access_sync,
+            self.settings.storage.postgres_dsn,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+        deadline = time.monotonic() + 300.0
+        try:
+            inspector = InspectorService(
+                PostgresInspectorStore(lease.connection_provider),
+                oxigraph_url=self.settings.storage.oxigraph_url,
+            )
+            while True:
+                report = await asyncio.to_thread(
+                    inspector.inspect_session,
+                    runtime_session_id,
+                    limit_events=256,
+                )
+                extraction = next(
+                    (
+                        item
+                        for item in report.get(
+                            "compaction_memory_extraction_durable_status", ()
+                        )
+                        if item.get("compaction_id") == compaction_id
+                    ),
+                    None,
+                )
+                status = (
+                    str(extraction.get("status"))
+                    if extraction is not None
+                    else "not_visible"
+                )
+                if (
+                    extraction is not None
+                    and status in {"governed_no_write", "governed_write"}
+                    and extraction.get("candidates")
+                ):
+                    self.progress(
+                        f"{scenario_id}: compaction memory extraction FULL "
+                        f"status={status} candidates={len(extraction['candidates'])}"
+                    )
+                    return
+                if status in {
+                    "background_account_reconciliation_required",
+                    "dead_letter",
+                    "job_or_target_reconciliation_required",
+                    "runtime_session_ledger_reconciliation_required",
+                }:
+                    failure = (
+                        extraction.get("job", {})
+                        .get("state", {})
+                        .get("last_failure")
+                    )
+                    raise RuntimeError(
+                        "compaction memory extraction reached terminal failure "
+                        f"status={status} failure={failure!r}"
+                    )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "compaction memory extraction did not reach governed "
+                        f"candidate status; last_status={status}"
+                    )
+                await asyncio.sleep(0.5)
+        finally:
+            lease.release()
 
 
 def write_suite_summary(

@@ -166,6 +166,26 @@ class RootRunToolGate(FrozenContract):
         return self
 
 
+class CompactionMemoryExtractionEvidenceGate(FrozenContract):
+    minimum_candidate_count: int = Field(ge=1, le=3)
+    allowed_terminal_statuses: tuple[
+        Literal["governed_no_write", "governed_write"], ...
+    ] = ("governed_no_write", "governed_write")
+    require_main_continuation_before_model_end: Literal[True] = True
+    require_human_only_input: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _ordered_statuses(self) -> "CompactionMemoryExtractionEvidenceGate":
+        if (
+            self.allowed_terminal_statuses
+            != tuple(sorted(self.allowed_terminal_statuses))
+            or len(self.allowed_terminal_statuses)
+            != len(set(self.allowed_terminal_statuses))
+        ):
+            raise ValueError("compaction terminal statuses must be sorted and unique")
+        return self
+
+
 class EvidenceGateContract(FrozenContract):
     min_root_runs: int = Field(ge=1, le=32)
     max_root_runs: int = Field(ge=1, le=32)
@@ -178,6 +198,7 @@ class EvidenceGateContract(FrozenContract):
     event_count_minimums: tuple[EventCountMinimum, ...] = ()
     forbidden_event_types: tuple[str, ...] = ()
     root_run_tool_gate: RootRunToolGate | None = None
+    compaction_memory_extraction: CompactionMemoryExtractionEvidenceGate | None = None
     require_positive_cached_input_tokens: bool = False
     max_provider_input_rollovers: int = Field(ge=0, le=32)
 

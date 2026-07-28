@@ -1,0 +1,157 @@
+{
+  "schema_version": "pulsara.cme5-dod-evidence.v1",
+  "hard_cut": "CME0-CME5",
+  "debt_item": "D5",
+  "status": "passed",
+  "completed_on": "2026-07-28",
+  "gates": [
+    {
+      "gate_id": "CME0",
+      "status": "passed",
+      "evidence": [
+        "tests/test_compaction_memory_extraction_contracts.py",
+        "tests/test_dependency_architecture.py"
+      ]
+    },
+    {
+      "gate_id": "CME1",
+      "status": "passed",
+      "evidence": [
+        "tests/test_compaction_memory_extraction_evidence.py",
+        "tests/test_context_compaction.py"
+      ]
+    },
+    {
+      "gate_id": "CME2",
+      "status": "passed",
+      "evidence": [
+        "tests/test_compaction_memory_extraction_runtime.py",
+        "tests/test_compaction_memory_extraction_postgres.py"
+      ]
+    },
+    {
+      "gate_id": "CME3",
+      "status": "passed",
+      "evidence": [
+        "tests/test_compaction_memory_extraction_postgres.py",
+        "tests/test_compaction_memory_governance_evidence.py",
+        "tests/test_schema_migrations.py"
+      ]
+    },
+    {
+      "gate_id": "CME4",
+      "status": "passed",
+      "evidence": [
+        "tests/test_dependency_architecture.py",
+        "tests/test_durable_projection_architecture.py",
+        "tests/test_runtime_event_architecture.py",
+        "tests/test_schema_hot_path_architecture.py"
+      ]
+    },
+    {
+      "gate_id": "CME5",
+      "status": "passed",
+      "evidence": [
+        "tests/test_core_dogfood_suite.py",
+        "benchmarks/suites/core/v1/scenarios/manual-compaction-trail/scenario.json"
+      ]
+    }
+  ],
+  "pytest": {
+    "full_run": {
+      "passed": 2556,
+      "skipped": 2,
+      "initial_failed": 5,
+      "elapsed_seconds": 1395.56,
+      "closure_policy": "rerun_only_failed_nodes",
+      "failed_nodes_after_fixes": 0,
+      "failed_node_rerun_passed": 5
+    },
+    "cme_targeted": {
+      "passed": 29,
+      "elapsed_seconds": 8.13
+    },
+    "postgres_oxigraph_targeted": {
+      "passed": 10
+    },
+    "broad_affected_matrix": {
+      "passed": 306,
+      "initial_failed": 1,
+      "failed_node_after_fix": 0
+    },
+    "final_cme_compaction_matrix": {
+      "passed": 131,
+      "failed": 0
+    },
+    "final_architecture_migration_inspector_matrix": {
+      "passed": 177,
+      "failed": 0
+    }
+  },
+  "static_validation": {
+    "ruff": "passed",
+    "git_diff_check": "passed",
+    "frozen_suite_validate": "passed",
+    "residual_scc_observation_count": 391,
+    "residual_scc_observation_fingerprint": "sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc"
+  },
+  "post_review_consistency_audit": {
+    "review_findings_closed": [
+      "request_policy_is_execution_truth",
+      "cross_producer_candidate_semantic_identity",
+      "input_artifact_attempt_deadline",
+      "provider_retry_transition_confirmation",
+      "shared_semantic_is_governance_dedupe_authority",
+      "retry_schedule_matches_normative_contract"
+    ],
+    "targeted_non_postgres_passed": 37,
+    "postgres_governance_passed": 2,
+    "candidate_pool_cascade_nodes_passed": 10,
+    "migration_matrix_initial_passed": 5,
+    "migration_matrix_initial_failed": 1,
+    "migration_golden_node_rerun_passed": 1,
+    "architecture_gate_passed": 33,
+    "semantic_retry_exact_nodes_passed": 10,
+    "compaction_contract_runtime_passed": 22,
+    "second_review_architecture_passed": 26,
+    "ruff": "passed",
+    "git_diff_check": "passed",
+    "registry_resource_validation": "passed",
+    "frozen_suite_validate": "passed",
+    "database_isolation": "temporary_pgvector_postgresql_16_container"
+  },
+  "final_post_review_full_run": {
+    "passed": 2578,
+    "skipped": 2,
+    "warnings": 7,
+    "failed": 0,
+    "elapsed_seconds": 1392.23,
+    "closure_policy": "single_full_run_then_rerun_only_failed_nodes",
+    "failed_node_reruns_required": 0
+  },
+  "real_llm_dogfood": {
+    "suite_id": "pulsara-core-dogfood-v1",
+    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+    "scenario_id": "manual-compaction-trail",
+    "scenario_contract_fingerprint": "284301db1904b4626a39c44c3774d9afd06e2a19d1c285ebdfa4ce538ec6aa2d",
+    "runner_build_fingerprint": "8708afc094c7930dca2e328a5471e99fcd80472b4680b0cfedf1efcd3d1a9fd0",
+    "result_record_sha256": "3b3371641e41280b97cfedb252f20fdab46f04211c62bba7835429f63358d6c4",
+    "status": "passed",
+    "elapsed_seconds": 135.75635220785625,
+    "model_call_count": 12,
+    "tool_call_count": 7,
+    "total_tokens": 251046,
+    "cached_input_tokens": 153728,
+    "candidate_count": 2,
+    "terminal_status": "governed_write",
+    "required_assertions": [
+      "all_durable_runs_finished",
+      "compaction_summary_precedes_extraction_terminal",
+      "main_continuation_started_before_extraction_terminal",
+      "compaction_memory_input_is_canonical_human_only",
+      "compaction_memory_candidate_job_outbox_exact_join",
+      "workflow_execution_completed"
+    ],
+    "isolated_postgres_database_dropped": true
+  }
+}

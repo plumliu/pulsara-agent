@@ -1103,6 +1103,7 @@ _REQUEST_OPERATION_KIND = {
     "governance_request": "governance",
     "reflection_request": "reflection",
     "summarizer_request": "summarizer",
+    "compaction_memory_extraction_request": "compaction_memory_extraction",
 }
 
 

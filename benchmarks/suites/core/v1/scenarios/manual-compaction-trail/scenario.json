@@ -1,7 +1,7 @@
 {
   "schema_version": "pulsara.core-dogfood-scenario.v1",
   "scenario_id": "manual-compaction-trail",
-  "description": "Follow a long linked-document trail, compact through the public Host API, and recover both endpoint facts without rereading files.",
+  "description": "Follow a long linked-document trail, compact through the public Host API, preserve endpoint facts, and govern explicit preferences from exact human evidence.",
   "model_role": "flash",
   "reasoning_effort": null,
   "timeout_seconds": 1200,
@@ -17,8 +17,8 @@
   },
   "workflow": {
     "workflow_kind": "manual_compaction",
-    "discovery_prompt": "Begin with story/chapter-1.md. Each chapter ends with NEXT or TRAIL_END. Read exactly that linked trail one chapter at a time; do not guess ahead. Remember the river village explicitly named in the first trail chapter and the noble House explicitly named at TRAIL_END. Do not write answer.txt yet. When done, briefly state that both endpoint facts are retained.",
-    "post_compaction_prompt": "The Host has now completed a durable manual compaction. Do not read or search any workspace file. From the retained conversation, write answer.txt whose entire contents are FIRST_VILLAGE-FINAL_HOUSE with the exact two names learned from the trail. Use write_file exactly once."
+    "discovery_prompt": "These two sentences are direct human evidence for the automatic post-compaction memory extractor; do not call remember_preference or any memory tool: I prefer compact factual progress reports. I prefer final answers without decorative emoji. Then begin with story/chapter-1.md. Each chapter ends with NEXT or TRAIL_END. Follow exactly that linked trail one chapter at a time, call read_file exactly once for each of the six chapters, never reread a chapter, and do not guess ahead. Retain the river village explicitly named in the first trail chapter and the noble House explicitly named at TRAIL_END. Do not write answer.txt yet. When the trail ends, briefly state that both endpoint facts and both stable preferences are retained, then stop.",
+    "post_compaction_prompt": "The Host has now completed a durable manual compaction. Do not call read_file, search_files, terminal, remember_preference, or any other tool except write_file. From the retained conversation, call write_file exactly once to create answer.txt whose entire contents are FIRST_VILLAGE-FINAL_HOUSE with the exact two names learned from the trail, then stop."
   },
   "verifier": {
     "path": "verify.py",
@@ -35,6 +35,8 @@
     "max_tool_calls": 24,
     "event_count_minimums": [
       {"event_type": "CONTEXT_COMPACTION_COMPLETED", "minimum": 1},
+      {"event_type": "CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED", "minimum": 1},
+      {"event_type": "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED", "minimum": 1},
       {"event_type": "MODEL_CALL_END", "minimum": 3},
       {"event_type": "RUN_END", "minimum": 2}
     ],
@@ -50,6 +52,12 @@
         {"tool_name": "write_file", "exact_count": 1}
       ],
       "forbidden_tool_names": ["read_file", "search_files", "terminal"]
+    },
+    "compaction_memory_extraction": {
+      "minimum_candidate_count": 1,
+      "allowed_terminal_statuses": ["governed_no_write", "governed_write"],
+      "require_main_continuation_before_model_end": true,
+      "require_human_only_input": true
     },
     "require_positive_cached_input_tokens": false,
     "max_provider_input_rollovers": 3

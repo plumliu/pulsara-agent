@@ -89,6 +89,16 @@ from pulsara_agent.runtime.projection_jobs.mutation_writer import (
     CanonicalMutationV2Writer,
     PostgresCanonicalMutationTransactionDriver,
 )
+from pulsara_agent.runtime.projection_jobs.compaction_memory_driver import (
+    CompactionMemoryExtractionSessionDriver,
+    build_driver_binding_fingerprint,
+)
+from pulsara_agent.runtime.projection_jobs.compaction_memory_settlement import (
+    RuntimeSessionCompactionMemoryExtractionSettlementPort,
+)
+from pulsara_agent.runtime.projection_jobs.model_lifecycle import (
+    build_model_lifecycle_companions,
+)
 from pulsara_agent.memory.canonical.write_gate import (
     MEMORY_WRITE_GATE_CONTRACT_FINGERPRINT,
     MemoryWriteGate,
@@ -101,8 +111,8 @@ from pulsara_agent.runtime.compaction import (
     ContextCompactionPolicy,
     ContextCompactionService,
 )
-from pulsara_agent.runtime.compaction.candidates import (
-    CandidatePoolCompactionMemoryCandidateSink,
+from pulsara_agent.memory.compaction.extension import (
+    MemoryCompactionPostCompletionExtension,
 )
 from pulsara_agent.memory.candidates.projection_outbox import (
     CandidateProjectionOutboxDispatcher,
@@ -113,6 +123,7 @@ from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
+from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
@@ -170,6 +181,45 @@ class RuntimeWiring:
 class AgentRuntimeWiring:
     agent_runtime: AgentRuntime
     runtime_wiring: RuntimeWiring
+
+    def build_compaction_memory_extraction_driver(
+        self,
+        *,
+        projection_service: object,
+        connection_provider: object,
+        safe_point_acquirer: Callable,
+        on_result_full: Callable[[], None],
+    ) -> tuple[object, object]:
+        registry = getattr(projection_service, "session_driver_registry", None)
+        repository = getattr(projection_service, "repository", None)
+        if registry is None or repository is None:
+            raise TypeError("projection service lacks extraction driver ownership")
+        runtime_session = self.runtime_wiring.runtime_session
+        generation = registry.next_driver_generation(
+            runtime_session.runtime_session_id
+        )
+        driver = CompactionMemoryExtractionSessionDriver(
+            runtime_session=runtime_session,
+            llm_runtime=self.agent_runtime.llm_runtime,
+            event_log=self.runtime_wiring.event_log,
+            archive=self.runtime_wiring.archive,
+            repository=repository,
+            settlement_port=RuntimeSessionCompactionMemoryExtractionSettlementPort(
+                runtime_session=runtime_session,
+                repository=repository,
+                outbox=PostgresCandidateProjectionOutbox(connection_provider),
+                on_result_full=on_result_full,
+            ),
+            model_lifecycle_companion_factory=build_model_lifecycle_companions,
+            driver_registry=registry,
+            safe_point_acquirer=safe_point_acquirer,
+            driver_generation=generation,
+            binding_fingerprint=build_driver_binding_fingerprint(
+                runtime_session_id=runtime_session.runtime_session_id,
+                driver_generation=generation,
+            ),
+        )
+        return driver, registry.register(driver)
 
 
 def build_durable_runtime_wiring(
@@ -618,14 +668,17 @@ def _with_memory_governance_engine(
             event_commit_port=RuntimeSessionCompactionEventCommitPort(
                 runtime_wiring.runtime_session
             ),
-            candidate_projection_commit_port=(
-                runtime_wiring.candidate_projection_commit_port
-            ),
-            candidate_sink=(
-                CandidatePoolCompactionMemoryCandidateSink(
-                    candidate_pool=runtime_wiring.candidate_pool,
+            post_completion_extension=(
+                MemoryCompactionPostCompletionExtension(
+                    archive=runtime_wiring.archive,
+                    runtime_session_id=(
+                        runtime_wiring.runtime_session.runtime_session_id
+                    ),
                     memory_domain=runtime_wiring.memory_domain,
-                    runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+                    resolved_model_target_factory=lambda: llm_runtime.resolve_target(
+                        role=ModelRole.FLASH
+                    ).fact,
+                    physical_executor=auxiliary_io_executor(),
                 )
                 if runtime_wiring.memory_domain is not None
                 else None

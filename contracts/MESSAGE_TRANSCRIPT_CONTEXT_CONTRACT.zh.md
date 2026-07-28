@@ -287,3 +287,12 @@ message，也不进入 transcript semantic accumulator。
 MCP normal ToolResult仍由 typed ToolResult terminal projection成为模型可见事实；closure和
 resume-failed只提供 lifecycle/recovery authority。Compaction Started/Completed/Failed仍按
 既有 summary boundary规则投影；request/skip audit不能成为第二份 compaction message。
+
+## 15. Compaction-memory evidence source
+
+Post-compaction extraction不得把summary或runtime-owned transcript item解释为用户证据。其manifest
+只从lossless transcript reducer中已确认的Host human `RunStart.current_user_message`生成，保存完整
+eligible leaf集合与physical completeness attribution。Selection可以分页读取manifest，但最终选中的
+每个节点必须exact-read原RunStart并重新验证human ingress、wire semantic、sanitizer与source sequence。
+Extraction Request、background model lifecycle和result均为non-transcript audit facts，不向主对话追加
+伪造的user/assistant message。

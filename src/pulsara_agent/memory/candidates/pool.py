@@ -15,9 +15,14 @@ from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from pulsara_agent.primitives.memory_candidate import CandidatePayload, MemoryCandidate
+from pulsara_agent.primitives.memory_candidate import (
+    CandidatePayload,
+    MemoryCandidate,
+    MemoryCandidateSemanticFact,
+    candidate_payload_semantic,
+)
 from pulsara_agent.event.events import utc_now
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.governance_evidence import (
@@ -42,6 +47,7 @@ class PooledMemoryCandidate(BaseModel):
 
     entry_id: str = Field(default_factory=lambda: f"pool:{uuid4().hex}")
     payload: CandidatePayload
+    candidate_semantic: MemoryCandidateSemanticFact | None = None
     origin: CandidateOrigin
     source_session_id: str
     source_run_id: str
@@ -55,6 +61,15 @@ class PooledMemoryCandidate(BaseModel):
     intent_fingerprint: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _shared_semantic(self) -> "PooledMemoryCandidate":
+        expected = candidate_payload_semantic(self.payload)
+        if self.candidate_semantic is None:
+            self.candidate_semantic = expected
+        elif self.candidate_semantic != expected:
+            raise ValueError("pooled candidate shared semantic identity drifted")
+        return self
 
 
 class CandidatePoolProposal(BaseModel):
@@ -341,6 +356,7 @@ class PostgresCandidatePool:
                     insert into memory_candidates (
                         entry_id,
                         payload,
+                        candidate_semantic_fingerprint,
                         origin,
                         source_session_id,
                         source_run_id,
@@ -355,12 +371,17 @@ class PostgresCandidatePool:
                         metadata,
                         created_at
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                     """,
                     (
                         candidate.entry_id,
                         Jsonb(
                             _payload_adapter.dump_python(candidate.payload, mode="json")
+                        ),
+                        (
+                            candidate.candidate_semantic.semantic_fingerprint
+                            if candidate.candidate_semantic is not None
+                            else None
                         ),
                         candidate.origin.value,
                         candidate.source_session_id,
@@ -598,7 +619,7 @@ def _validate_decision_targets(
 
 def candidate_from_storage_row(row: dict[str, Any]) -> PooledMemoryCandidate:
     created_at = row["created_at"]
-    return PooledMemoryCandidate(
+    candidate = PooledMemoryCandidate(
         entry_id=row["entry_id"],
         payload=_payload_adapter.validate_python(row["payload"]),
         origin=CandidateOrigin(row["origin"]),
@@ -623,6 +644,15 @@ def candidate_from_storage_row(row: dict[str, Any]) -> PooledMemoryCandidate:
         if hasattr(created_at, "isoformat")
         else str(created_at),
     )
+    stored_semantic = row.get("candidate_semantic_fingerprint")
+    expected_semantic = (
+        candidate.candidate_semantic.semantic_fingerprint
+        if candidate.candidate_semantic is not None
+        else None
+    )
+    if stored_semantic != expected_semantic:
+        raise ValueError("stored candidate shared semantic identity drifted")
+    return candidate
 
 
 def decision_from_storage_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRecord:

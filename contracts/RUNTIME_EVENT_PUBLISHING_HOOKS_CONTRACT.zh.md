@@ -370,3 +370,10 @@ Projection service implementation位于`runtime.projection_jobs`，Host通过窄
 `RuntimeProjectionServicePort`持有。Publisher subscriber只调用`wake(runtime_session_id)`，不依赖
 job repository/handler concrete type。Service与PostgreSQL/retrieval dependencies来自同一个
 Host process resource lease；close必须drain physical operation，超时保持blocked而不能越过依赖释放。
+
+## 15. Compaction-memory wake contract
+
+Extraction Request与Completed publication仍遵守publisher的O(1) wake边界。Publisher不得执行manifest
+hydrate、token estimation、provider call、parser、candidate projection或governance。D3 periodic seeder和
+durable job state负责丢wake恢复；result FULL后的governance callback也只是可合并wake，失败不能回滚或
+改写已提交event/outbox。

@@ -99,6 +99,7 @@ _RESOURCE_CHECKSUMS = (
     "10bb441ddc12a18425dffd8e5d0407bd57984cdde775377fccdf65a9c441c65f",
     "c99c0e898899162f433235301cc23d247668ef1740ebe78e233beb823580516a",
     "47f261bfedb330ce47f00a78139666fc8beb306c868ebd467d2b4f1d6fcb8814",
+    "f1c8d3fb3c62e10216b4ac659e4c2e87de1d789d316ca9211d37c56bba486229",
 )
 _NAMES = (
     "schema_migration_ledger",
@@ -110,6 +111,7 @@ _NAMES = (
     "canonical_mutation_surface_jobs",
     "run_timeline_projection_activation",
     "tool_result_evidence_projection_activation",
+    "compaction_memory_extraction_projection_activation",
 )
 _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
     (),
@@ -147,6 +149,16 @@ _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
         (
             "0008_tool_result_evidence_activation_v1.json",
             "c52e0bfad4bd26a6afd11375c5d1d1c3422cca28fd2b2380b8296b8ddef6c82f",
+        ),
+    ),
+    (
+        (
+            "0009_compaction_memory_extraction_activation_v1.json",
+            "d225ad7953d474c2a4bedf105ddcfef2b733efb6d1787fd91377deab4259d03e",
+        ),
+        (
+            "0009_runtime_write_protected_relations_v1.json",
+            "4b25ed93abb3bf1cacc43ae0b2c397b03dd3b4a5b9138097a921ad82bbf34b0b",
         ),
     ),
 )

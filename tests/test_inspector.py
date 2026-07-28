@@ -13,7 +13,6 @@ import psycopg
 import pytest
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
-from psycopg.types.json import Jsonb
 
 from tests.conftest import (
     run_end_contract_fields,
@@ -45,7 +44,6 @@ from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     EventContext,
     McpCapabilitySnapshotInstalledEvent,
@@ -75,10 +73,6 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog as _PostgresEventLog
-from pulsara_agent.primitives.memory_candidate import (
-    PreferenceCandidate,
-    ValidCandidatePayload,
-)
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.inspector.service import (
     _context_compilation_projection,
@@ -115,12 +109,6 @@ from pulsara_agent.primitives.long_horizon import (
     RolloutBudgetAccountFact,
     calculate_model_call_reservation,
 )
-from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
-from pulsara_agent.llm.terminal_projection import stable_event_identity
-from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.primitives.governance_evidence import (
-    CompactionCandidateAttributionFact,
-)
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
@@ -130,10 +118,6 @@ from pulsara_agent.capability.tool_action import (
 )
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
-from pulsara_agent.runtime.compaction.candidates import (
-    ContextCompactionMemoryCandidatePolicy,
-    compaction_extractor_contract,
-)
 from pulsara_agent.settings import StorageConfig
 
 
@@ -1138,6 +1122,35 @@ def test_inspect_run_reports_stale_run_projection_without_repairing(
         _cleanup_session(dsn, runtime_session_id)
 
 
+def test_session_run_inventory_excludes_internal_event_parent_rows(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        provider = verified_postgres_provider(dsn)
+        log = _bootstrapped_event_log(
+            connection_provider=provider,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        ctx = _ctx("session-run-inventory")
+        log.extend(_simple_run_events(ctx, user_input="hello", text="done"))
+        with guarded_postgres_test_connection(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "insert into runs (id, session_id) values (%s, %s)",
+                    ("run:governance/internal-parent", runtime_session_id),
+                )
+
+        rows = PostgresInspectorStore(provider).session_runs(runtime_session_id)
+
+        assert tuple(row["id"] for row in rows) == (ctx.run_id,)
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
 def test_inspect_run_prior_messages_are_bounded_to_target_run_start(
     tmp_path: Path,
 ) -> None:
@@ -1487,15 +1500,14 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(
         report = _service(dsn).inspect_session(runtime_session_id)
 
         assert report["compaction_windows"][0]["summary_artifact_present"] is False
-        assert report["compaction_candidate_projection_durable_status"] == [
+        assert report["compaction_memory_extraction_durable_status"] == [
             {
                 "compaction_id": completed.compaction_id,
                 "completed_event_id": completed.id,
                 "completed_sequence": completed.sequence,
                 "core_status": "completed",
-                "status": "not_durably_observable",
-                "producer_event_id": None,
-                "durable_evidence": [],
+                "status": "not_configured",
+                "extension_dispositions": [],
             }
         ]
         assert any(
@@ -1503,223 +1515,6 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(
             for diagnostic in report["diagnostics"]
         )
     finally:
-        _cleanup_session(dsn, runtime_session_id)
-
-
-def test_inspect_session_links_context_compaction_memory_candidates(
-    tmp_path: Path,
-) -> None:
-    dsn = StorageConfig.from_env().postgres_dsn
-    runtime_session_id = _runtime_session_id()
-    _connect_or_skip(dsn).close()
-    ctx = _ctx("compaction-candidates")
-    candidate_entry_id = f"pool:inspector:{uuid4().hex}"
-    decision_id = f"decision:inspector:{uuid4().hex}"
-    governance_batch_id = f"governance:inspector:{uuid4().hex}"
-    try:
-        log = _bootstrapped_event_log(
-            connection_provider=verified_postgres_provider(dsn),
-            runtime_session_id=runtime_session_id,
-            workspace_root=tmp_path,
-        )
-        log.extend(_simple_run_events(ctx, user_input="compact me", text="done"))
-        archive = PostgresArtifactStore(verified_postgres_provider(dsn))
-        summary_artifact_id = f"context_compaction_summary:{uuid4().hex}"
-        archive.put_text(
-            summary_artifact_id,
-            "Compaction summary mentions release sync workflow.",
-            session_id=runtime_session_id,
-            run_id=ctx.run_id,
-            metadata={"kind": "context_compaction_summary", "do_not_write_back": True},
-        )
-        completed = log.append(
-            ContextCompactionCompletedEvent(
-                **ctx.event_fields(),
-                **compaction_completed_contract_fields(
-                    estimated_tokens_before=200_001,
-                    estimated_tokens_after=4_000,
-                ),
-                compaction_id=f"context_compaction:{uuid4().hex}",
-                trigger="manual",
-                reason="user_requested",
-                window_number=1,
-                window_id=f"context_window:{uuid4().hex}",
-                summary_artifact_id=summary_artifact_id,
-                summary_chars=48,
-                threshold_tokens=200_000,
-                through_sequence=10,
-                keep_after_sequence=10,
-                included_run_ids=[ctx.run_id],
-            )
-        )
-        candidate_payload = ValidCandidatePayload(
-            candidate=PreferenceCandidate(
-                candidate_id="candidate:compaction-inspector",
-                statement=("The user prefers syncing release before pushing GitHub."),
-                scope="ctx:workspace/test",
-                source_authority="conversation_evidence",
-                verification_status="inferred",
-                evidence_ids=[],
-            )
-        )
-        extractor_contract = compaction_extractor_contract(
-            ContextCompactionMemoryCandidatePolicy()
-        )
-        summary_text = "Compaction summary mentions release sync workflow."
-        candidate_attribution = build_frozen_fact(
-            CompactionCandidateAttributionFact,
-            schema_version="compaction_candidate_attribution.v1",
-            candidate_entry_id=candidate_entry_id,
-            raw_candidate_index=0,
-            candidate_payload=candidate_payload,
-            candidate_payload_fingerprint=candidate_payload_fingerprint(
-                candidate_payload
-            ),
-            intent_fingerprint="sha256:inspector",
-        )
-        proposed = log.append(
-            ContextCompactionMemoryCandidatesProposedEvent(
-                **ctx.event_fields(),
-                compaction_id=completed.compaction_id,
-                source_event_id=completed.id,
-                source_event_sequence=completed.sequence or 0,
-                summary_artifact_id=summary_artifact_id,
-                candidate_entry_ids=[candidate_entry_id],
-                attempted_count=1,
-                proposed_count=1,
-                extractor_version=extractor_contract.extractor_version,
-                summary_content_sha256=hashlib.sha256(
-                    summary_text.encode("utf-8")
-                ).hexdigest(),
-                summary_content_bytes=len(summary_text.encode("utf-8")),
-                extractor_contract=extractor_contract,
-                ordered_candidate_attributions=(candidate_attribution,),
-                completed_compaction_event_identity=stable_event_identity(
-                    completed,
-                    runtime_session_id=runtime_session_id,
-                ),
-            )
-        )
-        with guarded_postgres_test_connection(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    insert into memory_candidates (
-                        entry_id,
-                        payload,
-                        origin,
-                        source_session_id,
-                        source_run_id,
-                        source_turn_id,
-                        source_reply_id,
-                        source_event_id,
-                        source_artifact_id,
-                        intent_fingerprint,
-                        metadata
-                    )
-                    values (%s, %s, 'compaction', %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        candidate_entry_id,
-                        Jsonb(
-                            {
-                                **candidate_payload.model_dump(mode="json"),
-                            }
-                        ),
-                        runtime_session_id,
-                        ctx.run_id,
-                        ctx.turn_id,
-                        ctx.reply_id,
-                        proposed.id,
-                        summary_artifact_id,
-                        "sha256:inspector",
-                        Jsonb(
-                            {
-                                "source": "context_compaction",
-                                "compaction_id": completed.compaction_id,
-                                "summary_artifact_id": summary_artifact_id,
-                                "summary_excerpt": "Compaction summary mentions release sync workflow.",
-                            }
-                        ),
-                    ),
-                )
-                cursor.execute(
-                    """
-                    insert into memory_governance_decisions (
-                        decision_id,
-                        governance_batch_id,
-                        batch_input_fingerprint,
-                        batch_input_reference_fingerprint,
-                        governance_model_call_id,
-                        decision_index,
-                        requested_decision_payload_fingerprint,
-                        decision_payload_fingerprint,
-                        decision,
-                        write_outcome
-                    )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        decision_id,
-                        governance_batch_id,
-                        f"sha256:batch:{governance_batch_id}",
-                        f"sha256:reference:{governance_batch_id}",
-                        f"model_call:{governance_batch_id}",
-                        0,
-                        f"sha256:requested:{decision_id}",
-                        f"sha256:effective:{decision_id}",
-                        Jsonb(
-                            {
-                                "kind": "skip",
-                                "target_entry_ids": [candidate_entry_id],
-                                "reason": "weak",
-                                "skip_reason": "not_durable",
-                            }
-                        ),
-                        Jsonb({"kind": "no_write"}),
-                    ),
-                )
-
-        report = _service(dsn).inspect_session(runtime_session_id)
-
-        window = next(
-            item
-            for item in report["compaction_windows"]
-            if item["compaction_id"] == completed.compaction_id
-        )
-        assert window["candidate_proposals"][0]["candidate_entry_ids"] == [
-            candidate_entry_id
-        ]
-        assert window["candidate_proposals"][0]["proposed_count"] == 1
-        assert window["memory_candidates"][0]["entry_id"] == candidate_entry_id
-        assert window["memory_candidates"][0]["origin"] == "compaction"
-        assert window["memory_candidates"][0]["source_event_id"] == proposed.id
-        assert window["memory_candidates"][0]["metadata"]["summary_excerpt"].startswith(
-            "Compaction summary"
-        )
-        assert (
-            window["memory_candidates"][0]["governance_decisions"][0]["decision_id"]
-            == decision_id
-        )
-        projection_status = next(
-            item
-            for item in report["compaction_candidate_projection_durable_status"]
-            if item["compaction_id"] == completed.compaction_id
-        )
-        assert projection_status["status"] == "not_durably_observable"
-        assert projection_status["producer_event_id"] == proposed.id
-        assert projection_status["durable_evidence"] == ["producer_event"]
-    finally:
-        with guarded_postgres_test_connection(dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "delete from memory_governance_decisions where decision_id = %s",
-                    (decision_id,),
-                )
-                cursor.execute(
-                    "delete from memory_candidates where entry_id = %s",
-                    (candidate_entry_id,),
-                )
         _cleanup_session(dsn, runtime_session_id)
 
 

@@ -440,3 +440,14 @@ commit outcome结算。Caller cancellation不能跳过该矩阵：NONE释放rese
 安装与已提交child对应的execution handle；UNKNOWN保留process-local reservation并要求reconciliation，
 Host close不得只遍历active child graph而漏过它。任何pending/unknown capacity owner存在时，close必须
 fail closed；不得把无durable child的裸reservation永久计入容量。
+
+## 18. Background derived model work
+
+Compaction-memory Call B不是Host run、autonomous ingress或Agent loop continuation。HostSession只提供
+borrower-scoped background model safe point：human ingress优先，active/preparing/waiting/closing时拒绝或
+defer，safe-point stale不推进dispatch attempt。Call B的provider operation由memory-owned session driver
+持有；caller cancellation只detach，provider完成后不得再次dispatch相同continuation。
+
+Host close先停止driver admission并撤销registry registration，再drain active borrow、model lifecycle、
+RESULT_READY settlement和manifest physical operation，最后才释放LLM/artifact/PostgreSQL dependencies。
+未dispatch的MODEL_RETRY_WAIT可typed supersede；已形成RESULT_READY不得重跑provider。

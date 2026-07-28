@@ -54,10 +54,18 @@ class PostgresInspectorStore:
     def session_runs(self, session_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         return self._fetchall(
             """
-            select id, session_id, status, stop_reason, started_at, completed_at, metadata
-            from runs
-            where session_id = %s
-            order by started_at desc, id desc
+            select r.id, r.session_id, r.status, r.stop_reason,
+                   r.started_at, r.completed_at, r.metadata
+            from runs as r
+            where r.session_id = %s
+              and exists (
+                  select 1
+                  from agent_events as e
+                  where e.session_id = r.session_id
+                    and e.run_id = r.id
+                    and e.event_type = 'RUN_START'
+              )
+            order by r.started_at desc, r.id desc
             limit %s
             """,
             (session_id, limit),
@@ -195,6 +203,19 @@ class PostgresInspectorStore:
             (compaction_id,),
         )
 
+    def memory_candidates_for_source_event(
+        self, source_event_id: str
+    ) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select *
+            from memory_candidates
+            where source_event_id = %s
+            order by created_at asc, entry_id asc
+            """,
+            (source_event_id,),
+        )
+
     def governance_decisions_for_candidate(self, entry_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             """
@@ -295,6 +316,78 @@ class PostgresInspectorStore:
             (session_id, limit),
         )
 
+    def compaction_memory_result_candidates_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        return self._fetchall(
+            """
+            select candidate.result_candidate_id, candidate.job_id,
+                   candidate.target_key, candidate.completed_event_id,
+                   candidate.result_semantic_fingerprint,
+                   candidate.candidate_payload,
+                   candidate.candidate_fingerprint,
+                   candidate.created_at
+            from compaction_memory_extraction_result_candidates as candidate
+            join durable_projection_jobs as job
+              on job.job_id = candidate.job_id
+            where job.runtime_session_id = %s
+            order by candidate.created_at, candidate.result_candidate_id
+            limit %s
+            """,
+            (session_id, resolved_limit),
+        )
+
+    def background_derived_work_budget_account(
+        self,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        return self._fetchone(
+            """
+            select runtime_session_id, policy_payload, policy_fingerprint,
+                   account_revision, account_payload, account_fingerprint,
+                   updated_at
+            from background_derived_work_budget_accounts
+            where runtime_session_id = %s
+            """,
+            (session_id,),
+        )
+
+    def background_derived_work_budget_reservations_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        resolved_limit = _bounded_limit(limit)
+        return self._fetchall(
+            """
+            select reservation.reservation_id,
+                   reservation.extraction_job_id,
+                   reservation.operation_id,
+                   reservation.resolved_model_call_id,
+                   reservation.dispatch_attempt_ordinal,
+                   reservation.reservation_payload,
+                   reservation.reservation_fingerprint,
+                   reservation.status,
+                   reservation.created_at,
+                   reservation.updated_at,
+                   settlement.settlement_payload,
+                   settlement.settlement_fingerprint,
+                   settlement.model_call_end_event_id
+            from background_derived_work_budget_reservations as reservation
+            left join background_derived_work_budget_settlements as settlement
+              on settlement.reservation_id = reservation.reservation_id
+            where reservation.runtime_session_id = %s
+            order by reservation.created_at, reservation.reservation_id
+            limit %s
+            """,
+            (session_id, resolved_limit),
+        )
+
     def durable_projection_jobs(
         self,
         *,
@@ -338,9 +431,11 @@ class PostgresInspectorStore:
                    canonical_mutation_surface_plan_fingerprint,
                    job_semantic_fingerprint, job_candidate_fingerprint,
                    status, state_revision, repair_generation, attempt_count,
+                   dispatch_attempt_count, settlement_generation,
                    lease_generation, lease_owner_id, lease_expires_at,
                    next_attempt_at, last_failure, result_receipt_reference,
-                   state_fingerprint, created_at, updated_at
+                   compaction_memory_deferral, state_fingerprint,
+                   created_at, updated_at
             from durable_projection_jobs
             where {predicate}
             order by job_id

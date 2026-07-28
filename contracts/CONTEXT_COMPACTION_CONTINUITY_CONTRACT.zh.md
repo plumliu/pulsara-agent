@@ -223,3 +223,18 @@ child scopes与pending dependency identities。Plan terminal、subagent result d
 run/workflow terminal推进closure；current run、latest clock、effective heads与pending dependency继续
 protected。Long-Horizon planner只能消费该snapshot，不得以几个局部`if`重新分类。Rollover fold
 必须再次重算partition、coverage和resulting effective heads。
+
+---
+
+## 11. Post-compaction memory extraction hard cut
+
+Compaction summary只负责provider context continuity。Compaction完成后的memory extraction是独立、
+可选的background model call，使用`ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION`，不得把candidate
+schema或memory tag放回summary prompt。`ContextCompactionCompletedEvent`与
+`ContextCompactionMemoryExtractionRequestedEvent`在同一RuntimeSession writer batch中提交；Call A
+completion不等待manifest artifact或Call B。
+
+Call B只读取lossless transcript projection派生的完整、sanitized Host human `RunStart` evidence。
+Previous/current summary、recalled memory、working context、tool output、runtime request、monitor与subagent
+输入都不是memory evidence。V1超长单条消息整条省略，不存在`head_tail`。Extraction只产生待治理的
+Preference candidate；它不能直接写durable memory。

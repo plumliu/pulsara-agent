@@ -42,6 +42,9 @@ from pulsara_agent.primitives.long_horizon import (
 from pulsara_agent.primitives.governance_evidence import (
     GovernanceModelInputAttributionFact,
 )
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionModelInputAttributionFact,
+)
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelContextMode
 from pulsara_agent.primitives.run_boundary import (
@@ -86,6 +89,9 @@ class ModelLifecycleStartCommitBundle:
     recovery_plan: ModelStreamRecoveryPlanFact
     companion_candidates: tuple[FrozenEventWriteCandidate, ...]
     governance_input_attribution: GovernanceModelInputAttributionFact | None
+    compaction_memory_extraction_input_attribution: (
+        CompactionMemoryExtractionModelInputAttributionFact | None
+    )
     provider_input_start_bundle: PreparedProviderInputStartBundle | None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None
     active_run_monitor_source_event_references: tuple[
@@ -130,6 +136,9 @@ def prepare_model_lifecycle_start_bundle(
     extra_companion_candidates: tuple[AgentEvent, ...] = (),
     prepared_rollout_reservation: PreparedModelRolloutReservation | None = None,
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None,
+    compaction_memory_extraction_input_attribution: (
+        CompactionMemoryExtractionModelInputAttributionFact | None
+    ) = None,
     provider_input_start_bundle: PreparedProviderInputStartBundle | None = None,
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None,
     active_run_monitor_source_event_references: tuple[
@@ -205,6 +214,9 @@ def prepare_model_lifecycle_start_bundle(
         ),
         companion_candidates=frozen_companions,
         governance_input_attribution=governance_input_attribution,
+        compaction_memory_extraction_input_attribution=(
+            compaction_memory_extraction_input_attribution
+        ),
         provider_input_start_bundle=provider_input_start_bundle,
         active_run_monitor_delivery=active_run_monitor_delivery,
         active_run_monitor_source_event_references=(
@@ -460,6 +472,32 @@ def validate_model_lifecycle_start_bundle(
             != llm_context_fingerprint(context)
         ):
             raise ValueError("governance model lifecycle input attribution drifted")
+    extraction = (
+        call.fact.purpose is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
+    )
+    extraction_attribution = (
+        bundle.compaction_memory_extraction_input_attribution
+    )
+    if extraction != (extraction_attribution is not None):
+        raise ValueError(
+            "compaction memory extraction lifecycle attribution matrix mismatch"
+        )
+    if extraction_attribution is not None:
+        if (
+            call.fact.context_mode is not ModelContextMode.DIRECT
+            or context.model_call_index is not None
+            or extraction_attribution.background_budget_reservation.extraction_job_id
+            != extraction_attribution.extraction_job_id
+            or extraction_attribution.background_budget_reservation
+            .model_call_reservation_quote.resolved_model_call_id
+            != call.fact.resolved_model_call_id
+            or extraction_attribution.background_budget_reservation
+            .dispatch_attempt_ordinal
+            != extraction_attribution.dispatch_attempt_ordinal
+        ):
+            raise ValueError(
+                "compaction memory extraction lifecycle identity drifted"
+            )
     payload = _bundle_payload(
         call_id=bundle.resolved_model_call_id,
         lifecycle_kind=bundle.lifecycle_kind,
@@ -472,6 +510,9 @@ def validate_model_lifecycle_start_bundle(
         reservation_quote=bundle.reservation_quote,
         companion_candidates=bundle.companion_candidates,
         governance_input_attribution=bundle.governance_input_attribution,
+        compaction_memory_extraction_input_attribution=(
+            bundle.compaction_memory_extraction_input_attribution
+        ),
         provider_input_start_bundle=bundle.provider_input_start_bundle,
         active_run_monitor_delivery=bundle.active_run_monitor_delivery,
         active_run_monitor_source_event_references=(
@@ -653,6 +694,9 @@ def _bundle_payload(
     reservation_quote: ModelCallReservationQuoteFact | None,
     companion_candidates: tuple[FrozenEventWriteCandidate, ...],
     governance_input_attribution: GovernanceModelInputAttributionFact | None,
+    compaction_memory_extraction_input_attribution: (
+        CompactionMemoryExtractionModelInputAttributionFact | None
+    ),
     provider_input_start_bundle: PreparedProviderInputStartBundle | None,
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None,
     active_run_monitor_source_event_references: tuple[
@@ -673,6 +717,9 @@ def _bundle_payload(
         "recovery_plan": recovery_plan,
         "companion_candidates": companion_candidates,
         "governance_input_attribution": governance_input_attribution,
+        "compaction_memory_extraction_input_attribution": (
+            compaction_memory_extraction_input_attribution
+        ),
         "provider_input_start_bundle": provider_input_start_bundle,
         "active_run_monitor_delivery": active_run_monitor_delivery,
         "active_run_monitor_source_event_references": (

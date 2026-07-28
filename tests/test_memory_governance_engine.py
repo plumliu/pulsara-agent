@@ -177,6 +177,9 @@ def test_memory_governance_engine_runs_event_first_evidence_pipeline(
         assert preparation.status is GovernanceBatchPreparationStatus.TERMINAL
 
         model_input = _governance_input(harness.transport.contexts[1])
+        assert "`submit_as_is` and `skip` MUST NOT include a `candidate`" in (
+            harness.transport.contexts[1].system_prompt or ""
+        )
         prompt_view = model_input["candidates"][0]
         prompt_candidate = prompt_view["candidate"]
         assert prompt_candidate["candidate_entry_id"] == candidate_ids[0]

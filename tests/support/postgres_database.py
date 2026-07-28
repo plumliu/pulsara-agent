@@ -58,9 +58,9 @@ def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
                 deadline_monotonic=deadline,
             )
             report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version != 8:
+        if report.migration_head_version != 9:
             raise RuntimeError(
-                "staged PostgreSQL test migration did not reach version 8"
+                "staged PostgreSQL test migration did not reach version 9"
             )
     except BaseException:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)

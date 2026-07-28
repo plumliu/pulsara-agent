@@ -13,7 +13,11 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field, TypeAdapter, model_validator
 
-from pulsara_agent.primitives.memory_candidate import CandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    CandidatePayload,
+    MemoryCandidateSemanticFact,
+    candidate_payload_semantic,
+)
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.frozen import (
     FrozenFactBase,
@@ -50,7 +54,7 @@ _PROMPT_FIELD_CODES = (
     "selected_tool_arguments",
     "tool_result_essential",
     "reflection_report",
-    "compaction_summary",
+    "canonical_sanitized_user_message",
 )
 
 
@@ -72,6 +76,7 @@ class GovernanceEvidenceArtifactReferenceFact(GovernanceEvidenceFrozenFact):
         "governance_batch_input",
         "terminal_projection",
         "compaction_summary",
+        "compaction_memory_extraction_input",
         "quoted_evidence",
         "tool_result",
         "related_memory_content",
@@ -171,33 +176,19 @@ class CandidateQuotedEvidenceLocatorFact(GovernanceEvidenceFrozenFact):
 
 class GovernanceCandidatePayloadSemanticFact(GovernanceEvidenceFrozenFact):
     schema_version: Literal["governance_candidate_payload_semantic.v1"]
-    candidate_origin: Literal["main_agent_tool", "reflection", "compaction"]
-    payload_kind: str = Field(min_length=1, max_length=64)
-    canonical_candidate_payload: CandidatePayload
-    canonical_payload_utf8_bytes: int = Field(ge=1, le=16 * 1024)
-    intent_fingerprint: str | None = Field(default=None, max_length=256)
+    candidate_semantic: MemoryCandidateSemanticFact
     payload_semantic_fingerprint: Fingerprint
-
-    @model_validator(mode="after")
-    def _payload_bytes(self) -> "GovernanceCandidatePayloadSemanticFact":
-        actual = len(
-            canonical_json_bytes(
-                _CANDIDATE_PAYLOAD_ADAPTER.dump_python(
-                    self.canonical_candidate_payload,
-                    mode="json",
-                )
-            )
-        )
-        if self.canonical_payload_utf8_bytes != actual:
-            raise ValueError("candidate canonical payload byte count mismatch")
-        if self.payload_kind != self.canonical_candidate_payload.payload_kind:
-            raise ValueError("candidate payload kind mismatch")
-        return self
 
 
 class GovernanceCandidateAttributionFact(GovernanceEvidenceFrozenFact):
     schema_version: Literal["governance_candidate_attribution.v1"]
     entry_id: str = Field(min_length=1, max_length=256)
+    candidate_origin: Literal["main_agent_tool", "reflection", "compaction"]
+    payload_kind: str = Field(min_length=1, max_length=64)
+    canonical_candidate_payload: CandidatePayload
+    canonical_payload_utf8_bytes: int = Field(ge=1, le=16 * 1024)
+    candidate_semantic_fingerprint: Fingerprint
+    intent_fingerprint: str | None = Field(default=None, max_length=256)
     runtime_session_id: str = Field(min_length=1, max_length=256)
     source_run_id: str = Field(min_length=1, max_length=256)
     source_turn_id: str = Field(min_length=1, max_length=256)
@@ -209,16 +200,41 @@ class GovernanceCandidateAttributionFact(GovernanceEvidenceFrozenFact):
     created_at_utc: str = Field(min_length=1, max_length=64)
     attribution_fingerprint: Fingerprint
 
+    @model_validator(mode="after")
+    def _payload(self) -> "GovernanceCandidateAttributionFact":
+        actual_bytes = len(
+            canonical_json_bytes(
+                _CANDIDATE_PAYLOAD_ADAPTER.dump_python(
+                    self.canonical_candidate_payload,
+                    mode="json",
+                )
+            )
+        )
+        semantic = candidate_payload_semantic(self.canonical_candidate_payload)
+        if (
+            self.payload_kind != self.canonical_candidate_payload.payload_kind
+            or self.canonical_payload_utf8_bytes != actual_bytes
+            or semantic is None
+            or semantic.semantic_fingerprint
+            != self.candidate_semantic_fingerprint
+        ):
+            raise ValueError("candidate payload attribution drifted")
+        return self
+
 
 class GovernanceQuotedEvidenceSemanticFact(GovernanceEvidenceFrozenFact):
     schema_version: Literal["governance_quoted_evidence_semantic.v1"]
     quote_kind: Literal[
-        "canonical_user_span", "reflection_reported", "compaction_summary_span"
+        "canonical_user_span",
+        "reflection_reported",
+        "canonical_sanitized_user_message",
     ]
     text: str = Field(max_length=16_384)
     text_utf8_bytes: int = Field(ge=0, le=64 * 1024)
     text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    verification_status: Literal["canonical_match", "origin_reported"]
+    verification_status: Literal[
+        "canonical_match", "origin_reported", "canonical_sanitized_match"
+    ]
     semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -228,11 +244,12 @@ class GovernanceQuotedEvidenceSemanticFact(GovernanceEvidenceFrozenFact):
             raise ValueError("quoted evidence byte count mismatch")
         if self.text_sha256 != hashlib.sha256(encoded).hexdigest():
             raise ValueError("quoted evidence SHA mismatch")
-        if (
-            self.verification_status == "canonical_match"
-            and self.quote_kind != "canonical_user_span"
-        ):
-            raise ValueError("only canonical user spans may be canonical matches")
+        expected = {
+            "canonical_match": "canonical_user_span",
+            "canonical_sanitized_match": "canonical_sanitized_user_message",
+        }.get(self.verification_status)
+        if expected is not None and self.quote_kind != expected:
+            raise ValueError("quoted evidence verification kind mismatch")
         return self
 
 
@@ -294,44 +311,26 @@ class ReflectionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
     semantic_fingerprint: Fingerprint
 
 
-class CompactionMemoryCandidateExtractorContractFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["compaction_memory_candidate_extractor_contract.v1"]
-    extractor_id: str = Field(min_length=1, max_length=128)
-    extractor_version: str = Field(min_length=1, max_length=64)
-    accepted_input_schema_fingerprint: Fingerprint
-    output_candidate_schema_fingerprint: Fingerprint
-    parsing_rules_fingerprint: Fingerprint
-    normalization_rules_fingerprint: Fingerprint
-    contract_fingerprint: Fingerprint
-
-
-class CompactionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["compaction_governance_source_semantic.v1"]
+class CompactionExtractionGovernanceSourceSemanticFact(
+    GovernanceEvidenceFrozenFact
+):
+    schema_version: Literal[
+        "compaction_extraction_governance_source_semantic.v1"
+    ]
     evidence_kind: Literal["compaction"]
     candidate_payload_semantic_fingerprint: Fingerprint
-    summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    summary_content_semantic_fingerprint: Fingerprint
-    extractor_contract: CompactionMemoryCandidateExtractorContractFact
-    raw_candidate_index: int = Field(ge=0, le=255)
-    canonical_parsed_candidate_payload_fingerprint: Fingerprint
-    intent_fingerprint: Fingerprint
-    quoted_evidence_semantic: GovernanceQuotedEvidenceSemanticFact | None = None
+    evidence_set_semantic_fingerprint: Fingerprint
+    extraction_semantic_contract_fingerprint: Fingerprint
+    ordered_evidence_semantics: tuple[
+        GovernanceQuotedEvidenceSemanticFact, ...
+    ] = Field(min_length=1, max_length=8)
     semantic_fingerprint: Fingerprint
-
-    @model_validator(mode="after")
-    def _payload_join(self) -> "CompactionGovernanceSourceSemanticFact":
-        if (
-            self.canonical_parsed_candidate_payload_fingerprint
-            != self.candidate_payload_semantic_fingerprint
-        ):
-            raise ValueError("compaction parsed candidate fingerprint mismatch")
-        return self
 
 
 GovernanceSourceEvidenceSemanticFact: TypeAlias = Annotated[
     MainAgentToolGovernanceSourceSemanticFact
     | ReflectionGovernanceSourceSemanticFact
-    | CompactionGovernanceSourceSemanticFact,
+    | CompactionExtractionGovernanceSourceSemanticFact,
     Field(discriminator="evidence_kind"),
 ]
 
@@ -344,7 +343,7 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
     authority_ledger_through_sequence: int = Field(ge=0)
     candidate_entry_id: str = Field(min_length=1, max_length=256)
     producer_event_references: tuple[GovernanceStoredEventReferenceFact, ...] = Field(
-        min_length=1, max_length=8
+        min_length=1, max_length=32
     )
     model_terminal_projection_reference: TerminalProjectionReferenceFact | None = None
     model_disposition_event_reference: GovernanceStoredEventReferenceFact | None = None
@@ -356,6 +355,12 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
         Field(max_length=16)
     )
     producer_contract_fingerprints: tuple[Fingerprint, ...] = Field(max_length=16)
+    compaction_candidate_attribution_fingerprint: Fingerprint | None = None
+    compaction_candidate_ordinal: int | None = Field(default=None, ge=0, le=2)
+    compaction_occurrence_attribution_fingerprint: Fingerprint | None = None
+    permanent_automatic_omission_count: int | None = Field(default=None, ge=0)
+    permanent_automatic_omission_semantic_accumulator: Fingerprint | None = None
+    permanent_automatic_omission_attribution_accumulator: Fingerprint | None = None
     fact_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -395,7 +400,7 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
                 raise ValueError(
                     "main-tool evidence requires model, disposition, and tool references"
                 )
-        elif (
+        elif self.evidence_kind == "reflection" and (
             self.model_terminal_projection_reference is not None
             or self.model_disposition_event_reference is not None
             or self.tool_terminal_projection_reference is not None
@@ -403,8 +408,25 @@ class GovernanceSourceEvidenceAttributionFact(GovernanceEvidenceFrozenFact):
             raise ValueError(
                 "non-tool evidence forbids model/tool projection references"
             )
-        if self.evidence_kind == "compaction" and not self.source_artifact_references:
-            raise ValueError("compaction evidence requires summary artifact")
+        compaction_fields = (
+            self.compaction_candidate_attribution_fingerprint,
+            self.compaction_candidate_ordinal,
+            self.compaction_occurrence_attribution_fingerprint,
+            self.permanent_automatic_omission_count,
+            self.permanent_automatic_omission_semantic_accumulator,
+            self.permanent_automatic_omission_attribution_accumulator,
+        )
+        if self.evidence_kind == "compaction":
+            if (
+                self.model_terminal_projection_reference is None
+                or self.model_disposition_event_reference is not None
+                or self.tool_terminal_projection_reference is not None
+                or not self.source_artifact_references
+                or any(item is None for item in compaction_fields)
+            ):
+                raise ValueError("compaction extraction attribution is incomplete")
+        elif any(item is not None for item in compaction_fields):
+            raise ValueError("non-compaction evidence carries extraction attribution")
         return self
 
 
@@ -416,11 +438,13 @@ class GovernancePromptEvidenceTextFact(GovernanceEvidenceFrozenFact):
         "selected_tool_arguments",
         "tool_result_essential",
         "reflection_report",
-        "compaction_summary",
+        "canonical_sanitized_user_message",
     ]
-    text: str = Field(max_length=2_000)
+    text: str = Field(max_length=8_192)
     source_semantic_fingerprint: Fingerprint
-    verification_status: Literal["canonical_match", "origin_reported"]
+    verification_status: Literal[
+        "canonical_match", "origin_reported", "canonical_sanitized_match"
+    ]
     text_fingerprint: Fingerprint
 
 
@@ -552,6 +576,11 @@ class ImmutableGovernanceCandidateSnapshotFact(GovernanceEvidenceFrozenFact):
         ):
             raise ValueError("candidate/source semantic payload mismatch")
         if (
+            self.candidate_attribution.candidate_semantic_fingerprint
+            != self.payload_semantic.candidate_semantic.semantic_fingerprint
+        ):
+            raise ValueError("candidate semantic/attribution mismatch")
+        if (
             self.source_evidence_attribution.candidate_entry_id
             != self.candidate_attribution.entry_id
         ):
@@ -572,7 +601,7 @@ class ImmutableGovernanceCandidateSnapshotFact(GovernanceEvidenceFrozenFact):
             "compaction": "compaction",
         }
         if (
-            origin_to_evidence[self.payload_semantic.candidate_origin]
+            origin_to_evidence[self.candidate_attribution.candidate_origin]
             != self.source_evidence_semantic.evidence_kind
             or self.source_evidence_attribution.evidence_kind
             != self.source_evidence_semantic.evidence_kind
@@ -584,6 +613,10 @@ class ImmutableGovernanceCandidateSnapshotFact(GovernanceEvidenceFrozenFact):
         source = self.source_evidence_semantic
         if isinstance(source, ReflectionGovernanceSourceSemanticFact):
             semantic_quotes = source.ordered_quoted_evidence_semantics
+        elif isinstance(
+            source, CompactionExtractionGovernanceSourceSemanticFact
+        ):
+            semantic_quotes = source.ordered_evidence_semantics
         else:
             semantic_quotes = (
                 ()
@@ -711,19 +744,9 @@ class ReflectionCandidateAttributionFact(GovernanceEvidenceFrozenFact):
     attribution_fingerprint: Fingerprint
 
 
-class CompactionCandidateAttributionFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["compaction_candidate_attribution.v1"]
-    candidate_entry_id: str = Field(min_length=1, max_length=256)
-    raw_candidate_index: int = Field(ge=0, le=255)
-    candidate_payload: CandidatePayload
-    candidate_payload_fingerprint: Fingerprint
-    intent_fingerprint: Fingerprint
-    attribution_fingerprint: Fingerprint
-
-
 class CandidateProjectionProducerKind(StrEnum):
     REFLECTION = "reflection"
-    COMPACTION = "compaction"
+    COMPACTION_MEMORY_EXTRACTION = "compaction_memory_extraction"
 
 
 class CandidateProjectionOutboxItemFact(GovernanceEvidenceFrozenFact):
@@ -733,6 +756,7 @@ class CandidateProjectionOutboxItemFact(GovernanceEvidenceFrozenFact):
     candidate_entry_id: str = Field(min_length=1, max_length=256)
     candidate_index: int = Field(ge=0, le=255)
     candidate_payload: CandidatePayload
+    candidate_semantic_fingerprint: Fingerprint
     candidate_payload_fingerprint: Fingerprint
     candidate_attribution_fingerprint: Fingerprint
     item_fingerprint: Fingerprint
@@ -1149,14 +1173,9 @@ _SCHEMAS: tuple[tuple[str, str, str], ...] = (
         "governance-reflection-source-semantic:v1",
     ),
     (
-        "compaction_memory_candidate_extractor_contract.v1",
-        "contract_fingerprint",
-        "compaction-memory-candidate-extractor-contract:v1",
-    ),
-    (
-        "compaction_governance_source_semantic.v1",
+        "compaction_extraction_governance_source_semantic.v1",
         "semantic_fingerprint",
-        "governance-compaction-source-semantic:v1",
+        "governance-compaction-extraction-source-semantic:v1",
     ),
     (
         "governance_source_evidence_attribution.v1",
@@ -1212,11 +1231,6 @@ _SCHEMAS: tuple[tuple[str, str, str], ...] = (
         "reflection_candidate_attribution.v1",
         "attribution_fingerprint",
         "reflection-candidate-attribution:v1",
-    ),
-    (
-        "compaction_candidate_attribution.v1",
-        "attribution_fingerprint",
-        "compaction-candidate-attribution:v1",
     ),
     (
         "candidate_projection_outbox_item.v1",

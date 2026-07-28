@@ -311,3 +311,22 @@ Pre-activation crash从immutable result receipts、coverage pages与cutover恢�
 pre-activation receipt的process-local状态只能显示`not_durably_observable`，不得猜测。
 Migration v7/v8 activation前后由database maintenance epoch隔离，不允许同一kind同时存在
 pre-activation与durable job writer。
+
+## 16. Compaction-memory extraction recovery
+
+Reopen从Requested、D3 job、budget rows、terminal projection、RESULT_READY candidate、receipt/head和
+candidate outbox恢复，不从summary或process callback补造结果。Model claim只推进lease generation；
+ModelCallStart FULL才推进dispatch ordinal并reserve budget。Provider terminal完成后lowering失败进入typed
+retry/reconciliation，绝不能再次调用provider。
+
+Provider/output failure提交`MODEL_RETRY_WAIT`后只接受FULL。Repository返回CONFLICT时必须在同一
+transaction exact-read winner；仅当dispatch ordinal、failure、state revision、released lease与retry state
+全部相容时才能等价归类为FULL，其他结果进入reconciliation，driver不得把冲突当作已处理。
+Stored Request派生的V1 model retry schedule固定为1s、2s、4s且无jitter；live与recovery failure共享同一
+factory。缺失ModelCallEnd的recovery poll是独立1s observation defer，不得冒充或推进model retry ordinal。
+
+`MODEL_RETRY_WAIT -- due claim --> LEASED`；graceful close可supersede尚未dispatch的model work。
+`RESULT_READY/SETTLEMENT_RETRY_WAIT/expired SETTLEMENT_WRITING`可用新settlement generation与新physical
+deadline重写同一stable event candidate；close maintenance可绕过not-before但不能延长shared close
+deadline。只有EventLog result transaction UNKNOWN可以latch RuntimeSession ledger；source/target与background
+account冲突各自留在其fault domain。

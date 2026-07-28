@@ -639,6 +639,10 @@ class MemoryGovernanceEngine:
                         decision,
                         governance_batch_id=batch_id,
                         relatedness_context=execution_context,
+                        candidate_snapshots={
+                            item.candidate_attribution.entry_id: item
+                            for item in prepared.snapshot.ordered_candidate_snapshots
+                        },
                         execution_identity=GovernanceDecisionExecutionIdentity(
                             batch_input_fingerprint=(
                                 prepared.snapshot.batch_input_fingerprint

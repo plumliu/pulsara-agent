@@ -499,6 +499,15 @@ class HostCore:
                 mcp_supervisor=mcp_supervisor,
                 reopen_deadline_monotonic=reopen_deadline_monotonic,
             )
+            compaction_service = wiring.runtime_wiring.compaction_service
+            if (
+                compaction_service is not None
+                and compaction_service.post_completion_extension is not None
+            ):
+                session.install_compaction_memory_extraction_driver(
+                    projection_service=projection_service,
+                    connection_provider=postgres_access_lease.connection_provider,
+                )
             agent_runtime = wiring.agent_runtime
             runtime_open_deadline_monotonic = (
                 wiring.runtime_wiring.runtime_session.runtime_open_deadline_monotonic

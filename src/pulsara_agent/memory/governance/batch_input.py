@@ -99,17 +99,21 @@ cannot authorize supersede or contradiction. Use candidate entry IDs exactly as
 supplied. For valid candidates, any decision shape requiring `candidate` MUST
 copy the candidate's `decision_candidate` object exactly. Never copy the outer
 `candidate` evidence object or canonical_candidate_payload wrapper into the
-`candidate` field. For an invalid candidate, construct a correction only when
-the evidence supplies every required typed field.
+`candidate` field. `submit_as_is` and `skip` MUST NOT include a `candidate`
+field; their exact shapes below are complete. For an invalid candidate,
+construct a correction only when the evidence supplies every required typed
+field.
 
 Every decision MUST use the exact tagged shape below. The discriminator is
 `kind`; never emit `decision` or `candidate_entry_id` aliases.
 
 submit_as_is:
 {"kind":"submit_as_is","target_entry_id":"pool:...","reason":"..."}
+This branch has exactly these three fields. Do not echo `decision_candidate`.
 
 skip:
 {"kind":"skip","target_entry_ids":["pool:..."],"reason":"...","skip_reason":"..."}
+This branch has no `candidate` field.
 
 correct_and_submit:
 {"kind":"correct_and_submit","target_entry_id":"pool:...","candidate":<typed candidate>,"reason":"..."}

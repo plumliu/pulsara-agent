@@ -24,7 +24,7 @@ from pulsara_agent.projection_jobs.contracts import (
 
 
 _V5_RESOURCE_NAME = "0005_runtime_write_protected_relations_v1.json"
-_LATEST_RESOURCE_NAME = "0006_runtime_write_protected_relations_v2.json"
+_LATEST_RESOURCE_NAME = "0009_runtime_write_protected_relations_v1.json"
 
 
 def _resource_payload(
@@ -544,6 +544,29 @@ def replace_runtime_write_protected_relation_registry(
                 registry.registry_fingerprint,
             ),
         )
+        trigger_exists = connection.execute(
+            """
+            SELECT 1
+            FROM pg_catalog.pg_trigger t
+            JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s
+              AND t.tgname = %s AND NOT t.tgisinternal
+            """,
+            (item.schema_name, item.relation_name, item.guard_trigger_name),
+        ).fetchone()
+        if trigger_exists is None:
+            connection.execute(
+                sql.SQL(
+                    "CREATE TRIGGER {} BEFORE INSERT OR UPDATE OR DELETE ON {}.{} "
+                    "FOR EACH ROW EXECUTE FUNCTION "
+                    "public.pulsara_assert_runtime_write_guard()"
+                ).format(
+                    sql.Identifier(item.guard_trigger_name),
+                    sql.Identifier(item.schema_name),
+                    sql.Identifier(item.relation_name),
+                )
+            )
     return registry
 
 

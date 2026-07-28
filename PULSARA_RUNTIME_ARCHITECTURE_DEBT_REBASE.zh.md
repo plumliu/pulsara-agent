@@ -1,6 +1,7 @@
 # Pulsara 运行时架构债务重基线审计
 
 > 审计日期：2026-07-22
+> D5 完成复核：2026-07-28
 > 代码基线：`main@dca11e75a150489a6fe167a39cd92189ca51b84d`
 > 原始来源：`ARCHITECTURE_DEBT_AUDIT.zh.md` 第 14 节依赖表的后半部分
 > 范围：从 `Async LiveRuntimeEventWriter` 到 `Compaction-memory extension`
@@ -37,11 +38,11 @@
 | Governance events 同 UOW | `SUPERSEDED` | 已由 memory UOW 内 durable stable-candidate outbox + session-owned accounted dispatcher 闭环，不应改回直接跨 owner 写 ledger | 无新 hard cut |
 | CustomEvent typed 化 | `CLOSED` | 7 个 production事实及 MCP closure已 typed；`CustomEvent`/`EventType.CUSTOM`与旧 decoder已物理删除 | 已完成 |
 | Hook/outbox 重构 | `CLOSED` | timeline/evidence、canonical mutation surfaces、seed repair、shutdown physical owner与eventual working-context均由durable owner闭环 | 已完成 |
-| Runtime dependency-cycle cleanup | `CLOSED`（D4 scope） | target DAG、ports、test-support、durable Host与facade hard cut已闭环；剩余全局SCC仅作为D5/D6 diagnostic baseline | 已完成 |
+| Runtime dependency-cycle cleanup | `CLOSED`（D4 scope） | target DAG、ports、test-support、durable Host与facade hard cut已闭环；剩余全局SCC仅作为D6 diagnostic baseline | 已完成 |
 | AgentRuntime coordinator 拆分 | `OPEN`，已有基础 | `RunWorkingSet` 与若干 coordinator 已出现，但 production scratchpad 和大范围 orchestration 仍集中 | 中后期 |
 | 删除 legacy MCP / in-memory product mode | `CLOSED` | legacy transport、production mock、`durable=False`与in-memory product composition均已删除；fake world只在tests/support | 已完成 |
 | Schema hot-path hard cut | `CLOSED` | migration registry/ledger、verify-only startup与verified connection provider已落地；constructor/UOW DDL及raw-DSN adapter入口已删除 | 已完成 |
-| Compaction-memory extension | `OPEN`，correctness 已改善 | event-first candidate projection 已闭环，但 compaction core 仍直接拥有 memory candidate 语义 | 中后期 |
+| Compaction-memory extension | `CLOSED` | summary 与 extraction 已拆为两次调用；Call B 由 durable job、exact human evidence、budget、RESULT_READY 与 governance 完整拥有 | 已完成 |
 
 最重要的重基线结论有三个：
 
@@ -265,13 +266,13 @@ Compaction candidate projection outbox属于D5，不因D3关闭而自动关闭�
 
 普通 pytest 运行 canonical AST dependency scanner。D4 target DAG 不再使用 exception；global package SCC只保存 module-level canonical observation baseline，新增同 package-pair import也会失败。
 
-最终 residual baseline 为 394 条 observation，fingerprint：
+经 D5 向下收缩后，最终 residual baseline 为 391 条 observation，fingerprint：
 
 ```text
-sha256:3ba9dfb749090f78256c6e7bd4eedb5e11f60947a1b5d3ab90689ab0cdddb367
+sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 ```
 
-该 baseline 中仍存在跨 `runtime/llm/memory/host/storage/graph/event_log/capability` 的全局 SCC。它们属于 D5 compaction-memory 与 D6 AgentRuntime/HostSession ownership 拆分；D4 的关闭不宣称全仓库跨 package SCC 已消除，也不得重新引入 lazy facade。
+该 baseline 中仍存在跨 `runtime/llm/memory/host/storage/graph/event_log/capability` 的全局 SCC。D5 已删除其负责的旧边并阻止新增 residual edge；剩余部分属于 D6 AgentRuntime/HostSession ownership 拆分。D4/D5 的关闭不宣称全仓库跨 package SCC 已消除，也不得重新引入 lazy facade。
 
 ### 9.3 验证结果
 
@@ -281,7 +282,7 @@ sha256:3ba9dfb749090f78256c6e7bd4eedb5e11f60947a1b5d3ab90689ab0cdddb367
 - frozen manifest validate通过；`durable-resume`、`subagent-delegation`、`workspace-patch`真实 provider dogfood通过；
 - static grep/AST、正反import-order smoke、changed-file format/lint与diff check通过。
 
-结论：**D4 target scope 已关闭；remaining global SCC继续由D5/D6负责。**
+结论：**D4 target scope 已关闭；D5 已向下收缩 baseline，remaining global SCC由D6负责。**
 
 ## 10. AgentRuntime coordinator 拆分
 
@@ -406,76 +407,54 @@ Schema hot-path债务关闭不表示schema不再演进。后续Hook/outbox、typ
 
 ## 13. Compaction-memory extension
 
-### 13.1 correctness 已经比原审计成熟
+### 13.1 最终裁决
 
-当前 compaction candidate producer 已具备：
-
-- typed extractor contract；
-- `ContextCompactionMemoryCandidatesProposedEvent`；
-- event-first candidate projection；
-- `MemoryCandidateProjectionCommitPort` 与 durable projection outbox；
-- producer event FULL 后幂等投影 candidate row；
-- candidate payload fingerprint 与 attribution join。
-
-因此原审计担心的“candidate append 与 audit event commit boundary 不明确”已经闭环。该工作项也不再依赖一个尚不存在的 LiveRuntimeEventWriter。
-
-### 13.2 ownership 方向仍然错误
-
-`runtime/compaction` 目前仍直接 import/拥有：
-
-- `memory.candidates.pool` 的 DTO、pool 和 fingerprint；
-- memory scope/domain/ontology；
-- candidate extraction policy；
-- candidate sink 与 projection outbox port。
-
-`ContextCompactionPolicy` 仍内嵌 `ContextCompactionMemoryCandidatePolicy`，`ContextCompactionService` 仍负责 optional `<memory_candidates_json>` prompt、解析、normalization、candidate attribution 和 proposed event。
-
-因此 context-maintenance core 仍依赖 memory product semantics。memory candidate schema变化会继续修改 compaction core。
-
-### 13.3 推荐目标
-
-保留“一次 compact 模型调用同时返回 summary 与 optional extension”的产品优化，但反转依赖：
+D5 已按 `PULSARA_POST_COMPACTION_MEMORY_EXTRACTION_HARD_CUT_IMPLEMENTATION.zh.md`
+完成。原“一次 compaction 调用同时返回 summary 与 memory extension”的方向被 supersede；生产
+路径现在固定为两次职责分离的调用：
 
 ```text
-ContextCompactionCore
-  -> CompactionOutputExtensionPort
-       -> MemoryCompactionCandidateExtension
+Call A: summary-only context continuity
+  -> ContextCompactionCompletedEvent
+  -> same-batch ContextCompactionMemoryExtractionRequestedEvent
+
+Call B: optional durable derived work
+  -> exact direct-human evidence manifest
+  -> target-aware input budget + session background budget
+  -> independent model lifecycle
+  -> RESULT_READY
+  -> Completed event + receipt/head/candidate outbox/job success
+  -> candidate pool -> governance -> optional canonical memory write
 ```
 
-core 只拥有：
+Call B 不属于 compaction correctness，也不创建 Host run ingress。没有 eligible evidence、input
+budget 不足或 background budget 耗尽均由 closed no-call outcome 终结，不触发 provider。
 
-- versioned extension ID/contract；
-- bounded prompt fragment；
-- bounded raw extension block或artifact reference；
-- summary artifact与compaction lifecycle；
-- extension parse outcome/audit commit port。
+### 13.2 已闭合的 ownership
 
-memory-owned extension 拥有：
+当前生产不变量包括：
 
-- candidate schema、scope、ontology；
-- parser/normalizer/fingerprint；
-- proposed event payload；
-- candidate projection outbox与pool sink。
+- `runtime/compaction` 不再 import 或拥有 concrete memory candidate DTO、parser、sink或outbox；
+- Call A prompt与输出只包含 summary；旧 `<memory_candidates_json>` producer、event与parser已物理删除；
+- Completed 与唯一 Requested trigger同批提交，无 post-scan recovery；
+- lossless transcript manifest只选择 exact direct human input，summary、assistant、tool、runtime observation均不是 evidence；
+- Call B 的 lease/retry/dead-letter、dispatch ordinal、ModelCall Start/End与session budget均有 durable authority；
+- terminal projection是唯一 raw model-output authority；RESULT_READY跨physical retry保持stable candidate；
+- extraction Completed、receipt、head、candidate outbox与job success经RuntimeSession writer同事务提交；
+- model只提出 pending Preference candidate，canonical memory仍必须经过治理；
+- governance在写入前exact-read RunStart并重算sanitizer，持久化完整 sanitized human Evidence；
+- migration `0009`、session bootstrap、Inspector、restart/close与long real-LLM dogfood均已覆盖。
 
-extension parse failure继续是 best-effort，不得让已经合法的 summary失败；但 parse result和零候选都必须有 typed audit outcome。
+### 13.3 验证证据
 
-### 13.4 前置与完成门槛
+机器可读 DoD 记录位于：
 
-前置：
+`benchmarks/suites/core/v1/cme5_dod_evidence.json`
 
-- writer correctness 已满足；
-- 最好先建立 contracts/ports dependency rule，防止新 extension port反向依赖 core implementation；
-- schema migration runner负责 projection/outbox schema，不能在 extension constructor里建表。
+它绑定 frozen dogfood suite、`manual-compaction-trail` scenario与runner fingerprints，并记录
+CME0-CME5 gates、pytest closure、PostgreSQL/Oxigraph集成和real-provider结果。
 
-完成门槛：
-
-- `runtime/compaction` 不 import `memory.candidates.*` concrete types；
-- `ContextCompactionPolicy` 不包含 memory candidate policy；
-- 无 memory extension时 core 仍能完整 compaction；
-- memory extension启用时仍只调用一次模型；
-- proposed event、outbox、candidate projection的现有 crash/retry tests保留。
-
-结论：**仍是 OPEN，但属于依赖方向债务，不是 correctness 紧急故障。**
+结论：**D5 CLOSED。**
 
 ## 14. 重基线后的依赖图
 
@@ -538,18 +517,22 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 ### D4：依赖规则与 test-support hard cut（`CLOSED`）
 
 - [x] 建立 contracts/ports与canonical AST import rule；
-- [x] D4 target DAG forbidden edge清零，residual SCC以D5/D6 diagnostic baseline冻结；
+- [x] D4 target DAG forbidden edge清零，residual SCC以D6 diagnostic baseline冻结；
 - [x] 切断 tools -> runtime concrete反向依赖，ToolExecutor归runtime唯一拥有；
 - [x] `MockMcpClientManager`、in-memory runtime与fake governance UOW移入 tests/support；
 - [x] production HostCore删除 `durable` branch并使用唯一durable composition；
 - [x] runtime/tools lazy facade物理删除；
 - [x] D4-5全量pytest失败集合闭环、durable integration与冻结dogfood最终确认。
 
-### D5：Compaction-memory extension（`OPEN`）
+### D5：Compaction-memory extension（`CLOSED`）
 
-- memory-owned extension；
-- 保留一次模型调用；
-- 保留现有 event-first/outbox correctness。
+- [x] summary-only Call A 与 durable optional Call B职责分离；
+- [x] Requested same-batch admission、D3 job与session background budget闭环；
+- [x] exact direct-human evidence manifest与target-aware budget闭环；
+- [x] terminal projection、RESULT_READY及atomic result settlement闭环；
+- [x] pending candidate继续经过governance，不直接写canonical memory；
+- [x] old one-call producer与runtime/compaction memory concrete ownership物理删除；
+- [x] migration、Inspector、recovery、PostgreSQL/Oxigraph与frozen dogfood通过。
 
 ### D6：AgentRuntime/HostSession ownership 拆分
 
@@ -599,11 +582,10 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 - **1 项已被更合适的方案替代并闭环**：Governance events 同 UOW；
 - **1 项 correctness 已完成，仅保留独立性能门控**：Async LiveRuntimeEventWriter；
 - **2 项由D4一并关闭**：target dependency/test-support hard cut，以及legacy MCP/in-memory product mode；
-- **2 项仍是有效债务**：AgentRuntime ownership、compaction-memory ownership。
+- **1 项仍是有效债务**：AgentRuntime/HostSession ownership拆分。
 
-Schema hot-path、D2 event vocabulary/writer尾巴、D3 durable projection jobs与D4 dependency/test-support
-hard cut均已完成。下一项进入D5；D5继续保持`OPEN`，不能把D3的runtime semantic projection receipt
-误报为compaction candidate crash ownership已经闭环。D4保留的global SCC baseline则继续作为D5/D6
-新增依赖的阻断基线。
+Schema hot-path、D2 event vocabulary/writer尾巴、D3 durable projection jobs、D4 dependency/test-support
+hard cut与D5 post-compaction memory extraction均已完成。下一项是D6；D4冻结且经D5向下收缩的
+global SCC baseline继续作为D6新增依赖的阻断基线。
 
 这份重基线的目的不是减少债务数量，而是把工程投入重新对准仍然存在的风险。

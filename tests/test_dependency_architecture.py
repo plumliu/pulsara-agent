@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Updated only when a hard cut deliberately removes residual edges. D4 forbids growth.
 RESIDUAL_SCC_OBSERVATION_FINGERPRINT = (
-    "sha256:ec2213041bae7005c00d035ae5ebbe84258e1063580799c8c21ecf5d1fe9349b"
+    "sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc"
 )
 
 

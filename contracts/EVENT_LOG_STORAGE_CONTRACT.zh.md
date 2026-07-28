@@ -501,3 +501,14 @@ RuntimeSession/EventLog writer不等待derived projection。Projection failure�
 Session bootstrap必须在同一transaction创建session row及每个kind所需的sequence-0
 active/pre-activation cutover。除唯一`RuntimeSessionOwnerBootstrapPort`与migration外，production
 Python不得直接`INSERT INTO sessions`。
+
+## 20. Compaction-memory extraction authority
+
+`ContextCompactionCompletedEvent`与`ContextCompactionMemoryExtractionRequestedEvent`由唯一
+RuntimeSession writer同批提交并通过无环extension link互相绑定。Requested是D3 job唯一trigger，且
+`source_horizon.through_sequence == Requested.sequence`。禁止扫描Completed补建Request或candidate。
+
+Extraction Completed只由RuntimeSession writer追加。其transaction companion在同一EventLog cursor上
+exact-read job lease、budget terminal authority与stored candidate plan，并原子写result receipt、target
+head、candidate outbox及job success；companion不得自行insert `agent_events`。NONE/UNKNOWN confirmation
+保留同一FrozenEventWriteCandidate，新的physical attempt可以使用新deadline但不能重建payload或重跑模型。

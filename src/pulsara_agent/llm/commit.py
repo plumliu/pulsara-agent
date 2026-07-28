@@ -61,6 +61,9 @@ if TYPE_CHECKING:
     from pulsara_agent.primitives.authority_materialization import (
         PhysicalOperationReservationFact,
     )
+    from pulsara_agent.ports.model_lifecycle import (
+        ModelLifecycleTransactionCompanion,
+    )
 
 
 class ModelStreamCommitContractError(RuntimeError):
@@ -235,10 +238,17 @@ class RuntimeSessionModelStreamEventCommitPort:
         *,
         runtime_session: RuntimeSession,
         state: LoopState | None,
+        start_transaction_companion: ModelLifecycleTransactionCompanion | None = None,
+        terminal_transaction_companion: (
+            ModelLifecycleTransactionCompanion | None
+        ) = None,
     ) -> None:
         self._runtime_session = runtime_session
         self._state = state
         self._physical_reservation: PhysicalOperationReservationFact | None = None
+        self._start_transaction_companion = start_transaction_companion
+        self._terminal_transaction_companion = terminal_transaction_companion
+        self._model_call_purpose = None
 
     @property
     def runtime_session(self) -> RuntimeSession:
@@ -299,6 +309,14 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model start batch does not match its frozen commit guard"
             )
+        self._validate_transaction_companion(
+            self._start_transaction_companion,
+            phase="start",
+            purpose=start.resolved_call.purpose,
+            resolved_model_call_id=guard.resolved_model_call_id,
+            stable_primary_event_id=start.id,
+        )
+        self._model_call_purpose = start.resolved_call.purpose
         safe_point_guard = guard.active_run_monitor_safe_point_guard
         if (safe_point_guard is None) != (
             start.active_run_monitor_delivery is None
@@ -424,7 +442,11 @@ class RuntimeSessionModelStreamEventCommitPort:
                     is None
                     and self._runtime_session.allow_unbootstrapped_test_events
                 ):
-                    return self._commit_in_writer(candidates, events=events)
+                    return self._commit_in_writer(
+                        candidates,
+                        events=events,
+                        transaction_companion=self._start_transaction_companion,
+                    )
                 from pulsara_agent.primitives.authority_materialization import (
                     PhysicalOperationKind,
                 )
@@ -440,6 +462,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                         reservation_id=physical_reservation_id,
                         owner_id=guard.resolved_model_call_id,
                         state=self._state,
+                        transaction_companion=self._start_transaction_companion,
                     )
                 )
                 self._physical_reservation = physical_reservation
@@ -620,6 +643,13 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model terminal end does not match its frozen commit guard"
             )
+        self._validate_transaction_companion(
+            self._terminal_transaction_companion,
+            phase="terminal",
+            purpose=self._model_call_purpose,
+            resolved_model_call_id=guard.resolved_model_call_id,
+            stable_primary_event_id=model_end.id,
+        )
         end_projection = model_end.terminal_projection
         if (
             projection.resolved_model_call_id != guard.resolved_model_call_id
@@ -747,7 +777,13 @@ class RuntimeSessionModelStreamEventCommitPort:
                         is None
                         and self._runtime_session.allow_unbootstrapped_test_events
                     ):
-                        result = self._commit_in_writer(candidates, events=events)
+                        result = self._commit_in_writer(
+                            candidates,
+                            events=events,
+                            transaction_companion=(
+                                self._terminal_transaction_companion
+                            ),
+                        )
                     else:
                         physical_reservation = self._require_physical_reservation(
                             resolved_model_call_id=guard.resolved_model_call_id
@@ -761,6 +797,9 @@ class RuntimeSessionModelStreamEventCommitPort:
                                     guard.model_stream_measurement_fingerprint
                                 ),
                                 state=self._state,
+                                transaction_companion=(
+                                    self._terminal_transaction_companion
+                                ),
                             )
                         )
                         result = self._confirmed_batch(candidates, result=write_result)
@@ -863,6 +902,7 @@ class RuntimeSessionModelStreamEventCommitPort:
         candidates: tuple[FrozenEventWriteCandidate, ...],
         *,
         events: tuple[AgentEvent, ...],
+        transaction_companion: ModelLifecycleTransactionCompanion | None = None,
     ) -> ConfirmedCommittedBatch:
         """Commit/reduce/enqueue without awaiting an observer callback.
 
@@ -876,6 +916,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             result = self._runtime_session.write_events_from_thread(
                 events,
                 state=self._state,
+                transaction_companion=transaction_companion,
             )
         except BaseException as original:
             try:
@@ -891,6 +932,28 @@ class RuntimeSessionModelStreamEventCommitPort:
                 self._runtime_session.latch_event_commit_outcome_unknown()
                 raise
         return self._confirmed_batch(candidates, result=result)
+
+    @staticmethod
+    def _validate_transaction_companion(
+        companion: ModelLifecycleTransactionCompanion | None,
+        *,
+        phase: str,
+        purpose: object,
+        resolved_model_call_id: str,
+        stable_primary_event_id: str,
+    ) -> None:
+        if companion is None:
+            return
+        identity = companion.identity
+        if (
+            identity.phase != phase
+            or identity.purpose != purpose
+            or identity.resolved_model_call_id != resolved_model_call_id
+            or identity.stable_primary_event_id != stable_primary_event_id
+        ):
+            raise ModelStreamCommitContractError(
+                "model lifecycle transaction companion identity drifted"
+            )
 
     @staticmethod
     def _decode_candidates(

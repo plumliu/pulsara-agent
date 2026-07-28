@@ -79,6 +79,13 @@ _DURABLE_PROJECTION_RELATIONS = (
     "durable_projection_repair_actions",
 )
 
+_COMPACTION_MEMORY_EXTRACTION_RELATIONS = (
+    "background_derived_work_budget_accounts",
+    "background_derived_work_budget_reservations",
+    "background_derived_work_budget_settlements",
+    "compaction_memory_extraction_result_candidates",
+)
+
 _RELATIONS_INTRODUCED_BY_VERSION = (
     ("pulsara_schema_migrations",),
     (),
@@ -89,6 +96,7 @@ _RELATIONS_INTRODUCED_BY_VERSION = (
     (),
     (),
     (),
+    _COMPACTION_MEMORY_EXTRACTION_RELATIONS,
 )
 _ALL_RELATIONS = tuple(
     name
@@ -173,6 +181,17 @@ _V5_RUNTIME_RELATION_PRIVILEGES: dict[str, tuple[str, ...]] = {
     "durable_projection_repair_actions": ("SELECT", "INSERT"),
 }
 
+_V9_RUNTIME_RELATION_PRIVILEGES: dict[str, tuple[str, ...]] = {
+    "background_derived_work_budget_accounts": ("SELECT", "INSERT", "UPDATE"),
+    "background_derived_work_budget_reservations": (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+    ),
+    "background_derived_work_budget_settlements": ("SELECT", "INSERT"),
+    "compaction_memory_extraction_result_candidates": ("SELECT", "INSERT"),
+}
+
 _V5_FUNCTION_ARGUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "pulsara_jsonb_text_array": ("pg_catalog.jsonb",),
     "pulsara_runtime_write_lock_key": ("pg_catalog.text", "pg_catalog.jsonb"),
@@ -219,7 +238,7 @@ _V5_RUNTIME_EXECUTABLE_FUNCTIONS = {
 
 
 def _manifest_payload(through_version: int) -> dict[str, object]:
-    if through_version < 0 or through_version > 8:
+    if through_version < 0 or through_version > 9:
         raise ValueError("unsupported manifest version")
     relations: list[dict[str, object]] = [
         _relation(
@@ -258,6 +277,19 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
                 runtime_privileges=_V5_RUNTIME_RELATION_PRIVILEGES[name],
             )
             for name in _DURABLE_PROJECTION_RELATIONS
+        )
+    if through_version >= 9:
+        relations.extend(
+            _relation(
+                name,
+                writable=any(
+                    privilege in {"INSERT", "UPDATE", "DELETE"}
+                    for privilege in _V9_RUNTIME_RELATION_PRIVILEGES[name]
+                ),
+                through_version=through_version,
+                runtime_privileges=_V9_RUNTIME_RELATION_PRIVILEGES[name],
+            )
+            for name in _COMPACTION_MEMORY_EXTRACTION_RELATIONS
         )
     extensions: tuple[dict[str, object], ...] = ()
     if through_version >= 1:
@@ -356,7 +388,7 @@ def build_postgres_schema_manifest(
 
 
 POSTGRES_SCHEMA_MANIFESTS = tuple(
-    build_postgres_schema_manifest(version) for version in range(9)
+    build_postgres_schema_manifest(version) for version in range(10)
 )
 POSTGRES_LATEST_SCHEMA_MANIFEST = POSTGRES_SCHEMA_MANIFESTS[-1]
 PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)

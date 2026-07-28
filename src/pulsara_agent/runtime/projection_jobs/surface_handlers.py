@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any
+from typing import Any, Coroutine, TypeVar
 
 from psycopg.rows import dict_row
 
@@ -39,6 +40,37 @@ from pulsara_agent.storage.postgres_connection_provider import (
 )
 
 
+_T = TypeVar("_T")
+
+
+def _run_on_owner_loop(
+    owner_loop: asyncio.AbstractEventLoop,
+    operation: Coroutine[Any, Any, _T],
+    *,
+    deadline_monotonic: float,
+) -> _T:
+    remaining = deadline_monotonic - monotonic()
+    if remaining <= 0:
+        operation.close()
+        raise TimeoutError("vector surface deadline exceeded")
+    if owner_loop.is_closed():
+        operation.close()
+        raise RuntimeError("vector surface owner event loop is closed")
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is owner_loop:
+        operation.close()
+        raise RuntimeError("vector surface worker cannot block its owner event loop")
+    future = asyncio.run_coroutine_threadsafe(operation, owner_loop)
+    try:
+        return future.result(timeout=remaining)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError("vector surface deadline exceeded") from exc
+
+
 def surface_handlers(
     *,
     connection_provider: VerifiedPostgresConnectionProviderProtocol,
@@ -56,6 +88,7 @@ def surface_handlers(
         ),
     ]
     if embedding is not None:
+        owner_loop = asyncio.get_running_loop()
         handlers.insert(
             1,
             VectorCanonicalMutationSurfaceHandler(
@@ -63,7 +96,8 @@ def surface_handlers(
                     connection_provider=connection_provider,
                     provider=embedding,
                     provider_name=embedding_provider_name,
-                )
+                ),
+                owner_loop=owner_loop,
             ),
         )
     return tuple(handlers)
@@ -108,6 +142,7 @@ class PostgresSearchIndexSurfaceHandler:
 @dataclass(slots=True)
 class VectorCanonicalMutationSurfaceHandler:
     sync: MemoryVectorIndexSync
+    owner_loop: asyncio.AbstractEventLoop
     surface: CanonicalMutationSurface = CanonicalMutationSurface.VECTOR_INDEX
 
     def apply(
@@ -138,7 +173,11 @@ class VectorCanonicalMutationSurfaceHandler:
                 results.append((memory_id, result.embedded_text_hash))
             return tuple(results)
 
-        results = asyncio.run(sync_all())
+        results = _run_on_owner_loop(
+            self.owner_loop,
+            sync_all(),
+            deadline_monotonic=deadline_monotonic,
+        )
         target = context_fingerprint(
             "canonical-mutation-vector-index-target:v1",
             {

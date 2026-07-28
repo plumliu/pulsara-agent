@@ -403,6 +403,9 @@ class MemoryReflectionEngine:
                         candidate_entry_id=candidate.entry_id,
                         candidate_index=index,
                         candidate_payload=candidate.payload,
+                        candidate_semantic_fingerprint=(
+                            _required_candidate_semantic_fingerprint(candidate)
+                        ),
                         candidate_payload_fingerprint=(
                             candidate_payload_fingerprint(candidate.payload)
                         ),
@@ -586,6 +589,15 @@ class MemoryReflectionEngine:
 def _parse_reflection_output(text: str) -> MemoryReflectionOutput:
     payload = json.loads(_json_object_text(text))
     return MemoryReflectionOutput.model_validate(payload)
+
+
+def _required_candidate_semantic_fingerprint(
+    candidate: PooledMemoryCandidate,
+) -> str:
+    semantic = candidate.candidate_semantic
+    if semantic is None:
+        raise ValueError("valid reflection candidate lacks shared semantic identity")
+    return semantic.semantic_fingerprint
 
 
 def cheap_memory_hints(text: str) -> list[MemoryReflectionHint]:

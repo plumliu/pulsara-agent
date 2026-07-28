@@ -23,6 +23,13 @@ from pulsara_agent.primitives.frozen import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     BoundedRuntimeFailureDiagnosticFact,
 )
+from pulsara_agent.primitives.governance_evidence import (
+    GovernanceStoredEventReferenceFact,
+)
+from pulsara_agent.primitives.compaction import (
+    BackgroundDerivedWorkBudgetAccountFact,
+    BackgroundDerivedWorkBudgetPolicyFact,
+)
 from pulsara_agent.primitives.terminal_projection import (
     ToolResultTerminalProjectionEndReferenceFact,
 )
@@ -32,6 +39,12 @@ from pulsara_agent.message.blocks import ToolResultState
 class DurableProjectionKind(StrEnum):
     RUN_TIMELINE = "run_timeline.v1"
     TOOL_RESULT_EXECUTION_EVIDENCE = "tool_result_execution_evidence.v1"
+    COMPACTION_MEMORY_EXTRACTION = "compaction_memory_extraction.v1"
+
+
+class DurableProjectionExecutionClass(StrEnum):
+    DATABASE_PROJECTION = "database_projection"
+    SESSION_MODEL_PROJECTION = "session_model_projection"
 
 
 class DurableProjectionTargetUpdatePolicy(StrEnum):
@@ -43,6 +56,11 @@ class DurableProjectionJobStatus(StrEnum):
     PENDING = "pending"
     LEASED = "leased"
     RETRY_WAIT = "retry_wait"
+    MODEL_RETRY_WAIT = "model_retry_wait"
+    RESULT_READY = "result_ready"
+    SETTLEMENT_WRITING = "settlement_writing"
+    SETTLEMENT_RETRY_WAIT = "settlement_retry_wait"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     SUCCEEDED = "succeeded"
     SUPERSEDED = "superseded"
     DEAD_LETTER = "dead_letter"
@@ -179,6 +197,12 @@ class DurableProjectionHandlerContractFact(FrozenFactBase):
     idempotency_contract_fingerprint: str
     contract_fingerprint: str
 
+    @property
+    def execution_class(self) -> DurableProjectionExecutionClass:
+        if self.projection_kind is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION:
+            return DurableProjectionExecutionClass.SESSION_MODEL_PROJECTION
+        return DurableProjectionExecutionClass.DATABASE_PROJECTION
+
     @model_validator(mode="after")
     def _validate_contract(self) -> "DurableProjectionHandlerContractFact":
         if not self.accepted_source_event_types or len(
@@ -190,6 +214,9 @@ class DurableProjectionHandlerContractFact(FrozenFactBase):
                 DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
             ),
             DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (
+                DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
+            ),
+            DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION: (
                 DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
             ),
         }[self.projection_kind]
@@ -494,9 +521,69 @@ class DurableProjectionSupersededResultReceiptFact(FrozenFactBase):
     receipt_fingerprint: str
 
 
+class CompactionMemoryExtractionProjectionResultReceiptFact(FrozenFactBase):
+    schema_version: Literal[
+        "compaction_memory_extraction_projection_result_receipt.v1"
+    ] = "compaction_memory_extraction_projection_result_receipt.v1"
+    receipt_kind: Literal["compaction_memory_extraction"] = (
+        "compaction_memory_extraction"
+    )
+    receipt_id: str
+    projection_kind: Literal[DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION] = (
+        DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+    )
+    job_id: str
+    target_key: str
+    source_request_event_reference: DurableProjectionSourceEventReferenceFact
+    completed_event_reference: GovernanceStoredEventReferenceFact
+    completed_result_semantic_fingerprint: str
+    target_head_revision: int = Field(ge=1)
+    outbox_item_count: int = Field(ge=0, le=3)
+    outbox_item_accumulator: str
+    permanent_automatic_omission_count: int = Field(ge=0)
+    permanent_automatic_omission_semantic_accumulator: str
+    permanent_automatic_omission_attribution_accumulator: str
+    receipt_fingerprint: str
+
+
+class CompactionMemoryExtractionJobDeferralFact(FrozenFactBase):
+    schema_version: Literal["compaction_memory_extraction_job_deferral.v1"] = (
+        "compaction_memory_extraction_job_deferral.v1"
+    )
+    job_id: str
+    reason: Literal["driver_busy", "safe_point_stale"]
+    deferral_ordinal: int = Field(ge=1)
+    not_before_utc: datetime
+    deferral_policy_fingerprint: str
+    deferral_fingerprint: str
+
+
+class CompactionMemoryExtractionSupersededReceiptFact(FrozenFactBase):
+    schema_version: Literal[
+        "compaction_memory_extraction_superseded_receipt.v1"
+    ] = "compaction_memory_extraction_superseded_receipt.v1"
+    receipt_kind: Literal["compaction_memory_extraction_superseded"] = (
+        "compaction_memory_extraction_superseded"
+    )
+    receipt_id: str
+    projection_kind: Literal[DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION] = (
+        DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+    )
+    job_id: str
+    target_key: str
+    source_request_event_reference: DurableProjectionSourceEventReferenceFact
+    supersession_reason: Literal["graceful_session_close"] = (
+        "graceful_session_close"
+    )
+    dispatch_attempt_count: int = Field(ge=0)
+    receipt_fingerprint: str
+
+
 DurableProjectionResultReceiptFact: TypeAlias = Annotated[
     DurableProjectionAppliedResultReceiptFact
-    | DurableProjectionSupersededResultReceiptFact,
+    | DurableProjectionSupersededResultReceiptFact
+    | CompactionMemoryExtractionProjectionResultReceiptFact
+    | CompactionMemoryExtractionSupersededReceiptFact,
     Field(discriminator="receipt_kind"),
 ]
 
@@ -509,11 +596,16 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
     state_revision: int
     repair_generation: int
     attempt_count: int
+    dispatch_attempt_count: int = 0
+    settlement_generation: int = 0
     lease_generation: int
     lease_owner_id: str | None
     lease_expires_at: datetime | None
     next_attempt_at: datetime | None
     last_failure: BoundedRuntimeFailureDiagnosticFact | None
+    compaction_memory_deferral: (
+        CompactionMemoryExtractionJobDeferralFact | None
+    ) = None
     result_receipt_reference: DurableProjectionResultReceiptReferenceFact | None
     state_fingerprint: str
 
@@ -524,6 +616,8 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
                 self.state_revision,
                 self.repair_generation,
                 self.attempt_count,
+                self.dispatch_attempt_count,
+                self.settlement_generation,
                 self.lease_generation,
             )
             < 0
@@ -532,10 +626,25 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
         leased = self.status is DurableProjectionJobStatus.LEASED
         if leased != bool(self.lease_owner_id and self.lease_expires_at):
             raise ValueError("projection lease state matrix mismatch")
-        if self.status is DurableProjectionJobStatus.RETRY_WAIT and (
-            self.next_attempt_at is None or self.last_failure is None
-        ):
+        if self.status in {
+            DurableProjectionJobStatus.RETRY_WAIT,
+            DurableProjectionJobStatus.MODEL_RETRY_WAIT,
+            DurableProjectionJobStatus.SETTLEMENT_RETRY_WAIT,
+        } and (self.next_attempt_at is None or self.last_failure is None):
             raise ValueError("retry_wait requires next attempt and failure")
+        if self.compaction_memory_deferral is not None:
+            if (
+                self.status is not DurableProjectionJobStatus.PENDING
+                or self.next_attempt_at
+                != self.compaction_memory_deferral.not_before_utc
+                or self.last_failure is not None
+            ):
+                raise ValueError("model-job deferral state matrix mismatch")
+        elif (
+            self.status is DurableProjectionJobStatus.PENDING
+            and self.next_attempt_at is not None
+        ):
+            raise ValueError("pending not-before requires a typed model-job deferral")
         if (
             self.status
             in {
@@ -566,6 +675,7 @@ class LeasedDurableProjectionJob(FrozenFactBase):
     expected_state_revision: int
     repair_generation: int
     attempt_count: int
+    dispatch_attempt_count: int = 0
     lease_generation: int
     lease_owner_id: str
     lease_expires_at: datetime
@@ -964,6 +1074,8 @@ class RuntimeSessionOwnerBootstrapCandidateFact(FrozenFactBase):
     )
     session_owner: RuntimeSessionOwnerSemanticFact
     expected_admission_epoch_fingerprint: str
+    background_budget_policy: BackgroundDerivedWorkBudgetPolicyFact
+    background_budget_account: BackgroundDerivedWorkBudgetAccountFact
     candidate_fingerprint: str
 
 
@@ -975,6 +1087,7 @@ class RuntimeSessionBootstrapStateFact(FrozenFactBase):
     ordered_active_cutover_fingerprints: tuple[str, ...]
     ordered_pre_activation_cutover_fingerprints: tuple[str, ...]
     cutover_set_accumulator: str
+    background_budget_account_fingerprint: str
     admission_epoch_fingerprint: str
     state_fingerprint: str
 
@@ -2303,6 +2416,21 @@ _FACT_FINGERPRINTS: tuple[tuple[type[FrozenFactBase], str, str], ...] = (
         "durable-projection-superseded-result-receipt:v1",
     ),
     (
+        CompactionMemoryExtractionProjectionResultReceiptFact,
+        "receipt_fingerprint",
+        "compaction-memory-extraction-projection-result-receipt:v1",
+    ),
+    (
+        CompactionMemoryExtractionJobDeferralFact,
+        "deferral_fingerprint",
+        "compaction-memory-extraction-job-deferral:v1",
+    ),
+    (
+        CompactionMemoryExtractionSupersededReceiptFact,
+        "receipt_fingerprint",
+        "compaction-memory-extraction-superseded-receipt:v1",
+    ),
+    (
         DurableProjectionJobOperationalStateFact,
         "state_fingerprint",
         "durable-projection-job-operational-state:v1",
@@ -2773,6 +2901,7 @@ def projection_target_key(
     runtime_session_id: str,
     run_id: str,
     tool_call_id: str | None = None,
+    source_event_id: str | None = None,
 ) -> str:
     """Derive the closed target identity for one projection kind."""
 
@@ -2782,6 +2911,16 @@ def projection_target_key(
         return "run:" + context_fingerprint(
             "durable-projection-run-target:v1",
             {"runtime_session_id": runtime_session_id, "run_id": run_id},
+        )
+    if projection_kind is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION:
+        if not source_event_id:
+            raise ValueError("compaction extraction target requires request event ID")
+        return "compaction-memory-extraction:" + context_fingerprint(
+            "compaction-memory-extraction-target:v1",
+            {
+                "runtime_session_id": runtime_session_id,
+                "request_event_id": source_event_id,
+            },
         )
     if not tool_call_id:
         raise ValueError("tool-result evidence target requires tool_call_id")

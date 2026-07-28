@@ -291,3 +291,18 @@ frontier，不内嵌O(history) ordered item列表。
 Superseded result receipt引用effective applied receipt；它不复制或重写effective artifacts。
 Target conflict、missing artifact或digest/codec drift必须显示authority diagnostic并停止推进
 target。
+
+## 13. Compaction-memory artifacts
+
+Human-evidence manifest root/pages与Call B typed input document使用content-addressed、contract-bound
+artifact references。Manifest preparation与Call A并行；Call A completion只执行无等待的
+`consume_full_or_abandon`，pending write被逻辑abandon但physical owner必须继续持有artifact/DB lease直到
+EXITED，并在Host close释放依赖前drain。
+
+Call B input artifact保存typed semantic/attribution document，用于restart exact hydrate；它不是raw model
+output。Raw output authority只存在于model terminal projection。Artifact digest/media type/codec、owner
+session与document fingerprint任一漂移都fail closed，不允许用summary或当前transcript重新生成替代输入。
+
+Input artifact write复用当前model attempt的absolute deadline并安装PostgreSQL statement timeout。写入由
+driver-owned physical operation持有；waiter cancellation只detach，operation真正退出前不得释放artifact/
+database dependency或让Host close成功。

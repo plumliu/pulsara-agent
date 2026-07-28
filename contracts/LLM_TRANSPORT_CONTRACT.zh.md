@@ -373,3 +373,15 @@ terminal-maintenance owner写 `started_publication` Failed。Completed publicati
 启动 memory candidate projection owner，也不重发 summarizer。Compaction core exact receipt与
 side LLM model stream各自有唯一 owner，caller cancellation不能让任一方用 ledger post-scan
 猜测结果。
+
+## 14. Background compaction-memory model call
+
+Memory extraction使用独立`direct_internal_call` lifecycle与
+`ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION`，不复用Call A request、provider prefix、Host ingress
+或conversation cache identity。Provider input只有privileged root、canonical runtime request和由
+Pulsara选择的完整sanitized human evidence nodes。Model terminal projection是raw output唯一durable
+authority；parser只读取confirmed projection，不另存raw output artifact。
+
+Purpose-neutral model lifecycle companion在ModelCallStart事务内推进job dispatch ordinal并reserve
+existing model quote，在ModelCallEnd事务内settle同一reservation。`llm`层不得import memory/job/account
+concrete DTO，也不得接受result settlement再次修改background budget。

@@ -198,7 +198,7 @@ def test_registry_validates_resources_and_prefix_recurrence() -> None:
     POSTGRES_MIGRATION_REGISTRY.verify_resources()
     assert tuple(
         definition.version for definition in POSTGRES_MIGRATION_REGISTRY.definitions
-    ) == tuple(range(9))
+    ) == tuple(range(10))
     assert (
         POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         == POSTGRES_MIGRATION_REGISTRY.definitions[-1].registry_prefix_fingerprint
@@ -225,8 +225,8 @@ def test_historical_migration_identity_has_append_only_golden_vectors() -> None:
             definition.registry_prefix_fingerprint,
         )
         for manifest, definition in zip(
-            POSTGRES_SCHEMA_MANIFESTS,
-            POSTGRES_MIGRATION_REGISTRY.definitions,
+            POSTGRES_SCHEMA_MANIFESTS[:9],
+            POSTGRES_MIGRATION_REGISTRY.definitions[:9],
             strict=True,
         )
     ) == (
@@ -288,6 +288,17 @@ def test_historical_migration_identity_has_append_only_golden_vectors() -> None:
         61,
         61,
         61,
+        65,
+    )
+    latest = POSTGRES_MIGRATION_REGISTRY.definition(9)
+    assert (
+        POSTGRES_SCHEMA_MANIFESTS[9].manifest_fingerprint,
+        latest.migration_contract_fingerprint,
+        latest.registry_prefix_fingerprint,
+    ) == (
+        "sha256:10826515eb397b64bbb5c98032e4d42550528d01bfcded7000ddbee2981616db",
+        "sha256:70cbfad54df80df018ae232ce211cb6930b82425092bd60a1624d2d1ca431762",
+        "sha256:5ecbc55255f53e41f1daa58efd2573ba8c9f5cb9b6b43e03e3505194f018d411",
     )
     assert all(
         identity.object_name != "memory_governance_decisions"
@@ -333,7 +344,7 @@ def test_fresh_database_migrates_to_latest_and_second_run_is_noop() -> None:
             preparation_port=preparation_port,
         )
         assert final.status == "migrated"
-        assert final.migration_head_version == 8
+        assert final.migration_head_version == 9
         assert final.registry_prefix_fingerprint == (
             POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         )
@@ -369,12 +380,47 @@ def test_final_binary_advances_historical_v4_database_through_all_dpj_gates() ->
             preparation_port=preparation_port,
         )
         assert final.status == "migrated"
-        assert final.applied_versions == (8,)
-        assert final.migration_head_version == 8
+        assert final.applied_versions == (8, 9)
+        assert final.migration_head_version == 9
         assert final.registry_prefix_fingerprint == (
             POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         )
         assert _deep_fingerprint(database)
+
+
+def test_nonempty_v8_world_requires_reset_before_compaction_memory_hard_cut() -> None:
+    with _fresh_database(migrated=False) as database:
+        v8_definitions = POSTGRES_MIGRATION_REGISTRY.definitions[:9]
+        v8_registry = PostgresMigrationRegistry(
+            definitions=v8_definitions,
+            registry_fingerprint=v8_definitions[-1].registry_prefix_fingerprint,
+        )
+        v8_runner, preparation_port = _migration_runner(
+            database,
+            registry=v8_registry,
+        )
+        first = v8_runner.migrate(deadline_monotonic=monotonic() + 120.0)
+        assert first.migration_head_version == 5
+        v8 = _advance_projection_migrations(
+            runner=v8_runner,
+            preparation_port=preparation_port,
+        )
+        assert v8.migration_head_version == 8
+
+        with psycopg.connect(database.admin_dsn, autocommit=True) as connection:
+            connection.execute("SET session_replication_role = replica")
+            connection.execute(
+                "INSERT INTO public.sessions (id, workspace_root) VALUES (%s, %s)",
+                ("runtime:nonempty-v8", "/tmp/nonempty-v8"),
+            )
+            connection.execute("SET session_replication_role = origin")
+
+        final_runner, _ = _migration_runner(database)
+        with pytest.raises(PostgresSchemaError) as failure:
+            final_runner.migrate(deadline_monotonic=monotonic() + 120.0)
+        assert failure.value.code is (
+            PostgresSchemaFailureCode.RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1
+        )
 
 
 def test_concurrent_migrators_serialize_on_database_advisory_lock() -> None:
@@ -491,7 +537,7 @@ def test_migration_commit_confirmation_has_distinct_full_none_and_conflict() -> 
         )
         outcome, connection = runner._confirm_migration_commit(  # noqa: SLF001
             runtime_identity=identity,
-            definition=POSTGRES_MIGRATION_REGISTRY.definition(8),
+            definition=POSTGRES_MIGRATION_REGISTRY.definition(9),
             deadline_monotonic=monotonic() + 30.0,
         )
         assert outcome is PostgresCommitConfirmation.FULL
@@ -582,7 +628,7 @@ def test_runtime_role_can_read_ledger_but_cannot_create_schema_objects(
         autocommit=True,
     ) as connection:
         rows = read_migration_ledger(connection)
-        assert rows is not None and rows[-1].version == 8
+        assert rows is not None and rows[-1].version == 9
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute(
                 f"CREATE TABLE public.forbidden_{uuid4().hex} (id integer)"

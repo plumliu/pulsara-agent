@@ -55,8 +55,8 @@ SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
     "profile_id",
     (
         "execution_evidence_projection_error.v1",
-        "compaction_candidate_projection_preparation_error.v1",
-        "compaction_candidate_projection_owner_installation_error.v1",
+        "durable_projection_job_error.v1",
+        "runtime_session_bootstrap_error.v1",
     ),
 )
 def test_runtime_failure_diagnostic_profiles_never_persist_raw_error_text(

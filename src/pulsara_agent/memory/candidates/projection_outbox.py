@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
     AgentEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionMemoryExtractionCompletedEvent,
     MemoryReflectionCompletedEvent,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
@@ -41,6 +41,13 @@ class CandidateProjectionOutboxRow:
             raise ValueError("candidate projection outbox entry ID drifted")
         if self.candidate.payload != self.item.candidate_payload:
             raise ValueError("candidate projection outbox payload drifted")
+        semantic = self.candidate.candidate_semantic
+        if (
+            semantic is None
+            or semantic.semantic_fingerprint
+            != self.item.candidate_semantic_fingerprint
+        ):
+            raise ValueError("candidate projection outbox semantic drifted")
         identity = stable_event_identity(
             producer_event,
             runtime_session_id=runtime_session_id,
@@ -222,10 +229,11 @@ class PostgresCandidateProjectionOutbox:
                     producer_payload_fingerprint,
                     producer_event_identity,
                     candidate_payload_fingerprint,
+                    candidate_semantic_fingerprint,
                     candidate_attribution_fingerprint,
                     candidate_payload,
                     status
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
                 on conflict (
                     runtime_session_id,
                     producer_kind,
@@ -243,6 +251,7 @@ class PostgresCandidateProjectionOutbox:
                     identity.payload_fingerprint,
                     Jsonb(identity.model_dump(mode="json")),
                     row.item.candidate_payload_fingerprint,
+                    row.item.candidate_semantic_fingerprint,
                     row.item.candidate_attribution_fingerprint,
                     Jsonb(candidate_payload),
                 ),
@@ -575,8 +584,8 @@ def _validate_producer_rows(
     expected_kind: CandidateProjectionProducerKind
     if isinstance(producer_event, MemoryReflectionCompletedEvent):
         expected_kind = CandidateProjectionProducerKind.REFLECTION
-    elif isinstance(producer_event, ContextCompactionMemoryCandidatesProposedEvent):
-        expected_kind = CandidateProjectionProducerKind.COMPACTION
+    elif isinstance(producer_event, ContextCompactionMemoryExtractionCompletedEvent):
+        expected_kind = CandidateProjectionProducerKind.COMPACTION_MEMORY_EXTRACTION
     else:
         raise TypeError("candidate projection producer event is unsupported")
     if len(rows) != len({row.item.candidate_entry_id for row in rows}):
@@ -623,6 +632,9 @@ def _row_from_postgres(row: dict[str, object]) -> CandidateProjectionOutboxRow:
             "candidate_entry_id": row["candidate_entry_id"],
             "candidate_index": row["candidate_index"],
             "candidate_payload": candidate.payload,
+            "candidate_semantic_fingerprint": row[
+                "candidate_semantic_fingerprint"
+            ],
             "candidate_payload_fingerprint": row["candidate_payload_fingerprint"],
             "candidate_attribution_fingerprint": row["candidate_attribution_fingerprint"],
             "item_fingerprint": row["outbox_item_fingerprint"],

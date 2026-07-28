@@ -222,3 +222,22 @@ Durable projection facts与pure contracts位于top-level`projection_jobs`，lowe
 
 Canonical mutation拆成pure factory、PostgreSQL repository、mutation writer/transaction capability；
 D3 event/job/result/schema fingerprint与运行语义不变。Runtime publisher仍只执行O(1) wake。
+
+## 12. Session-model projection kind
+
+`compaction_memory_extraction.v1`是D3的`SESSION_MODEL_PROJECTION` kind。Trigger只能是stored
+`ContextCompactionMemoryExtractionRequestedEvent`，target key覆盖session、memory domain、scope与
+extension contract；job ID由stored Request reference、target key和handler contract派生。Claim只推进
+lease generation，ModelCallStart companion才推进dispatch attempt。
+
+Stored Request中的extraction policy是唯一执行真源。V1 maximum attempts固定为3；seed policy必须从
+exact Request派生并与active seed逐字段相等，不能回退到通用projection的12次策略。Claim耗尽、retry
+delay、provider/physical deadline都消费该source-derived policy。ModelCallStart companion必须在同一
+transaction exact-read Request并join job policy、resolved target与background account policy；任一漂移
+都拒绝dispatch。V1 provider/output retry recurrence固定为1s、2s、4s且无jitter；recovery与live
+failure必须调用同一个source-derived schedule。
+
+Handler可进入`RESULT_READY`，其中只保存stable FrozenEventWriteCandidate与immutable candidate outbox
+plan，不保存physical rows/current lease。Settlement writer通过RuntimeSession EventLog transaction
+companion原子提交event、receipt/head/outbox/job success。Result settlement对background budget表只读；
+retry/close可更换physical generation/deadline，但provider与stable result payload不可重建。

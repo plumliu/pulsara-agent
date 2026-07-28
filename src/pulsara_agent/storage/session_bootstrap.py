@@ -13,6 +13,11 @@ from pulsara_agent.event_log.transcript_prefix import (
     EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.primitives.compaction import (
+    BackgroundDerivedWorkBudgetAccountFact,
+    DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+    build_background_budget_genesis,
+)
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
@@ -75,6 +80,11 @@ def build_runtime_session_bootstrap_candidate(
             schema_version="runtime_session_owner_bootstrap_candidate.v1",
             session_owner=owner,
             expected_admission_epoch_fingerprint=(expected_admission_epoch_fingerprint),
+            background_budget_policy=DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+            background_budget_account=build_background_budget_genesis(
+                runtime_session_id=runtime_session_id,
+                policy=DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+            ),
         ),
     )
 
@@ -236,10 +246,21 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                         (candidate.session_owner.runtime_session_id,),
                     ).fetchone()[0]
                 )
+                budget_count = int(
+                    connection.execute(
+                        """
+                        SELECT count(*)
+                        FROM public.background_derived_work_budget_accounts
+                        WHERE runtime_session_id = %s
+                        """,
+                        (candidate.session_owner.runtime_session_id,),
+                    ).fetchone()[0]
+                )
                 if (
                     row is None
                     and active_count == 0
                     and pre_count == 0
+                    and budget_count == 0
                     and epoch.epoch_fingerprint
                     == candidate.expected_admission_epoch_fingerprint
                 ):
@@ -327,6 +348,29 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     cutover.cutover_fingerprint,
                 ),
             )
+        account = candidate.background_budget_account
+        policy = candidate.background_budget_policy
+        connection.execute(
+            """
+            INSERT INTO public.background_derived_work_budget_accounts (
+                runtime_session_id,
+                policy_payload,
+                policy_fingerprint,
+                account_revision,
+                account_payload,
+                account_fingerprint
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (runtime_session_id) DO NOTHING
+            """,
+            (
+                account.runtime_session_id,
+                Jsonb(policy.model_dump(mode="json")),
+                policy.policy_fingerprint,
+                account.account_revision,
+                Jsonb(account.model_dump(mode="json")),
+                account.account_fingerprint,
+            ),
+        )
 
     @staticmethod
     def _expected_cutovers(
@@ -496,6 +540,36 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             or pre_cutovers != expected_pre
         ):
             return None
+        budget_row = connection.execute(
+            """
+            SELECT policy_payload, policy_fingerprint, account_revision,
+                   account_payload, account_fingerprint
+            FROM public.background_derived_work_budget_accounts
+            WHERE runtime_session_id = %s
+            """,
+            (candidate.session_owner.runtime_session_id,),
+        ).fetchone()
+        if budget_row is None or (
+            budget_row[0] != candidate.background_budget_policy.model_dump(mode="json")
+            or str(budget_row[1])
+            != candidate.background_budget_policy.policy_fingerprint
+        ):
+            return None
+        try:
+            current_budget_account = (
+                BackgroundDerivedWorkBudgetAccountFact.model_validate(budget_row[3])
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            current_budget_account.runtime_session_id
+            != candidate.session_owner.runtime_session_id
+            or current_budget_account.policy_fingerprint
+            != candidate.background_budget_policy.policy_fingerprint
+            or int(budget_row[2]) != current_budget_account.account_revision
+            or str(budget_row[4]) != current_budget_account.account_fingerprint
+        ):
+            return None
         active_fingerprints = tuple(
             item.cutover_fingerprint for item in active_cutovers
         )
@@ -514,6 +588,9 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                         "active": active_fingerprints,
                         "pre_activation": pre_fingerprints,
                     },
+                ),
+                background_budget_account_fingerprint=(
+                    current_budget_account.account_fingerprint
                 ),
                 admission_epoch_fingerprint=(
                     candidate.expected_admission_epoch_fingerprint

@@ -32,7 +32,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log.serialization import (
     canonical_event_payload_bytes,
-    freeze_event_write_candidate,
+    stable_event_identity,
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.primitives import context_fingerprint, freeze_json
@@ -776,24 +776,6 @@ def _join_projection_parts(value: dict[str, object]) -> str:
     if not isinstance(parts, list) or any(not isinstance(part, str) for part in parts):
         raise RuntimeError("model projection block parts state drifted")
     return "".join(parts)
-
-
-def stable_event_identity(
-    event: AgentEvent,
-    *,
-    runtime_session_id: str,
-) -> StableEventIdentityFact:
-    candidate = freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
-    return build_frozen_fact(
-        StableEventIdentityFact,
-        schema_version="stable_event_identity.v2",
-        runtime_session_id=runtime_session_id,
-        event_id=candidate.event_id,
-        event_type=candidate.event_type,
-        event_schema_version=candidate.event_schema_version,
-        event_schema_fingerprint=candidate.event_schema_fingerprint,
-        payload_fingerprint=candidate.payload_fingerprint,
-    )
 
 
 def build_model_stream_semantic_commit_measurement(

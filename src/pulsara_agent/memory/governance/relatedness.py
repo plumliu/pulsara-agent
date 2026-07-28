@@ -17,7 +17,10 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    ValidCandidatePayload,
+    memory_candidate_semantic_fingerprint,
+)
 from pulsara_agent.memory.candidates.pool import PooledMemoryCandidate
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
@@ -539,18 +542,28 @@ class GovernanceRelatednessService:
                     or view.status is not memory.NodeStatus.ACTIVE
                 ):
                     continue
-                exact = _normalize(view.statement) == _normalize(spec.statement)
+                exact = (
+                    view.candidate_semantic_fingerprint
+                    == spec.candidate_semantic_fingerprint
+                )
+                validated_scores = {
+                    channel: score
+                    for channel, score in scores.items()
+                    if channel != "exact" or exact
+                }
                 channels = tuple(
                     channel
                     for channel in ("exact", "alias", "lexical", "dense", "inline_gap")
-                    if channel in scores
+                    if channel in validated_scores
                 )
+                if not channels:
+                    continue
                 selected.append(
                     RelatedCanonicalMemory(
                         view=view,
                         match_channels=channels,
                         is_exact_duplicate=exact,
-                        internal_scores=MappingProxyType(dict(scores)),
+                        internal_scores=MappingProxyType(validated_scores),
                     )
                 )
             selected.sort(key=_candidate_sort_key)
@@ -630,16 +643,28 @@ class _CandidateSpec:
     lexical_text: str
     scope: str
     memory_type: str
+    candidate_semantic_fingerprint: str
 
 
 def _candidate_spec(candidate: PooledMemoryCandidate) -> _CandidateSpec | None:
     if not isinstance(candidate.payload, ValidCandidatePayload):
         return None
     value = candidate.payload.candidate
-    context = [value.statement]
-    if candidate.user_quote and _normalize(candidate.user_quote) != _normalize(
-        value.statement
+    expected_semantic_fingerprint = memory_candidate_semantic_fingerprint(
+        kind=value.kind,
+        scope=value.scope,
+        statement=value.statement,
+    )
+    if (
+        candidate.candidate_semantic is None
+        or candidate.candidate_semantic.semantic_fingerprint
+        != expected_semantic_fingerprint
     ):
+        raise ValueError("relatedness candidate shared semantic identity drifted")
+    context = [value.statement]
+    if candidate.user_quote and _normalize_discovery_text(
+        candidate.user_quote
+    ) != _normalize_discovery_text(value.statement):
         context.append(candidate.user_quote)
     applies_when = getattr(value, "applies_when", None)
     do_not_apply_when = getattr(value, "do_not_apply_when", None)
@@ -656,6 +681,7 @@ def _candidate_spec(candidate: PooledMemoryCandidate) -> _CandidateSpec | None:
         ),
         scope=value.scope,
         memory_type=value.kind,
+        candidate_semantic_fingerprint=expected_semantic_fingerprint,
     )
 
 
@@ -701,7 +727,7 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-def _normalize(value: str) -> str:
+def _normalize_discovery_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
@@ -734,7 +760,7 @@ def _alias_expansions(
     text: str,
     groups: Sequence[Sequence[str]],
 ) -> tuple[str, ...]:
-    normalized = _normalize(text)
+    normalized = _normalize_discovery_text(text)
     expanded: list[str] = []
     for group in groups:
         matched = [alias for alias in group if _contains_alias(normalized, alias)]
@@ -745,7 +771,7 @@ def _alias_expansions(
 
 
 def _contains_alias(text: str, alias: str) -> bool:
-    normalized_alias = _normalize(alias)
+    normalized_alias = _normalize_discovery_text(alias)
     if not normalized_alias:
         return False
     if any("\u4e00" <= character <= "\u9fff" for character in normalized_alias):

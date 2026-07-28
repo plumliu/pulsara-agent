@@ -1,6 +1,7 @@
 """Semantic graph persistence backends."""
 
 from pulsara_agent.graph.in_memory import InMemoryGraphStore
+from pulsara_agent.graph.jsonld_codec import normalize_jsonld_document
 from pulsara_agent.graph.mutable import MutableCanonicalMemoryStore
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
@@ -13,4 +14,5 @@ __all__ = [
     "MutableCanonicalMemoryStore",
     "OxigraphGraphStore",
     "PostgresGraphStore",
+    "normalize_jsonld_document",
 ]

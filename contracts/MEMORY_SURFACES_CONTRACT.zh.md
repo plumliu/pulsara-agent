@@ -622,14 +622,24 @@ authority：
 |---|---|---|
 | MAIN_AGENT_TOOL | accepted model terminal projection + control disposition + terminal tool pair | deterministic main-agent builder |
 | REFLECTION | `MemoryReflectionCompletedEvent` ordered candidate attributions | transactional projection outbox |
-| COMPACTION | `ContextCompactionMemoryCandidatesProposedEvent` + confirmed summary artifact/extractor contract | transactional projection outbox |
+| COMPACTION | `ContextCompactionMemoryExtractionCompletedEvent` + exact human evidence + extraction contract | transactional projection outbox |
 | GOVERNANCE | canonical decision/UOW attribution | audit-only，不再进入 pending governance |
 
 Main-agent candidate ID必须由 source tool-call identity与 versioned builder contract确定性派生；
 不得在 memory tool 或 replay 中生成随机替代 ID。Reflection completion必须逐项保存 candidate
-entry ID、payload fingerprint、index与quoted-evidence refs。Compaction必须绑定 summary content
-hash、extractor ID/version/contract fingerprint、raw candidate index、parsed payload fingerprint与
-intent fingerprint。
+entry ID、payload fingerprint、index与quoted-evidence refs。Compaction occurrence必须绑定exact Request、
+D3 job、output ordinal、verified human evidence与extraction contract；summary不是candidate evidence或
+semantic identity的一部分。
+
+所有valid producer使用同一个`memory_candidate_semantic.v2` factory。该semantic只覆盖kind、resolved
+scope与规范化statement；origin、tool call、reflection event、compaction/request/job/model、evidence ordinal
+均只属于occurrence attribution。Candidate ID与pool entry ID保持producer-specific occurrence identity，
+不能直接等同于shared semantic fingerprint。
+
+规范化statement只做NFC、line-ending canonicalization与outer trim，保留大小写和内部空白。Canonical
+memory view必须从kind/scope/statement重算同一fingerprint；relatedness与executor只能比较该fingerprint
+决定exact duplicate。Lexical/alias search可以使用更宽松的discovery normalization，但不得升级为
+duplicate authority。
 
 用户原话是独立 typed evidence。Destructive replacement/supersede只能使用经 stable transcript
 entry exact span验证的 `canonical_user_span`；reflection-reported 或 compaction summary quote不能
@@ -657,3 +667,14 @@ canonical mutation commit port。全部对象共享exact physical transaction id
 每个public operation先验证ACTIVE scope/owner/generation/facade kind；scope先停止新borrow并drain，
 再revoke全部facade/commit port，随后commit/rollback并归还connection。公开bundle不暴露raw
 connection、cursor、generic SQL或concrete repository；保留任一facade到scope外必须在SQL前fail closed。
+
+## 16. Post-compaction candidate boundary
+
+Compaction core不再拥有candidate policy、parser、pool或projection outbox。Memory-owned extension在Call A
+之后通过D3 session-model job运行独立Call B，V1只接受最多3个`Preference` candidate。模型只能给出
+statement与输入中已有的evidence node IDs；scope、authority、verification、candidate ID、timestamp和
+semantic fingerprint全部由runtime factory决定。
+
+Extraction result先成为immutable RESULT_READY event candidate，再由RuntimeSession writer原子写producer
+event与candidate outbox。Outbox physical rows只能从stored Completed event及immutable plan确定性lower；
+candidate进入pending pool后仍必须经过普通governance，任何extraction结果都不能直接写canonical memory。

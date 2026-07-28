@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -41,7 +40,6 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     EventContext,
     ModelCallControlDispositionResolvedEvent,
@@ -89,15 +87,11 @@ from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.raw_provider import RawProviderFailure
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.memory import InMemoryCandidatePool, MemoryDomainContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
-from pulsara_agent.memory.candidates.projection_outbox import (
-    CandidateProjectionOutboxDispatcher,
-    InMemoryCandidateProjectionOutbox,
-    MemoryCandidateProjectionCommitPort,
+from pulsara_agent.memory.compaction.extension import (
+    MemoryCompactionPostCompletionExtension,
 )
-from pulsara_agent.ontology import memory
+from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
 from pulsara_agent.capability.types import CapabilityProjectionResolveContext
@@ -119,12 +113,6 @@ from pulsara_agent.runtime.approval import (
     ToolApprovalDecision,
 )
 from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
-from pulsara_agent.runtime.compaction.candidates import (
-    CandidatePoolCompactionMemoryCandidateSink,
-    ContextCompactionMemoryCandidatePolicy,
-    compaction_extractor_contract,
-    parse_compaction_memory_candidates,
-)
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.compaction.commit import (
     CompactionCommitPendingAfterCancellation,
@@ -154,7 +142,7 @@ from pulsara_agent.runtime.compaction.service import (
     build_metadata_only_compaction_input,
     production_compaction_prompt,
 )
-from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
 import pulsara_agent.runtime.compaction.service as compaction_service_module
 from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
@@ -190,6 +178,7 @@ from pulsara_agent.primitives.long_horizon import (
     RolloutBudgetBucket,
     RolloutReservationFact,
 )
+from tests.support.model_call import test_resolved_target_fact
 
 
 class CompactScriptedTransport:
@@ -388,9 +377,6 @@ async def _compact_attempt(
         if isinstance(exc.__cause__, Exception):
             raise exc.__cause__
         raise
-    await service.drain_candidate_projection_owners(
-        deadline_monotonic=monotonic() + 2.0
-    )
     return result
 
 
@@ -464,7 +450,6 @@ def _compaction_service(**kwargs: Any) -> ContextCompactionService:
     """Build compaction tests on the same RuntimeSession-owned model path as production."""
 
     runtime_session = kwargs.get("runtime_session")
-    sink = kwargs.get("candidate_sink")
     if runtime_session is None:
         runtime_session_id = str(kwargs["event_log"].runtime_session_id)
         kwargs["runtime_session_id"] = runtime_session_id
@@ -480,19 +465,6 @@ def _compaction_service(**kwargs: Any) -> ContextCompactionService:
     if kwargs.get("event_commit_port") is None:
         kwargs["event_commit_port"] = RuntimeSessionCompactionEventCommitPort(
             runtime_session
-        )
-    if sink is not None and kwargs.get("candidate_projection_commit_port") is None:
-        repository = InMemoryCandidateProjectionOutbox()
-        kwargs["candidate_projection_commit_port"] = (
-            MemoryCandidateProjectionCommitPort(
-                runtime_session=runtime_session,
-                repository=repository,
-                dispatcher=CandidateProjectionOutboxDispatcher(
-                    runtime_session_id=runtime_session.runtime_session_id,
-                    repository=repository,
-                    candidate_pool=sink.candidate_pool,
-                ),
-            )
         )
     return ContextCompactionService(**kwargs)
 
@@ -963,7 +935,7 @@ class _FakeCompactionServiceBase:
     async def drain_pending_terminalizations(self, *, timeout_seconds: float) -> None:
         del timeout_seconds
 
-    async def stop_candidate_projection_admission_and_drain(
+    async def stop_post_completion_extension_admission_and_drain(
         self,
         *,
         deadline_monotonic: float,
@@ -1010,7 +982,6 @@ def _fake_compaction_attempt(
             "completed" if terminal_event is not None else "not_applicable"
         ),
         publication_errors=(),
-        candidate_projection_receipt=None,
     )
 
 
@@ -1188,34 +1159,6 @@ def test_context_compaction_events_round_trip() -> None:
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(completed)) == completed
 
-    summary = "summary text"
-    extractor_contract = compaction_extractor_contract(
-        ContextCompactionMemoryCandidatePolicy()
-    )
-    proposed = ContextCompactionMemoryCandidatesProposedEvent(
-        **ctx.event_fields(),
-        compaction_id="context_compaction:test",
-        source_event_id=completed.id,
-        source_event_sequence=2,
-        summary_artifact_id="artifact:summary",
-        candidate_entry_ids=[],
-        attempted_count=1,
-        proposed_count=0,
-        skipped_count=1,
-        duplicate_count=0,
-        error_count=0,
-        extractor_version=extractor_contract.extractor_version,
-        summary_content_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
-        summary_content_bytes=len(summary.encode("utf-8")),
-        extractor_contract=extractor_contract,
-        ordered_candidate_attributions=(),
-        completed_compaction_event_identity=stable_event_identity(
-            completed,
-            runtime_session_id="runtime:test",
-        ),
-    )
-    assert load_agent_event(dump_agent_event(proposed)) == proposed
-
 
 def test_strip_compaction_analysis_keeps_summary_only() -> None:
     raw = (
@@ -1230,153 +1173,6 @@ def test_strip_compaction_analysis_rejects_unclosed_private_blocks() -> None:
     assert strip_compaction_analysis("<summary>official handoff with no close") == ""
 
 
-def test_strip_compaction_analysis_rejects_tagless_summary_with_memory_candidates() -> (
-    None
-):
-    raw = """
-Useful handoff.
-<memory_candidates_json>{"candidates": []}</memory_candidates_json>
-"""
-
-    assert strip_compaction_analysis(raw) == ""
-
-
-def test_parse_compaction_summary_and_memory_candidates() -> None:
-    raw = """
-<analysis>private draft</analysis>
-<summary>Useful handoff.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub.",
-      "scope": "ctx:user",
-      "source_authority": "explicit_user_instruction"
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-
-    result = parse_compaction_memory_candidates(
-        raw,
-        workspace_scope="ctx:workspace/pulsara_agent",
-        workspace_kind="project",
-    )
-
-    assert result.attempted_count == 1
-    assert result.diagnostics == ()
-    assert result.skipped == ()
-    assert len(result.candidates) == 1
-    candidate = result.candidates[0].payload.candidate
-    assert candidate.kind == "Preference"
-    assert (
-        candidate.statement == "The user prefers syncing release before pushing GitHub."
-    )
-    assert candidate.scope == "ctx:workspace/pulsara_agent"
-    assert candidate.source_authority is memory.SourceAuthority.CONVERSATION_EVIDENCE
-    assert candidate.verification_status is memory.VerificationStatus.INFERRED
-    assert candidate.evidence_ids == ()
-    assert result.candidates[0].intent_fingerprint.startswith("sha256:")
-
-
-def test_parse_compaction_candidate_failure_does_not_drop_summary() -> None:
-    raw = "<summary>Useful handoff.</summary><memory_candidates_json>{broken</memory_candidates_json>"
-
-    assert strip_compaction_analysis(raw) == "Useful handoff."
-    result = parse_compaction_memory_candidates(
-        raw,
-        workspace_scope="ctx:workspace/pulsara_agent",
-        workspace_kind="project",
-    )
-
-    assert result.candidates == ()
-    assert result.diagnostics[0].code == "compaction_candidate_json_malformed"
-
-
-def test_parse_compaction_candidate_secret_filter_redacts() -> None:
-    raw = """
-<summary>Useful handoff.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {"kind": "Preference", "statement": "The API key is sk-1234567890SECRET"}
-  ]
-}
-</memory_candidates_json>
-"""
-
-    result = parse_compaction_memory_candidates(
-        raw,
-        workspace_scope="ctx:workspace/pulsara_agent",
-        workspace_kind="project",
-    )
-
-    assert result.candidates == ()
-    assert result.skipped[0].code == "compaction_candidate_secret_like_content"
-    assert result.skipped[0].redacted is True
-    assert "sk-123" not in result.skipped[0].reason
-    assert result.diagnostics[0].redacted is True
-
-
-def test_parse_compaction_candidate_ignores_missing_block_by_default() -> None:
-    result = parse_compaction_memory_candidates(
-        "<summary>Useful handoff.</summary>",
-        workspace_scope="ctx:workspace/pulsara_agent",
-        workspace_kind="project",
-    )
-
-    assert result.attempted_count == 0
-    assert result.candidates == ()
-    assert result.diagnostics == ()
-
-
-def test_parse_compaction_candidate_missing_block_can_be_diagnostic() -> None:
-    result = parse_compaction_memory_candidates(
-        "<summary>Useful handoff.</summary>",
-        workspace_scope="ctx:workspace/pulsara_agent",
-        workspace_kind="project",
-        policy=ContextCompactionMemoryCandidatePolicy(
-            missing_candidates_block_policy="diagnostic"
-        ),
-    )
-
-    assert result.attempted_count == 0
-    assert result.candidates == ()
-    assert result.diagnostics[0].code == "compaction_candidate_block_missing"
-
-
-def test_parse_compaction_candidate_transient_workspace_disabled() -> None:
-    raw = """
-<summary>Useful handoff.</summary>
-<memory_candidates_json>{"candidates": [{"kind": "Preference", "statement": "The user prefers concise output."}]}</memory_candidates_json>
-"""
-
-    result = parse_compaction_memory_candidates(
-        raw,
-        workspace_scope="ctx:workspace/transient",
-        workspace_kind="transient",
-    )
-
-    assert result.candidates == ()
-    assert (
-        result.diagnostics[0].code
-        == "compaction_candidates_disabled_for_transient_workspace"
-    )
-
-
-def test_context_compaction_memory_candidate_policy_defaults() -> None:
-    policy = ContextCompactionMemoryCandidatePolicy()
-
-    assert policy.enabled is True
-    assert policy.extract_on_manual is True
-    assert policy.extract_on_preflight is True
-    assert policy.extract_on_mid_turn is False
-    assert policy.missing_candidates_block_policy == "ignore"
-    assert policy.max_candidates_per_compaction == 3
-
-
 def test_compaction_prompt_preserves_yielded_terminal_process_continuation() -> None:
     prompt = production_compaction_prompt()
 
@@ -1384,14 +1180,6 @@ def test_compaction_prompt_preserves_yielded_terminal_process_continuation() -> 
     assert "long-running or background process" in prompt
     assert "continue with terminal_process" in prompt
     assert "rather than restarting the command" in prompt
-
-
-def test_compaction_prompt_can_omit_memory_candidate_instructions() -> None:
-    prompt = production_compaction_prompt(memory_candidates_enabled=False)
-
-    assert "memory_candidates_json" not in prompt
-    assert "durable-memory candidates" not in prompt
-    assert "an <analysis> block followed by a <summary> block." in prompt
 
 
 def test_compaction_metadata_only_input_is_smaller_than_full_observation_input() -> (
@@ -1517,6 +1305,64 @@ def test_manual_context_compaction_writes_summary_artifact_and_events() -> None:
     assert transport.contexts
     assert transport.contexts[0].tools == ()
     assert "Do NOT call any tools" in (transport.contexts[0].system_prompt or "")
+
+
+def test_completed_extraction_request_batch_retires_terminal_owner(tmp_path) -> None:
+    class YieldingCompactTransport(CompactScriptedTransport):
+        async def stream(self, **kwargs) -> AsyncIterator:
+            await asyncio.sleep(0.05)
+            async for item in super().stream(**kwargs):
+                yield item
+
+    async def scenario() -> None:
+        wiring = build_component_runtime_wiring(tmp_path)
+        runtime_session = wiring.runtime_session
+        await _emit_turn(
+            runtime_session,
+            "extension-batch",
+            "I prefer compact progress reports.",
+            "Preference acknowledged.",
+        )
+        extension = MemoryCompactionPostCompletionExtension(
+            archive=wiring.archive,
+            runtime_session_id=runtime_session.runtime_session_id,
+            memory_domain=MemoryDomainContext(
+                memory_domain_id="u_test",
+                workspace_kind="transient",
+            ),
+            resolved_model_target_factory=test_resolved_target_fact,
+            physical_executor=auxiliary_io_executor(),
+        )
+        service = _compaction_service(
+            event_log=wiring.event_log,
+            archive=wiring.archive,
+            llm_runtime=_llm_runtime(
+                YieldingCompactTransport("<summary>Stable handoff.</summary>")
+            ),
+            runtime_session_id=runtime_session.runtime_session_id,
+            runtime_session=runtime_session,
+            post_completion_extension=extension,
+            policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+        )
+
+        result = await service.compact(
+            target_model_target=_target(service),
+            trigger="manual",
+            reason="user_requested",
+            force=True,
+        )
+
+        assert result.status == "completed"
+        assert service.pending_terminalization_count == 0
+        assert any(
+            event.type == "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED"
+            for event in wiring.event_log.iter()
+        )
+        await extension.stop_admission_and_drain(
+            deadline_monotonic=monotonic() + 2.0
+        )
+
+    asyncio.run(scenario())
 
 
 def test_cancelled_compaction_after_started_commits_stable_failed_terminal() -> None:
@@ -1868,540 +1714,6 @@ def test_compaction_attempt_result_requires_exact_terminal_budget_shape() -> Non
         match="terminal compaction result requires its event deadline budget",
     ):
         replace(completed, terminal_event_deadline_budget=None)
-
-
-def test_context_compaction_appends_pending_memory_candidate() -> None:
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(
-        _emit_turn(runtime_session, "one", "please remember my workflow", "noted")
-    )
-    raw = """
-<analysis>draft</analysis>
-<summary>Task state: user repeatedly syncs release before pushing.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub in this workspace.",
-      "reason": "Observed repeated workflow."
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    pending = candidate_pool.list_pending()
-    assert len(pending) == 1
-    candidate = pending[0]
-    assert candidate.origin is CandidateOrigin.COMPACTION
-    assert candidate.source_event_id == (
-        f"context-compaction:{event.compaction_id}:memory-candidates"
-    )
-    assert candidate.metadata["compaction_completed_event_id"] == event.id
-    assert candidate.source_artifact_id == event.summary_artifact_id
-    assert candidate.intent_fingerprint is not None
-    assert candidate.metadata["compaction_id"] == event.compaction_id
-    assert candidate.metadata["summary_artifact_id"] == event.summary_artifact_id
-    assert candidate.metadata["summary_excerpt"].startswith("Task state:")
-    assert candidate.metadata["included_run_ids"] == ["run:one"]
-    audit_events = [
-        stored
-        for stored in log.iter()
-        if isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-    ]
-    assert len(audit_events) == 1
-    audit = audit_events[0]
-    assert audit.source_event_id == event.id
-    assert audit.candidate_entry_ids == [candidate.entry_id]
-    assert audit.attempted_count == 1
-    assert audit.proposed_count == 1
-
-
-def test_context_compaction_zero_proposal_audit_event_for_all_skipped() -> None:
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
-    raw = """
-<summary>Task state: first request was handled.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {"kind": "Claim", "statement": "This unsupported claim should be skipped."}
-  ]
-}
-</memory_candidates_json>
-"""
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    assert candidate_pool.list_pending() == []
-    audit_events = [
-        stored
-        for stored in log.iter()
-        if isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-    ]
-    assert len(audit_events) == 1
-    audit = audit_events[0]
-    assert audit.source_event_id == event.id
-    assert audit.attempted_count == 1
-    assert audit.proposed_count == 0
-    assert audit.candidate_entry_ids == []
-    assert audit.skipped_count == 1
-    assert (
-        audit.diagnostics[0].code
-        == "compaction_candidate_skipped:compaction_candidate_kind_not_supported"
-    )
-    assert "only accepts Preference" in audit.diagnostics[0].message
-
-
-def test_context_compaction_zero_proposal_audit_event_for_all_duplicate() -> None:
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
-    raw = """
-<summary>Task state: user repeatedly syncs release before pushing.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub in this workspace."
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-    sink = CandidatePoolCompactionMemoryCandidateSink(
-        candidate_pool=candidate_pool,
-        memory_domain=MemoryDomainContext(
-            memory_domain_id="u_test",
-            workspace_kind="project",
-            stable_project_key="/tmp/pulsara_agent",
-        ),
-        runtime_session_id="runtime:test",
-    )
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=sink,
-    )
-
-    first = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-    second = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert first is not None
-    assert second is not None
-    assert len(candidate_pool.list_pending()) == 1
-    audit_events = [
-        stored
-        for stored in log.iter()
-        if isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-    ]
-    assert len(audit_events) == 2
-    duplicate_audit = audit_events[-1]
-    assert duplicate_audit.source_event_id == second.id
-    assert duplicate_audit.attempted_count == 1
-    assert duplicate_audit.proposed_count == 0
-    assert duplicate_audit.candidate_entry_ids == []
-    assert duplicate_audit.duplicate_count == 1
-    assert duplicate_audit.skipped_count == 1
-    assert (
-        duplicate_audit.diagnostics[0].code
-        == "compaction_candidate_skipped:duplicate_pending_compaction_candidate"
-    )
-    assert "same intent fingerprint" in duplicate_audit.diagnostics[0].message
-
-
-def test_context_compaction_projection_failure_keeps_durable_outbox_for_retry() -> None:
-    class FailingSecondAppendPool(InMemoryCandidatePool):
-        def __init__(self) -> None:
-            super().__init__()
-            self.append_attempts = 0
-
-        def append_candidate(
-            self, candidate: PooledMemoryCandidate
-        ) -> PooledMemoryCandidate:
-            self.append_attempts += 1
-            if self.append_attempts == 2:
-                raise RuntimeError(
-                    "database rejected candidate with secret sk-LEAKSHOULDNOTAPPEAR"
-                )
-            return super().append_candidate(candidate)
-
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = FailingSecondAppendPool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
-    raw = """
-<summary>Task state: user repeatedly syncs release before pushing.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub in this workspace."
-    },
-    {
-      "kind": "Preference",
-      "statement": "The user prefers staging and committing before syncing release in this workspace."
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    pending = candidate_pool.list_pending()
-    assert len(pending) == 1
-    audit_events = [
-        stored
-        for stored in log.iter()
-        if isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-    ]
-    assert len(audit_events) == 1
-    audit = audit_events[0]
-    assert audit.proposed_count == 2
-    assert len(audit.candidate_entry_ids) == 2
-    assert audit.skipped_count == 0
-    assert audit.error_count == 0
-    assert audit.diagnostics == []
-    port = service.candidate_projection_commit_port
-    assert port is not None
-    assert port.dispatch_retry_required is True
-
-    assert asyncio.run(port.flush_pending()) == 1
-    assert len(candidate_pool.list_pending()) == 2
-    assert port.dispatch_retry_required is False
-
-
-def test_context_compaction_producer_commit_failure_does_not_rewrite_candidate() -> (
-    None
-):
-    class FailingProjectionCommitPort:
-        def __init__(self) -> None:
-            self.calls = []
-
-        async def commit_producer_bundle(self, *, producer_event, rows):
-            self.calls.append((producer_event, rows))
-            raise RuntimeError("producer commit unavailable")
-
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
-    raw = """
-<summary>Task state: user repeatedly syncs release before pushing.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub in this workspace."
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-    failing_port = FailingProjectionCommitPort()
-    service.candidate_projection_commit_port = failing_port  # type: ignore[assignment]
-
-    with pytest.raises(RuntimeError, match="producer commit unavailable"):
-        asyncio.run(
-            _compact(service, trigger="manual", reason="user_requested", force=True)
-        )
-
-    assert len(failing_port.calls) == 1
-    producer_event, rows = failing_port.calls[0]
-    assert producer_event.proposed_count == 1
-    assert len(rows) == 1
-    assert not any(
-        isinstance(event, ContextCompactionMemoryCandidatesProposedEvent)
-        for event in log.iter()
-    )
-
-
-def test_context_compaction_sink_failure_records_single_redacted_diagnostic() -> None:
-    class FailingSink(CandidatePoolCompactionMemoryCandidateSink):
-        def prepare_compaction_candidates(self, **kwargs):  # type: ignore[no-untyped-def]
-            raise RuntimeError(
-                "database rejected candidate with secret sk-LEAKSHOULDNOTAPPEAR"
-            )
-
-    log = InMemoryEventLog(runtime_session_id="runtime:test")
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    runtime_session = in_memory_runtime_session(
-        Path.cwd(),
-        runtime_session_id="runtime:test",
-        event_log=log,
-        archive=archive,
-    )
-    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
-    raw = """
-<summary>Task state: user repeatedly syncs release before pushing.</summary>
-<memory_candidates_json>
-{
-  "candidates": [
-    {
-      "kind": "Preference",
-      "statement": "The user prefers syncing release before pushing GitHub in this workspace."
-    }
-  ]
-}
-</memory_candidates_json>
-"""
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
-        runtime_session_id="runtime:test",
-        runtime_session=runtime_session,
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=FailingSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    audit_events = [
-        stored
-        for stored in log.iter()
-        if isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-    ]
-    assert len(audit_events) == 1
-    audit = audit_events[0]
-    assert audit.proposed_count == 0
-    assert audit.error_count == 1
-    assert [diagnostic.code for diagnostic in audit.diagnostics] == [
-        "compaction_candidate_preparation_failed"
-    ]
-    assert audit.diagnostics[0].message == "RuntimeError"
-    assert audit.diagnostics[0].redacted is True
-    assert "sk-LEAK" not in audit.diagnostics[0].model_dump_json()
-
-
-def test_context_compaction_memory_candidate_policy_disabled_omits_prompt_and_audit() -> (
-    None
-):
-    log = InMemoryEventLog()
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "first request", "first reply")
-    raw = """
-<summary>Task state: first request was handled.</summary>
-<memory_candidates_json>
-{"candidates": [{"kind": "Preference", "statement": "The user prefers concise output."}]}
-</memory_candidates_json>
-"""
-    transport = CompactScriptedTransport(raw)
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(transport),
-        runtime_session_id="runtime:test",
-        policy=ContextCompactionPolicy(
-            min_events_after_last_compact=1,
-            memory_candidates=ContextCompactionMemoryCandidatePolicy(enabled=False),
-        ),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="project",
-                stable_project_key="/tmp/pulsara_agent",
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
-    assert candidate_pool.list_pending() == []
-    assert not any(
-        isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-        for stored in log.iter()
-    )
-
-
-def test_context_compaction_transient_workspace_does_not_write_candidate_audit_event() -> (
-    None
-):
-    log = InMemoryEventLog()
-    archive = InMemoryArchiveStore()
-    candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "first request", "first reply")
-    raw = """
-<summary>Task state: first request was handled.</summary>
-<memory_candidates_json>
-{"candidates": [{"kind": "Preference", "statement": "The user prefers concise output."}]}
-</memory_candidates_json>
-"""
-    transport = CompactScriptedTransport(raw)
-    service = _compaction_service(
-        event_log=log,
-        archive=archive,
-        llm_runtime=_llm_runtime(transport),
-        runtime_session_id="runtime:test",
-        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
-        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
-            candidate_pool=candidate_pool,
-            memory_domain=MemoryDomainContext(
-                memory_domain_id="u_test",
-                workspace_kind="transient",
-                stable_project_key=None,
-            ),
-            runtime_session_id="runtime:test",
-        ),
-    )
-
-    event = asyncio.run(
-        _compact(service, trigger="manual", reason="user_requested", force=True)
-    )
-
-    assert event is not None
-    assert "memory_candidates_json" not in _runtime_request_text(transport.contexts[0])
-    assert candidate_pool.list_pending() == []
-    assert not any(
-        isinstance(stored, ContextCompactionMemoryCandidatesProposedEvent)
-        for stored in log.iter()
-    )
 
 
 def test_repeated_compaction_carries_previous_summary_forward() -> None:

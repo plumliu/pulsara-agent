@@ -132,8 +132,13 @@ class LLMRuntime:
         *,
         target: ResolvedModelTarget,
         purpose: ModelCallPurpose,
+        resolved_model_call_id: str | None = None,
     ) -> ResolvedModelCall:
-        return resolve_model_call(target=target, purpose=purpose)
+        return resolve_model_call(
+            target=target,
+            purpose=purpose,
+            resolved_model_call_id=resolved_model_call_id,
+        )
 
     def rebind_target(self, fact: ResolvedModelTargetFact) -> ResolvedModelTarget:
         return rebind_model_target(
@@ -347,6 +352,9 @@ class LLMRuntime:
                 recovery_plan=recovery_plan,
                 governance_input_attribution=(
                     start_bundle.governance_input_attribution
+                ),
+                compaction_memory_extraction_input_attribution=(
+                    start_bundle.compaction_memory_extraction_input_attribution
                 ),
                 provider_input_reference=provider_input_start.committed_reference,
                 active_run_monitor_delivery=(

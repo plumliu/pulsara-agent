@@ -195,3 +195,22 @@ write-admission guard；没有generic SQL escape hatch。Commit/rollback/revoke�
 `CanonicalMutationCommitPort`对caller只暴露append。
 
 In-memory governance UOW已移至`tests/support/memory_uow.py`，production module不提供fake fallback。
+
+## 12. Compaction extraction governance
+
+Compaction candidate的governance source是ordered canonical sanitized human evidence，不是summary quote。
+Builder必须从producer Completed exact joinRequest、manifest、input document、model terminal projection、
+candidate attribution与原RunStart；每个quoted evidence引用整条verified node，`start_char/end_char`为空。
+Physical compaction/request/job/model/artifact/ordinal只进入attribution，不得改变evidence或governance semantic
+fingerprint。不同secret若经同一sanitizer得到同一全文，不得因原secret digest形成不同semantic identity。
+
+所有valid memory candidate producer共用`memory_candidate_semantic.v2`中央factory，semantic只覆盖kind、
+resolved scope与normalized statement。唯一normalization是NFC、CRLF/CR到LF及outer trim；大小写与
+内部连续空白保留。Main-agent、reflection与compaction产生相同事实时
+必须得到同一semantic fingerprint；candidate ID、pool entry ID仍由各自source occurrence独立派生。同批
+去重、governance payload semantic与exact replay均消费shared semantic，不得用正文级临时比较替代它。
+Casefold/whitespace collapse只允许服务lexical/alias discovery，不能设置`is_exact_duplicate`或
+`duplicate_existing_memory`。
+
+Zero candidate与governed no-write都是合法终态。Candidate outbox FULL后operational wake可以降低治理延迟，
+但durable pending outbox仍是唯一恢复authority；wake丢失不得丢candidate。

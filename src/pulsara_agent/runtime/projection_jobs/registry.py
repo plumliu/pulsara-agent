@@ -12,6 +12,9 @@ from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.projection_jobs.canonical_mutation import (
     default_projection_delivery_policy,
 )
+from pulsara_agent.projection_jobs.compaction_memory_policy import (
+    default_compaction_memory_delivery_policy,
+)
 from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationKind,
     CanonicalMutationPlannedSurfaceFact,
@@ -93,9 +96,7 @@ def build_projection_executable_registry(
         DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (_EVIDENCE_HANDLER),
     }
     if set(executables) != set(expected):
-        raise ValueError(
-            "projection executable bindings do not cover the closed kind set"
-        )
+        raise ValueError("projection executable bindings do not cover database kinds")
     return DurableProjectionExecutableRegistry(
         tuple(
             DurableProjectionExecutableBinding(
@@ -171,6 +172,21 @@ def _surface_plan(
             composition_fingerprint=context_fingerprint(
                 "canonical-mutation-surface-composition:v1",
                 (CanonicalMutationSurface.OXIGRAPH.value,),
+            ),
+        ),
+    )
+
+
+def _empty_surface_plan() -> CanonicalMutationSurfacePlanFact:
+    return cast(
+        CanonicalMutationSurfacePlanFact,
+        build_projection_fact(
+            CanonicalMutationSurfacePlanFact,
+            schema_version="canonical_mutation_surface_plan.v1",
+            ordered_surfaces=(),
+            composition_fingerprint=context_fingerprint(
+                "canonical-mutation-surface-composition:v1",
+                (),
             ),
         ),
     )
@@ -254,6 +270,9 @@ def _seed_contract(
                     "run-target"
                     if handler.projection_kind is DurableProjectionKind.RUN_TIMELINE
                     else "tool-result-target"
+                    if handler.projection_kind
+                    is DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
+                    else "compaction-memory-extraction-target"
                 ),
                 target_resolver_version="1",
                 target_resolver_contract_fingerprint=context_fingerprint(
@@ -296,6 +315,7 @@ def _seed_contract(
 
 
 _DELIVERY_POLICY = default_projection_delivery_policy()
+_COMPACTION_MEMORY_DELIVERY_POLICY = default_compaction_memory_delivery_policy()
 _SURFACE_PLAN = _surface_plan(_DELIVERY_POLICY)
 _TIMELINE_TYPES = (
     EventType.REPLY_END,
@@ -303,6 +323,9 @@ _TIMELINE_TYPES = (
     EventType.RUN_END,
 )
 _EVIDENCE_TYPES = (EventType.TOOL_RESULT_END,)
+_COMPACTION_MEMORY_EXTRACTION_TYPES = (
+    EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED,
+)
 _TIMELINE_HANDLER, _TIMELINE_SCHEMA_FPS = _handler(
     kind=DurableProjectionKind.RUN_TIMELINE,
     event_types=_TIMELINE_TYPES,
@@ -312,6 +335,13 @@ _EVIDENCE_HANDLER, _EVIDENCE_SCHEMA_FPS = _handler(
     kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
     event_types=_EVIDENCE_TYPES,
     update_policy=DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT,
+)
+_COMPACTION_MEMORY_EXTRACTION_HANDLER, _COMPACTION_MEMORY_EXTRACTION_SCHEMA_FPS = (
+    _handler(
+        kind=DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION,
+        event_types=_COMPACTION_MEMORY_EXTRACTION_TYPES,
+        update_policy=DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT,
+    )
 )
 
 DURABLE_PROJECTION_TRIGGER_REGISTRY = DurableProjectionTriggerRegistry(
@@ -330,6 +360,13 @@ DURABLE_PROJECTION_TRIGGER_REGISTRY = DurableProjectionTriggerRegistry(
             delivery_policy=_DELIVERY_POLICY,
             surface_plan=_SURFACE_PLAN,
         ),
+        _seed_contract(
+            handler=_COMPACTION_MEMORY_EXTRACTION_HANDLER,
+            event_types=_COMPACTION_MEMORY_EXTRACTION_TYPES,
+            schema_fingerprints=_COMPACTION_MEMORY_EXTRACTION_SCHEMA_FPS,
+            delivery_policy=_COMPACTION_MEMORY_DELIVERY_POLICY,
+            surface_plan=_empty_surface_plan(),
+        ),
     )
 )
 
@@ -346,6 +383,7 @@ def validate_projection_registry_completeness(
     handler_kinds = {
         _TIMELINE_HANDLER.projection_kind,
         _EVIDENCE_HANDLER.projection_kind,
+        _COMPACTION_MEMORY_EXTRACTION_HANDLER.projection_kind,
     }
     if trigger_kinds != expected or handler_kinds != expected:
         raise ValueError("projection registry does not cover the closed kind set")
@@ -355,12 +393,17 @@ def validate_projection_registry_completeness(
         executable_kinds = {
             item.projection_kind for item in executable_registry.contracts()
         }
-        if executable_kinds != expected:
+        database_kinds = {
+            DurableProjectionKind.RUN_TIMELINE,
+            DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+        }
+        if executable_kinds != database_kinds:
             raise ValueError(
-                "projection executable registry does not cover the closed kind set"
+                "projection executable registry does not cover database kinds"
             )
         for kind in active_kinds or ():
-            executable_registry.resolve(kind)
+            if kind in database_kinds:
+                executable_registry.resolve(kind)
 
 
 __all__ = [

@@ -310,11 +310,16 @@ def _validated_job(
                 "state_revision": row["state_revision"],
                 "repair_generation": row["repair_generation"],
                 "attempt_count": row["attempt_count"],
+                "dispatch_attempt_count": row["dispatch_attempt_count"],
+                "settlement_generation": row["settlement_generation"],
                 "lease_generation": row["lease_generation"],
                 "lease_owner_id": row["lease_owner_id"],
                 "lease_expires_at": row["lease_expires_at"],
                 "next_attempt_at": row["next_attempt_at"],
                 "last_failure": row["last_failure"],
+                "compaction_memory_deferral": row[
+                    "compaction_memory_deferral"
+                ],
                 "result_receipt_reference": row["result_receipt_reference"],
                 "state_fingerprint": row["state_fingerprint"],
             }

@@ -1,11 +1,11 @@
-"""Closed data transforms owned by PostgreSQL migrations 0006-0008."""
+"""Closed data transforms owned by PostgreSQL migrations 0006-0009."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from psycopg import Connection
+from psycopg import Connection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -52,9 +52,14 @@ from pulsara_agent.runtime.projection_jobs.pre_activation import (
     packaged_pre_activation_contracts,
     read_legacy_binding_plan,
 )
+from pulsara_agent.storage.migrations.errors import (
+    PostgresSchemaError,
+    PostgresSchemaFailureCode,
+)
 
 
 _PROTECTED_RELATIONS_V2 = "0006_runtime_write_protected_relations_v2.json"
+_PROTECTED_RELATIONS_V9 = "0009_runtime_write_protected_relations_v1.json"
 
 
 def apply_projection_migration_transform(
@@ -102,14 +107,124 @@ def apply_projection_migration_transform(
             ),
             maintenance_epoch=maintenance_epoch,
         )
+        return
+    if version == 9:
+        _require_empty_compaction_memory_extraction_world(connection)
+        _activate_projection_kind_without_pre_activation(
+            connection,
+            kind=DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION,
+            migration_version=version,
+            resulting_registry_prefix_fingerprint=(
+                resulting_registry_prefix_fingerprint
+            ),
+            maintenance_epoch=maintenance_epoch,
+        )
 
 
 def protected_relation_resource_for_version(version: int) -> str:
+    if version >= 9:
+        return _PROTECTED_RELATIONS_V9
     return (
         "0005_runtime_write_protected_relations_v1.json"
         if version <= 5
         else _PROTECTED_RELATIONS_V2
     )
+
+
+def _require_empty_compaction_memory_extraction_world(
+    connection: Connection,
+) -> None:
+    relations = (
+        "agent_events",
+        "artifacts",
+        "background_derived_work_budget_accounts",
+        "compaction_memory_extraction_result_candidates",
+        "graph_documents",
+        "graph_relation_facts",
+        "memory_candidate_projection_outbox",
+        "memory_candidates",
+        "memory_governance_decisions",
+        "memory_nodes",
+        "memory_relations",
+        "runtime_projection_checkpoints",
+        "sessions",
+    )
+    for relation_name in relations:
+        exists = connection.execute(
+            """
+            SELECT pg_catalog.to_regclass(%s) IS NOT NULL
+            """,
+            (f"public.{relation_name}",),
+        ).fetchone()[0]
+        if not exists:
+            continue
+        has_row = connection.execute(
+            sql.SQL("SELECT 1 FROM {}.{} LIMIT 1").format(
+                sql.Identifier("public"),
+                sql.Identifier(relation_name),
+            )
+        ).fetchone()
+        if has_row is not None:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1,
+                "migration 0009 requires a reset PostgreSQL event/memory/projection world",
+            )
+
+
+def _activate_projection_kind_without_pre_activation(
+    connection: Connection,
+    *,
+    kind: DurableProjectionKind,
+    migration_version: int,
+    resulting_registry_prefix_fingerprint: str,
+    maintenance_epoch: RuntimeWriteAdmissionEpochFact,
+) -> None:
+    if (
+        maintenance_epoch.target_migration_version != migration_version
+        or not maintenance_epoch.maintenance_operation_id
+    ):
+        raise ValueError("projection activation requires its exact maintenance epoch")
+    activation_semantic = load_activation_semantic(kind)
+    activation = cast(
+        DurableProjectionKindActivationFact,
+        build_projection_fact(
+            DurableProjectionKindActivationFact,
+            schema_version="durable_projection_kind_activation.v1",
+            activation_semantic=activation_semantic,
+            activation_migration_version=migration_version,
+            resulting_migration_registry_prefix_fingerprint=(
+                resulting_registry_prefix_fingerprint
+            ),
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO public.durable_projection_kind_activations (
+            projection_kind,
+            activation_payload,
+            activation_fingerprint
+        ) VALUES (%s, %s, %s)
+        ON CONFLICT (projection_kind) DO NOTHING
+        """,
+        (
+            kind.value,
+            Jsonb(activation.model_dump(mode="json")),
+            activation.activation_fingerprint,
+        ),
+    )
+    row = connection.execute(
+        """
+        SELECT activation_payload, activation_fingerprint
+        FROM public.durable_projection_kind_activations
+        WHERE projection_kind = %s
+        """,
+        (kind.value,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("projection activation was not installed")
+    observed = DurableProjectionKindActivationFact.model_validate(row[0])
+    if observed != activation or str(row[1]) != activation.activation_fingerprint:
+        raise ValueError("projection activation exact confirmation failed")
 
 
 def _migrate_legacy_mutations(

@@ -1268,6 +1268,27 @@ def test_related_dedupe_authority_remains_statement_exact() -> None:
     )
 
 
+def test_related_dedupe_uses_shared_semantic_without_casefold_or_space_collapse() -> (
+    None
+):
+    graph = InMemoryGraphStore()
+    service = _service_on(graph)
+    service.submit(
+        _preference_candidate("candidate:old", "Likes  Tea"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
+    )
+
+    assert (
+        already_exists(
+            _preference_candidate("candidate:new", " likes tea "),
+            graph,
+        )
+        is False
+    )
+
+
 def test_jsonld_type_names_accepts_compact_and_iri_types() -> None:
     assert _jsonld_type_names({"@type": ["Preference", memory.CLAIM.value]}) == {
         "Preference",

@@ -102,6 +102,7 @@ def _bootstrap_state() -> RuntimeSessionBootstrapStateFact:
                 "runtime-session-bootstrap-cutover-set:v1",
                 {"active": (), "pre_activation": ()},
             ),
+            background_budget_account_fingerprint="sha256:background-budget-account",
             admission_epoch_fingerprint="sha256:epoch",
         ),
     )

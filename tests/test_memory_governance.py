@@ -184,6 +184,50 @@ def test_governance_duplicate_existing_memory_records_skip_without_write_events(
     assert len(graph.find_by_type(memory.PREFERENCE)) == 1
 
 
+def test_governance_executor_uses_shared_semantic_for_duplicate_decision() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    service = _service_on(graph)
+    service.submit(
+        PreferenceCandidate(
+            candidate_id="candidate:existing",
+            statement="Likes  Tea",
+            scope="ctx:user",
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+        ),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
+    )
+    candidate = pool.append_candidate(
+        _pooled_valid(
+            PreferenceCandidate(
+                candidate_id="candidate:new",
+                statement=" likes tea ",
+                scope="ctx:user",
+                source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            )
+        )
+    )
+    executor = _executor(pool=pool, graph=graph, log=log)
+
+    result = _apply_decision(
+        executor,
+        SubmitAsIsDecision(
+            target_entry_id=candidate.entry_id,
+            reason="Shared semantics keep these facts distinct.",
+        ),
+        governance_batch_id="governance:test:shared-semantic-distinct",
+    )
+
+    assert result.decision_record.decision.kind == "submit_as_is"
+    assert result.decision_record.write_outcome.kind == "write_succeeded"
+    assert len(graph.find_by_type(memory.PREFERENCE)) == 2
+
+
 def test_governance_write_failed_does_not_terminally_remove_candidate() -> None:
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, TypeAlias
+from typing import Any, Literal, Mapping
 
 from pydantic import Field, field_validator, model_validator
 
@@ -767,170 +767,6 @@ class CompactionPublicationTerminalizationScope(FrozenRuntimeStateBase):
         return self
 
 
-class CompactionCandidateProjectionRequestIdentity(FrozenRuntimeStateBase):
-    request_id: str
-    compaction_id: str
-    expected_completed_event_id: str
-    extractor_id: str
-    extractor_version: str
-    extractor_contract_fingerprint: str
-    projection_policy_fingerprint: str
-    request_fingerprint: str
-
-    @model_validator(mode="after")
-    def _request_identity(self) -> "CompactionCandidateProjectionRequestIdentity":
-        expected = context_fingerprint(
-            "compaction-candidate-projection-request:v1",
-            self.model_dump(mode="json", exclude={"request_fingerprint"}),
-        )
-        if self.request_fingerprint != expected:
-            raise ValueError("compaction projection request fingerprint mismatch")
-        return self
-
-
-class PreparedCompactionCandidateProjectionInput(FrozenRuntimeStateBase):
-    request_identity: CompactionCandidateProjectionRequestIdentity
-    owner_id: str
-    summary_artifact_id: str
-    summary_artifact_content_fingerprint: str
-    owned_summary_canonical_utf8_bytes: bytes
-    prepared_input_fingerprint: str
-
-    @model_validator(mode="after")
-    def _prepared_input(self) -> "PreparedCompactionCandidateProjectionInput":
-        try:
-            summary = self.owned_summary_canonical_utf8_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("prepared compaction summary is not UTF-8") from exc
-        if len(self.owned_summary_canonical_utf8_bytes) > 256 * 1_024:
-            raise ValueError("prepared compaction summary exceeds its byte bound")
-        if (
-            context_fingerprint(
-                "compaction-summary-artifact-content:v1",
-                summary,
-            )
-            != self.summary_artifact_content_fingerprint
-        ):
-            raise ValueError("prepared compaction summary content drifted")
-        expected = context_fingerprint(
-            "prepared-compaction-candidate-projection-input:v1",
-            {
-                **self.model_dump(
-                    mode="json",
-                    exclude={
-                        "prepared_input_fingerprint",
-                        "owned_summary_canonical_utf8_bytes",
-                    },
-                ),
-                "owned_summary_canonical_utf8": summary,
-            },
-        )
-        if self.prepared_input_fingerprint != expected:
-            raise ValueError("prepared compaction projection fingerprint mismatch")
-        return self
-
-
-CompactionCandidateProjectionStatus: TypeAlias = Literal[
-    "not_requested",
-    "preparation_failed",
-    "owner_installation_failed",
-    "suppressed_by_publication_latch",
-    "owner_installed",
-    "candidate_frozen",
-    "producer_bundle_full",
-    "projection_applied",
-    "reconciliation_required",
-]
-
-
-class CompactionCandidateProjectionReceipt(FrozenRuntimeStateBase):
-    completed_compaction_event_reference: ContextEventReferenceFact
-    request_identity: CompactionCandidateProjectionRequestIdentity | None
-    status: CompactionCandidateProjectionStatus
-    owner_id: str | None
-    prepared_input_fingerprint: str | None
-    failure_stage: Literal["prepared_input_factory", "owner_installation"] | None
-    failure_diagnostic: BoundedRuntimeFailureDiagnosticFact | None
-    producer_event_id: str | None
-    producer_payload_fingerprint: str | None
-    producer_event_reference: ContextEventReferenceFact | None
-    outbox_item_accumulator: str | None
-    reconciliation_from_status: (
-        Literal[
-            "owner_installed",
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-        ]
-        | None
-    )
-
-    @model_validator(mode="after")
-    def _status_matrix(self) -> "CompactionCandidateProjectionReceipt":
-        request_required = self.status != "not_requested"
-        if request_required != (self.request_identity is not None):
-            raise ValueError("compaction projection request identity matrix mismatch")
-        failure = self.status in {"preparation_failed", "owner_installation_failed"}
-        if failure != (
-            self.failure_stage is not None and self.failure_diagnostic is not None
-        ):
-            raise ValueError("compaction projection failure field matrix mismatch")
-        if self.status == "preparation_failed":
-            if (
-                self.failure_stage != "prepared_input_factory"
-                or self.owner_id is not None
-                or self.prepared_input_fingerprint is not None
-            ):
-                raise ValueError("compaction projection preparation failure drifted")
-        if self.status == "owner_installation_failed":
-            if (
-                self.failure_stage != "owner_installation"
-                or self.owner_id is not None
-                or self.prepared_input_fingerprint is None
-            ):
-                raise ValueError("compaction projection owner failure drifted")
-        owner_statuses = {
-            "owner_installed",
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-            "reconciliation_required",
-        }
-        if (self.status in owner_statuses) != (
-            self.owner_id is not None and self.prepared_input_fingerprint is not None
-        ):
-            raise ValueError("compaction projection owner field matrix mismatch")
-        producer_frozen = self.status in {
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-        } or (
-            self.status == "reconciliation_required"
-            and self.reconciliation_from_status
-            in {"candidate_frozen", "producer_bundle_full", "projection_applied"}
-        )
-        if producer_frozen != (
-            self.producer_event_id is not None
-            and self.producer_payload_fingerprint is not None
-        ):
-            raise ValueError("compaction projection producer identity matrix mismatch")
-        durable = self.status in {"producer_bundle_full", "projection_applied"} or (
-            self.status == "reconciliation_required"
-            and self.reconciliation_from_status
-            in {"producer_bundle_full", "projection_applied"}
-        )
-        if durable != (
-            self.producer_event_reference is not None
-            and self.outbox_item_accumulator is not None
-        ):
-            raise ValueError("compaction projection durable receipt matrix mismatch")
-        if (self.status == "reconciliation_required") != (
-            self.reconciliation_from_status is not None
-        ):
-            raise ValueError("compaction projection reconciliation matrix mismatch")
-        return self
-
-
 def build_mcp_interaction_semantic(
     *,
     interaction_id: str,
@@ -1179,14 +1015,6 @@ _DIAGNOSTIC_PROFILE_CONTRACTS: Mapping[str, Mapping[str, object]] = {
         "default_message": "Runtime session owner bootstrap failed.",
         "accepts_explicit_redacted_message": False,
     },
-    "compaction_candidate_projection_preparation_error.v1": {
-        "default_message": "Compaction candidate projection preparation failed.",
-        "accepts_explicit_redacted_message": False,
-    },
-    "compaction_candidate_projection_owner_installation_error.v1": {
-        "default_message": "Compaction candidate projection owner installation failed.",
-        "accepts_explicit_redacted_message": False,
-    },
 }
 _DIAGNOSTIC_SECRET_PATTERNS = (
     (
@@ -1296,9 +1124,6 @@ def build_runtime_event_deadline_budget(
 
 __all__ = [
     "BoundedRuntimeFailureDiagnosticFact",
-    "CompactionCandidateProjectionReceipt",
-    "CompactionCandidateProjectionRequestIdentity",
-    "CompactionCandidateProjectionStatus",
     "CompactionPublicationTerminalizationScope",
     "ContextCompactionRequestFact",
     "MAX_MCP_INPUT_REQUEST_BYTES",
@@ -1317,7 +1142,6 @@ __all__ = [
     "McpPendingLeaseReservationIdentityFact",
     "McpUserVisibleInputRequestFact",
     "MidTurnCompactionSkipFact",
-    "PreparedCompactionCandidateProjectionInput",
     "PreparedMcpInputRequiredSuspension",
     "PreparedMcpInputRequiredResolution",
     "PreparedMcpResponseEntry",

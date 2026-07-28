@@ -188,7 +188,7 @@ Inspector 必须展示每个 completed compaction window：
 
 Started without completed/failed 是 warning。Completed boundary 引用 missing summary artifact 是 error。
 
-### 7.1 Typed audit、MCP lifecycle 与 candidate projection
+### 7.1 Typed audit、MCP lifecycle 与 derived projection
 
 Session/run inspection必须从 typed events投影：
 
@@ -198,14 +198,14 @@ Session/run inspection必须从 typed events投影：
 - `mid_turn_compaction_skips`；
 - `tool_result_evidence_projection_failures`；
 - `mandatory_runtime_audit_reconciliation`；
-- `compaction_candidate_projection_durable_status`。
+- `compaction_memory_extraction_chain`。
 
-MCP投影必须复用 production `McpInputRequiredLifecycleStore`，不能另写 reducer。Compaction
-candidate historical status只从 exact proposed event、durable outbox row与 candidate-pool
-join得到。`preparation_failed`、`owner_installation_failed`、`owner_installed` 和
-`candidate_frozen` 等 process-local phase不属于 historical Inspector；无 durable
-producer/outbox authority时必须显示 `not_durably_observable`，不得从 event absence猜测。
-Host live diagnostics可以显示当前 owner receipt，但不能写回 historical report。
+MCP投影必须复用 production `McpInputRequiredLifecycleStore`，不能另写 reducer。Compaction-memory
+historical status只从 exact Requested、durable job、model lifecycle、extraction Completed、result
+receipt/head、durable outbox row与candidate-pool/governance join得到；旧proposed-event projection已
+物理删除，不得作为historical fallback。Manifest preparation和driver availability等process-local
+phase不属于historical Inspector；无durable authority时必须显示`not_durably_observable`，不得从
+event absence猜测。Host live diagnostics可以显示当前owner状态，但不能写回historical report。
 
 ---
 
@@ -425,3 +425,16 @@ preparation/owner状态统一显示`not_durably_observable`。CLI list/status必
 Health diagnostics至少包括：checkpoint/cutover drift、lease过期、dead-letter、target conflict、
 missing receipt/artifact、surface predecessor gap、coverage不完整与migration preparation
 required。Inspector只观察，不自动repair或推进migration。
+
+## 19. Compaction-memory extraction chain
+
+Inspector按compaction展示manifest/completeness、summary completion、extension disposition、Request、seed
+checkpoint/job、lease/retry、background budget、Call B Start/End/terminal projection、typed input artifact、
+RESULT_READY candidate、result receipt/head、candidate outbox/pool与governance outcome。Input artifact只
+投影bounded node identity、bytes、source RunStart/sequence、human ingress与full-projection结论，不复制
+完整正文。
+
+状态必须区分not configured/admission failed/pending/deferred/leased/retry/result ready/settlement/
+dead-letter/reconciliation、outbox pending、candidate projected、governance pending、governed no-write与
+governed write。Inspector只exact-read durable authority；driver availability等process-local状态显示
+`not_durably_observable`。

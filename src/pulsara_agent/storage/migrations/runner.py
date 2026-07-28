@@ -282,6 +282,13 @@ class PostgresMigrationRunner:
                 if preparation_requirement is not None:
                     break
                 definition = self._registry.definitions[next_version]
+                if definition.version == 9:
+                    self._require_empty_world_for_compaction_memory_extraction(admin)
+                    self._enter_compaction_memory_extraction_maintenance(
+                        admin,
+                        definition=definition,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                 admin = self._apply_one(
                     admin,
                     runtime_identity=runtime_identity,
@@ -395,6 +402,69 @@ class PostgresMigrationRunner:
         finally:
             admin.close()
 
+    def _enter_compaction_memory_extraction_maintenance(
+        self,
+        connection: Connection,
+        *,
+        definition: PostgresMigrationDefinition,
+        deadline_monotonic: float,
+    ) -> None:
+        from pulsara_agent.projection_jobs.contracts import RuntimeWriteAdmissionMode
+        from pulsara_agent.storage.runtime_write_admission import (
+            enter_runtime_write_maintenance,
+        )
+
+        epoch = read_runtime_write_epoch(connection, privileged=True)
+        if (
+            epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
+            and epoch.target_migration_version == definition.version
+        ):
+            return
+        if epoch.mode is not RuntimeWriteAdmissionMode.NORMAL:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.MIGRATION_FAILED,
+                "migration 0009 cannot replace a different maintenance operation",
+            )
+        operation_id = "projection-maintenance:" + postgres_schema_fingerprint(
+            "compaction-memory-extraction-activation-operation:v1",
+            {
+                "database_target_fingerprint": (
+                    self._admin_factory.endpoint.endpoint_fingerprint
+                ),
+                "normal_epoch_fingerprint": epoch.epoch_fingerprint,
+                "target_migration_contract_fingerprint": (
+                    definition.migration_contract_fingerprint
+                ),
+            },
+        )
+        with connection.transaction():
+            _apply_local_deadline(connection, deadline_monotonic)
+            enter_runtime_write_maintenance(
+                connection,
+                current_epoch=epoch,
+                maintenance_operation_id=operation_id,
+                target_migration_version=definition.version,
+            )
+
+    @staticmethod
+    def _require_empty_world_for_compaction_memory_extraction(
+        connection: Connection,
+    ) -> None:
+        with connection.cursor(row_factory=tuple_row) as cursor:
+            row = cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM public.sessions LIMIT 1
+                ) AS world_is_nonempty
+                """
+            ).fetchone()
+        if row is not None and bool(row[0]):
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1,
+                "migration 0009 changes compaction-memory evidence authority; "
+                "reset the PostgreSQL and Oxigraph runtime world before migration",
+            )
+
     def _require_projection_preparation_port(
         self,
     ) -> ProjectionMigrationPreparationPort:
@@ -402,7 +472,7 @@ class PostgresMigrationRunner:
         if port is None:
             raise PostgresSchemaError(
                 PostgresSchemaFailureCode.PROJECTION_PREPARATION_PORT_REQUIRED,
-                "projection migration preparation port is required for migrations 0006-0008",
+                "projection migration preparation port is required for migrations 0006-0009",
             )
         return port
 
@@ -736,7 +806,11 @@ class PostgresMigrationRunner:
                     resource_name=(
                         "0005_runtime_write_protected_relations_v1.json"
                         if through_version == 5
-                        else "0006_runtime_write_protected_relations_v2.json"
+                        else (
+                            "0006_runtime_write_protected_relations_v2.json"
+                            if through_version <= 8
+                            else "0009_runtime_write_protected_relations_v1.json"
+                        )
                     )
                 )
                 cursor.execute(

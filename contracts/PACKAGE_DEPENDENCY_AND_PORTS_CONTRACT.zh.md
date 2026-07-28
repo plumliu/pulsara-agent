@@ -157,5 +157,18 @@ Whole in-memory runtime、component Host、Mock MCP和fake governance UOW只在 
 - `tests/test_host_composition_contract.py`；
 - `tests/test_package_facade.py`。
 
-Residual package SCC只作为 D5/D6 diagnostic baseline；D4完成声明不得写成“全仓库跨package SCC
+Residual package SCC只作为 D6 diagnostic baseline；D4/D5完成声明不得写成“全仓库跨package SCC
 已消除”。
+
+## 8. D5 compaction-memory direction
+
+`runtime.compaction`只消费`ports.compaction_extensions`的低层extension intent/commit contracts，不得
+import `memory.candidates`、`memory.governance`、memory ontology或`memory.compaction` concrete module。
+Memory-owned manifest/evidence/parser/result contract与driver/settlement support facade位于
+`memory.compaction`；需要RuntimeSession、D3 repository或PostgreSQL transaction的physical driver、budget
+与settlement adapter位于`runtime.projection_jobs`并只向下消费这些memory contracts。Purpose-neutral model
+lifecycle seam位于`ports.model_lifecycle`，`llm.commit`不得import/downcast memory/job/account DTO。
+
+Durable projection facts继续由top-level`projection_jobs`拥有，PostgreSQL implementation位于
+`runtime.projection_jobs`。Live handle必须是frozen dataclass，不能进入Pydantic/event serialization；
+prepared Request只保存`FrozenEventWriteCandidate`。

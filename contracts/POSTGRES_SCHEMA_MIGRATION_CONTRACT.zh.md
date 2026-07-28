@@ -229,3 +229,14 @@ preparation request/outcome，并重验exact migration head、maintenance epoch�
 
 D3 v5-v8 SQL、ledger contract与expected catalog fingerprint保持不变；本次只改变Python module与
 composition ownership。
+
+## 14. Migration 0009
+
+Immutable v9 migration激活`compaction_memory_extraction.v1` session-model projection kind，并增加
+background derived-work account/reservation/settlement、dispatch attempt、RESULT_READY candidate与
+settlement generation所需shape。Session bootstrap在创建session/cutover的同一事务内创建revision-0
+background account。
+
+V9是reset-only product hard cut：非空v8 event/projection/memory world返回typed reset-required，不从旧
+summary candidate或历史proposed event推断新evidence authority。Fresh migration必须同步验证registry
+prefix、expected catalog、runtime grants与runtime-write protected relation manifest。

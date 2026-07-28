@@ -133,6 +133,7 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         "0006_canonical_mutation_surface_jobs.sql",
         "0007_run_timeline_projection_activation.sql",
         "0008_tool_result_evidence_projection_activation.sql",
+        "0009_compaction_memory_extraction_projection_activation.sql",
     ]
     create_extension_owners = []
     for path in resources:
@@ -145,7 +146,8 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
             "0005_durable_projection_jobs.sql",
         }:
             assert "IF NOT EXISTS" not in upper
-        assert " ADD COLUMN " not in upper
+        if path.name != "0009_compaction_memory_extraction_projection_activation.sql":
+            assert " ADD COLUMN " not in upper
         assert " DROP COLUMN " not in upper
         assert " ALTER COLUMN " not in upper
         if path.name != "0005_durable_projection_jobs.sql":

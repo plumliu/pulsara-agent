@@ -19,6 +19,9 @@ class PostgresSchemaFailureCode(StrEnum):
     RESOURCE_CHECKSUM_MISMATCH = "schema_migration_resource_checksum_mismatch"
     MIGRATION_FAILED = "schema_migration_failed"
     PROJECTION_PREPARATION_PORT_REQUIRED = "schema_projection_preparation_port_required"
+    RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1 = (
+        "schema_reset_required_for_compaction_memory_extraction_v1"
+    )
     MIGRATION_CONFIRMATION_CONFLICT = "schema_migration_confirmation_conflict"
     MIGRATION_CONFIRMATION_UNRESOLVED = "schema_migration_confirmation_unresolved"
     CATALOG_DRIFT = "schema_catalog_drift"

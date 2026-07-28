@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import cast
 
-from pulsara_agent.event import ToolResultEndEvent
+from pulsara_agent.event import (
+    ContextCompactionMemoryExtractionRequestedEvent,
+    ToolResultEndEvent,
+)
 from pulsara_agent.event_log.protocol import (
     EventLog,
     RawStoredEventEnvelope,
@@ -23,6 +26,9 @@ from pulsara_agent.projection_jobs.contracts import (
     build_projection_fact,
     durable_projection_job_id,
     projection_target_key,
+)
+from pulsara_agent.projection_jobs.compaction_memory_policy import (
+    compaction_memory_delivery_policy_from_request,
 )
 from pulsara_agent.runtime.projection_jobs.registry import (
     DurableProjectionTriggerRegistry,
@@ -160,11 +166,26 @@ def build_job_candidate(
         raise ValueError("projection trigger event schema is unsupported")
     event = stored.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
     tool_call_id = event.tool_call_id if isinstance(event, ToolResultEndEvent) else None
+    source_event_id = (
+        event.id
+        if isinstance(event, ContextCompactionMemoryExtractionRequestedEvent)
+        else None
+    )
+    delivery_policy = seed_contract.delivery_policy
+    if isinstance(event, ContextCompactionMemoryExtractionRequestedEvent):
+        delivery_policy = compaction_memory_delivery_policy_from_request(
+            event.extraction_policy
+        )
+        if delivery_policy != seed_contract.delivery_policy:
+            raise ValueError(
+                "extraction Request delivery policy is outside the active seed contract"
+            )
     target_key = projection_target_key(
         projection_kind=projection_kind,
         runtime_session_id=stored.source_reference.runtime_session_id,
         run_id=stored.source_reference.run_id,
         tool_call_id=tool_call_id,
+        source_event_id=source_event_id,
     )
     job_id = durable_projection_job_id(
         projection_kind=projection_kind,
@@ -195,7 +216,7 @@ def build_job_candidate(
             job_semantic=semantic,
             activation_fingerprint=activation_fingerprint,
             seed_contract_fingerprint=seed_contract.seed_contract_fingerprint,
-            delivery_policy=seed_contract.delivery_policy,
+            delivery_policy=delivery_policy,
             canonical_mutation_surface_plan=(
                 seed_contract.canonical_mutation_surface_plan
             ),

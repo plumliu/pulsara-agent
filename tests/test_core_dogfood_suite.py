@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 
@@ -9,6 +10,7 @@ from benchmarks.suites.contracts import (
     DogfoodContractError,
     HiddenVerifierResultFact,
     load_suite,
+    runner_build_fingerprint,
 )
 from benchmarks.suites.graders import grade_durable_evidence, run_hidden_verifier
 from benchmarks.suites.run_core_dogfood import DEFAULT_SUITE_ROOT, main
@@ -23,6 +25,57 @@ EXPECTED_SCENARIOS = (
     "subagent-delegation",
     "workspace-patch",
 )
+
+
+def test_cme5_dod_evidence_matches_frozen_suite() -> None:
+    evidence = json.loads(
+        (DEFAULT_SUITE_ROOT / "cme5_dod_evidence.json").read_text(encoding="utf-8")
+    )
+    suite = load_suite(DEFAULT_SUITE_ROOT)
+    scenario = next(
+        item
+        for item in suite.scenarios
+        if item.contract.scenario_id == "manual-compaction-trail"
+    )
+
+    assert evidence["schema_version"] == "pulsara.cme5-dod-evidence.v1"
+    assert evidence["hard_cut"] == "CME0-CME5"
+    assert evidence["debt_item"] == "D5"
+    assert evidence["status"] == "passed"
+    assert tuple(item["gate_id"] for item in evidence["gates"]) == tuple(
+        f"CME{index}" for index in range(6)
+    )
+    assert all(item["status"] == "passed" for item in evidence["gates"])
+
+    dogfood = evidence["real_llm_dogfood"]
+    assert dogfood["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
+    assert (
+        dogfood["scenario_contract_fingerprint"]
+        == scenario.scenario_contract_fingerprint
+    )
+    assert dogfood["runner_build_fingerprint"] == runner_build_fingerprint(
+        DEFAULT_SUITE_ROOT.parents[1]
+    )
+    assert dogfood["status"] == "passed"
+    assert dogfood["candidate_count"] >= 1
+    assert dogfood["terminal_status"] in {"governed_no_write", "governed_write"}
+    assert dogfood["isolated_postgres_database_dropped"] is True
+
+    repository_root = DEFAULT_SUITE_ROOT.parents[3]
+    implementation_spec = (
+        repository_root
+        / "PULSARA_POST_COMPACTION_MEMORY_EXTRACTION_HARD_CUT_IMPLEMENTATION.zh.md"
+    ).read_text(encoding="utf-8")
+    dod = implementation_spec.split("## 22. Definition of Done", 1)[1].split(
+        "## 23. 最终不变量", 1
+    )[0]
+    assert "- [ ]" not in dod
+    assert "D5 CLOSED" in implementation_spec.splitlines()[2]
+
+    debt = (
+        repository_root / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
+    ).read_text(encoding="utf-8")
+    assert "### D5：Compaction-memory extension（`CLOSED`）" in debt
 
 
 def test_core_dogfood_suite_is_frozen_and_complete() -> None:
@@ -223,6 +276,138 @@ def test_cache_scenario_grader_requires_real_cache_and_balanced_lifecycle() -> N
         for item in missed.assertions
         if item.assertion_id == "provider_reported_positive_continuation_cache_hit"
     ).passed
+
+
+def test_manual_compaction_grader_requires_exact_memory_extraction_chain() -> None:
+    suite = load_suite(DEFAULT_SUITE_ROOT)
+    scenario = next(
+        item.contract
+        for item in suite.scenarios
+        if item.contract.scenario_id == "manual-compaction-trail"
+    )
+    counts = {
+        "CONTEXT_COMPACTION_COMPLETED": 1,
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED": 1,
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED": 1,
+        "MODEL_CALL_START": 4,
+        "MODEL_CALL_END": 4,
+        "RUN_START": 2,
+        "RUN_END": 2,
+        "TOOL_CALL_START": 7,
+        "TOOL_RESULT_END": 7,
+    }
+    session_report = {
+        "runs": [
+            {"id": "run:discovery", "status": "finished"},
+            {"id": "run:continuation", "status": "finished"},
+        ],
+        "event_counts": counts,
+        "event_count": sum(counts.values()),
+        "diagnostics": [],
+        "model_usage_by_run": [
+            {
+                "run_id": "run:discovery",
+                "total_tokens": 300,
+                "cached_input_tokens": 0,
+                "reported_call_count": 2,
+                "missing_usage_call_count": 0,
+            },
+            {
+                "run_id": "run:continuation",
+                "total_tokens": 200,
+                "cached_input_tokens": 0,
+                "reported_call_count": 2,
+                "missing_usage_call_count": 0,
+            },
+        ],
+        "provider_input_generations": [
+            {
+                "generation_id": "generation:manual",
+                "rollover": None,
+                "model_calls": [
+                    {"cached_input_tokens": 0},
+                    {"cached_input_tokens": 0},
+                    {"cached_input_tokens": 0},
+                    {"cached_input_tokens": 0},
+                ],
+            }
+        ],
+        "compaction_memory_extraction_durable_status": [
+            {
+                "status": "governed_write",
+                "completed_sequence": 50,
+                "request": {"event_id": "request:1", "sequence": 51},
+                "job": {"job_id": "job:1"},
+                "model_lifecycle": [
+                    {
+                        "start": {"sequence": 65},
+                        "end": {"sequence": 80},
+                        "input": {
+                            "status": "full",
+                            "all_sources_direct_human": True,
+                            "nodes": [
+                                {
+                                    "projection_kind": "full",
+                                    "source_event_type": "RUN_START",
+                                    "source_ingress_kind": "human",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "result": {"event_id": "result:1", "sequence": 90},
+                "result_candidate": {
+                    "job_id": "job:1",
+                    "completed_event_id": "result:1",
+                },
+                "outbox": [
+                    {"producer_event_id": "result:1", "status": "applied"}
+                ],
+                "candidates": [{"entry_id": "candidate:1"}],
+            }
+        ],
+    }
+    root_reports = (
+        {
+            "run": {"id": "run:discovery", "status": "finished"},
+            "timeline": {
+                "items": [
+                    {"kind": "tool_call", "metadata": {"tool_name": "read_file"}}
+                    for _ in range(6)
+                ]
+            },
+            "events": [{"type": "RUN_START", "sequence": 1}],
+        },
+        {
+            "run": {"id": "run:continuation", "status": "finished"},
+            "timeline": {
+                "items": [
+                    {"kind": "tool_call", "metadata": {"tool_name": "write_file"}}
+                ]
+            },
+            "events": [{"type": "RUN_START", "sequence": 70}],
+        },
+    )
+    verifier = HiddenVerifierResultFact(
+        passed=True,
+        exit_code=0,
+        elapsed_seconds=0,
+        stdout="ok",
+        stderr="",
+    )
+
+    grade = grade_durable_evidence(
+        scenario=scenario,
+        session_report=session_report,
+        root_run_reports=root_reports,
+        final_texts=("discovery", "continuation"),
+        verifier=verifier,
+    )
+    assert grade.passed, tuple(
+        (item.assertion_id, item.detail)
+        for item in grade.assertions
+        if not item.passed
+    )
 
 
 def test_core_dogfood_cli_validate_and_list_are_offline(capsys) -> None:

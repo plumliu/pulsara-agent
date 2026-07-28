@@ -9,32 +9,32 @@
     {
       "scenario_id": "cache-continuity",
       "path": "scenarios/cache-continuity",
-      "scenario_contract_fingerprint": "f6b18cd3e6f5d36c2e3e0362250ecfb9eff74d4d493517bb5f6714535314600c"
+      "scenario_contract_fingerprint": "9d5a146ccba597f47203b3e87f7b339a3172d7051d8f7d5aa1c805845ae7c562"
     },
     {
       "scenario_id": "durable-resume",
       "path": "scenarios/durable-resume",
-      "scenario_contract_fingerprint": "1adb3ef5c28ace935a2651c256fe9533b427cf14d8f070fbca9217fb75261476"
+      "scenario_contract_fingerprint": "c1193105c48933029b026e6cb93c0f12eeec3a6f647cfe60b4447e20899f601d"
     },
     {
       "scenario_id": "manual-compaction-trail",
       "path": "scenarios/manual-compaction-trail",
-      "scenario_contract_fingerprint": "8d6c871da9d9e9376b3ff5762012e3c801e9c5ee39b075aadb2385d236270db7"
+      "scenario_contract_fingerprint": "284301db1904b4626a39c44c3774d9afd06e2a19d1c285ebdfa4ce538ec6aa2d"
     },
     {
       "scenario_id": "plan-workflow",
       "path": "scenarios/plan-workflow",
-      "scenario_contract_fingerprint": "fbe6c4881356b7449d132035a35ebc5e9d554d7274da0a20033c39baf1d22c86"
+      "scenario_contract_fingerprint": "9db4ca9734aebad47dcd962373d1032521b80d384ce4d0f2535390b078fc64f7"
     },
     {
       "scenario_id": "subagent-delegation",
       "path": "scenarios/subagent-delegation",
-      "scenario_contract_fingerprint": "2f9bb245fcb6fe8e89d8742b6a951dd1977e830f140a183d4afba3a4c8116533"
+      "scenario_contract_fingerprint": "23d0e8b3cbc9baf534ccad223dcddde1ddc822a5835a5d125b89f03c51e85daf"
     },
     {
       "scenario_id": "workspace-patch",
       "path": "scenarios/workspace-patch",
-      "scenario_contract_fingerprint": "a712742ef13bc661c11321b9f164d36ae7d4434df05ff59e80291e33f691abed"
+      "scenario_contract_fingerprint": "c364efd7c58439bef33d12b58c48dd276ed928058c860577b0fa26ca5eeff659"
     }
   ]
 }

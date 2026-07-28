@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.support.postgres import verified_postgres_provider
 
 import asyncio
+from threading import get_ident
 from time import monotonic
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from pulsara_agent.memory.canonical.vector_index_sync import (
     VectorSyncStatus,
 )
 from pulsara_agent.ontology import memory
+from pulsara_agent.runtime.projection_jobs.surface_handlers import _run_on_owner_loop
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
@@ -49,6 +51,28 @@ class _FakeEmbeddingProvider:
 
     async def aclose(self) -> None:
         return None
+
+
+def test_vector_surface_reuses_retrieval_owner_loop_from_worker_threads() -> None:
+    async def scenario() -> None:
+        owner_loop = asyncio.get_running_loop()
+        owner_thread_id = get_ident()
+
+        async def probe(value: int) -> tuple[int, int]:
+            assert asyncio.get_running_loop() is owner_loop
+            return value, get_ident()
+
+        def invoke(value: int) -> tuple[int, int]:
+            return _run_on_owner_loop(
+                owner_loop,
+                probe(value),
+                deadline_monotonic=monotonic() + 2.0,
+            )
+
+        assert await asyncio.to_thread(invoke, 1) == (1, owner_thread_id)
+        assert await asyncio.to_thread(invoke, 2) == (2, owner_thread_id)
+
+    asyncio.run(scenario())
 
 
 def test_vector_sync_applies_and_skips_unchanged_hash() -> None:

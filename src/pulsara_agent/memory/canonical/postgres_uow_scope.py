@@ -654,15 +654,21 @@ class _CandidateDecisionRepository:
             cursor.execute(
                 """
                 INSERT INTO memory_candidates (
-                    entry_id, payload, origin, source_session_id, source_run_id,
+                    entry_id, payload, candidate_semantic_fingerprint,
+                    origin, source_session_id, source_run_id,
                     source_turn_id, source_reply_id, source_tool_call_id,
                     user_quote, quoted_evidence_locator, source_event_id,
                     source_artifact_id, intent_fingerprint, metadata, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                 """,
                 (
                     candidate.entry_id,
                     Jsonb(_payload_adapter.dump_python(candidate.payload, mode="json")),
+                    (
+                        candidate.candidate_semantic.semantic_fingerprint
+                        if candidate.candidate_semantic is not None
+                        else None
+                    ),
                     candidate.origin.value,
                     candidate.source_session_id,
                     candidate.source_run_id,

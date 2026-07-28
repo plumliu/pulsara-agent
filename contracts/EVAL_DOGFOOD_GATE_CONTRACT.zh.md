@@ -322,3 +322,15 @@ Long-Horizon 的发布轨迹由 `manual-compaction-trail` 冻结。它必须证�
 authority、summary artifact、window transition、close drain，以及 compaction 后无需重读原始
 长证据仍能完成隐藏 verifier。更细的 pairing、settlement、mid-turn cancellation 和
 fake/PostgreSQL parity 继续由默认离线测试覆盖；不得为每个内部边界重新增加联网 pytest。
+
+## 11. Compaction-memory extraction dogfood
+
+`manual-compaction-trail`同时冻结post-compaction memory extraction：早期human prompt包含两条明确稳定
+preference，Call A完成后主任务立即继续，Call B在独立safe point运行。Gate必须从PostgreSQL Inspector
+证明Call A Completed < Request < Call B Start < Call B End < extraction Completed，且continuation
+RunStart早于Call B End。
+
+Call B typed input的全部节点必须来自exact Host human RunStart、使用full sanitized projection且不包含
+summary/recalled memory/tool/runtime observation。至少一个显式preference candidate完成outbox/job/result
+exact join并进入governance终态。Zero-candidate合法性由离线closed-union测试覆盖，不能因此把真实显式
+preference dogfood降级为只看调用成功。

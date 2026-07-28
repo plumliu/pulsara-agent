@@ -11,11 +11,36 @@ schema boundary instead of deferring them to runtime dispatch.
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.frozen import (
+    FrozenFactBase,
+    build_frozen_fact,
+    register_durable_fact,
+)
+
+
+class MemoryCandidateSemanticFact(FrozenFactBase):
+    schema_version: Literal["memory_candidate_semantic.v2"] = (
+        "memory_candidate_semantic.v2"
+    )
+    kind: Literal[
+        "Claim", "Preference", "Observation", "ActionBoundary", "Decision"
+    ]
+    scope: str = Field(min_length=1)
+    normalized_statement: str = Field(min_length=1)
+    semantic_fingerprint: str = Field(min_length=1)
+
+
+register_durable_fact(
+    schema_version="memory_candidate_semantic.v2",
+    own_fingerprint_field="semantic_fingerprint",
+    domain_separator="memory-candidate-semantic:v2",
+)
 
 
 class MemoryCandidateBase(BaseModel):
@@ -91,3 +116,60 @@ CandidatePayload = Annotated[
     ValidCandidatePayload | InvalidAttemptPayload,
     Field(discriminator="payload_kind"),
 ]
+
+
+_CANDIDATE_PAYLOAD_ADAPTER = TypeAdapter(CandidatePayload)
+
+
+def normalize_memory_candidate_statement(statement: str) -> str:
+    normalized = unicodedata.normalize(
+        "NFC", statement.replace("\r\n", "\n").replace("\r", "\n")
+    )
+    return normalized.strip()
+
+
+def build_memory_candidate_semantic(
+    *,
+    kind: str,
+    scope: str,
+    statement: str,
+) -> MemoryCandidateSemanticFact:
+    normalized = normalize_memory_candidate_statement(statement)
+    if not normalized:
+        raise ValueError("memory candidate semantic statement is empty")
+    return build_frozen_fact(
+        MemoryCandidateSemanticFact,
+        schema_version="memory_candidate_semantic.v2",
+        kind=kind,
+        scope=scope,
+        normalized_statement=normalized,
+    )
+
+
+def memory_candidate_semantic_fingerprint(
+    *,
+    kind: str,
+    scope: str,
+    statement: str,
+) -> str:
+    """Return the sole exact-duplicate identity for a candidate-shaped fact."""
+
+    return build_memory_candidate_semantic(
+        kind=kind,
+        scope=scope,
+        statement=statement,
+    ).semantic_fingerprint
+
+
+def candidate_payload_semantic(
+    payload: CandidatePayload | dict[str, Any],
+) -> MemoryCandidateSemanticFact | None:
+    parsed = _CANDIDATE_PAYLOAD_ADAPTER.validate_python(payload)
+    if not isinstance(parsed, ValidCandidatePayload):
+        return None
+    candidate = parsed.candidate
+    return build_memory_candidate_semantic(
+        kind=candidate.kind,
+        scope=candidate.scope,
+        statement=candidate.statement,
+    )

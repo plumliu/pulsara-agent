@@ -2,7 +2,7 @@
 
 The schema migrator deliberately does not manufacture its own prerequisites.
 This module owns the two durable preparation families used by migrations
-0006-0008: legacy surface binding plans and pre-activation coverage receipts.
+0006-0009: legacy surface binding plans, pre-activation coverage, and activation.
 """
 
 from __future__ import annotations
@@ -78,10 +78,17 @@ from pulsara_agent.storage.runtime_write_admission import (
 
 _LEGACY_PLAN_RESOURCE = "0006_legacy_surface_binding_plan_contract_v1.json"
 _PRE_ACTIVATION_RESOURCE = "0006_pre_activation_projection_contracts_v1.json"
+DURABLE_PROJECTION_V6_PRE_ACTIVATION_KINDS = (
+    DurableProjectionKind.RUN_TIMELINE,
+    DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+)
 _ACTIVATION_RESOURCE_BY_KIND = {
     DurableProjectionKind.RUN_TIMELINE: "0007_run_timeline_activation_v1.json",
     DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (
         "0008_tool_result_evidence_activation_v1.json"
+    ),
+    DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION: (
+        "0009_compaction_memory_extraction_activation_v1.json"
     ),
 }
 _TARGET_VERSION_BY_KIND = {
@@ -117,8 +124,8 @@ def load_pre_activation_contract_semantics() -> tuple[
         PreActivationProjectionHookContractSemanticFact.model_validate(item)
         for item in payload["ordered_contract_semantics"]
     )
-    if tuple(item.projection_kind for item in semantics) != tuple(
-        DurableProjectionKind
+    if tuple(item.projection_kind for item in semantics) != (
+        DURABLE_PROJECTION_V6_PRE_ACTIVATION_KINDS
     ):
         raise ValueError("packaged pre-activation contract registry is incomplete")
     return semantics

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from threading import RLock
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
 
@@ -136,6 +137,12 @@ from pulsara_agent.primitives.terminal_observation import TerminalAutonomousDeli
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages_bounded
 from pulsara_agent.message import SystemMsg
+from pulsara_agent.ports.model_lifecycle import (
+    BackgroundModelCallAdmissionLeaseIdentity,
+    BackgroundModelCallAdmissionProof,
+    CompactionMemoryExtractionSessionDriverHandle,
+    DriverRegistrationLease,
+)
 from pulsara_agent.runtime.approval import (
     ApprovalResolution,
     PendingApproval,
@@ -252,6 +259,97 @@ class HostSessionLifecycle(StrEnum):
     OPEN = "open"
     CLOSING = "closing"
     CLOSED = "closed"
+
+
+class _HostBackgroundModelCallAdmissionLease:
+    """Borrower-scoped idle-Host reservation held through ModelCallStart FULL."""
+
+    def __init__(
+        self,
+        *,
+        identity: BackgroundModelCallAdmissionLeaseIdentity,
+        proof: BackgroundModelCallAdmissionProof,
+        validator: Callable[[BackgroundModelCallAdmissionProof], None],
+        releaser: Callable[[BackgroundModelCallAdmissionLeaseIdentity], None],
+    ) -> None:
+        self._identity = identity
+        self._proof = proof
+        self._validator = validator
+        self._releaser = releaser
+        self._state: Literal[
+            "issued",
+            "in_flight",
+            "consumed",
+            "released",
+            "reconciliation_required",
+        ] = "issued"
+        self._resolved_model_call_id: str | None = None
+        self._released_lock = False
+        self._lock = RLock()
+
+    @property
+    def identity(self) -> BackgroundModelCallAdmissionLeaseIdentity:
+        return self._identity
+
+    @property
+    def proof(self) -> BackgroundModelCallAdmissionProof:
+        return self._proof
+
+    @property
+    def state(self) -> Literal[
+        "issued",
+        "in_flight",
+        "consumed",
+        "released",
+        "reconciliation_required",
+    ]:
+        with self._lock:
+            return self._state
+
+    def begin_model_start(self) -> None:
+        with self._lock:
+            if self._state != "issued":
+                raise RuntimeError("background model admission is not issuable")
+            self._validator(self._proof)
+            self._state = "in_flight"
+
+    def validate_model_start(self, *, resolved_model_call_id: str) -> None:
+        with self._lock:
+            if self._state != "in_flight":
+                raise RuntimeError("background model admission is not in flight")
+            if self._resolved_model_call_id not in {None, resolved_model_call_id}:
+                raise RuntimeError("background model-call identity drifted")
+            self._validator(self._proof)
+            self._resolved_model_call_id = resolved_model_call_id
+
+    def confirm_model_start_full(self) -> None:
+        with self._lock:
+            if self._state == "consumed":
+                return
+            if self._state != "in_flight":
+                raise RuntimeError("background model admission cannot confirm FULL")
+            self._state = "consumed"
+        self._release_host_lock_once()
+
+    def mark_reconciliation_required(self) -> None:
+        with self._lock:
+            if self._state in {"consumed", "released"}:
+                return
+            self._state = "reconciliation_required"
+        self._release_host_lock_once()
+
+    def release(self) -> None:
+        with self._lock:
+            if self._state not in {"consumed", "reconciliation_required"}:
+                self._state = "released"
+        self._release_host_lock_once()
+
+    def _release_host_lock_once(self) -> None:
+        with self._lock:
+            if self._released_lock:
+                return
+            self._released_lock = True
+        self._releaser(self._identity)
 
 
 _STREAM_QUEUE_MAX_ITEMS = 128
@@ -562,6 +660,18 @@ class HostSession:
     )
     _stop_intent_revision: int = field(default=0, init=False, repr=False)
     _termination_intent_revision: int = field(default=0, init=False, repr=False)
+    _background_model_call_admission_generation: int = field(
+        default=0, init=False, repr=False
+    )
+    _background_model_call_admission_lease: (
+        _HostBackgroundModelCallAdmissionLease | None
+    ) = field(default=None, init=False, repr=False)
+    _compaction_memory_extraction_driver: (
+        CompactionMemoryExtractionSessionDriverHandle | None
+    ) = field(default=None, init=False, repr=False)
+    _compaction_memory_extraction_registration: DriverRegistrationLease | None = field(
+        default=None, init=False, repr=False
+    )
     _host_open_deadline_monotonic: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -628,10 +738,175 @@ class HostSession:
         """Synchronously close the mutation gate before async teardown starts."""
         if self._lifecycle is HostSessionLifecycle.OPEN:
             self._lifecycle = HostSessionLifecycle.CLOSING
+        lease = self._background_model_call_admission_lease
+        if lease is not None:
+            lease.release()
 
     @property
     def runtime_session_id(self) -> str:
         return self.wiring.runtime_wiring.runtime_session.runtime_session_id
+
+    async def acquire_compaction_memory_model_safe_point(
+        self,
+        operation_id: str,
+        deadline_monotonic: float,
+    ) -> _HostBackgroundModelCallAdmissionLease | None:
+        """Reserve an idle Host only until the background ModelStart is durable."""
+
+        if deadline_monotonic <= time.monotonic() or self._run_lock.locked():
+            return None
+        timeout = min(0.1, max(0.0, deadline_monotonic - time.monotonic()))
+        try:
+            await asyncio.wait_for(self._run_lock.acquire(), timeout=timeout)
+        except TimeoutError:
+            return None
+        try:
+            runtime_session = self.wiring.runtime_wiring.runtime_session
+            host_state = self._ingress_coordinator.state_fact()
+            if (
+                self._lifecycle is not HostSessionLifecycle.OPEN
+                or not self._ingress_coordinator.can_borrow_background_model_call()
+                or self.active_run_id is not None
+                or self.stopping_run_id is not None
+                or self.pending_interaction is not None
+                or self._active_state is not None
+                or self._preparing_state is not None
+                or self._boundary_task is not None
+                and not self._boundary_task.done()
+                or runtime_session.reconciliation_required
+                or runtime_session.model_stream_execution_registry.active_handle_count()
+                != 0
+                or self._background_model_call_admission_lease is not None
+            ):
+                self._run_lock.release()
+                return None
+            runtime_session.require_mutation_allowed()
+            self._background_model_call_admission_generation += 1
+            generation = self._background_model_call_admission_generation
+            lease_id = (
+                "background-model-admission:"
+                + context_fingerprint(
+                    "background-model-call-admission-id:v1",
+                    (self.runtime_session_id, operation_id, generation),
+                ).removeprefix("sha256:")
+            )
+            expires_at = min(deadline_monotonic, time.monotonic() + 10.0)
+            proof_payload = {
+                "lease_id": lease_id,
+                "lease_generation": generation,
+                "runtime_session_id": self.runtime_session_id,
+                "operation_id": operation_id,
+                "host_state_generation": host_state.state_generation,
+                "active_run_frontier_fingerprint": context_fingerprint(
+                    "background-model-call-active-run-frontier:v1", ()
+                ),
+                "permission_policy_revision": host_state.permission_policy_revision,
+                "permission_policy_fingerprint": (
+                    host_state.permission_policy_fingerprint
+                ),
+                "stop_intent_revision": self._stop_intent_revision,
+                "close_intent_revision": host_state.close_intent_revision,
+                "expected_provider_input_generation_revision": (
+                    runtime_session.provider_input_generation_store.through_sequence
+                ),
+                "expires_at_monotonic": expires_at,
+            }
+            proof = BackgroundModelCallAdmissionProof(
+                **proof_payload,
+                proof_fingerprint=context_fingerprint(
+                    "background-model-call-admission-proof:v1", proof_payload
+                ),
+            )
+            identity_payload = {
+                "lease_id": lease_id,
+                "lease_generation": generation,
+                "runtime_session_id": self.runtime_session_id,
+                "operation_id": operation_id,
+                "admission_proof_fingerprint": proof.proof_fingerprint,
+            }
+            identity = BackgroundModelCallAdmissionLeaseIdentity(
+                **identity_payload,
+                identity_fingerprint=context_fingerprint(
+                    "background-model-call-admission-lease-identity:v1",
+                    identity_payload,
+                ),
+            )
+            lease = _HostBackgroundModelCallAdmissionLease(
+                identity=identity,
+                proof=proof,
+                validator=self._validate_background_model_call_admission,
+                releaser=self._release_background_model_call_admission,
+            )
+            self._background_model_call_admission_lease = lease
+            return lease
+        except BaseException:
+            if self._run_lock.locked():
+                self._run_lock.release()
+            raise
+
+    def _validate_background_model_call_admission(
+        self,
+        proof: BackgroundModelCallAdmissionProof,
+    ) -> None:
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        host_state = self._ingress_coordinator.state_fact()
+        lease = self._background_model_call_admission_lease
+        if (
+            lease is None
+            or lease.proof != proof
+            or not self._run_lock.locked()
+            or self._lifecycle is not HostSessionLifecycle.OPEN
+            or not self._ingress_coordinator.can_borrow_background_model_call()
+            or self.active_run_id is not None
+            or self.stopping_run_id is not None
+            or self.pending_interaction is not None
+            or self._active_state is not None
+            or self._preparing_state is not None
+            or host_state.state_generation != proof.host_state_generation
+            or host_state.permission_policy_revision
+            != proof.permission_policy_revision
+            or host_state.permission_policy_fingerprint
+            != proof.permission_policy_fingerprint
+            or host_state.close_intent_revision != proof.close_intent_revision
+            or self._stop_intent_revision != proof.stop_intent_revision
+            or runtime_session.provider_input_generation_store.through_sequence
+            != proof.expected_provider_input_generation_revision
+            or time.monotonic() >= proof.expires_at_monotonic
+        ):
+            raise HostIngressAdmissionStale(
+                "background model-call Host authority became stale"
+            )
+        runtime_session.require_mutation_allowed()
+
+    def _release_background_model_call_admission(
+        self,
+        identity: BackgroundModelCallAdmissionLeaseIdentity,
+    ) -> None:
+        lease = self._background_model_call_admission_lease
+        if lease is not None and lease.identity == identity:
+            self._background_model_call_admission_lease = None
+            if self._run_lock.locked():
+                self._run_lock.release()
+
+    def install_compaction_memory_extraction_driver(
+        self,
+        *,
+        projection_service: object,
+        connection_provider: object,
+    ) -> None:
+        """Register the one live session driver after Host ownership exists."""
+
+        if self._compaction_memory_extraction_registration is not None:
+            raise RuntimeError("compaction memory extraction driver is already installed")
+        driver, registration = self.wiring.build_compaction_memory_extraction_driver(
+            projection_service=projection_service,
+            connection_provider=connection_provider,
+            safe_point_acquirer=self.acquire_compaction_memory_model_safe_point,
+            on_result_full=self._notify_governance,
+        )
+        self._compaction_memory_extraction_driver = driver
+        self._compaction_memory_extraction_registration = registration
+        projection_service.wake(self.runtime_session_id)
 
     @property
     def has_live_processes(self) -> bool:
@@ -3811,6 +4086,12 @@ class HostSession:
         self.begin_close()
         close_deadline = time.monotonic() + drain_timeout_seconds
         runtime_session = self.wiring.runtime_wiring.runtime_session
+        extraction_registration = self._compaction_memory_extraction_registration
+        extraction_driver = self._compaction_memory_extraction_driver
+        if extraction_driver is not None:
+            extraction_driver.stop_admission()
+        if extraction_registration is not None and extraction_registration.active:
+            extraction_registration.revoke()
         await self._ingress_coordinator.begin_close()
         dispatch_task = self._terminal_notification_dispatch_task
         if dispatch_task is not None and not dispatch_task.done():
@@ -3822,6 +4103,8 @@ class HostSession:
         await runtime_session.model_stream_execution_registry.drain_all(
             deadline_monotonic=close_deadline
         )
+        if extraction_driver is not None:
+            await extraction_driver.close(deadline_monotonic=close_deadline)
         await self._finalize_suspended_run(reason)
         await runtime_session.mandatory_runtime_audit_owner.drain(
             deadline_monotonic=close_deadline
@@ -3858,8 +4141,8 @@ class HostSession:
         )
         compaction_service = self.wiring.runtime_wiring.compaction_service
         if compaction_service is not None:
-            await compaction_service.stop_candidate_projection_admission_and_drain(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            await compaction_service.stop_post_completion_extension_admission_and_drain(
+                deadline_monotonic=close_deadline
             )
         candidate_projection_port = (
             self.wiring.runtime_wiring.candidate_projection_commit_port

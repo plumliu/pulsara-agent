@@ -819,6 +819,7 @@ class LedgerMaterializationCoordinator:
         business_window_id: str | None = None,
         business_window_generation: int | None = None,
         deadline_monotonic: float | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> CommittedPhysicalReservation:
         """Atomically create a reservation and its dispatch proof batch."""
 
@@ -1019,6 +1020,7 @@ class LedgerMaterializationCoordinator:
                 resulting=resulting,
                 expected_last_sequence=source.ledger_through_sequence,
                 deadline_monotonic=deadline_monotonic,
+                transaction_companion=transaction_companion,
             )
             self.store.install_confirmed_state(resulting)
             return CommittedPhysicalReservation(
@@ -1845,6 +1847,7 @@ class LedgerMaterializationCoordinator:
         terminal_outcome: str,
         model_stream_measurement_fingerprint: str | None = None,
         deadline_monotonic: float | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> CommittedPhysicalSettlement:
         """Commit a stable terminal batch and close its exact reservation."""
 
@@ -2044,6 +2047,7 @@ class LedgerMaterializationCoordinator:
                 resulting=resulting,
                 expected_last_sequence=source.ledger_through_sequence,
                 deadline_monotonic=deadline_monotonic,
+                transaction_companion=transaction_companion,
             )
             self.store.install_confirmed_state(resulting)
             return CommittedPhysicalSettlement(

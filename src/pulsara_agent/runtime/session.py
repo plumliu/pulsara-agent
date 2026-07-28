@@ -19,6 +19,7 @@ from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryExtractionRequestedEvent,
     ContextCompactionRequestedEvent,
     ContextCompactionStartedEvent,
     ContextCompiledEvent,
@@ -2857,6 +2858,7 @@ class RuntimeSession:
         expected_last_sequence: int | None = None,
         state: LoopState | None = None,
         deadline_monotonic: float | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         self._require_tool_terminal_projection_ready(events)
         prepared = self._prepare_event_batch(events)
@@ -2884,6 +2886,10 @@ class RuntimeSession:
         )
         tool_reservation = self._active_tool_reservation_for_batch(prepared)
         if tool_reservation is not None:
+            if transaction_companion is not None:
+                raise ValueError(
+                    "tool physical continuation cannot carry a transaction companion"
+                )
             return self.event_write_service.execute_blocking(
                 lambda: self.charge_physical_operation_from_thread(
                     prepared,
@@ -2901,6 +2907,7 @@ class RuntimeSession:
                     state=state,
                     await_delivery=False,
                     deadline_monotonic=deadline,
+                    transaction_companion=transaction_companion,
                 ).result
             ),
             deadline_monotonic=deadline,
@@ -3027,6 +3034,7 @@ class RuntimeSession:
         reservation_id: str,
         owner_id: str,
         state: LoopState | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> tuple[PhysicalOperationReservationFact, EventWriteResult]:
         """Atomically commit a dispatch proof and retain its physical reserve."""
 
@@ -3059,6 +3067,7 @@ class RuntimeSession:
                         ).contract
                     ),
                     deadline_monotonic=deadline,
+                    transaction_companion=transaction_companion,
                 )
             except BaseException as exc:
                 self._raise_materialization_commit_error(
@@ -3296,6 +3305,7 @@ class RuntimeSession:
         terminal_outcome: str,
         model_stream_measurement_fingerprint: str | None = None,
         state: LoopState | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         """Commit a stable terminal batch and remove its exact reserve."""
 
@@ -3322,6 +3332,7 @@ class RuntimeSession:
                         model_stream_measurement_fingerprint
                     ),
                     deadline_monotonic=deadline,
+                    transaction_companion=transaction_companion,
                 )
             except BaseException as exc:
                 self._raise_materialization_commit_error(
@@ -3734,6 +3745,7 @@ class RuntimeSession:
 
         self.mcp_input_required_lifecycle_store.validate_next_batch(events)
         self._validate_memory_governance_batch(events)
+        self._validate_compaction_extension_batch(events)
         self._validate_terminal_projection_batch(events)
         self._validate_terminal_monitor_registration_batch(events)
         self._validate_terminal_monitor_cancellation_batch(events)
@@ -4186,6 +4198,114 @@ class RuntimeSession:
                     raise ValueError(
                         "resume boundary MCP audits must precede its exposure"
                     )
+
+    def _validate_compaction_extension_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.primitives.compaction import (
+            CompactionPostCompletionExtensionLinkFact,
+            CompactionPostCompletionExtensionRequestedFact,
+        )
+        from pulsara_agent.primitives.frozen import build_frozen_fact
+
+        extension_events = tuple(
+            event
+            for event in events
+            if isinstance(
+                event,
+                (
+                    ContextCompactionCompletedEvent,
+                    ContextCompactionMemoryExtractionRequestedEvent,
+                ),
+            )
+        )
+        for index, event in enumerate(extension_events):
+            if isinstance(event, ContextCompactionCompletedEvent):
+                requested = tuple(
+                    item
+                    for item in event.post_completion_extension_dispositions
+                    if isinstance(
+                        item, CompactionPostCompletionExtensionRequestedFact
+                    )
+                )
+                if not requested:
+                    continue
+                if len(requested) != 1 or index + 1 >= len(extension_events):
+                    raise ValueError(
+                        "compaction requested disposition requires one companion request"
+                    )
+                request = extension_events[index + 1]
+                if not isinstance(
+                    request, ContextCompactionMemoryExtractionRequestedEvent
+                ):
+                    raise ValueError(
+                        "compaction request must immediately follow Completed"
+                    )
+                link = requested[0].extension_link
+                if request.extension_link != link:
+                    raise ValueError("compaction Completed/Request link drifted")
+                expected = build_frozen_fact(
+                    CompactionPostCompletionExtensionLinkFact,
+                    schema_version="compaction_post_completion_extension_link.v1",
+                    compaction_id=event.compaction_id,
+                    completed_event_id=event.id,
+                    request_event_id=request.id,
+                    extension_contract_fingerprint=(
+                        link.extension_contract_fingerprint
+                    ),
+                )
+                if link != expected:
+                    raise ValueError("compaction extension link identity is invalid")
+                if (
+                    request.run_id != event.run_id
+                    or request.turn_id != event.turn_id
+                    or request.reply_id != event.reply_id
+                    or link.compaction_id != event.compaction_id
+                ):
+                    raise ValueError(
+                        "compaction extension request occurrence does not join Completed"
+                    )
+                expected_occurrence = context_fingerprint(
+                    "compaction-memory-extraction-request-occurrence:v1",
+                    (
+                        self.runtime_session_id,
+                        event.compaction_id,
+                        event.id,
+                        request.id,
+                    ),
+                )
+                if (
+                    request.business_occurrence_fingerprint
+                    != expected_occurrence
+                ):
+                    raise ValueError(
+                        "compaction extraction request occurrence fingerprint drifted"
+                    )
+                expected_semantic = context_fingerprint(
+                    "context-compaction-memory-extraction-request-semantic:v1",
+                    {
+                        "manifest_semantic": (
+                            request.human_evidence_manifest_reference
+                            .manifest_semantic_fingerprint
+                        ),
+                        "memory_domain_id": request.memory_domain_id,
+                        "resolved_scope": request.resolved_scope,
+                        "extraction_contract": (
+                            request.extraction_contract.contract_fingerprint
+                        ),
+                    },
+                )
+                if request.event_semantic_fingerprint != expected_semantic:
+                    raise ValueError(
+                        "compaction extraction request semantic fingerprint drifted"
+                    )
+            elif index == 0 or not isinstance(
+                extension_events[index - 1], ContextCompactionCompletedEvent
+            ):
+                raise ValueError(
+                    "compaction extraction Requested cannot be submitted independently"
+                )
 
     @staticmethod
     def _validate_terminal_monitor_registration_batch(

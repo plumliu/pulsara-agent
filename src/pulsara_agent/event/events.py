@@ -45,6 +45,9 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelTargetFact,
     sha256_fingerprint,
 )
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionModelInputAttributionFact,
+)
 from pulsara_agent.primitives.transcript_projection import (
     RunTranscriptSeedReferenceFact,
     RunTranscriptSeedSemanticFact,
@@ -189,12 +192,23 @@ from pulsara_agent.primitives.host_ingress import (
 )
 from pulsara_agent.primitives.frozen import StableEventIdentityFact
 from pulsara_agent.primitives.governance_evidence import (
-    CompactionCandidateAttributionFact,
-    CompactionMemoryCandidateExtractorContractFact,
     GovernanceBatchInputReferenceFact,
     GovernanceModelInputAttributionFact,
     MemoryCandidateEvidenceRejectedRecord,
     ReflectionCandidateAttributionFact,
+)
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionCandidateAttributionFact,
+    CompactionMemoryExtractionContractFact,
+    CompactionMemoryExtractionPolicyFact,
+    CompactionPostCompletionExtensionDispositionFact,
+    CompactionPostCompletionExtensionLinkFact,
+    CompactionPostCompletionExtensionRequestedFact,
+    CompactionHumanEvidenceManifestReferenceFact,
+)
+from pulsara_agent.projection_jobs.compaction_memory import (
+    CompactionMemoryExtractionOccurrenceAttributionFact,
+    CompactionMemoryExtractionResultSemanticFact,
 )
 from pulsara_agent.primitives.provider_input import (
     CommittedProviderInputGenerationCoreStateFact,
@@ -421,8 +435,11 @@ class EventType(StrEnum):
     CONTEXT_COMPACTION_REQUESTED = "CONTEXT_COMPACTION_REQUESTED"
     MID_TURN_CONTEXT_COMPACTION_SKIPPED = "MID_TURN_CONTEXT_COMPACTION_SKIPPED"
     TOOL_RESULT_EVIDENCE_PROJECTION_FAILED = "TOOL_RESULT_EVIDENCE_PROJECTION_FAILED"
-    CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED = (
-        "CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED"
+    CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED = (
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED"
+    )
+    CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED = (
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED"
     )
     CONTEXT_COMPACTION_FAILED = "CONTEXT_COMPACTION_FAILED"
 
@@ -1171,6 +1188,9 @@ class ModelCallStartEvent(EventBase):
     recovery_plan: ModelStreamRecoveryPlanFact
     provider_input_reference: CommittedProviderInputReferenceFact
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None
+    compaction_memory_extraction_input_attribution: (
+        CompactionMemoryExtractionModelInputAttributionFact | None
+    ) = None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None
 
     @model_validator(mode="after")
@@ -1211,6 +1231,24 @@ class ModelCallStartEvent(EventBase):
                 != self.resolved_call.target.target_fingerprint
             ):
                 raise ValueError("governance model Start attribution drifted")
+        is_extraction = (
+            self.resolved_call.purpose
+            is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
+        )
+        extraction = self.compaction_memory_extraction_input_attribution
+        if is_extraction != (extraction is not None):
+            raise ValueError(
+                "compaction memory extraction Start requires exact input attribution"
+            )
+        if extraction is not None and (
+            self.resolved_call.context_mode != "direct"
+            or self.model_call_index is not None
+            or extraction.background_budget_reservation.model_call_reservation_quote.resolved_model_call_id
+            != self.resolved_call.resolved_model_call_id
+            or extraction.background_budget_reservation.dispatch_attempt_ordinal
+            != extraction.dispatch_attempt_ordinal
+        ):
+            raise ValueError("compaction memory extraction Start attribution drifted")
         if self.active_run_monitor_delivery is not None and (
             self.resolved_call.context_mode != "compiled"
             or self.model_call_index is None
@@ -3501,6 +3539,9 @@ class ContextCompactionCompletedEvent(EventBase):
     started_event_id: str = Field(min_length=1)
     host_boundary_id: str | None = None
     host_boundary_kind: Literal["pre_run"] | None = None
+    post_completion_extension_dispositions: tuple[
+        CompactionPostCompletionExtensionDispositionFact, ...
+    ] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def _validate_compaction_contract(self) -> "ContextCompactionCompletedEvent":
@@ -3556,54 +3597,77 @@ class ContextCompactionCompletedEvent(EventBase):
             raise ValueError(
                 "summarizer terminal estimate does not match started estimate"
             )
+        requested_ids = tuple(
+            item.extension_link.extension_link_id
+            for item in self.post_completion_extension_dispositions
+            if isinstance(item, CompactionPostCompletionExtensionRequestedFact)
+        )
+        if len(requested_ids) != len(set(requested_ids)):
+            raise ValueError("compaction extension dispositions contain duplicates")
         return self
 
 
-class CompactionCandidateDiagnosticEvent(BaseModel):
+class ContextCompactionMemoryExtractionRequestedEvent(EventBase):
     model_config = ConfigDict(extra="forbid")
 
-    code: str
-    field: str | None = None
-    message: str = ""
-    redacted: bool = False
-
-
-class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
-    type: Literal[EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED] = (
-        EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED
-    )
-    compaction_id: str
-    source_event_id: str
-    source_event_sequence: int
-    summary_artifact_id: str
-    candidate_entry_ids: list[str] = Field(default_factory=list)
-    attempted_count: int = 0
-    proposed_count: int
-    skipped_count: int = 0
-    duplicate_count: int = 0
-    error_count: int = 0
-    extractor_version: str = "compaction-memory-candidates:v1"
-    diagnostics: list[CompactionCandidateDiagnosticEvent] = Field(default_factory=list)
-    summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    summary_content_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
-    extractor_contract: CompactionMemoryCandidateExtractorContractFact
-    ordered_candidate_attributions: tuple[CompactionCandidateAttributionFact, ...] = (
-        Field(max_length=256)
-    )
-    completed_compaction_event_identity: StableEventIdentityFact
+    type: Literal[
+        EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
+    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
+    extension_link: CompactionPostCompletionExtensionLinkFact
+    human_evidence_manifest_reference: CompactionHumanEvidenceManifestReferenceFact
+    memory_domain_id: str = Field(min_length=1)
+    resolved_scope: str = Field(min_length=1)
+    extraction_contract: CompactionMemoryExtractionContractFact
+    extraction_policy: CompactionMemoryExtractionPolicyFact
+    business_occurrence_fingerprint: str = Field(min_length=1)
+    event_semantic_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _candidate_attribution_join(
-        self,
-    ) -> "ContextCompactionMemoryCandidatesProposedEvent":
-        if self.proposed_count != len(self.ordered_candidate_attributions):
-            raise ValueError("compaction proposed count/attribution mismatch")
-        if tuple(self.candidate_entry_ids) != tuple(
-            item.candidate_entry_id for item in self.ordered_candidate_attributions
+    def _request(self) -> "ContextCompactionMemoryExtractionRequestedEvent":
+        if self.extension_link.request_event_id != self.id:
+            raise ValueError("extraction request event/link identity mismatch")
+        return self
+
+
+class ContextCompactionMemoryExtractionCompletedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
+    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
+    result_semantic: CompactionMemoryExtractionResultSemanticFact
+    occurrence_attribution: CompactionMemoryExtractionOccurrenceAttributionFact
+    ordered_candidate_attributions: tuple[
+        CompactionMemoryExtractionCandidateAttributionFact, ...
+    ] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def _result_matrix(self) -> "ContextCompactionMemoryExtractionCompletedEvent":
+        outcome = self.result_semantic.outcome_kind
+        if self.occurrence_attribution.outcome_attribution.outcome_kind != outcome:
+            raise ValueError("extraction result semantic/attribution branch mismatch")
+        candidates = self.ordered_candidate_attributions
+        if outcome == "valid_candidates":
+            if not candidates:
+                raise ValueError("valid candidate result requires candidates")
+            semantic_fingerprints = tuple(
+                sorted(
+                    item.candidate_payload.candidate_semantic_fingerprint
+                    for item in candidates
+                )
+            )
+            if (
+                semantic_fingerprints
+                != self.result_semantic.ordered_candidate_semantic_fingerprints
+            ):
+                raise ValueError("extraction result candidate semantic join failed")
+        elif candidates:
+            raise ValueError("non-candidate extraction result cannot carry candidates")
+        if (
+            self.occurrence_attribution.extension_link.request_event_id
+            != self.occurrence_attribution.request_event_reference.stable_identity.event_id
         ):
-            raise ValueError("compaction candidate IDs/attributions mismatch")
-        if self.extractor_version != self.extractor_contract.extractor_version:
-            raise ValueError("compaction extractor version drifted")
+            raise ValueError("extraction result request occurrence mismatch")
         return self
 
 
@@ -4882,7 +4946,8 @@ AgentEvent: TypeAlias = (
     | ContextCompactionRequestedEvent
     | MidTurnContextCompactionSkippedEvent
     | ToolResultEvidenceProjectionFailedEvent
-    | ContextCompactionMemoryCandidatesProposedEvent
+    | ContextCompactionMemoryExtractionRequestedEvent
+    | ContextCompactionMemoryExtractionCompletedEvent
     | ContextCompactionFailedEvent
     | SubagentRunStartedEvent
     | SubagentMessageSentEvent
