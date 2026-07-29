@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import AsyncIterator, TypeAlias
 
-from tests.support import test_llm_config
+from tests.support import memory_hook_view, test_llm_config
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
     RawProviderTextBlockStart,
@@ -50,7 +50,7 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelTokenUsageFact,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from tests.support.runtime_factory import (
     build_component_runtime_wiring,
 )
@@ -807,7 +807,7 @@ def _harness(tmp_path: Path, replies: list[ScriptedReply]) -> _Harness:
 
 
 async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
-    state = LoopState(session_id=harness.wiring.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(session_id=harness.wiring.runtime_session.runtime_session_id)
     state.messages.append(
         UserMsg(
             name="user",
@@ -818,8 +818,8 @@ async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
         harness.wiring.runtime_session._adopt_unbootstrapped_in_memory_account_for_test(
             incoming_run_id=state.run_id
         )
-    events = await harness.reflection.reflect(
-        state=state,
+        events = await harness.reflection.reflect(
+            view=memory_hook_view(state),
         event_store=harness.wiring.event_log,
         trigger_reasons=["cheap_memory_hint"],
         cheap_hints=[

@@ -49,12 +49,12 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeObservationRewriteUnitSemanticFact,
     RuntimeObservationSourceAttributionFact,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
     runtime_observation_kind_contract,
     runtime_observation_derived_producer,
 )
-from pulsara_agent.runtime.provider_input.materialization import freeze_message_unit
+from pulsara_agent.llm.provider_input_materialization import freeze_message_unit
 from pulsara_agent.runtime.provider_input.vector import (
     PreparedProviderInputArtifact,
     prepared_json_artifact,

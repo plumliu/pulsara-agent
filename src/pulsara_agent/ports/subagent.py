@@ -7,6 +7,8 @@ from enum import StrEnum
 from collections.abc import Mapping
 from typing import Literal, Protocol, TypeAlias
 
+from pydantic import model_validator
+
 from pulsara_agent.event import EventContext
 from pulsara_agent.ports.tool_execution import (
     ToolInvocationOwnerKind,
@@ -16,6 +18,12 @@ from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     context_fingerprint,
     freeze_json,
+)
+from pulsara_agent.primitives.frozen import FrozenRuntimeStateBase
+from pulsara_agent.ports.run_execution import (
+    LedgerHorizonFact,
+    RunHandle,
+    RunTerminalOutcome,
 )
 from pulsara_agent.primitives.subagent import (
     SubagentCommandKind,
@@ -828,6 +836,109 @@ def _validate_fingerprint(value: object, field_name: str, namespace: str) -> Non
         raise ValueError(f"{field_name} mismatch")
 
 
+class RecoveredChildOccupancyProof(FrozenRuntimeStateBase):
+    schema_version: Literal[1] = 1
+    parent_runtime_session_id: str
+    parent_run_id: str
+    subagent_run_id: str
+    spawn_edge_id: str
+    parent_graph_horizon: LedgerHorizonFact
+    parent_graph_state_fingerprint: str
+    proof_fingerprint: str
+
+    @model_validator(mode="after")
+    def _validate_proof(self) -> "RecoveredChildOccupancyProof":
+        payload = self.model_dump(
+            mode="json",
+            exclude={"proof_fingerprint"},
+        )
+        expected = context_fingerprint("recovered-child-occupancy-proof:v1", payload)
+        if self.proof_fingerprint != expected:
+            raise ValueError("recovered child occupancy proof fingerprint mismatch")
+        return self
+
+
+def build_recovered_child_occupancy_proof(
+    *,
+    parent_runtime_session_id: str,
+    parent_run_id: str,
+    subagent_run_id: str,
+    spawn_edge_id: str,
+    parent_graph_horizon: LedgerHorizonFact,
+    parent_graph_state_fingerprint: str,
+) -> RecoveredChildOccupancyProof:
+    payload = {
+        "schema_version": 1,
+        "parent_runtime_session_id": parent_runtime_session_id,
+        "parent_run_id": parent_run_id,
+        "subagent_run_id": subagent_run_id,
+        "spawn_edge_id": spawn_edge_id,
+        "parent_graph_horizon": parent_graph_horizon.model_dump(mode="json"),
+        "parent_graph_state_fingerprint": parent_graph_state_fingerprint,
+    }
+    return RecoveredChildOccupancyProof(
+        **payload,
+        proof_fingerprint=context_fingerprint(
+            "recovered-child-occupancy-proof:v1",
+            payload,
+        ),
+    )
+
+
+class ChildCapacityReservation(Protocol):
+    @property
+    def reservation_id(self) -> str: ...
+
+    def release(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LiveChildCapacityReservationSlot:
+    slot_kind: Literal["live_reservation"]
+    reservation: ChildCapacityReservation
+    reservation_generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredChildCapacityOccupancySlot:
+    slot_kind: Literal["recovered_occupancy"]
+    occupancy_id: str
+    proof: RecoveredChildOccupancyProof
+
+
+@dataclass(frozen=True, slots=True)
+class ReleasedChildCapacitySlot:
+    slot_kind: Literal["released"]
+    release_receipt_id: str
+    released_from_fingerprint: str
+
+
+ChildCapacitySlot: TypeAlias = (
+    LiveChildCapacityReservationSlot
+    | RecoveredChildCapacityOccupancySlot
+    | ReleasedChildCapacitySlot
+)
+
+
+class SubagentChildActivationPort(Protocol):
+    async def activate_committed_child(
+        self,
+        subagent_run_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> RunHandle: ...
+
+    async def terminalize_committed_child(
+        self,
+        subagent_run_id: str,
+        *,
+        termination_kind: Literal["parent_cancel", "host_teardown", "child_timeout"],
+        deadline_monotonic: float,
+    ) -> RunTerminalOutcome: ...
+
+    def retire_child_activation(self, subagent_run_id: str) -> None: ...
+
+
 __all__ = [name for name in globals() if name.startswith("Subagent")]
 __all__ += [
     "build_subagent_command_owner",
@@ -842,5 +953,11 @@ __all__ += [
     "StopAgentTaskCommand",
     "WaitAgentCommand",
     "WaitAgentTasksCommand",
+    "ChildCapacitySlot",
+    "LiveChildCapacityReservationSlot",
+    "RecoveredChildCapacityOccupancySlot",
+    "RecoveredChildOccupancyProof",
+    "ReleasedChildCapacitySlot",
+    "build_recovered_child_occupancy_proof",
     "process_local_subagent_fingerprint",
 ]

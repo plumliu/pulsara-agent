@@ -93,9 +93,7 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptToolPairLeafEntryFact,
     TranscriptToolResultLeafEntryFact,
 )
-from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
-    GovernanceTranscriptAuthoritySnapshot,
-)
+from pulsara_agent.memory.foundation.protocols import GovernanceTranscriptAuthority
 from pulsara_agent.memory.candidates.main_agent_builder import (
     build_main_agent_memory_candidate_payload,
     main_agent_memory_candidate_builder_contract,
@@ -144,7 +142,7 @@ class GovernanceSourceEvidenceBuilder:
         self,
         *,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> GovernanceEvidencePreparation:
         high_water = authority.ledger_through_sequence
         if candidate.source_session_id != self.runtime_session_id:
@@ -267,7 +265,7 @@ class GovernanceSourceEvidenceBuilder:
     def _main_tool(
         self,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> tuple[
         MainAgentToolGovernanceSourceSemanticFact,
         GovernanceSourceEvidenceAttributionFact,
@@ -462,7 +460,7 @@ class GovernanceSourceEvidenceBuilder:
     def _reflection(
         self,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> tuple[
         ReflectionGovernanceSourceSemanticFact,
         GovernanceSourceEvidenceAttributionFact,
@@ -868,7 +866,7 @@ class GovernanceSourceEvidenceBuilder:
         candidate: PooledMemoryCandidate,
         semantic: GovernanceSourceEvidenceSemanticFact,
         attribution: GovernanceSourceEvidenceAttributionFact,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> GovernanceEvidencePromptProjectionFact:
         evidence: list[GovernancePromptEvidenceTextFact] = []
         truncations: list[str] = []
@@ -1044,7 +1042,7 @@ class GovernanceSourceEvidenceBuilder:
     def _tool_result_prompt_text(
         self,
         reference: TerminalProjectionReferenceFact | None,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> str:
         if reference is None:
             return ""

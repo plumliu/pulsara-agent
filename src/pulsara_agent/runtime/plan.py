@@ -17,7 +17,6 @@ from pulsara_agent.primitives._context_base import ContextEventReferenceFact, th
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredSuspensionFact,
 )
-from pulsara_agent.ports.mcp import McpPendingExecutionHandle
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.approval import PendingApproval
 from pulsara_agent.primitives.permission import (
@@ -29,7 +28,7 @@ from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
-from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus
 
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
 PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
@@ -289,7 +288,6 @@ class PendingMcpInputRequired:
     server_id: str
     source_suspension_event_reference: ContextEventReferenceFact
     suspension_fact: McpInputRequiredSuspensionFact
-    pending_handle: McpPendingExecutionHandle
     input_requests: tuple[dict[str, Any], ...]
     round_count: int = 1
     deadline_monotonic: float | None = None
@@ -371,7 +369,7 @@ PendingInteraction: TypeAlias = (
 
 
 def pending_plan_interaction_from_state(
-    state: LoopState, host_session_id: str
+    state: RunActivationWorkingState, host_session_id: str
 ) -> PendingPlanInteraction:
     if state.status is not LoopStatus.WAITING_USER:
         raise ValueError(
@@ -406,7 +404,7 @@ def pending_plan_interaction_from_state(
 
 
 def pending_mcp_input_required_from_state(
-    state: LoopState, host_session_id: str
+    state: RunActivationWorkingState, host_session_id: str
 ) -> PendingMcpInputRequired:
     if state.status is not LoopStatus.WAITING_USER:
         raise ValueError(
@@ -440,7 +438,6 @@ def pending_mcp_input_required_from_state(
         server_id=view.interaction.server_id,
         source_suspension_event_reference=source_reference,
         suspension_fact=suspension,
-        pending_handle=pending_handle,
         input_requests=tuple(
             {
                 "key": item.key,

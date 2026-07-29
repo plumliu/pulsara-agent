@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
@@ -89,6 +89,7 @@ from pulsara_agent.primitives.authority_materialization import (
     LedgerWriteAdmissionClass,
     PhysicalOperationKind,
     PhysicalOperationReservationFact,
+    ToolDeltaBurstContractFact,
 )
 from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.context_input.candidate import InMemoryContextLifecycleCache
@@ -111,7 +112,6 @@ from pulsara_agent.runtime.publisher import (
     RuntimeEventPublisher,
     RuntimePublishedEvent,
 )
-from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
     OwnedTerminalRuntime,
@@ -137,6 +137,17 @@ from pulsara_agent.runtime.mandatory_audit import RuntimeSessionMandatoryAuditOw
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     RuntimeEventOperationDeadlineBudget,
 )
+from pulsara_agent.ports.event_write import (
+    CommittedReducerError,
+    EventBatchCommitOutcome,
+    EventCommitError,
+    EventPublicationAfterCommitError,
+    EventPublicationError,
+    EventReconciliationRequired,
+    EventWriteCancelled,
+    EventWriteResult,
+    event_batch_commit_outcome_from_error as _base_event_batch_commit_outcome,
+)
 
 
 _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID: ContextVar[str | None] = ContextVar(
@@ -148,106 +159,15 @@ _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID: ContextVar[str | None] = ContextVar(
 @dataclass(frozen=True, slots=True)
 class RuntimeThreadRecorder:
     runtime_session: "RuntimeSession"
-    state: LoopState | None = None
 
     def __call__(self, event: AgentEvent) -> AgentEvent:
-        return self.runtime_session.emit_from_thread(event, state=self.state)
-
-
-@dataclass(frozen=True, slots=True)
-class CommittedReducerError:
-    reducer_id: str
-    error_type: str
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
-class EventPublicationError:
-    event_id: str
-    sequence: int
-    subscriber_id: str | None
-    error_type: str
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
-class EventWriteResult:
-    committed_events: tuple[AgentEvent, ...]
-    commit_status: Literal["committed"]
-    reducer_high_waters: Mapping[str, int]
-    reconciliation_required: bool
-    reducer_errors: tuple[CommittedReducerError, ...]
-    publication_status: Literal["completed", "enqueued", "unavailable"]
-    publisher_enqueued_through_sequence: int | None
-    publication_errors: tuple[EventPublicationError, ...] = ()
-    accounting_events: tuple[AgentEvent, ...] = ()
-
-    def require_reduced(self, reducer_id: str) -> tuple[AgentEvent, ...]:
-        last_sequence = max(
-            (event.sequence or 0 for event in self.committed_events),
-            default=0,
-        )
-        reducer_sequence = self.reducer_high_waters.get(reducer_id)
-        reducer_failed = any(
-            error.reducer_id == reducer_id for error in self.reducer_errors
-        )
-        if (
-            reducer_sequence is None
-            or reducer_sequence < last_sequence
-            or reducer_failed
-        ):
-            raise EventReconciliationRequired(
-                f"Committed reducer {reducer_id!r} did not apply through sequence {last_sequence}"
-            )
-        return self.committed_events
+        return self.runtime_session.emit_from_thread(event)
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeEventSnapshot:
     events: tuple[AgentEvent, ...]
     through_sequence: int
-
-
-@dataclass(frozen=True, slots=True)
-class EventBatchCommitOutcome:
-    """Terminal durable result owned by one event-writer attempt."""
-
-    status: Literal["full", "none", "unknown"]
-    deadline_monotonic: float
-    result: EventWriteResult | None = None
-
-    def __post_init__(self) -> None:
-        if self.status == "full" and self.result is None:
-            raise ValueError("FULL event commit outcome requires its write result")
-        if self.status != "full" and self.result is not None:
-            raise ValueError("non-FULL event commit outcome cannot carry a result")
-
-    @property
-    def committed_events(self) -> tuple[AgentEvent, ...]:
-        return self.result.committed_events if self.result is not None else ()
-
-
-class EventCommitError(RuntimeError):
-    """Event batch was not durably committed."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        commit_outcome: Literal["none", "unknown"] = "none",
-        deadline_monotonic: float | None = None,
-    ) -> None:
-        self.commit_outcome = commit_outcome
-        self.deadline_monotonic = deadline_monotonic
-        super().__init__(message)
-
-
-class EventWriteCancelled(asyncio.CancelledError):
-    """Caller cancellation after the critical writer resolved durable state."""
-
-    def __init__(self, outcome: EventBatchCommitOutcome) -> None:
-        self.outcome = outcome
-        super().__init__(f"event write cancelled with {outcome.status} commit outcome")
 
 
 class EventWriteConflict(RuntimeError):
@@ -269,38 +189,14 @@ class EventWriteConflict(RuntimeError):
         )
 
 
-class EventReconciliationRequired(RuntimeError):
-    """A committed reducer is inconsistent and mutation must fail closed."""
-
-
-class EventPublicationAfterCommitError(RuntimeError):
-    def __init__(self, result: EventWriteResult) -> None:
-        self.result = result
-        super().__init__("Event batch committed but one or more observers failed")
-
-
 def event_batch_commit_outcome_from_error(
     error: BaseException,
 ) -> EventBatchCommitOutcome | None:
     """Return an outcome already resolved by the writer without new ledger I/O."""
 
-    if isinstance(error, EventWriteCancelled):
-        return error.outcome
-    if isinstance(error, EventPublicationAfterCommitError):
-        return EventBatchCommitOutcome(
-            status="full",
-            deadline_monotonic=monotonic(),
-            result=error.result,
-        )
-    if isinstance(error, EventCommitError):
-        return EventBatchCommitOutcome(
-            status=error.commit_outcome,
-            deadline_monotonic=(
-                error.deadline_monotonic
-                if error.deadline_monotonic is not None
-                else monotonic()
-            ),
-        )
+    base = _base_event_batch_commit_outcome(error)
+    if base is not None:
+        return base
     if isinstance(error, EventWriteConflict) and error.deadline_monotonic is not None:
         return EventBatchCommitOutcome(
             status="none",
@@ -348,7 +244,6 @@ class RuntimeSession:
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     terminal_binding: TerminalRuntimeBinding | None = None
     dynamic_tool_installations: tuple[object, ...] = ()
-    subagent_runtime: Any | None = None
     window_compaction_service: Any | None = None
     mcp_supervisor: Any | None = None
     mcp_tool_execution_port: Any | None = None
@@ -1753,6 +1648,37 @@ class RuntimeSession:
     ) -> PhysicalOperationReservationFact | None:
         return self._physical_reservation_facts.get((operation_kind, owner_id))
 
+    def resolve_run_rollout_binding(self, *, run_id: str):
+        from pulsara_agent.runtime.long_horizon.accounting import (
+            resolve_run_rollout_binding,
+        )
+
+        return resolve_run_rollout_binding(self, run_id=run_id)
+
+    @staticmethod
+    def plan_root_model_admission(*, account, state, quote, purpose):
+        from pulsara_agent.runtime.long_horizon.coordinator import (
+            plan_root_model_admission,
+        )
+
+        return plan_root_model_admission(
+            account=account,
+            state=state,
+            quote=quote,
+            purpose=purpose,
+        )
+
+    @staticmethod
+    def build_one_shot_generation_close_event(*, bundle, event_context):
+        from pulsara_agent.runtime.provider_input.planner import (
+            build_one_shot_generation_close_event,
+        )
+
+        return build_one_shot_generation_close_event(
+            bundle=bundle,
+            event_context=event_context,
+        )
+
     def physical_operation_admission_owner_id(
         self,
         *,
@@ -1981,7 +1907,6 @@ class RuntimeSession:
         start_event: ModelCallStartEvent,
         candidate_events: tuple[AgentEvent, ...],
         guard: Any,
-        state: Any,
     ):
         factory = self._active_run_monitor_safe_point_commit_guard_factory
         if guard is None or factory is None:
@@ -1991,20 +1916,22 @@ class RuntimeSession:
             start_event=start_event,
             candidate_events=candidate_events,
             guard=guard,
-            state=state,
+            run_id=start_event.run_id,
         ):
             yield
 
     async def borrow_active_run_monitor_safe_point(
         self,
         *,
-        state: Any,
+        run_id: str,
         next_model_call_index: int,
     ) -> Any:
         provider = self._active_run_monitor_safe_point_provider
         if provider is None:
             return None
-        return await provider(state, next_model_call_index)
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("active-run safe point requires a typed run identity")
+        return await provider(run_id, next_model_call_index)
 
     def release_active_run_monitor_safe_point(self, lease: Any) -> None:
         releaser = self._active_run_monitor_safe_point_releaser
@@ -2017,7 +1944,6 @@ class RuntimeSession:
         start_event: ModelCallStartEvent,
         candidate_events: tuple[AgentEvent, ...],
         guard: Any,
-        state: Any,
     ) -> None:
         validator = self._active_run_monitor_safe_point_validator
         if validator is None:
@@ -2026,7 +1952,7 @@ class RuntimeSession:
             start_event=start_event,
             candidate_events=candidate_events,
             guard=guard,
-            state=state,
+            run_id=start_event.run_id,
         )
 
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
@@ -2378,14 +2304,12 @@ class RuntimeSession:
         self,
         candidates: Sequence[AgentEvent],
         *,
-        state: LoopState | None = None,
         deadline_monotonic: float,
     ) -> EventWriteResult:
         prepared = self._prepare_event_batch(candidates)
         return await self.event_write_service.execute(
             lambda: self._confirm_and_handoff_event_batch_owned(
                 prepared,
-                state=state,
                 deadline_monotonic=deadline_monotonic,
             ),
             deadline_monotonic=deadline_monotonic,
@@ -2395,7 +2319,6 @@ class RuntimeSession:
         self,
         candidates: Sequence[AgentEvent],
         *,
-        state: LoopState | None = None,
         deadline_monotonic: float | None = None,
     ) -> EventWriteResult:
         prepared = self._prepare_event_batch(candidates)
@@ -2407,7 +2330,6 @@ class RuntimeSession:
         return self.event_write_service.execute_blocking(
             lambda: self._confirm_and_handoff_event_batch_owned(
                 prepared,
-                state=state,
                 deadline_monotonic=deadline,
             ),
             deadline_monotonic=deadline,
@@ -2416,8 +2338,6 @@ class RuntimeSession:
     def confirm_and_handoff_event_batch(
         self,
         candidates: Sequence[AgentEvent],
-        *,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         """Confirm a stable batch and restore its process-local handoff.
 
@@ -2431,7 +2351,6 @@ class RuntimeSession:
         prepared = self._prepare_event_batch(candidates)
         return self._confirm_and_handoff_event_batch_owned(
             prepared,
-            state=state,
             deadline_monotonic=deadline,
         )
 
@@ -2439,7 +2358,6 @@ class RuntimeSession:
         self,
         prepared: tuple[AgentEvent, ...],
         *,
-        state: LoopState | None,
         deadline_monotonic: float,
     ) -> EventWriteResult:
         with self.write_coordinator.lock:
@@ -2462,15 +2380,12 @@ class RuntimeSession:
             return self._reconcile_confirmed_attempt(
                 committed,
                 catch_up_through_sequence=high_water,
-                state=state,
                 await_delivery=False,
             ).result
 
     def confirm_and_reduce_event_batch(
         self,
         candidates: Sequence[AgentEvent],
-        *,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         """Confirm and fold a stable batch without touching the publisher.
 
@@ -2500,7 +2415,6 @@ class RuntimeSession:
             return self._reconcile_confirmed_attempt(
                 committed,
                 catch_up_through_sequence=high_water,
-                state=state,
                 await_delivery=False,
                 enqueue_publication=False,
             ).result
@@ -2586,12 +2500,10 @@ class RuntimeSession:
         event: AgentEvent,
         *,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         return await self.write_events(
             (event,),
             expected_last_sequence=expected_last_sequence,
-            state=state,
         )
 
     async def write_event_with_deadline(
@@ -2600,14 +2512,12 @@ class RuntimeSession:
         *,
         deadline_monotonic: float,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> EventWriteResult:
         return await self.write_events_with_deadline(
             (event,),
             deadline_monotonic=deadline_monotonic,
             expected_last_sequence=expected_last_sequence,
-            state=state,
             publication_terminal_maintenance_lease=(
                 publication_terminal_maintenance_lease
             ),
@@ -2618,7 +2528,6 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         deadline = self.event_write_service.new_deadline_monotonic()
@@ -2626,7 +2535,6 @@ class RuntimeSession:
             events,
             deadline_monotonic=deadline,
             expected_last_sequence=expected_last_sequence,
-            state=state,
             transaction_companion=transaction_companion,
         )
 
@@ -2636,7 +2544,6 @@ class RuntimeSession:
         *,
         deadline_monotonic: float,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> EventWriteResult:
@@ -2708,7 +2615,6 @@ class RuntimeSession:
                 attempt = await self.event_write_service.execute(
                     lambda: self._commit_genesis_reduce_enqueue(
                         prepared,
-                        state=state,
                         await_delivery=True,
                         deadline_monotonic=deadline,
                     ),
@@ -2719,7 +2625,6 @@ class RuntimeSession:
                     lambda: self._charge_physical_operation_attempt_from_thread(
                         prepared,
                         reservation=tool_reservation,
-                        state=state,
                         await_delivery=True,
                     ),
                     deadline_monotonic=deadline,
@@ -2730,7 +2635,6 @@ class RuntimeSession:
                     lambda: self._commit_reduce_enqueue(
                         prepared,
                         expected_last_sequence=expected_last_sequence,
-                        state=state,
                         await_delivery=True,
                         deadline_monotonic=deadline,
                         transaction_companion=transaction_companion,
@@ -2856,7 +2760,6 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
         deadline_monotonic: float | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
@@ -2894,7 +2797,6 @@ class RuntimeSession:
                 lambda: self.charge_physical_operation_from_thread(
                     prepared,
                     reservation=tool_reservation,
-                    state=state,
                 ),
                 deadline_monotonic=deadline,
                 **self._physical_operation_continuation_admission(tool_reservation),
@@ -2904,7 +2806,6 @@ class RuntimeSession:
                 self._commit_reduce_enqueue(
                     prepared,
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                     await_delivery=False,
                     deadline_monotonic=deadline,
                     transaction_companion=transaction_companion,
@@ -3033,7 +2934,6 @@ class RuntimeSession:
         operation_kind: PhysicalOperationKind,
         reservation_id: str,
         owner_id: str,
-        state: LoopState | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> tuple[PhysicalOperationReservationFact, EventWriteResult]:
         """Atomically commit a dispatch proof and retain its physical reserve."""
@@ -3088,7 +2988,6 @@ class RuntimeSession:
             result = self._handoff_accounted_business_batch(
                 stored_events=committed.stored_events,
                 business_events=prepared,
-                state=state,
                 deadline_monotonic=deadline,
             )
             physical_reservation = committed.reservation
@@ -3145,7 +3044,6 @@ class RuntimeSession:
             return self._handoff_accounted_business_batch(
                 stored_events=committed.stored_events,
                 business_events=(checkpoint_event,),
-                state=None,
                 deadline_monotonic=deadline,
             )
 
@@ -3154,14 +3052,12 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         reservation: PhysicalOperationReservationFact,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         """Charge one stable non-terminal batch to an active reservation."""
 
         return self._charge_physical_operation_attempt_from_thread(
             events,
             reservation=reservation,
-            state=state,
             await_delivery=False,
         ).result
 
@@ -3170,7 +3066,6 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         reservation: PhysicalOperationReservationFact,
-        state: LoopState | None,
         await_delivery: bool,
     ) -> _WriteAttempt:
         """Charge a batch while preserving its ordered publication waiters."""
@@ -3204,7 +3099,6 @@ class RuntimeSession:
             attempt = self._handoff_accounted_business_batch_attempt(
                 stored_events=committed.stored_events,
                 business_events=prepared,
-                state=state,
                 deadline_monotonic=deadline,
                 await_delivery=await_delivery,
             )
@@ -3222,7 +3116,6 @@ class RuntimeSession:
         *,
         dispatch_requests: Sequence[Any],
         one_shot_request: Any | None = None,
-        state: LoopState | None = None,
     ) -> tuple[tuple[PhysicalOperationReservationFact, ...], EventWriteResult]:
         """Atomically admit independent physical owners for one business batch."""
 
@@ -3283,7 +3176,6 @@ class RuntimeSession:
             result = self._handoff_accounted_business_batch(
                 stored_events=committed.stored_events,
                 business_events=prepared,
-                state=state,
                 deadline_monotonic=deadline,
             )
             for reservation in committed.reservations:
@@ -3304,7 +3196,6 @@ class RuntimeSession:
         reservation: PhysicalOperationReservationFact,
         terminal_outcome: str,
         model_stream_measurement_fingerprint: str | None = None,
-        state: LoopState | None = None,
         transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         """Commit a stable terminal batch and remove its exact reserve."""
@@ -3353,7 +3244,6 @@ class RuntimeSession:
             result = self._handoff_accounted_business_batch(
                 stored_events=committed.stored_events,
                 business_events=prepared,
-                state=state,
                 deadline_monotonic=deadline,
             )
             key = (reservation.owner_kind, reservation.owner_id)
@@ -3372,7 +3262,6 @@ class RuntimeSession:
         reservation: PhysicalOperationReservationFact,
         suspension_id: str,
         binding_identity_fingerprint: str,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         """Commit a suspension batch and retain only its exact physical tail."""
 
@@ -3385,6 +3274,11 @@ class RuntimeSession:
             self._validate_run_lifecycle_batch(prepared)
             self.long_horizon_state_store.validate_next_batch(prepared)
             first = prepared[0]
+            burst_contract = self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                reservation.owner_kind
+            ).contract
+            if not isinstance(burst_contract, ToolDeltaBurstContractFact):
+                raise TypeError("physical suspension requires a tool burst contract")
             try:
                 committed = self.materialization_coordinator.commit_reserved_suspension(
                     context=EventContext(
@@ -3393,6 +3287,7 @@ class RuntimeSession:
                         reply_id=first.reply_id,
                     ),
                     reservation=reservation,
+                    burst_contract=burst_contract,
                     business_events=prepared,
                     suspension_id=suspension_id,
                     binding_identity_fingerprint=binding_identity_fingerprint,
@@ -3407,7 +3302,6 @@ class RuntimeSession:
             result = self._handoff_accounted_business_batch(
                 stored_events=committed.stored_events,
                 business_events=prepared,
-                state=state,
                 deadline_monotonic=deadline,
             )
             key = (reservation.owner_kind, reservation.owner_id)
@@ -3423,13 +3317,11 @@ class RuntimeSession:
         *,
         stored_events: tuple[AgentEvent, ...],
         business_events: tuple[AgentEvent, ...],
-        state: LoopState | None,
         deadline_monotonic: float,
     ) -> EventWriteResult:
         return self._handoff_accounted_business_batch_attempt(
             stored_events=stored_events,
             business_events=business_events,
-            state=state,
             deadline_monotonic=deadline_monotonic,
         ).result
 
@@ -3438,7 +3330,6 @@ class RuntimeSession:
         *,
         stored_events: tuple[AgentEvent, ...],
         business_events: tuple[AgentEvent, ...],
-        state: LoopState | None,
         deadline_monotonic: float,
         await_delivery: bool = False,
     ) -> _WriteAttempt:
@@ -3451,7 +3342,6 @@ class RuntimeSession:
         full_attempt = self._reconcile_confirmed_attempt(
             stored_events,
             catch_up_through_sequence=_event_sequence(stored_events[-1]),
-            state=state,
             await_delivery=await_delivery,
         )
         by_id = {event.id: event for event in stored_events}
@@ -3513,7 +3403,6 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
     ) -> EventWriteResult:
         """Commit and synchronously fold while deferring ordered publication."""
 
@@ -3529,7 +3418,6 @@ class RuntimeSession:
                 self._commit_reduce_enqueue(
                     prepared,
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                     await_delivery=False,
                     enqueue_publication=False,
                     deadline_monotonic=deadline,
@@ -3542,14 +3430,12 @@ class RuntimeSession:
         self,
         *,
         through_sequence: int,
-        state: LoopState | None = None,
     ) -> Literal["completed", "enqueued", "unavailable"]:
         """Enqueue a contiguous committed prefix after control linearization."""
 
         with self.write_coordinator.lock:
             enqueue = self._catch_up_publisher(
                 through_sequence=through_sequence,
-                state=state,
                 await_delivery=False,
             )
         return _publication_status(enqueue)
@@ -4569,7 +4455,6 @@ class RuntimeSession:
         events: tuple[AgentEvent, ...],
         *,
         expected_last_sequence: int | None,
-        state: LoopState | None,
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool = True,
@@ -4638,7 +4523,6 @@ class RuntimeSession:
                 return self._commit_accounted_one_shot_reduce_enqueue(
                     events,
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                     await_delivery=await_delivery,
                     deadline_monotonic=deadline_monotonic,
                     enqueue_publication=enqueue_publication,
@@ -4669,14 +4553,12 @@ class RuntimeSession:
                             confirmed_high_water,
                             exc.actual_last_sequence,
                         ),
-                        state=state,
                         await_delivery=await_delivery,
                         enqueue_publication=enqueue_publication,
                     )
                 self._catch_up_reducers(exc.actual_last_sequence)
                 self._catch_up_publisher(
                     through_sequence=exc.actual_last_sequence,
-                    state=state,
                     await_delivery=await_delivery,
                 )
                 raise EventWriteConflict(
@@ -4704,7 +4586,6 @@ class RuntimeSession:
                     return self._reconcile_confirmed_attempt(
                         confirmed,
                         catch_up_through_sequence=confirmed_high_water,
-                        state=state,
                         await_delivery=await_delivery,
                         enqueue_publication=enqueue_publication,
                     )
@@ -4785,7 +4666,6 @@ class RuntimeSession:
                             RuntimePublishedEvent(
                                 runtime_session_id=self.runtime_session_id,
                                 event=event,
-                                state=state,
                             )
                             for event in publisher_events
                         ),
@@ -4815,7 +4695,6 @@ class RuntimeSession:
         events: tuple[AgentEvent, ...],
         *,
         expected_last_sequence: int | None,
-        state: LoopState | None,
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool,
@@ -4927,7 +4806,6 @@ class RuntimeSession:
         full_attempt = self._reconcile_confirmed_attempt(
             committed.stored_events,
             catch_up_through_sequence=_event_sequence(committed.stored_events[-1]),
-            state=state,
             await_delivery=await_delivery,
             enqueue_publication=enqueue_publication,
         )
@@ -4943,7 +4821,6 @@ class RuntimeSession:
         self,
         events: tuple[AgentEvent, ...],
         *,
-        state: LoopState | None,
         await_delivery: bool,
         deadline_monotonic: float,
     ) -> _WriteAttempt:
@@ -5005,7 +4882,6 @@ class RuntimeSession:
             full_attempt = self._reconcile_confirmed_attempt(
                 stored,
                 catch_up_through_sequence=_event_sequence(stored[-1]),
-                state=state,
                 await_delivery=await_delivery,
             )
             by_id = {event.id: event for event in stored}
@@ -5060,7 +4936,6 @@ class RuntimeSession:
         self._reconcile_confirmed_attempt(
             committed,
             catch_up_through_sequence=_event_sequence(committed[-1]),
-            state=None,
             await_delivery=False,
         )
 
@@ -5105,7 +4980,6 @@ class RuntimeSession:
         committed: tuple[AgentEvent, ...],
         *,
         catch_up_through_sequence: int,
-        state: LoopState | None,
         await_delivery: bool,
         enqueue_publication: bool = True,
     ) -> _WriteAttempt:
@@ -5169,7 +5043,6 @@ class RuntimeSession:
                         RuntimePublishedEvent(
                             runtime_session_id=self.runtime_session_id,
                             event=event,
-                            state=state,
                         )
                         for event in publisher_events
                     ),
@@ -5215,7 +5088,6 @@ class RuntimeSession:
         self,
         *,
         through_sequence: int,
-        state: LoopState | None,
         await_delivery: bool,
     ) -> PublisherEnqueueResult:
         start = self.publisher.enqueued_through_sequence + 1
@@ -5245,7 +5117,6 @@ class RuntimeSession:
                 RuntimePublishedEvent(
                     runtime_session_id=self.runtime_session_id,
                     event=event,
-                    state=state,
                 )
                 for event in events
             ),
@@ -5268,10 +5139,8 @@ class RuntimeSession:
             )
         return prefix + current
 
-    async def emit(
-        self, event: AgentEvent, *, state: LoopState | None = None
-    ) -> AgentEvent:
-        result = await self.write_event(event, state=state)
+    async def emit(self, event: AgentEvent) -> AgentEvent:
+        result = await self.write_event(event)
         if result.publication_errors or (
             result.publication_status == "unavailable"
             and self._batch_requires_critical_publication(
@@ -5286,12 +5155,10 @@ class RuntimeSession:
         events: Iterable[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
-        state: LoopState | None = None,
     ) -> list[AgentEvent]:
         result = await self.write_events(
             tuple(events),
             expected_last_sequence=expected_last_sequence,
-            state=state,
         )
         if result.publication_errors or (
             result.publication_status == "unavailable"
@@ -5302,25 +5169,19 @@ class RuntimeSession:
             raise EventPublicationAfterCommitError(result)
         return list(result.committed_events)
 
-    def emit_from_thread(
-        self, event: AgentEvent, *, state: LoopState | None = None
-    ) -> AgentEvent:
-        result = self.write_events_from_thread((event,), state=state)
+    def emit_from_thread(self, event: AgentEvent) -> AgentEvent:
+        result = self.write_events_from_thread((event,))
         return next(item for item in result.committed_events if item.id == event.id)
 
-    def publish_stored_event(
-        self, event: AgentEvent, *, state: LoopState | None = None
-    ) -> None:
+    def publish_stored_event(self, event: AgentEvent) -> None:
         if event.sequence is None:
             raise ValueError("Stored events must have a canonical sequence")
         self._require_default_metadata_present(event)
-        self.publish_stored_events((event,), state=state)
+        self.publish_stored_events((event,))
 
     def publish_stored_events(
         self,
         events: Iterable[AgentEvent],
-        *,
-        state: LoopState | None = None,
     ) -> None:
         event_list = tuple(events)
         for event in event_list:
@@ -5345,17 +5206,14 @@ class RuntimeSession:
                     RuntimePublishedEvent(
                         runtime_session_id=self.runtime_session_id,
                         event=stored,
-                        state=state,
                     )
                     for stored in publish_events
                 ),
                 await_delivery=False,
             )
 
-    def make_thread_recorder(
-        self, *, state: LoopState | None = None
-    ) -> RuntimeThreadRecorder:
-        return RuntimeThreadRecorder(runtime_session=self, state=state)
+    def make_thread_recorder(self) -> RuntimeThreadRecorder:
+        return RuntimeThreadRecorder(runtime_session=self)
 
     def close(self) -> None:
         # Owned-local: we shut the manager down. Borrowed (HostCore path): we do
@@ -5389,13 +5247,6 @@ class RuntimeSession:
         self.model_call_control_disposition_owner.clear()
         self.mandatory_runtime_audit_owner.close_if_idle()
         self._context_input_cache_diagnostics.clear()
-        subagent_runtime = self.subagent_runtime
-        detach = getattr(subagent_runtime, "detach_from_parent_session", None)
-        if (
-            callable(detach)
-            and getattr(subagent_runtime, "parent_runtime_session", None) is self
-        ):
-            detach()
         with self.write_coordinator.lock:
             self._publication_maintenance_coordinator.invalidate_issued()
             self._committed_reducers.clear()

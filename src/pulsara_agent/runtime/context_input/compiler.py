@@ -1,7 +1,7 @@
 """Pure compiler entrypoint for immutable context-input facts.
 
 This module is the production C3 boundary.  It does not accept or import
-``LoopState``/``Msg`` and performs no lifecycle-cache or storage I/O.
+``RunActivationWorkingState``/``Msg`` and performs no lifecycle-cache or storage I/O.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from pulsara_agent.runtime.context_input.candidate import (
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
     context_source_observation_kind,
     context_source_transition_kind,

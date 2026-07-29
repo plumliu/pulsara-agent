@@ -1,4 +1,4 @@
-"""Runtime provenance value objects for memory persistence."""
+"""Runtime provenance value objects reconstructed from committed events."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Pure normalization of a frozen event slice into compiler transcript facts.
 
-The projector deliberately does not read ``EventLog``, ``LoopState``, message
+The projector deliberately does not read ``EventLog``, ``RunActivationWorkingState``, message
 replay caches, or a live capability registry.  Every model-visible block and
 tool-result unit is derived from the owned canonical events in one
 ``ContextEventSlice`` and the already-frozen context snapshot.

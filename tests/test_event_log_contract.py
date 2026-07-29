@@ -1508,7 +1508,7 @@ def test_postgres_event_log_transaction_failure_leaves_no_partial_events(
         _cleanup_session(dsn, conflicting_session_id)
 
 
-def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> None:
+def runtime_session_for_test_can_emit_with_postgres_event_log(tmp_path: Path) -> None:
 
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()

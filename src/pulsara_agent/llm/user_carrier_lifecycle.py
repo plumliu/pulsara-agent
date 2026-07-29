@@ -1,4 +1,4 @@
-"""Authoritative runtime-observation producer and source lifecycle registry."""
+"""Authoritative user-carrier producer and source lifecycle registry."""
 
 from __future__ import annotations
 

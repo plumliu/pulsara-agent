@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import pulsara_agent.runtime.session_run_capabilities as capability_module
+
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import (
+    build_test_agent_runtime,
+)
+
+
 import asyncio
 from hashlib import sha256
 
@@ -23,7 +32,6 @@ from pulsara_agent.primitives.context_source import (
     InlineContextSourceContentSemanticFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.context_input.candidate import (
     InMemoryContextLifecycleCache,
@@ -51,18 +59,17 @@ from tests.test_agent_runtime_loop import (
 
 
 async def _prepared_snapshot(tmp_path, monkeypatch):
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
-    agent = AgentRuntime(
+    monkeypatch.setattr(capability_module, "prepare_live_context_snapshot", capture)
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -83,7 +90,7 @@ async def _compiled_snapshot(tmp_path, monkeypatch) -> ContextFactSnapshotFact:
         return snapshot
 
     monkeypatch.setattr(agent_module, "build_context_snapshot", capture)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -426,20 +433,19 @@ def test_candidate_collector_consumes_snapshot_sources_without_parallel_facade(
 def test_required_source_above_legacy_64k_uses_resolved_physical_policy(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     system_prompt = "system source above the removed fixed cap\n" + ("x" * 70_000)
     transport = ScriptedTransport([{"text": "done"}])
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
-    agent = AgentRuntime(
+    monkeypatch.setattr(capability_module, "prepare_live_context_snapshot", capture)
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -512,7 +518,7 @@ def test_new_child_completion_between_reads_cannot_drift_selection_high_water(
     tmp_path,
 ) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -708,18 +714,17 @@ def test_budget_omits_low_priority_optional_system_before_required_fact() -> Non
 def test_model_followup_reuses_session_owned_candidate_cache(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
-    agent = AgentRuntime(
+    monkeypatch.setattr(capability_module, "prepare_live_context_snapshot", capture)
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(
@@ -760,7 +765,7 @@ def test_model_followup_reuses_session_owned_candidate_cache(
     assert first_system.candidate.attribution != second_system.candidate.attribution
     compiled = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
     ]
     assert any(
@@ -775,7 +780,7 @@ def test_model_followup_reuses_session_owned_candidate_cache(
         units=second.normalized_transcript.tool_result_units,
         transcript=second.normalized_transcript.transcript,
         policy_basis=second.invocation.fact.compile_policy.tool_result_basis,
-        cache=agent.runtime_session.tool_result_render_cache,
+        cache=runtime_session_for_test(agent).tool_result_render_cache,
     )
     replay_rendered = render_prepared_tool_result_units(
         prepared=replay_prepared,

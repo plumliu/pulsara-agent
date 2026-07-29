@@ -52,7 +52,6 @@ from pulsara_agent.runtime.context_input.event_slice import event_reference_from
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
     from pulsara_agent.ports.tool_execution import PreparedToolTerminalResult
 
 
@@ -714,7 +713,6 @@ class ToolExecutionTerminalRegistry:
                 )
             return await RuntimeSessionToolExecutionEventCommitPort(
                 runtime_session=self._runtime_session,
-                state=None,  # type: ignore[arg-type]
             ).commit_suspension(
                 suspension_candidate=suspensions[0],
                 reservation_id=owner.reservation_id,
@@ -747,8 +745,7 @@ class ToolExecutionTerminalRegistry:
                     candidates,
                     reservation=physical_reservation,
                     terminal_outcome=terminal_outcome,
-                    state=None,
-                ),
+                                    ),
                 deadline_monotonic=deadline_monotonic,
                 operation_kind=PhysicalOperationKind.TOOL_CALL,
                 operation_owner_id=owner.tool_call_id,
@@ -766,8 +763,7 @@ class ToolExecutionTerminalRegistry:
             self._runtime_session,
             lambda: self._runtime_session.confirm_and_handoff_event_batch_from_thread(
                 candidates,
-                state=None,
-            ),
+                            ),
             deadline_monotonic=deadline_monotonic,
         )
 
@@ -1026,7 +1022,6 @@ def build_tool_result_terminal_event(
 @dataclass(frozen=True, slots=True)
 class RuntimeSessionToolExecutionEventCommitPort:
     runtime_session: RuntimeSession
-    state: LoopState
 
     async def commit_gate_and_reservation(
         self,
@@ -1050,6 +1045,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         self._require_account_state(
             reservation.account_id,
             expected_account_state_fingerprint,
+            run_id=gate_candidate.run_id,
         )
         return await self._write_gate_items(
             ((gate_candidate, reservation_candidate, ()),)
@@ -1111,6 +1107,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         self._require_account_state(
             next(iter(account_ids)),
             expected_account_state_fingerprint,
+            run_id=admission_candidates[0][0].run_id,
         )
         return await self._write_gate_items(
             tuple((gate, reservation, ()) for gate, reservation in admission_candidates)
@@ -1174,7 +1171,11 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     "denied tool gate requires one matching terminal fact"
                 )
             events.extend((gate, *denied_events))
-        self._require_account_state(account_id, expected_account_state_fingerprint)
+        self._require_account_state(
+            account_id,
+            expected_account_state_fingerprint,
+            run_id=gate_items[0][0].run_id,
+        )
         return await self._write_gate_items(gate_items)
 
     async def commit_terminal_and_settlement(
@@ -1187,6 +1188,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         reservation = self._active_reservation(
             settlement_candidate.reservation_id,
             expected_reservation_fingerprint,
+            run_id=terminal_candidate.run_id,
         )
         if (
             reservation.owner_kind != "tool_call"
@@ -1223,6 +1225,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         reservation = self._active_reservation(
             settlement_candidate.reservation_id,
             expected_reservation_fingerprint,
+            run_id=terminal.run_id,
         )
         if (
             reservation.owner_kind != "tool_call"
@@ -1273,7 +1276,11 @@ class RuntimeSessionToolExecutionEventCommitPort:
             raise ToolExecutionCommitContractError(
                 "tool denial batch requires one matching terminal fact"
             )
-        self._require_account_state(account_id, expected_account_state_fingerprint)
+        self._require_account_state(
+            account_id,
+            expected_account_state_fingerprint,
+            run_id=gate_candidate.run_id,
+        )
         return await self._write_gate_items(
             ((gate_candidate, None, tuple(denied_terminal_candidates)),)
         )
@@ -1318,10 +1325,16 @@ class RuntimeSessionToolExecutionEventCommitPort:
         tool_contract = self.runtime_session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
             PhysicalOperationKind.TOOL_CALL
         ).contract
+        run_ids = {event.run_id for event in prepared}
+        if len(run_ids) != 1:
+            raise ToolExecutionCommitContractError(
+                "tool gate batch spans multiple run identities"
+            )
+        run_id = next(iter(run_ids))
         dispatch_requests = tuple(
             PhysicalDispatchReservationRequest(
                 reservation_id=_tool_physical_reservation_id(
-                    run_id=self.state.run_id,
+                    run_id=run_id,
                     tool_call_id=tool_call_id,
                 ),
                 owner_id=tool_call_id,
@@ -1360,8 +1373,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     prepared,
                     dispatch_requests=dispatch_requests,
                     one_shot_request=one_shot_request,
-                    state=self.state,
-                )
+                                    )
             )
             return result
 
@@ -1382,6 +1394,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         reservation = self._active_reservation(
             reservation_id,
             expected_reservation_fingerprint,
+            run_id=suspension_candidate.run_id,
         )
         if reservation.owner_id != suspension_candidate.tool_call_id:
             raise ToolExecutionCommitContractError(
@@ -1420,7 +1433,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 ),
             },
         )
-        suspension_id = suspension_candidate.suspension.interaction.interaction_id
+        # One MCP interaction may suspend repeatedly. Bind account lifecycle
+        # identity to the exact round event, not the shared interaction ID.
+        suspension_id = suspension_candidate.id
         self.runtime_session.publisher.bind_running_loop()
 
         def commit_suspension_batch():
@@ -1429,8 +1444,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 reservation=physical_reservation,
                 suspension_id=suspension_id,
                 binding_identity_fingerprint=binding_fingerprint,
-                state=self.state,
-            )
+                            )
 
         return await _execute_runtime_event_write(
             self.runtime_session,
@@ -1499,8 +1513,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 prepared,
                 reservation=physical_reservation,
                 terminal_outcome=terminal_outcome,
-                state=self.state,
-            )
+                            )
 
         try:
             result = await _execute_runtime_event_write(
@@ -1547,14 +1560,12 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     return self.runtime_session.write_events_from_thread(
                         events,
                         expected_last_sequence=expected_sequence,
-                        state=self.state,
-                    )
+                                            )
                 except BaseException as original:
                     try:
                         return self.runtime_session.confirm_and_handoff_event_batch(
                             events,
-                            state=self.state,
-                        )
+                                                    )
                     except Exception as confirmation_error:
                         from pulsara_agent.runtime.session import EventCommitError
 
@@ -1585,6 +1596,8 @@ class RuntimeSessionToolExecutionEventCommitPort:
         self,
         account_id: str,
         expected_fingerprint: str,
+        *,
+        run_id: str,
     ) -> None:
         state = self.runtime_session.long_horizon_state_store.rollout_state(account_id)
         if state is not None:
@@ -1592,7 +1605,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         else:
             binding = resolve_run_rollout_binding(
                 self.runtime_session,
-                run_id=self.state.run_id,
+                run_id=run_id,
             )
             if binding.account.account_id != account_id:
                 raise ToolExecutionCommitContractError(
@@ -1608,6 +1621,8 @@ class RuntimeSessionToolExecutionEventCommitPort:
         self,
         reservation_id: str,
         expected_fingerprint: str,
+        *,
+        run_id: str,
     ):
         for state in self.runtime_session.long_horizon_state_store.rollout_states():
             for reservation in state.active_reservations:
@@ -1620,7 +1635,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 return reservation
         binding = resolve_run_rollout_binding(
             self.runtime_session,
-            run_id=self.state.run_id,
+            run_id=run_id,
         )
         if binding.child_state is not None:
             for reservation in binding.child_state.active_reservations:

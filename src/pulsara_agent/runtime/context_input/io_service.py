@@ -10,7 +10,7 @@ from time import monotonic
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
-from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+from pulsara_agent.blocking_executor import auxiliary_io_executor
 
 
 T = TypeVar("T")

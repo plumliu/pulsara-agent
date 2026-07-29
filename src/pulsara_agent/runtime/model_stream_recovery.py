@@ -1,4 +1,4 @@
-"""Deterministic recovery for durably started model streams.
+"""Runtime recovery for durably started model streams.
 
 The process-local execution handle disappears on restart.  This service uses
 only the Start-frozen recovery plan and the canonical event prefix to close an
@@ -43,7 +43,7 @@ from pulsara_agent.llm.terminal_projection import (
     rebuild_model_stream_semantic_commit_measurements,
 )
 from pulsara_agent.llm.segment import MODEL_STREAM_SEGMENT_POLICY
-from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.ports.artifact import ModelArtifactStore
 from pulsara_agent.runtime.authority_materialization import (
     LedgerMaterializationAccountStore,
     LedgerMaterializationCoordinator,
@@ -89,7 +89,7 @@ class ModelStreamRecoveryService:
         self,
         *,
         event_log: EventLog,
-        archive: ArtifactStore,
+        archive: ModelArtifactStore,
     ) -> None:
         self._event_log = event_log
         self._archive = archive

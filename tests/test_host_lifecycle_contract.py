@@ -33,10 +33,13 @@ from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
     EventContext,
+    ModelCallControlDispositionResolvedEvent,
     RunEndEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
 )
+from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
+from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.host import (
     DuplicateHostSessionError,
     HostCore,
@@ -53,11 +56,32 @@ from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.plan import PendingPlanInteraction, PlanQuestionResolution
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventWriteCancelled,
 )
+from pulsara_agent.ports.run_execution import (
+    RunSuspendedOutcome,
+    build_prepared_run_owner_reservation_key,
+    build_run_owner_identity,
+)
+from pulsara_agent.ports.run_terminalization import (
+    RunFinalOutputMaterializationFull,
+)
+from pulsara_agent.runtime.context_input.event_slice import (
+    event_reference_from_stored,
+)
+from pulsara_agent.runtime.run_execution.final_output import (
+    RunFinalOutputMaterializer,
+)
+from pulsara_agent.runtime.run_execution.owner import UnboundRunResources
+from pulsara_agent.runtime.run_execution.recovery import (
+    materialize_dormant_run_owner,
+)
+from pulsara_agent.ports.run_authority import InstalledRunAuthorityRevision
+from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.runtime.terminal import (
@@ -1193,10 +1217,14 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(
 
         consumer = asyncio.create_task(consume())
         await asyncio.sleep(0.05)
+        service = s.wiring.run_activation_service
+        assert service is not None
+        active_owner = service.active_host_run_view()
+        boundary_task = s._current_boundary_task()
         owned = (
-            s._active_task is not None
-            or s._boundary_task is not None
-            and not s._boundary_task.done()
+            active_owner is not None
+            or boundary_task is not None
+            and not boundary_task.done()
         )
         await core.close_session("host:stream")
         await consumer
@@ -1242,7 +1270,8 @@ def test_close_suspended_run_emits_auditable_host_teardown(
         assert s.get_pending_approval() is not None
         await core.close_session("host:susp")
         events = s.replay_events()
-        return events, first.state.run_id, s.closed
+        assert isinstance(first, RunSuspendedOutcome)
+        return events, first.owner_identity.run_id, s.closed
 
     events, run_id, closed = asyncio.run(run())
     assert closed
@@ -1279,6 +1308,8 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
             policy=_trusted_terminal_ask_policy(),
         )
         await s.run_turn("do x")  # suspends on terminal-ask approval
+        service = s.wiring.run_activation_service
+        assert service is not None
         pending = s.get_pending_approval()
         suspended_boundary = s.summary()["boundary"]
         events: list[AgentEvent] = []
@@ -1297,10 +1328,10 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
 
         resume_task = asyncio.create_task(consume())
         for _ in range(100):
-            if s._active_task is not None:
+            if service.active_host_run_view() is not None:
                 break
             await asyncio.sleep(0.005)
-        owned = s._active_task is not None  # resume runs under the same owned handle
+        owned = service.active_host_run_view() is not None
         active_boundary = s.summary()["boundary"]
         await resume_task
         await core.shutdown()
@@ -1331,6 +1362,352 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
     )
 
 
+def test_one_committed_run_uses_distinct_generations_for_two_resumes(
+    tmp_path, monkeypatch
+) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:first",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf first"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:second",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf second"}),
+                    }
+                ]
+            },
+            {"text": "both complete"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    def approve(pending):
+        return ApprovalResolution(
+            approval_id=pending.approval_id,
+            decisions=tuple(
+                ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                for call in pending.tool_calls
+            ),
+        )
+
+    async def run():
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:two-resumes",
+            policy=_trusted_terminal_ask_policy(),
+        )
+        first = await session.run_turn("run both commands")
+        first_pending = session.get_pending_approval()
+        assert first_pending is not None
+
+        second = await session.resolve_approval(approve(first_pending))
+        second_pending = session.get_pending_approval()
+        assert second_pending is not None
+        assert isinstance(first, RunSuspendedOutcome)
+        assert isinstance(second, RunSuspendedOutcome)
+        assert second.owner_identity.run_id == first.owner_identity.run_id
+
+        terminal = await session.resolve_approval(approve(second_pending))
+        assert terminal.run_id == first.owner_identity.run_id
+        assert session.get_pending_approval() is None
+        events = session.replay_events()
+        await core.shutdown()
+        return first.owner_identity.run_id, session.runtime_session_id, events
+
+    run_id, runtime_session_id, events = asyncio.run(run())
+    starts = [
+        event
+        for event in events
+        if isinstance(event, RunStartEvent) and event.run_id == run_id
+    ]
+    ends = [
+        event
+        for event in events
+        if isinstance(event, RunEndEvent) and event.run_id == run_id
+    ]
+    control = [
+        event
+        for event in events
+        if isinstance(event, ModelCallControlDispositionResolvedEvent)
+        and event.run_id == run_id
+    ]
+    assert len(starts) == 1
+    assert len(ends) == 1
+    assert [event.run_execution_activation.segment_generation for event in control] == [
+        1,
+        2,
+        3,
+    ]
+    assert [
+        event.run_execution_activation.activation_owner_kind for event in control
+    ] == ["host_run_boundary", "host_resume_boundary", "host_resume_boundary"]
+    assert (
+        len(
+            [
+                event
+                for event in events
+                if isinstance(event, RunInteractionResumeBoundaryEvent)
+                and event.run_id == run_id
+            ]
+        )
+        == 2
+    )
+
+    start = starts[0]
+    end = ends[0]
+    assert start.sequence is not None and end.sequence is not None
+    pre_terminal_events = tuple(
+        event
+        for event in events
+        if event.run_id == run_id
+        and event.sequence is not None
+        and event.sequence < end.sequence
+    )
+
+    async def rebuild_dormant_snapshot():
+        dormant = materialize_dormant_run_owner(
+            events=pre_terminal_events,
+            run_start_envelope=RawStoredEventEnvelope.from_stored_event(
+                event=start,
+                runtime_session_id=runtime_session_id,
+                schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+            ),
+        )
+        assert isinstance(dormant.resource_slot, UnboundRunResources)
+        assert isinstance(dormant.authority_head, InstalledRunAuthorityRevision)
+        snapshot = (
+            dormant.lifecycle,
+            dormant.resource_slot.reason,
+            dormant.authority_head.revision.revision,
+            dormant.latest_activation_owner_kind,
+            dormant.active_segment,
+        )
+        dormant.run_completion.cancel()
+        return snapshot
+
+    assert asyncio.run(rebuild_dormant_snapshot()) == (
+        "initializing",
+        "reopen_continuation_rebind_pending",
+        3,
+        "host_resume_boundary",
+        None,
+    )
+
+
+def test_final_output_rebuild_after_run_owner_retirement_is_byte_identical(
+    tmp_path, monkeypatch
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([{"text": "stable final output"}]))
+
+    async def run():
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:final-output-rebuild",
+        )
+        live = await session.run_turn("finish once")
+        runtime_session = session.wiring.runtime_wiring.runtime_session
+        events = tuple(runtime_session.event_log.iter(run_id=live.run_id))
+        start = next(event for event in events if isinstance(event, RunStartEvent))
+        end = next(event for event in events if isinstance(event, RunEndEvent))
+        assert start.sequence is not None and end.sequence is not None
+        owner_identity = build_run_owner_identity(
+            reservation_key=build_prepared_run_owner_reservation_key(
+                runtime_session_id=session.runtime_session_id,
+                run_id=live.run_id,
+                run_start_event_id=start.id,
+            ),
+            run_start_sequence=start.sequence,
+        )
+        end_reference = event_reference_from_stored(
+            end,
+            runtime_session_id=session.runtime_session_id,
+        )
+        loop_thread_id = threading.get_ident()
+        raw_page_spans: list[int] = []
+        event_log_type = type(runtime_session.event_log)
+        original_read_range_snapshot = event_log_type.read_range_snapshot
+        original_read_raw_events_by_types = event_log_type.read_raw_events_by_types
+
+        def reject_unbounded_range(*_args, **_kwargs):
+            raise AssertionError("final output must not scan a full run range")
+
+        def read_bounded_lifecycle_page(self, *args, **kwargs):
+            assert threading.get_ident() != loop_thread_id
+            start_sequence = kwargs.get("minimum_sequence")
+            end_sequence = kwargs.get("through_sequence")
+            if start_sequence is not None and end_sequence is not None:
+                raw_page_spans.append(end_sequence - start_sequence + 1)
+                assert raw_page_spans[-1] <= 512
+            return original_read_raw_events_by_types(self, *args, **kwargs)
+
+        def reject_reply_replay(*_args, **_kwargs):
+            raise AssertionError(
+                "final output must use canonical terminal projection authority"
+            )
+
+        monkeypatch.setattr(
+            event_log_type, "read_range_snapshot", reject_unbounded_range
+        )
+        monkeypatch.setattr(
+            event_log_type,
+            "read_raw_events_by_types",
+            read_bounded_lifecycle_page,
+        )
+        monkeypatch.setattr(
+            event_log_type,
+            "read_raw_reply_events",
+            reject_reply_replay,
+        )
+        first = await RunFinalOutputMaterializer(
+            event_log=runtime_session.event_log,
+            runtime_session_id=session.runtime_session_id,
+            io_service=runtime_session.context_input_io_service,
+            transcript_projection=runtime_session.transcript_projection_state_store,
+            archive=runtime_session.archive,
+        ).materialize(
+            owner_identity=owner_identity,
+            run_end_event_reference=end_reference,
+            deadline_monotonic=asyncio.get_running_loop().time() + 2.0,
+        )
+        recovered = await RunFinalOutputMaterializer(
+            event_log=runtime_session.event_log,
+            runtime_session_id=session.runtime_session_id,
+            io_service=runtime_session.context_input_io_service,
+            transcript_projection=runtime_session.transcript_projection_state_store,
+            archive=runtime_session.archive,
+        ).materialize(
+            owner_identity=owner_identity,
+            run_end_event_reference=end_reference,
+            deadline_monotonic=asyncio.get_running_loop().time() + 2.0,
+        )
+        assert isinstance(first, RunFinalOutputMaterializationFull)
+        assert isinstance(recovered, RunFinalOutputMaterializationFull)
+        assert recovered.receipt == first.receipt
+        assert recovered.receipt.output.final_text == live.final_text
+        assert (
+            recovered.receipt.output.usage.total_tokens == live.token_usage.total_tokens
+        )
+        assert raw_page_spans
+        assert session.wiring.run_execution_registry.owner_count == 0
+        monkeypatch.setattr(
+            event_log_type,
+            "read_range_snapshot",
+            original_read_range_snapshot,
+        )
+        monkeypatch.setattr(
+            event_log_type,
+            "read_raw_events_by_types",
+            original_read_raw_events_by_types,
+        )
+        await core.shutdown()
+
+    asyncio.run(run())
+
+
+def test_plan_interaction_uses_distinct_generations_for_two_resumes(
+    tmp_path, monkeypatch
+) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:plan-first",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "First choice?"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:plan-second",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "Second choice?"}),
+                    }
+                ]
+            },
+            {"text": "plan complete"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:two-plan-resumes",
+        )
+        session.wiring.agent_runtime.budget = LoopBudget(
+            max_plan_interactions_per_run=3
+        )
+        session.enter_plan(reason="two resume contract")
+        first = await session.run_turn("ask both questions")
+        first_pending = session.get_pending_interaction()
+        assert isinstance(first_pending, PendingPlanInteraction)
+
+        second = await session.resolve_plan_interaction(
+            PlanQuestionResolution(
+                interaction_id=first_pending.interaction_id,
+                answer_text="first answer",
+            )
+        )
+        second_pending = session.get_pending_interaction()
+        assert isinstance(second_pending, PendingPlanInteraction)
+        assert isinstance(first, RunSuspendedOutcome)
+        assert isinstance(second, RunSuspendedOutcome)
+        assert second.owner_identity.run_id == first.owner_identity.run_id
+
+        terminal = await session.resolve_plan_interaction(
+            PlanQuestionResolution(
+                interaction_id=second_pending.interaction_id,
+                answer_text="second answer",
+            )
+        )
+        assert terminal.run_id == first.owner_identity.run_id
+        events = session.replay_events()
+        await core.shutdown()
+        return first.owner_identity.run_id, events
+
+    run_id, events = asyncio.run(run())
+    control = [
+        event
+        for event in events
+        if isinstance(event, ModelCallControlDispositionResolvedEvent)
+        and event.run_id == run_id
+    ]
+    assert [event.run_execution_activation.segment_generation for event in control] == [
+        1,
+        2,
+        3,
+    ]
+    assert [
+        event.run_execution_activation.activation_owner_kind for event in control
+    ] == ["host_run_boundary", "host_resume_boundary", "host_resume_boundary"]
+    assert (
+        len(
+            [
+                event
+                for event in events
+                if isinstance(event, RunInteractionResumeBoundaryEvent)
+                and event.run_id == run_id
+            ]
+        )
+        == 2
+    )
+
+
 def test_cancel_after_run_start_commit_terminalizes_stable_run(
     tmp_path, monkeypatch
 ) -> None:
@@ -1358,7 +1735,6 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
                 result = await self.write_events(
                     tuple(events),
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                 )
                 raise EventWriteCancelled(
                     EventBatchCommitOutcome(
@@ -1371,7 +1747,6 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
                 self,
                 events,
                 expected_last_sequence=expected_last_sequence,
-                state=state,
             )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
@@ -1439,7 +1814,6 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
                 result = await self.write_events(
                     tuple(events),
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                 )
                 raise EventWriteCancelled(
                     EventBatchCommitOutcome(
@@ -1452,7 +1826,6 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
                 self,
                 events,
                 expected_last_sequence=expected_last_sequence,
-                state=state,
             )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
@@ -1527,10 +1900,16 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(
         assert produced_while_attached <= _STREAM_QUEUE_MAX_ITEMS + 4
 
         await stream.aclose()  # transport observer detaches; execution stays owned
-        boundary_task = session._boundary_task
-        assert boundary_task is not None
-        await asyncio.wait_for(asyncio.shield(boundary_task), timeout=10.0)
-        assert session._active_task is None
+        service = session.wiring.run_activation_service
+        assert service is not None
+        view = service.current_host_run_view()
+        boundary_task = session._current_boundary_task()
+        if view is not None and view.active_driver_running:
+            await service.wait_active_driver(view.run_id, timeout_seconds=10.0)
+        else:
+            assert boundary_task is not None
+            await asyncio.wait_for(asyncio.shield(boundary_task), timeout=10.0)
+        assert service.active_host_run_view() is None
         await core.shutdown()
         return produced_while_attached, transport.produced
 
@@ -1564,13 +1943,16 @@ def test_detached_stream_remains_active_and_blocks_second_run(
         stream = session.stream_turn("pause")
         await anext(stream)
         await paused.wait()
-        task = session._active_task
+        service = session.wiring.run_activation_service
+        assert service is not None
+        view = service.active_host_run_view()
         await stream.aclose()
-        assert task is session._active_task and task is not None and not task.done()
+        assert view is not None and view.active_driver_running
+        assert service.active_host_run_view() is not None
         with pytest.raises(HostSessionBusyError):
             await session.run_turn("must not overlap")
         release.set()
-        await asyncio.wait_for(asyncio.shield(task), timeout=30)
+        await service.wait_active_driver(view.run_id, timeout_seconds=30.0)
         await core.shutdown()
         return session.active_run_id
 
@@ -1602,7 +1984,8 @@ def test_host_close_aborts_run_after_stream_observer_detaches(
         await anext(stream)
         await paused.wait()
         await stream.aclose()
-        assert session._active_task is not None
+        service = session.wiring.run_activation_service
+        assert service is not None and service.active_host_run_view() is not None
         await core.close_session(session.host_session_id)
         return session.replay_events()
 
@@ -1853,11 +2236,13 @@ def test_nonstream_close_waits_for_abort_finalization(tmp_path, monkeypatch) -> 
 
         monkeypatch.setattr(runtime_type, "abort_run", delayed_abort)
         caller = asyncio.create_task(session.run_turn("hold"))
+        service = session.wiring.run_activation_service
+        assert service is not None
         for _ in range(200):
-            if session._active_task is not None:
+            if service.active_host_run_view() is not None:
                 break
             await asyncio.sleep(0.005)
-        assert session._active_task is not None
+        assert service.active_host_run_view() is not None
         closing = asyncio.create_task(core.close_session(session.host_session_id))
         await abort_started.wait()
         assert not closing.done()

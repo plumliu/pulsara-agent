@@ -276,7 +276,7 @@ def rebuild_prior_messages_before_sequence(
     while the boundary's ``keep_after_sequence`` points to a historical prefix
     before the current run. This helper may use that boundary, but it must only
     replay events whose sequence is lower than ``before_sequence`` so the
-    active run tail can be preserved from in-memory ``LoopState.messages``.
+    active run tail can be preserved from in-memory ``RunActivationWorkingState.messages``.
     """
 
     events = event_log.iter()

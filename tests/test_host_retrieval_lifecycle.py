@@ -11,7 +11,7 @@ from pulsara_agent.settings import PulsaraSettings
 from tests.support.settings import compatibility_storage_config
 
 
-def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(
+def test_host_session_close_has_no_legacy_active_task_owner(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
@@ -37,22 +37,11 @@ def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(
             ),
             wiring=wiring,
         )
-        cancelled = asyncio.Event()
-
-        async def inflight_provider_request() -> None:
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-
-        task = asyncio.create_task(inflight_provider_request())
-        await asyncio.sleep(0)
-        session._active_task = task
+        assert not hasattr(session, "_active_task")
+        assert session.wiring.run_activation_service is not None
 
         await session.aclose(drain_timeout_seconds=0.05)
 
         assert session.closed is True
-        assert task.cancelled()
-        assert cancelled.is_set()
 
     asyncio.run(scenario())

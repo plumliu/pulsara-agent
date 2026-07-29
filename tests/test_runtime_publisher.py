@@ -12,7 +12,6 @@ from tests.support.model_stream import (
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
-from pulsara_agent.runtime.state import LoopState
 
 
 CTX = EventContext(
@@ -88,30 +87,29 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
     assert runtime.event_log.iter()[-2].sequence == first_sequence
 
 
-def test_emit_from_thread_preserves_loop_state_for_subscribers(tmp_path) -> None:
+def test_emit_from_thread_does_not_publish_mutable_run_state(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
-    state = LoopState(session_id=runtime.runtime_session_id)
 
     async def run() -> None:
         await runtime.emit(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             ),
-            state=state,
-        )
+                    )
         runtime.emit_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="thread"
             ),
-            state=state,
-        )
+                    )
         await asyncio.sleep(0.05)
 
     asyncio.run(run())
 
-    assert subscriber.events[-1].state is state
+    assert subscriber.events[-1].runtime_session_id == runtime.runtime_session_id
+    assert subscriber.events[-1].event.text == "thread"
+    assert not hasattr(subscriber.events[-1], "state")
 
 
 def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:

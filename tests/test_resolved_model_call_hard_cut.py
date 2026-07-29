@@ -145,7 +145,6 @@ async def _start_test_stream(
         start_bundle=bundle,
         commit_port=RuntimeSessionModelStreamEventCommitPort(
             runtime_session=runtime_session,
-            state=None,
         ),
         execution_registry=runtime_session.model_stream_execution_registry,
     )

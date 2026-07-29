@@ -17,7 +17,7 @@ from pulsara_agent.runtime.terminal_projection import ExternalExecutionResultCan
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
+    from pulsara_agent.runtime.state import RunActivationWorkingState
 
 
 class ExternalExecutionCommitContractError(RuntimeError):
@@ -27,7 +27,7 @@ class ExternalExecutionCommitContractError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ExternalExecutionCommitPort:
     runtime_session: RuntimeSession
-    state: LoopState | None = None
+    state: RunActivationWorkingState | None = None
 
     async def commit_requirement(
         self,
@@ -54,8 +54,7 @@ class ExternalExecutionCommitPort:
                     requirement.id,
                 ),
                 owner_id=requirement.id,
-                state=self.state,
-            )
+                            )
             return result
 
         return await self.runtime_session.event_write_service.execute(
@@ -95,8 +94,7 @@ class ExternalExecutionCommitPort:
                 prepared,
                 reservation=reservation,
                 terminal_outcome=terminal_outcome,
-                state=self.state,
-            )
+                            )
 
         return await self.runtime_session.event_write_service.execute(
             commit_settlement,

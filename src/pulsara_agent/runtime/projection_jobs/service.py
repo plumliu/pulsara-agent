@@ -13,7 +13,7 @@ from time import monotonic
 from typing import cast
 from uuid import uuid4
 
-from pulsara_agent.runtime.blocking_executor import (
+from pulsara_agent.blocking_executor import (
     projection_maintenance_executor,
 )
 from pulsara_agent.runtime.projection_jobs.compaction_memory_driver_registry import (

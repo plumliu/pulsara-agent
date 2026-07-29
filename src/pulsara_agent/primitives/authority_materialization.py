@@ -198,7 +198,7 @@ class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
 
 
 class ToolDeltaBurstContractFact(PhysicalBurstContractBase):
-    schema_version: Literal["tool_delta_burst_contract.v1"]
+    schema_version: Literal["tool_delta_burst_contract.v2"]
     burst_shape: Literal["tool_delta"]
     operation_kind: Literal[
         PhysicalOperationKind.TOOL_CALL,
@@ -208,11 +208,31 @@ class ToolDeltaBurstContractFact(PhysicalBurstContractBase):
     max_result_delta_payload_bytes: PositiveInt
     max_durable_events_per_delta_item: PositiveInt
     max_canonical_wrapper_payload_bytes_per_delta_item: PositiveInt
+    maximum_successor_suspension_commits: NonNegativeInt
+    successor_suspension_reserved_events: NonNegativeInt
+    successor_suspension_reserved_payload_bytes: NonNegativeInt
+    minimum_terminal_tail_events: NonNegativeInt
+    minimum_terminal_tail_payload_bytes: NonNegativeInt
     result_capture_contract_fingerprint: Fingerprint
     artifact_fallback_contract_fingerprint: Fingerprint
 
     @model_validator(mode="after")
     def _covers_delta_burst(self) -> "ToolDeltaBurstContractFact":
+        if self.terminal_tail_reserved_events != (
+            self.minimum_terminal_tail_events
+            + self.successor_suspension_reserved_events
+        ):
+            raise ValueError("tool terminal event tail partition mismatch")
+        if self.terminal_tail_reserved_payload_bytes != (
+            self.minimum_terminal_tail_payload_bytes
+            + self.successor_suspension_reserved_payload_bytes
+        ):
+            raise ValueError("tool terminal byte tail partition mismatch")
+        if self.maximum_successor_suspension_commits == 0 and (
+            self.successor_suspension_reserved_events
+            or self.successor_suspension_reserved_payload_bytes
+        ):
+            raise ValueError("disabled successor suspension cannot reserve a tail")
         required_events = (
             self.max_result_delta_items * self.max_durable_events_per_delta_item
             + self.max_structural_tail_events
@@ -1204,7 +1224,7 @@ class PhysicalStoredEnvelopeObservation(FrozenRuntimeStateBase):
 _OWN_FINGERPRINTS: tuple[tuple[str, str, str], ...] = (
     ("fixed_batch_event_contract.v1", "event_contract_fingerprint", "fixed-batch-event-contract:v1"),
     ("transport_segmented_burst_contract.v1", "contract_fingerprint", "transport-segmented-burst-contract:v1"),
-    ("tool_delta_burst_contract.v1", "contract_fingerprint", "tool-delta-burst-contract:v1"),
+    ("tool_delta_burst_contract.v2", "contract_fingerprint", "tool-delta-burst-contract:v2"),
     ("fixed_batch_burst_contract.v1", "contract_fingerprint", "fixed-batch-burst-contract:v1"),
     ("stored_envelope_identity_bounds.v1", "bounds_contract_fingerprint", "stored-envelope-identity-bounds:v1"),
     ("physical_bookkeeping_event_bound.v1", "bound_fingerprint", "physical-bookkeeping-event-bound:v1"),

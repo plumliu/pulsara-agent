@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.message.blocks import ToolResultState
@@ -24,6 +24,11 @@ from pulsara_agent.primitives.tool_result import (
 )
 from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessObservationReceiptFact,
+)
+from pulsara_agent.primitives.frozen import FrozenRuntimeStateBase
+from pulsara_agent.ports.run_execution import (
+    RunActivationIdentity,
+    RunOwnerIdentity,
 )
 
 if TYPE_CHECKING:
@@ -319,3 +324,63 @@ class AsyncTool(Protocol):
         runtime_context: ToolRuntimeContext,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         """Execute a tool call on the agent runtime event loop."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolBatchExecutionRequest:
+    owner_identity: RunOwnerIdentity
+    activation_identity: RunActivationIdentity
+    source_model_call_reference: ContextEventReferenceFact
+    ordered_tool_calls: tuple[ToolCall, ...]
+    authority_revision: int
+    authority_fingerprint: str
+    execution_surface_fingerprint: str
+    batch_fingerprint: str
+
+
+class CompletedToolBatch(FrozenRuntimeStateBase):
+    outcome_kind: Literal["completed"] = "completed"
+    ordered_terminal_event_references: tuple[ContextEventReferenceFact, ...]
+    receipt_accumulator: str
+
+
+class SuspendedToolBatch(FrozenRuntimeStateBase):
+    outcome_kind: Literal["suspended"] = "suspended"
+    suspension_event_reference: ContextEventReferenceFact
+    pending_interaction_fingerprint: str
+
+
+class TerminalizationPendingToolBatch(FrozenRuntimeStateBase):
+    outcome_kind: Literal["terminalization_pending"] = "terminalization_pending"
+    finalization_owner_fingerprint: str
+
+
+class ToolBatchReconciliationRequired(FrozenRuntimeStateBase):
+    outcome_kind: Literal["reconciliation_required"] = "reconciliation_required"
+    stable_owner_fingerprint: str
+
+
+ToolBatchOutcome: TypeAlias = (
+    CompletedToolBatch
+    | SuspendedToolBatch
+    | TerminalizationPendingToolBatch
+    | ToolBatchReconciliationRequired
+)
+
+
+class ToolBatchExecutionHandle(Protocol):
+    @property
+    def batch_fingerprint(self) -> str: ...
+
+    async def wait_outcome(self) -> ToolBatchOutcome: ...
+
+    def release(self) -> None: ...
+
+
+class ToolBatchExecutionPort(Protocol):
+    async def dispatch(
+        self,
+        request: ToolBatchExecutionRequest,
+        *,
+        deadline_monotonic: float,
+    ) -> ToolBatchExecutionHandle: ...

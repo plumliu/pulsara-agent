@@ -208,8 +208,7 @@ async def terminalize_reopened_mcp_input_required(
             tuple(ordered),
             reservation=physical_reservation,
             terminal_outcome="interrupted",
-            state=None,
-        ),
+                    ),
         deadline_monotonic=deadline_monotonic,
         admission_class=LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
         operation_owner_id=(

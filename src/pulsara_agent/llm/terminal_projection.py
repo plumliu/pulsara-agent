@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from hashlib import sha256
 from time import monotonic
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -72,9 +72,7 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalProjectionDocumentFact,
     TerminalProjectionReferenceFact,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.ports.model_lifecycle import ModelLifecycleRuntimeGateway
 
 
 TERMINAL_PROJECTION_MEDIA_TYPE = (
@@ -902,7 +900,7 @@ def rebuild_model_stream_semantic_commit_measurements(
 
 
 def bind_model_terminal_projection_to_session(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     prepared: PreparedModelTerminalProjection,
 ) -> PreparedModelTerminalProjection:
     """Bind same-batch identity to the session's exact metadata overlay."""
@@ -929,7 +927,7 @@ def bind_model_terminal_projection_to_session(
 
 
 async def persist_model_terminal_projection(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     prepared: PreparedModelTerminalProjection,
     *,
     run_id: str,
@@ -979,7 +977,7 @@ async def persist_model_terminal_projection(
 
 
 async def hydrate_terminal_projection(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     reference: TerminalProjectionReferenceFact,
     *,
     deadline_monotonic: float | None = None,

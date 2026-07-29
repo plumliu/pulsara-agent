@@ -18,7 +18,7 @@ versioned token estimator，compiler、compaction planner与provider pre-send va
 Auto compact 的 UI 可见执行点有两个:
 
 - run-start preflight: 用户提交新的普通 user turn 后、下一次模型调用前触发；若 compact 成功，HostSession 必须继续消费同一个 user input，不得要求用户再次输入。
-- mid-turn inline: active run 内工具结果已完成、runtime 准备发起 follow-up model call 前触发。旧inline路径只允许处理current run之前的历史prefix；Stage 4 current-run window compaction则通过typed transcript units、pairing-safe projection与durable window facts处理同run历史，不能直接truncate mutable `LoopState.messages`。current user、protected tail与tool-call/result pairing必须保留。
+- mid-turn inline: active run 内工具结果已完成、runtime 准备发起 follow-up model call 前触发。旧inline路径只允许处理current run之前的历史prefix；Stage 4 current-run window compaction则通过typed transcript units、pairing-safe projection与durable window facts处理同run历史，不能直接truncate mutable `RunActivationWorkingState.messages`。current user、protected tail与tool-call/result pairing必须保留。
 - run-end: 不得调度后台 auto compact；`pulsara>` 提示符显示后，不得再由 auto compaction 向 REPL 输入区写入 completed / failed notice。
 - suspended-run resume 路径不得触发 HostSession preflight auto compact；但 approval / plan interaction / MCP elicitation resolution 若已经完成 pending payload、状态回到 `RUNNING`、并准备进入 follow-up model call，可走同一个 mid-turn inline safe point。abort / stop / host teardown recovery 不得触发 compact。
 
@@ -88,7 +88,7 @@ Mid-turn inline compaction 的 completed boundary event 可以出现在 current 
 ```text
 context compaction summary system message
 + replayed events where keep_after_sequence < sequence < current_run_start_sequence
-+ current run tail copied from LoopState.messages
++ current run tail copied from current RunActivationWorkingState.messages
 ```
 
 不得全量 rebuild 后再 append current tail，避免重复 current user/tool messages。
@@ -192,7 +192,7 @@ Inspector 必须能解释:
 - manual `:compact` 通过 RuntimeSession writer发布 exact compaction receipts且无重复 listener notice;
 - approval / plan / MCP suspended-run resume 不触发 auto compact;
 - mid-turn compact 只压 current run 前的历史 prefix;
-- current run assistant tool call 和 tool result 保留在 rewritten `LoopState.messages` tail;
+- current run assistant tool call 和 tool result 保留在 rewritten `RunActivationWorkingState.messages` tail;
 - mid-turn compact failed event由 RuntimeSession发布，后续 runtime event 不得因 sequence gap 卡住;
 - inspector windows 显示 mid-turn phase/safe-point metadata;
 - inspector windows/diagnostics;

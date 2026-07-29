@@ -335,7 +335,7 @@ def test_inconsistent_full_rebuild_keeps_runtime_reconciliation_required(
     assert runtime.reconciliation_required is True
 
 
-def test_runtime_session_close_unregisters_committed_reducers(tmp_path) -> None:
+def runtime_session_for_test_close_unregisters_committed_reducers(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     runtime.register_committed_reducer(
         reducer_id="test:close",

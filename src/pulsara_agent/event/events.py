@@ -621,6 +621,7 @@ class RunStartEvent(EventBase):
             raise ValueError("child RunStart requires only subagent_run_entry")
         else:
             entry = self.subagent_run_entry
+            basis = entry.capability_basis
             inherited = self.long_horizon.inherited_rollout_reservation
             if self.child_rollout_subaccount is None or inherited is None:
                 raise ValueError("child RunStart requires child rollout subaccount")
@@ -644,6 +645,15 @@ class RunStartEvent(EventBase):
                 != self.mcp_installation_owner_runtime_session_id
             ):
                 raise ValueError("child RunStart contract identity mismatch")
+            if (
+                basis.owner.owner_id != self.id
+                or basis.owner.run_id != self.run_id
+                or basis.permission_snapshot_id != self.permission_snapshot_id
+                or basis.mcp_installation_id != self.mcp_installation_id
+                or basis.execution_surface_identity.mcp_installation_id
+                != self.mcp_installation_id
+            ):
+                raise ValueError("child RunStart capability basis attribution mismatch")
         return self
 
 

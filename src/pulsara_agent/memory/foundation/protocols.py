@@ -90,3 +90,30 @@ class RuntimeEventReadStore(Protocol):
     ) -> list[AgentEvent]: ...
 
     def replay(self, reply_id: str) -> Any: ...
+
+
+class MemoryModelRuntimeGateway(Protocol):
+    """Structural authority used by background memory model owners."""
+
+    runtime_session_id: str
+    provider_input_generation_coordinator: Any
+    model_stream_execution_registry: Any
+    transcript_projection_state_store: Any
+    context_input_io_service: Any
+
+    async def write_events(
+        self,
+        events: tuple[AgentEvent, ...],
+        **kwargs: Any,
+    ) -> Any: ...
+
+    def latch_memory_governance_reconciliation_required(self) -> None: ...
+
+
+class GovernanceTranscriptAuthority(Protocol):
+    reducer_evidence_snapshot: Any
+    document_view: Any
+    ledger_through_sequence: int
+    ledger_continuity_accumulator: str
+    transcript_semantic_event_count: int
+    transcript_semantic_accumulator: str

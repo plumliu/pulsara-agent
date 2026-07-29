@@ -1,3 +1,4 @@
+
 import asyncio
 from threading import Event, Timer
 from time import monotonic
@@ -230,7 +231,10 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     )
 
     assert isinstance(wiring, AgentRuntimeWiring)
-    assert wiring.agent_runtime.runtime_session is wiring.runtime_wiring.runtime_session
+    assert (
+        wiring.runtime_wiring.runtime_session
+        is wiring.runtime_wiring.runtime_session
+    )
     assert (
         wiring.runtime_wiring.runtime_session.runtime_session_id == runtime_session_id
     )
@@ -286,9 +290,9 @@ required_binaries: [terminal-only, missing-cli]
         workspace_kind="transient",
         memory_domain=wiring.agent_runtime.memory_domain,
         tool_registry=wiring.agent_runtime.tool_executor.registry,
-        archive=wiring.agent_runtime.runtime_session.archive,
-        runtime_session_id=wiring.agent_runtime.runtime_session.runtime_session_id,
-        mcp_installation_id=wiring.agent_runtime.runtime_session.mcp_installation_id,
+        archive=wiring.runtime_wiring.runtime_session.archive,
+        runtime_session_id=wiring.runtime_wiring.runtime_session.runtime_session_id,
+        mcp_installation_id=wiring.runtime_wiring.runtime_session.mcp_installation_id,
         user_input="$terminal-cli",
     )
 

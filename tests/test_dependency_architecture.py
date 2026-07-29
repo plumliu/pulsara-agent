@@ -15,20 +15,14 @@ from tests.support.dependency_rules import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Updated only when a hard cut deliberately removes residual edges. D4 forbids growth.
-RESIDUAL_SCC_OBSERVATION_FINGERPRINT = (
-    "sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc"
-)
-
-
 def test_d4_target_dependency_dag_has_no_exceptions() -> None:
     observations = scan_pulsara_imports(ROOT)
     assert forbidden_d4_observations(observations) == ()
 
 
-def test_package_scc_diagnostic_baseline_does_not_grow() -> None:
+def test_production_package_graph_has_no_cross_package_scc() -> None:
     residual = residual_scc_observations(scan_pulsara_imports(ROOT))
-    assert observation_set_fingerprint(residual) == RESIDUAL_SCC_OBSERVATION_FINGERPRINT
+    assert residual == ()
 
 
 def test_canonical_ast_import_observation_detects_same_scc_package_pair_growth(

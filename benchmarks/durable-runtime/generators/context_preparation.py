@@ -67,6 +67,11 @@ from pulsara_agent.primitives.terminal_projection import (
     ToolTerminalProjectionPayloadFact,
 )
 from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.run_execution.factory import RunActivationFactory
+from pulsara_agent.runtime.session_run_capabilities import (
+    build_agent_runtime_session_capabilities,
+)
+from pulsara_agent.runtime.subagent.activation import SubagentChildActivationService
 from pulsara_agent.runtime.context_input.compiler import (
     compile_context_from_facts,
     provider_neutral_payload_fingerprint,
@@ -112,7 +117,6 @@ from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
 from pulsara_agent.storage.postgres_connection_provider import (
     VerifiedPostgresConnectionProviderProtocol,
 )
-
 from generators.runtime_fixture import (
     BenchmarkContextRun,
     bootstrap_benchmark_context_run,
@@ -1496,13 +1500,40 @@ def _bind_subagent_agent(
 ) -> AgentRuntime:
     registry = LLMTransportRegistry(production_mode=True)
     registry.register(SanitizingLLMTransport(child_transport))
-    agent = AgentRuntime(
-        runtime_session=runtime_session,
-        llm_runtime=LLMRuntime(config=llm_config, registry=registry),
-        capability_runtime=CapabilityRuntime(),
+    llm_runtime = LLMRuntime(config=llm_config, registry=registry)
+    capability_runtime = CapabilityRuntime()
+    session_capabilities = build_agent_runtime_session_capabilities(runtime_session)
+    activation_factory = RunActivationFactory()
+    composition = activation_factory.create(
+        event_log=runtime_session.event_log,
+        runtime_session_id=runtime_session.runtime_session_id,
+        agent_runtime_kwargs={
+            **session_capabilities,
+            "llm_runtime": llm_runtime,
+            "capability_runtime": capability_runtime,
+        },
     )
+    agent = composition.agent_runtime
     if agent.subagent_runtime is None:
         raise RuntimeError("subagent benchmark AgentRuntime lacks graph runtime")
+    child_service = SubagentChildActivationService(
+        run_identity=session_capabilities["run_identity"],
+        run_ledger_port=session_capabilities["run_ledger_port"],
+        run_long_horizon_port=session_capabilities["run_long_horizon_port"],
+        llm_runtime=llm_runtime,
+        model_role=agent.model_role,
+        options=agent.options,
+        budget=agent.budget,
+        system_prompt=agent.system_prompt,
+        capability_runtime=capability_runtime,
+        workspace_kind=agent.workspace_kind,
+        rollout_budget_feasibility_report=(
+            agent.rollout_budget_feasibility_report
+        ),
+        activation_factory=activation_factory,
+        subagent_runtime=agent.subagent_runtime,
+    )
+    agent.subagent_runtime.bind_child_activation_port(child_service)
     exposure = run.working_set.effective_exposure_plan
     if exposure is None:
         raise RuntimeError("subagent benchmark lacks frozen parent exposure")

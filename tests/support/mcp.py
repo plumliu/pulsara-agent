@@ -19,10 +19,20 @@ from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     PreparedMcpInputRequiredSuspension,
 )
+from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
 from pulsara_agent.runtime.mcp.types import (
+    McpDiscoveredTool,
     McpInputRequiredResolution,
     McpOriginalRequest,
+    McpServerCandidate,
+    McpServerRuntimeSpec,
     McpServerSnapshot,
+    McpServerStatus,
+    McpToolAnnotations,
+    event_safe_mcp_config_fingerprint,
+    new_mcp_slot,
+    runtime_mcp_config_fingerprint,
+    snapshot_semantic_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -203,6 +213,79 @@ class MockMcpClientManager:
                 pass
 
 
+async def queue_ready_test_mcp_candidate(
+    supervisor: object,
+    runtime: object,
+    *,
+    tool_name: str = "lookup",
+    handler: McpToolHandler,
+) -> MockMcpClientManager:
+    """Queue one deterministic READY candidate through Supervisor ownership."""
+
+    config = runtime.spec.config  # type: ignore[attr-defined]
+    discovered = McpDiscoveredTool(
+        server_id=config.server_id,
+        name=tool_name,
+        description=f"test MCP tool {tool_name}",
+        input_schema={"type": "object", "properties": {}},
+        annotations=McpToolAnnotations(read_only_hint=True),
+    )
+    timing = McpServerLifecycleTimingFact(
+        queued_at_utc=runtime.queued_at_utc,  # type: ignore[attr-defined]
+        connect_started_at_utc="2026-01-01T00:00:00Z",
+        connect_ended_at_utc="2026-01-01T00:00:00Z",
+        discovery_started_at_utc="2026-01-01T00:00:00Z",
+        discovery_ended_at_utc="2026-01-01T00:00:00.010000Z",
+        completed_at_utc="2026-01-01T00:00:00.010000Z",
+        connect_duration_seconds=0,
+        discovery_duration_seconds=0.01,
+        total_duration_seconds=0.01,
+    )
+    snapshot = McpServerSnapshot(
+        snapshot_id=f"mcp_snapshot:{runtime.attempt.reconcile_attempt_id}",  # type: ignore[attr-defined]
+        server_id=config.server_id,
+        config_epoch=runtime.attempt.config_epoch,  # type: ignore[attr-defined]
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
+            server_id=config.server_id,
+            status=McpServerStatus.READY,
+            tools=(discovered,),
+        ),
+        reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,  # type: ignore[attr-defined]
+        discovery_generation=runtime.attempt.reserved_discovery_generation,  # type: ignore[attr-defined]
+        status=McpServerStatus.READY,
+        required=config.required,
+        tools=(discovered,),
+        timing=timing,
+    )
+    manager = MockMcpClientManager(
+        _snapshots=(snapshot,),
+        handlers={(config.server_id, tool_name): handler},
+    )
+    spec = McpServerRuntimeSpec(
+        config=config,
+        runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+    )
+    candidate = McpServerCandidate(
+        ticket_id=runtime.ticket_id,  # type: ignore[attr-defined]
+        config_epoch=runtime.attempt.config_epoch,  # type: ignore[attr-defined]
+        reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,  # type: ignore[attr-defined]
+        reserved_discovery_generation=runtime.attempt.reserved_discovery_generation,  # type: ignore[attr-defined]
+        server_snapshot=snapshot,
+        runtime_spec=spec,
+        manager_slot=new_mcp_slot(spec=spec, snapshot=snapshot, manager=manager),
+        trigger=runtime.trigger,  # type: ignore[attr-defined]
+        request_count=1,
+        page_count=1,
+    )
+    with supervisor._state_lock:  # type: ignore[attr-defined]
+        current = supervisor._current_attempts.get(config.server_id)  # type: ignore[attr-defined]
+        if current is runtime:
+            supervisor._candidates.append(candidate)  # type: ignore[attr-defined]
+    return manager
+
+
 async def _await_handler(handler: McpToolHandler, arguments: dict[str, Any]) -> Any:
     result = handler(arguments)
     if hasattr(result, "__await__"):
@@ -215,4 +298,5 @@ __all__ = [
     "PreparedTestMcpPendingHandle",
     "install_prepared_test_mcp_pending_handle",
     "prepared_test_mcp_pending_handle",
+    "queue_ready_test_mcp_candidate",
 ]

@@ -27,6 +27,7 @@ from tests.support.capability import (
 def build_component_tool_registry(
     runtime_session: RuntimeSession,
     *,
+    subagent_runtime=None,
     memory_proposal_sink: MemoryProposalSink | None = None,
     memory_recall_service: MemoryRecallService | None = None,
     memory_query: MemoryQuery | None = None,
@@ -41,6 +42,7 @@ def build_component_tool_registry(
     del permission_state
     composition = build_runtime_tool_composition_input(
         runtime_session,
+        subagent_runtime=subagent_runtime,
         memory_proposal_sink=memory_proposal_sink,
         memory_recall_service=memory_recall_service,
         memory_query=memory_query,
@@ -53,6 +55,7 @@ def build_component_tool_registry(
 def build_component_tool_executor(
     runtime_session: RuntimeSession,
     *,
+    subagent_runtime=None,
     memory_proposal_sink: MemoryProposalSink | None = None,
     memory_recall_service: MemoryRecallService | None = None,
     memory_query: MemoryQuery | None = None,
@@ -64,6 +67,7 @@ def build_component_tool_executor(
         raise TypeError("build_component_tool_executor requires a RuntimeSession")
     composition = build_runtime_tool_composition_input(
         runtime_session,
+        subagent_runtime=subagent_runtime,
         memory_proposal_sink=memory_proposal_sink,
         memory_recall_service=memory_recall_service,
         memory_query=memory_query,

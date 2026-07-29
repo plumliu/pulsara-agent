@@ -616,7 +616,7 @@ class MemoryGovernanceExecutor:
         if self.async_operation_port is not None:
             return await self.async_operation_port(name, operation, deadline)
         loop = asyncio.get_running_loop()
-        from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+        from pulsara_agent.blocking_executor import auxiliary_io_executor
 
         return await loop.run_in_executor(auxiliary_io_executor(), operation)
 

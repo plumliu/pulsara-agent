@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -251,6 +251,14 @@ def test_frozen_json_is_recursive_deterministic_and_returns_owned_thaws() -> Non
     first["z"][1]["b"] = False
     assert second["z"][1]["b"] is True
     assert canonical_json_bytes(frozen) == b'{"a":"text","z":[1,{"b":true}]}'
+
+
+def test_freeze_json_accepts_read_only_string_key_mapping() -> None:
+    frozen = freeze_json(
+        MappingProxyType({"z": 2, "a": MappingProxyType({"nested": True})})
+    )
+
+    assert thaw_json(frozen) == {"a": {"nested": True}, "z": 2}
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])

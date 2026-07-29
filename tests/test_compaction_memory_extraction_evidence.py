@@ -58,6 +58,7 @@ def _run_pair(*, index: int, text: str, source: str, identity_namespace: str):
         user_input=text,
     )
     start = RunStartEvent(
+        id=f"run_start:test:{context.run_id}",
         **context.event_fields(),
         **fields,
         user_input_chars=len(text),

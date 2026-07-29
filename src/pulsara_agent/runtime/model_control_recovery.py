@@ -1,4 +1,4 @@
-"""Restart recovery for completed main model calls without a disposition."""
+"""Runtime restart recovery for completed model calls without a disposition."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from pulsara_agent.llm.materialize import (
     materialize_committed_model_call_result_from_terminal_projection,
 )
 from pulsara_agent.llm.terminal_projection import hydrate_terminal_projection_text
-from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.ports.artifact import ModelArtifactStore
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.runtime.authority_materialization import (
     MaterializationAccountCommitFailed,
@@ -67,7 +67,7 @@ class ModelCallControlDispositionRecoveryService:
         self,
         *,
         event_log: EventLog,
-        archive: ArtifactStore,
+        archive: ModelArtifactStore,
     ) -> None:
         self._event_log = event_log
         self._archive = archive
@@ -292,7 +292,7 @@ def _materialize(
     events: tuple[AgentEvent, ...],
     start: ModelCallStartEvent,
     event_log: EventLog,
-    archive: ArtifactStore,
+    archive: ModelArtifactStore,
     deadline_monotonic: float | None,
 ):
     try:

@@ -27,7 +27,7 @@ from pulsara_agent.host.resume import (
     repair_dangling_runs_for_resume,
 )
 from pulsara_agent.host.run_boundary import HostBoundaryStopResult
-from pulsara_agent.host.session import HostSession
+from pulsara_agent.host.session import HostActivationResult, HostSession
 from pulsara_agent.host.session_manifest import (
     ResumableSessionSummary,
     permission_policy_from_manifest,
@@ -484,7 +484,7 @@ class HostCore:
                 resources=resources,
             )
             wiring = wiring_outcome.agent_runtime_wiring
-            wiring.agent_runtime.rollout_budget_feasibility_report = (
+            wiring.bind_rollout_budget_feasibility_report(
                 self.rollout_budget_feasibility
             )
             wiring.runtime_wiring.runtime_session.publisher.subscribe(
@@ -508,20 +508,13 @@ class HostCore:
                     projection_service=projection_service,
                     connection_provider=postgres_access_lease.connection_provider,
                 )
-            agent_runtime = wiring.agent_runtime
             runtime_open_deadline_monotonic = (
                 wiring.runtime_wiring.runtime_session.runtime_open_deadline_monotonic
             )
-            if (
-                repair_dangling_on_resume
-                and agent_runtime._subagent_parent_features_enabled
-                and agent_runtime.subagent_runtime is not None
-                and not agent_runtime._subagent_dangling_repair_done
-            ):
-                await agent_runtime.subagent_runtime.repair_dangling_children(
+            if repair_dangling_on_resume:
+                await session.repair_dangling_children_once(
                     deadline_monotonic=runtime_open_deadline_monotonic
                 )
-                agent_runtime._subagent_dangling_repair_done = True
             await session.recover_terminal_monitor_owners_before_open(
                 deadline_monotonic=runtime_open_deadline_monotonic,
             )
@@ -600,7 +593,7 @@ class HostCore:
             if lease is not None:
                 await self._release_supervisor_lease(lease)
             if wiring is not None:
-                wiring.agent_runtime.close()
+                wiring.close()
             raise
 
     # -- Read facades (allowed during CLOSING for diagnostics) ----------------
@@ -651,7 +644,7 @@ class HostCore:
         self,
         host_session_id: str,
         resolution: ApprovalResolution,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_accepting("resolve an approval")
         session = await self.get_session(host_session_id)
         return await session.resolve_approval(resolution)
@@ -660,7 +653,7 @@ class HostCore:
         self,
         host_session_id: str,
         resolution: PlanInteractionResolution,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_accepting("resolve a plan interaction")
         session = await self.get_session(host_session_id)
         return await session.resolve_plan_interaction(resolution)
@@ -669,7 +662,7 @@ class HostCore:
         self,
         host_session_id: str,
         resolution: McpInputRequiredInteractionResolution,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_accepting("resolve MCP input-required")
         session = await self.get_session(host_session_id)
         return await session.resolve_mcp_input_required(resolution)

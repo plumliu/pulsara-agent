@@ -48,7 +48,7 @@ from pulsara_agent.memory import summarize_run_timeline
 from pulsara_agent.event import ConfirmResult
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.replay.timeline import build_run_timeline
 
 
 CTX = EventContext(

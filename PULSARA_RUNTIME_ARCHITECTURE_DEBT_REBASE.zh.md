@@ -534,11 +534,26 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 - [x] old one-call producer与runtime/compaction memory concrete ownership物理删除；
 - [x] migration、Inspector、recovery、PostgreSQL/Oxigraph与frozen dogfood通过。
 
-### D6：AgentRuntime/HostSession ownership 拆分
+### D6：AgentRuntime/HostSession ownership 拆分（`CLOSED`）
 
-- scratchpad -> typed attempts；
-- 按实际状态机提取 coordinator；
-- 不再让新 coordinator依赖全能 RuntimeSession/HostSession。
+- [x] committed run由唯一稳定`RunOwner`持有，initial/resume分别使用独立activation coordinator与generation；
+- [x] genesis、immutable authority revision、typed progress、revocable resources与stable finalization owner穷尽分离；
+- [x] Host只消费opaque handle/outcome/observer，不保存working state或driver；run/stream共享service-owned driver；
+- [x] Host与child共用composition-owned registry/factory，child admission owner只持capacity/session资源；
+- [x] `AgentRuntime`不再持有完整`RuntimeSession`，model/tool/interaction/finalization只借用capability-scoped ports；
+- [x] production scratchpad、`AgentRunResult.state`、旧Host direct driver、child execution callback与compat owner物理删除；
+- [x] child initial capability basis进入AgentEvent catalog v7的RunStart schema fingerprint，PostgreSQL/Oxigraph world按reset-only subcut推进到migration v9；
+- [x] canonical import forbidden edge与cross-package SCC均为0，分区全量pytest失败集合闭环，frozen real-provider dogfood按全套5/6加唯一非确定性格式失败定向重跑的并集口径6/6通过；post-review activation异常出口、child timeout、bounded final output、exact interaction source、finalization snapshot、stable driver-exit repair、closed activation outcome、finalization alias删除与nonblocking exact rebind矩阵闭环。
+
+机器可读DoD证据：
+
+`benchmarks/suites/core/v1/d6_dod_evidence.json`
+
+长期ownership contract：
+
+`contracts/RUN_EXECUTION_OWNERSHIP_CONTRACT.zh.md`
+
+结论：**D6 CLOSED。**
 
 ### 独立性能支线
 

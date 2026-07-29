@@ -10,7 +10,7 @@ from typing import Any
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.timeline import RunTimeline, RunTimelineItem
+from pulsara_agent.replay.timeline import RunTimeline, RunTimelineItem
 
 
 _PERSISTENT_MANIFEST_SCHEMA = "run_timeline_persistent_manifest.v1"

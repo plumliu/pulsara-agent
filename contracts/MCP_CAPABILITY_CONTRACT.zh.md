@@ -222,11 +222,12 @@ AsyncTool.execute_async()
   -> freeze McpInputRequiredSuspensionFact
   -> ToolExecutionSuspended(interaction_kind="mcp_input_required",
                             prepared_mcp_input_required=...)
-  -> AgentRuntime state.pending_interaction_kind = "mcp_input_required"
-  -> HostSession.pending_interaction = PendingMcpInputRequired
+  -> ToolExecutionTerminalRegistry owns the stable suspension candidate
+  -> FULL installs PendingMcpInputRequiredAuthority in RunOwner suspension slot
+  -> activation completes with typed RunSuspendedOutcome
   -> freeze PreparedMcpInputRequiredResolution before first await
-  -> Host boundary + McpInputRequiredResolutionSubmittedEvent atomic FULL
-  -> AgentRuntime.resume_after_mcp_input_required()
+  -> InteractionTransitionPort commits Host boundary + resolution atomically
+  -> registry consumes the exact suspension slot and installs a new activation
   -> adapter resumes through normal capability/gate-aware tool continuation
   -> manager.resume_suspended_request(...)
 ```
@@ -247,7 +248,8 @@ AsyncTool.execute_async()
 - v1 只有 wrapper tool / runtime tool-call 路径支持 input-required suspend。direct CLI / inspect / doctor 路径如果遇到 resource/prompt input-required，必须 fail-closed 并产 diagnostic，不创建 pending interaction，也不尝试在 CLI 内临时提问。
 - 如果 v1 通过显式 wrapper tool 暴露 resource/prompt input-required，typed source必须同时
   证明 wrapper tool 身份与 underlying request envelope fingerprint；两者不得混用。
-- HostSession 只产 Pulsara-owned、可持久化的 resolution DTO，不构造或持有 SDK `InputResponses`。
+- Host/UI只消费`RunSuspendedOutcome`携带的typed authority；不得持有MCP pending handle、SDK `InputResponses`或旧activation working state。
+- 已完成的suspended activation receipt不可改写。新activation通过immutable resume-link receipt引用predecessor generation。
 - SDK `InputResponses` 只能由 SDK-backed manager/facade 在内部构造，并用同一个 request_state 与同一个原始 request 重试。
 - 再次收到 `InputRequiredResult` 时继续 suspend；超过 round cap、用户 cancel、session close 或 request_state 失效时返回结构化 cancel/error。
 - pending input-required 状态下不得自动 context compact；resolution 后进入 follow-up safe point 时才可 mid-turn compact。
@@ -431,3 +433,7 @@ successor并退休predecessor。Lowering/validation失败冻结为non-retryable
 
 Registry返回origin-aware MCP binding contract，required携带server/slot/snapshot/discovery generation；
 concrete attribute和`getattr()`不得成为binding authority。Mock manager只存在于`tests/support/mcp.py`。
+
+多轮ToolDelta authority使用`tool_delta_burst_contract.v2`。每轮suspension、successor suspension与terminal
+settlement必须exact join同一tool-call、burst contract、predecessor resolution和RunOwner activation identity；
+不得从Host字段、旧working state或时间顺序猜测所属interaction。

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from tests.support.postgres import connect_postgres_test_database as _connect_or_skip
 from tests.support.capability import tool_runtime_context
+from tests.support import memory_hook_view
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.event import EventContext
@@ -38,7 +39,7 @@ from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.message import AssistantMsg, TextBlock, UserMsg
 from pulsara_agent.ontology import memory
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.runtime.tool_executor import ToolExecutor
@@ -113,13 +114,15 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
             ),
             graph_id=graph_id,
         )
-        state = LoopState(session_id="runtime:test")
+        state = RunActivationWorkingState(session_id="runtime:test")
         state.current_scope = "ctx:workspace/other_project"
         state.messages.append(
             UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")])
         )
 
-        projection = asyncio.run(hooks.project(state, token_budget=200))
+        projection = asyncio.run(
+            hooks.project(memory_hook_view(state), token_budget=200)
+        )
 
         assert projection is not None
         assert projection["do_not_write_back"] is True
@@ -163,13 +166,13 @@ def test_durable_memory_project_reuses_same_run_projection_across_tool_loop_turn
             recall=recall,
             graph_id=graph_id,
         )
-        state = LoopState(session_id="runtime:tool-loop-cache")
+        state = RunActivationWorkingState(session_id="runtime:tool-loop-cache")
         state.messages.append(
             UserMsg(name="user", content="Can you keep this concise?")
         )
 
-        first = asyncio.run(hooks.project(state, token_budget=200))
-        second = asyncio.run(hooks.project(state, token_budget=200))
+        first = asyncio.run(hooks.project(memory_hook_view(state), token_budget=200))
+        second = asyncio.run(hooks.project(memory_hook_view(state), token_budget=200))
 
         assert recall.calls == 1
         assert first == second
@@ -209,12 +212,14 @@ def test_durable_memory_project_uses_read_scope_set() -> None:
             graph_id=graph_id,
             read_scopes=frozenset({"ctx:user", "ctx:workspace/test_project"}),
         )
-        state = LoopState(session_id="runtime:test")
+        state = RunActivationWorkingState(session_id="runtime:test")
         state.messages.append(
             UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")])
         )
 
-        projection = asyncio.run(hooks.project(state, token_budget=200))
+        projection = asyncio.run(
+            hooks.project(memory_hook_view(state), token_budget=200)
+        )
 
         assert projection is not None
         assert projection["included_memory_ids"] == ["preference:user-concise"]
@@ -324,13 +329,15 @@ def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
             ),
             graph_id=graph_id,
         )
-        state = LoopState(session_id="runtime:test")
+        state = RunActivationWorkingState(session_id="runtime:test")
         state.current_scope = "ctx:user"
         state.messages.append(
             UserMsg(name="user", content="Can you keep this concise?")
         )
 
-        projection = asyncio.run(hooks.project(state, token_budget=200))
+        projection = asyncio.run(
+            hooks.project(memory_hook_view(state), token_budget=200)
+        )
         assert projection is not None
         sink.deposit_valid(
             CandidatePoolProposal(
@@ -349,7 +356,9 @@ def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
         )
 
         asyncio.run(
-            hooks.after_model_reply(state, AssistantMsg(name="assistant", content="ok"))
+            hooks.after_model_reply(
+                memory_hook_view(state), AssistantMsg(name="assistant", content="ok")
+            )
         )
 
         assert pool.list_candidates() == []

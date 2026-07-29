@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 import json
 from dataclasses import replace
@@ -19,9 +22,8 @@ from pulsara_agent.primitives.context_source import ContextSourceId
 from pulsara_agent.primitives.runtime_observation import (
     ContextSourceObservationProducerFact,
 )
-from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.state import LoopStatus
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     default_context_source_lifecycle_registry,
     default_provider_user_carrier_protocol,
     default_runtime_observation_protocol,
@@ -253,7 +255,7 @@ def test_long_horizon_observation_rewrite_protects_latest_clock_and_shrinks_hist
             {"text": "second run done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from threading import RLock
 from time import monotonic
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -26,9 +26,33 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.ports.event_write import (
+    EventCommitError,
+    EventReconciliationRequired,
+    EventWriteCancelled,
+    EventWriteResult,
+    PendingRuntimeEventWriteError,
+)
 
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
+
+class CandidateProjectionRuntimeGateway(Protocol):
+    runtime_session_id: str
+    event_write_service: Any
+    context_input_io_service: Any
+
+    async def write_events(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        transaction_companion: object | None = None,
+    ) -> EventWriteResult: ...
+
+    async def confirm_and_handoff_event_batch_async(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        deadline_monotonic: float,
+    ) -> EventWriteResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,7 +381,7 @@ class CandidateProjectionOutboxDispatcher:
 class MemoryCandidateProjectionCommitPort:
     """RuntimeSession-owned atomic producer event/account/outbox commit port."""
 
-    runtime_session: "RuntimeSession"
+    runtime_session: CandidateProjectionRuntimeGateway
     repository: CandidateProjectionOutboxRepository
     dispatcher: CandidateProjectionOutboxDispatcher
     _dispatch_retry_required: bool = field(default=False, init=False, repr=False)
@@ -448,15 +472,6 @@ class MemoryCandidateProjectionCommitPort:
         self,
         bundle: "_CandidateProjectionCommitBundle",
     ) -> "EventWriteResult":
-        from pulsara_agent.runtime.event_write_service import (
-            PendingRuntimeEventWriteError,
-        )
-        from pulsara_agent.runtime.session import (
-            EventCommitError,
-            EventReconciliationRequired,
-            EventWriteCancelled,
-        )
-
         retry_delay = 0.05
         operation = "write"
         while True:

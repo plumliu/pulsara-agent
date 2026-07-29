@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import monotonic
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
-from pulsara_agent.event import RunStartEvent
+from pulsara_agent.event import EventContext, RunStartEvent
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.event.events import utc_now
@@ -42,7 +41,7 @@ from pulsara_agent.primitives.transcript_projection import (
     RunTranscriptSeedReferenceFact,
     RunTranscriptSeedSemanticFact,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 from pulsara_agent.runtime.long_horizon.run_contract import (
     PreparedLongHorizonRunFacts,
@@ -50,7 +49,10 @@ from pulsara_agent.runtime.long_horizon.run_contract import (
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.control import RunModelCallControlOwner
-    from pulsara_agent.runtime.agent import AgentRuntime
+    from pulsara_agent.runtime.session_run_capabilities import (
+        RunRuntimeIdentity,
+        RuntimeSessionRunContextPort,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +207,7 @@ CommittedRunEntry: TypeAlias = CommittedHostRunEntry | CommittedSubagentRunEntry
 
 
 def install_run_working_set(
-    state: LoopState,
+    state: RunActivationWorkingState,
     committed: CommittedRunEntry,
     *,
     plan_snapshot: PlanWorkflowStateFact,
@@ -245,9 +247,10 @@ def install_run_working_set(
 
 
 async def prepare_agent_run_draft(
-    agent: AgentRuntime,
-    state: LoopState,
+    state: RunActivationWorkingState,
     *,
+    run_identity: RunRuntimeIdentity,
+    run_context_port: RuntimeSessionRunContextPort,
     run_model_target: ResolvedModelTarget,
     permission_snapshot: RunPermissionSnapshot,
     current_user_message: CurrentUserMessageFact,
@@ -275,6 +278,12 @@ async def prepare_agent_run_draft(
         state.run_model_target = run_model_target
     if state.permission_snapshot != permission_snapshot:
         raise RuntimeError("prepared run permission snapshot/state mismatch")
+    if (
+        state.terminal_run_end_event_id is not None
+        and state.terminal_run_end_event_id != terminal_run_end_event_id
+    ):
+        raise RuntimeError("prepared run terminal event identity changed")
+    state.terminal_run_end_event_id = terminal_run_end_event_id
     state.messages.extend(
         message.model_copy(deep=True) for message in (prior_messages or [])
     )
@@ -287,7 +296,11 @@ async def prepare_agent_run_draft(
             created_at=current_user_message.observed_at_utc,
         )
     )
-    event_context = agent._event_context(state)
+    event_context = EventContext(
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+    )
     if isinstance(new_run_boundary, NewRunBoundaryFact):
         if subagent_run_entry is not None:
             raise RuntimeError("host run entry cannot carry a child entry fact")
@@ -299,66 +312,8 @@ async def prepare_agent_run_draft(
         raise RuntimeError(
             "run entry requires exactly one host boundary or subagent entry fact"
         )
-    from pulsara_agent.runtime.authority_materialization import (
-        prepare_authority_artifact_write_reservation,
-        persist_prepared_run_transcript_seed,
-        prepare_run_transcript_seed,
-    )
-    from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
-        TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
-    )
-
-    projection_store = agent.runtime_session.transcript_projection_state_store
-    projection_snapshot = projection_store.snapshot()
-    if not projection_snapshot.checkpointable:
-        raise RuntimeError("RunStart transcript seed requires a stable projection safe point")
-    prepared_seed = prepare_run_transcript_seed(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
-        stable_state=projection_snapshot.stable_semantic_state,
-        stable_entries=projection_store.stable_entries(),
-        ledger_through_sequence=projection_snapshot.ledger_through_sequence,
-        ledger_continuity_accumulator=(
-            projection_snapshot.ledger_continuity_accumulator
-        ),
-        reducer_id="pulsara.transcript-projection",
-        reducer_version="1",
-        reducer_contract_fingerprint=(
-            TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
-        ),
-        transcript_semantic_domain_contract_fingerprint=(
-            agent.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
-        ),
-        contracts=(
-            agent.runtime_session.transcript_projection_materialization_contracts
-        ),
-    )
-    seed_deadline = monotonic() + (
-        agent.runtime_session.authority_materialization_contracts.limits.checkpoint_operation_timeout_seconds
-    )
-    seed_write_reservation = prepare_authority_artifact_write_reservation(
-        operation_id=f"run-seed:{state.run_id}",
-        owner_kind="run_seed_materialization",
-        artifacts=prepared_seed.artifacts,
-        limits=agent.runtime_session.authority_materialization_contracts.limits,
-        absolute_deadline_monotonic=seed_deadline,
-    )
-    await agent.runtime_session.context_input_io_service.execute(
-        operation_name="run-transcript-seed-materialization",
-        operation=lambda: persist_prepared_run_transcript_seed(
-            prepared_seed,
-            write_reservation=seed_write_reservation,
-            limits=agent.runtime_session.authority_materialization_contracts.limits,
-            archive=agent.runtime_session.archive,
-            runtime_session_id=agent.runtime_session.runtime_session_id,
-            deadline_monotonic=seed_deadline,
-        ),
-        deadline_monotonic=seed_deadline,
-    )
-    agent.runtime_session.transcript_projection_checkpoint_service.prepare_run_seed_artifacts(
-        run_id=state.run_id,
-        artifact_ids=frozenset(
-            item.artifact_id for item in prepared_seed.artifacts
-        ),
+    prepared_seed = await run_context_port.prepare_run_transcript_seed(
+        run_id=state.run_id
     )
     run_start = RunStartEvent(
         id=run_start_event_id,
@@ -368,13 +323,13 @@ async def prepare_agent_run_draft(
         **permission_snapshot.to_event_fields(),
         model_target=run_model_target.fact,
         subagent_graph_reducer_contract=(
-            agent.runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
+            run_context_port.subagent_graph_reducer_contract
         ),
         long_horizon=long_horizon.contract,
         child_rollout_subaccount=child_rollout_subaccount,
-        mcp_installation_id=agent.runtime_session.mcp_installation_id,
+        mcp_installation_id=run_identity.mcp_installation_id,
         mcp_installation_owner_runtime_session_id=(
-            agent.runtime_session.mcp_installation_owner_runtime_session_id
+            run_identity.mcp_installation_owner_runtime_session_id
         ),
         run_entry_kind=run_entry_kind,
         current_user_message=current_user_message,
@@ -389,7 +344,9 @@ async def prepare_agent_run_draft(
     expected_basis = (
         new_run_boundary.capability_basis
         if isinstance(new_run_boundary, NewRunBoundaryFact)
-        else capability_basis
+        else subagent_run_entry.capability_basis
+        if isinstance(subagent_run_entry, SubagentRunEntryFact)
+        else None
     )
     if expected_basis != capability_basis:
         raise RuntimeError("prepared run capability basis mismatch")

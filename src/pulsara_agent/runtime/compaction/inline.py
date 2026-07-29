@@ -25,7 +25,7 @@ from pulsara_agent.runtime.compaction.service import (
     ContextCompactionService,
 )
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.state import LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.transcript import rebuild_prior_messages_before_sequence
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
@@ -56,7 +56,7 @@ class RuntimeContextCompactorProtocol(Protocol):
     async def maybe_compact_before_followup(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         model_visible_messages: list[Msg],
         protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult: ...
@@ -67,7 +67,7 @@ class NoopRuntimeContextCompactor:
     async def maybe_compact_before_followup(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         model_visible_messages: list[Msg],
         protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult:
@@ -85,7 +85,7 @@ class RuntimeContextCompactor:
     async def maybe_compact_before_followup(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         model_visible_messages: list[Msg],
         protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult:
@@ -252,7 +252,7 @@ class RuntimeContextCompactor:
             rewritten_messages=rewritten,
         )
 
-    def _safe_point_guard(self, state: LoopState) -> str | None:
+    def _safe_point_guard(self, state: RunActivationWorkingState) -> str | None:
         if state.status is not LoopStatus.RUNNING:
             return "state_not_running"
         if state.last_transition is not LoopTransition.CONTINUE_AFTER_TOOL:
@@ -273,7 +273,7 @@ class RuntimeContextCompactor:
 
     async def _emit_skip_diagnostic(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: str,
         current_run_start: AgentEvent | None,
@@ -329,7 +329,7 @@ class RuntimeContextCompactor:
             receipt.publication_summary not in {"completed", "enqueued"},
         )
 
-def _current_run_tail_from_state(state: LoopState) -> list[Msg]:
+def _current_run_tail_from_state(state: RunActivationWorkingState) -> list[Msg]:
     tail: list[Msg] = []
     in_current_run = False
     user_message_id = f"user-message:{state.run_id}"

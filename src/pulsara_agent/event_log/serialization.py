@@ -22,7 +22,7 @@ from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
 
 # This is a catalog migration version only.  Per-row decoder identity is the
 # event type/version/schema/domain tuple below.
-AGENT_EVENT_SCHEMA_VERSION = 6
+AGENT_EVENT_SCHEMA_VERSION = 7
 
 
 class EventSchemaRegistryConflict(RuntimeError):

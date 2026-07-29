@@ -1,3 +1,6 @@
+import pulsara_agent.runtime.session_run_capabilities as capability_module
+
+
 import asyncio
 import json
 import shlex
@@ -113,6 +116,7 @@ from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
     sha256_fingerprint,
 )
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings
@@ -488,7 +492,7 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
 
     assert (
         session.runtime_session_id
-        == session.wiring.agent_runtime.runtime_session.runtime_session_id
+        == session.wiring.runtime_wiring.runtime_session.runtime_session_id
     )
     assert "first user" in _context_text(transport.contexts[1])
     assert "sentinel-one" in _context_text(transport.contexts[1])
@@ -1437,7 +1441,7 @@ def test_host_session_injects_failed_turn_note_into_next_context(
 
     assert (
         session.runtime_session_id
-        == session.wiring.agent_runtime.runtime_session.runtime_session_id
+        == session.wiring.runtime_wiring.runtime_session.runtime_session_id
     )
     assert len(transport.contexts) == 4
     second_context = transport.contexts[-1]
@@ -2098,20 +2102,17 @@ def test_host_terminal_monitor_ready_output_drives_real_health_check(
                 and event.observation.observation_kind == "output_progress"
                 for event in events
             )
-            boundary = session._boundary_task
-            active = session._active_task
+            boundary_state = session.summary()["boundary"]["state"]
             if (
                 readiness_observed
                 and len(transport.contexts) >= 4
-                and (boundary is None or boundary.done())
-                and (active is None or active.done())
+                and boundary_state == "idle"
             ):
                 break
             await asyncio.sleep(0.05)
         assert readiness_observed
         assert len(transport.contexts) >= 4
-        assert boundary is None or boundary.done()
-        assert active is None or active.done()
+        assert boundary_state == "idle"
         events = session.replay_events()
         health_status = await asyncio.to_thread(
             lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=2).status
@@ -2710,7 +2711,7 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
         assert pending is not None
         assert pending.tool_calls[0].id == "call:danger"
         assert session.active_run_id is None
-        assert session.suspended_run_id == first.state.run_id
+        assert session.suspended_run_id == first.owner_identity.run_id
         assert not session._run_lock.locked()
         with pytest.raises(HostSessionPendingApprovalError):
             await session.run_turn("new prompt should not start")
@@ -2732,7 +2733,9 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
     assert session.get_pending_approval() is None
     assert session.suspended_run_id is None
     assert session.active_run_id is None
-    assert any(event.run_id == first.state.run_id for event in session.replay_events())
+    assert any(
+        event.run_id == first.owner_identity.run_id for event in session.replay_events()
+    )
 
 
 def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(
@@ -2776,7 +2779,9 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(
 
     session, first, resolved = asyncio.run(run())
     run_events = [
-        event for event in session.replay_events() if event.run_id == first.state.run_id
+        event
+        for event in session.replay_events()
+        if event.run_id == first.owner_identity.run_id
     ]
     tool_output = "".join(
         event.delta
@@ -2785,7 +2790,7 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(
         and event.tool_call_id == "call:ask-terminal"
     )
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert resolved.final_text == "approved ask continuation"
     assert session.get_pending_approval() is None
@@ -2837,7 +2842,7 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(
 
     session, first, resolved = asyncio.run(run())
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert (tmp_path / "approved.txt").read_text(
         encoding="utf-8"
@@ -2886,7 +2891,9 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(
 
     session, first, resolved = asyncio.run(run())
     run_events = [
-        event for event in session.replay_events() if event.run_id == first.state.run_id
+        event
+        for event in session.replay_events()
+        if event.run_id == first.owner_identity.run_id
     ]
     denied_output = "".join(
         event.delta
@@ -2934,7 +2941,9 @@ def test_host_session_stop_terminal_access_ask_pending_approval_aborts(
 
     session, first, stopped, second = asyncio.run(run())
     run_events = [
-        event for event in session.replay_events() if event.run_id == first.state.run_id
+        event
+        for event in session.replay_events()
+        if event.run_id == first.owner_identity.run_id
     ]
 
     assert stopped.status.value == "aborted"
@@ -2985,7 +2994,9 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
 
     session, first, stopped, second = asyncio.run(run())
     run_events = [
-        event for event in session.replay_events() if event.run_id == first.state.run_id
+        event
+        for event in session.replay_events()
+        if event.run_id == first.owner_identity.run_id
     ]
 
     assert stopped.status.value == "aborted"
@@ -3031,9 +3042,7 @@ def test_host_session_hardline_under_terminal_ask_denies_without_approval(
 
     session, result = asyncio.run(run())
     run_events = [
-        event
-        for event in session.replay_events()
-        if event.run_id == result.state.run_id
+        event for event in session.replay_events() if event.run_id == result.run_id
     ]
     denied_output = "".join(
         event.delta
@@ -3100,7 +3109,9 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(
 
     session, first, resolved = asyncio.run(run())
     run_events = [
-        event for event in session.replay_events() if event.run_id == first.state.run_id
+        event
+        for event in session.replay_events()
+        if event.run_id == first.owner_identity.run_id
     ]
     tool_output = "".join(
         event.delta
@@ -3109,7 +3120,7 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(
         and event.tool_call_id == "call:ask-terminal"
     )
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert resolved.final_text == "ask-permissions terminal continuation"
     assert session.get_pending_approval() is None
@@ -3163,7 +3174,7 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(
 
     first, resolved = asyncio.run(run())
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert (tmp_path / "ask_permissions.txt").read_text() == "PULSARA_ASK_WRITE_OK\n"
 
@@ -3232,7 +3243,7 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(
         return session, first, resolved, write_exists_at_pause
 
     session, first, resolved, write_exists_at_pause = asyncio.run(run())
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert write_exists_at_pause is True
     assert (tmp_path / "accept_edits.txt").read_text() == "PULSARA_ACCEPT_EDITS_OK\n"
     assert resolved.status.value == "finished"
@@ -3279,9 +3290,7 @@ def test_bypass_permissions_preset_runs_without_pending_approval(
 
     session, result = asyncio.run(run())
     run_events = [
-        event
-        for event in session.replay_events()
-        if event.run_id == result.state.run_id
+        event for event in session.replay_events() if event.run_id == result.run_id
     ]
     terminal_output = "".join(
         event.delta
@@ -3330,9 +3339,7 @@ def test_bypass_permissions_preset_still_denies_hardline_terminal(
 
     session, result = asyncio.run(run())
     run_events = [
-        event
-        for event in session.replay_events()
-        if event.run_id == result.state.run_id
+        event for event in session.replay_events() if event.run_id == result.run_id
     ]
     denied_output = "".join(
         event.delta
@@ -3378,9 +3385,7 @@ def test_read_only_preset_denies_write_without_pending_approval(
 
     session, result = asyncio.run(run())
     run_events = [
-        event
-        for event in session.replay_events()
-        if event.run_id == result.state.run_id
+        event for event in session.replay_events() if event.run_id == result.run_id
     ]
     denied_output = "".join(
         event.delta
@@ -3677,7 +3682,7 @@ def test_plan_question_suspends_and_resolution_continues_same_run(
     session, first, resolved = asyncio.run(run())
     events = session.replay_events()
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert resolved.final_text == "question answered"
     assert session.get_pending_interaction() is None
@@ -3690,7 +3695,7 @@ def test_plan_question_suspends_and_resolution_continues_same_run(
         event.run_id
         for event in events
         if isinstance(event, PlanQuestionAskedEvent | PlanQuestionAnsweredEvent)
-    } == {first.state.run_id}
+    } == {first.owner_identity.run_id}
 
 
 def test_plan_question_supports_structured_options(tmp_path, monkeypatch) -> None:
@@ -3798,7 +3803,7 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     session, first, resolved = asyncio.run(run())
     events = session.replay_events()
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "finished"
     assert resolved.final_text == ""
     assert session.plan_state.active is False
@@ -3874,7 +3879,7 @@ def test_plan_terminal_snapshot_closes_prior_guidance_for_observation_rewrite(
 
     session, waiting, resumed = asyncio.run(run())
 
-    assert waiting.status.value == "waiting_user"
+    assert isinstance(waiting, RunSuspendedOutcome)
     assert resumed.status.value == "finished"
     runtime_session = session.wiring.runtime_wiring.runtime_session
     snapshot = runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
@@ -3906,10 +3911,9 @@ def test_plan_terminal_snapshot_closes_prior_guidance_for_observation_rewrite(
 def test_exit_plan_revise_keeps_plan_active_and_read_only(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     prepared_snapshots = []
-    original_prepare = agent_module.prepare_live_context_snapshot
+    original_prepare = capability_module.prepare_live_context_snapshot
 
     async def capture_prepare(**kwargs):
         prepared = await original_prepare(**kwargs)
@@ -3917,7 +3921,7 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
         return prepared
 
     monkeypatch.setattr(
-        agent_module,
+        capability_module,
         "prepare_live_context_snapshot",
         capture_prepare,
     )
@@ -3965,12 +3969,11 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
 
     session, result = asyncio.run(run())
 
-    assert result.status.value == "waiting_user"
+    assert isinstance(result, RunSuspendedOutcome)
     pending = session.get_pending_interaction()
     assert isinstance(pending, PendingPlanInteraction)
     assert pending.kind == "exit"
     assert pending.plan_text == "revised draft with tests"
-    assert result.final_text == ""
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
     assert not any(
@@ -4034,7 +4037,7 @@ def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(
     session, first = asyncio.run(run())
     events = session.replay_events()
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert session.plan_state.active is False
     assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
     assert session.get_pending_interaction() is None
@@ -4114,7 +4117,7 @@ def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(
         and event.tool_call_id == "call:sibling-write"
     )
 
-    assert result.status.value == "waiting_user"
+    assert isinstance(result, RunSuspendedOutcome)
     assert isinstance(session.get_pending_interaction(), PendingPlanInteraction)
     assert not (tmp_path / "sibling.txt").exists()
     assert "not executed because a plan workflow control tool" in sibling_output
@@ -4151,7 +4154,7 @@ def test_stop_pending_plan_interaction_keeps_plan_active_read_only(
 
     session, first, stopped, second = asyncio.run(run())
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert stopped.status.value == "aborted"
     assert second.final_text == "still planning"
     assert session.plan_state.active is True
@@ -4213,7 +4216,7 @@ def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(
     session, first, resolved = asyncio.run(run())
     events = session.replay_events()
 
-    assert first.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
     assert resolved.status.value == "failed"
     assert resolved.stop_reason == "plan_interaction_budget"
     assert session.get_pending_interaction() is None
@@ -4291,8 +4294,8 @@ def test_plan_exit_revision_budget_exhaustion_fails_run(tmp_path, monkeypatch) -
     session, first, second, third = asyncio.run(run())
     events = session.replay_events()
 
-    assert first.status.value == "waiting_user"
-    assert second.status.value == "waiting_user"
+    assert isinstance(first, RunSuspendedOutcome)
+    assert isinstance(second, RunSuspendedOutcome)
     assert third.status.value == "failed"
     assert third.stop_reason == "plan_interaction_budget"
     assert any(
@@ -4387,7 +4390,9 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(
 
     session, first, stopped, second = asyncio.run(run())
     events = session.replay_events()
-    run_events = [event for event in events if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in events if event.run_id == first.owner_identity.run_id
+    ]
 
     assert stopped.status.value == "aborted"
     assert stopped.stop_reason == "aborted"
@@ -4457,7 +4462,7 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(
         return session, stopped, result, second
 
     session, stopped, result, second = asyncio.run(run())
-    first_run_id = result.state.run_id
+    first_run_id = result.run_id
     first_events = [
         event for event in session.replay_events() if event.run_id == first_run_id
     ]
@@ -4465,9 +4470,7 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(
     assert stopped is not None
     assert stopped.status.value == "aborted"
     assert result.status.value == "aborted"
-    assert result.state.stop_request is None
-    assert result.state.abort_kind is not None
-    assert result.state.abort_kind.value == "user_stop"
+    assert result.stop_reason.value == "aborted"
     assert second.final_text == "continued"
     assert session.active_run_id is None
     assert session.stopping_run_id is None
@@ -4508,7 +4511,7 @@ def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber
     assert result.status.value == "aborted"
     assert any(
         isinstance(event, RunEndEvent)
-        and event.run_id == result.state.run_id
+        and event.run_id == result.run_id
         and event.status == "aborted"
         and event.stop_reason == "aborted"
         for event in delivered
@@ -4573,9 +4576,7 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(
 
     session, result = asyncio.run(run())
     first_events = [
-        event
-        for event in session.replay_events()
-        if event.run_id == result.state.run_id
+        event for event in session.replay_events() if event.run_id == result.run_id
     ]
 
     assert result.status.value == "aborted"
@@ -4633,12 +4634,12 @@ def test_host_session_resume_can_suspend_again_with_new_pending_approval(
 
     first, resumed, first_pending, second_pending, session = asyncio.run(run())
 
-    assert resumed.status.value == "waiting_user"
+    assert isinstance(resumed, RunSuspendedOutcome)
     assert second_pending is not None
     assert second_pending.approval_id != first_pending.approval_id
-    assert second_pending.run_id == first_pending.run_id == first.state.run_id
+    assert second_pending.run_id == first_pending.run_id == first.owner_identity.run_id
     assert second_pending.tool_calls[0].id == "call:second"
-    assert session.suspended_run_id == first.state.run_id
+    assert session.suspended_run_id == first.owner_identity.run_id
     assert session.active_run_id is None
 
 

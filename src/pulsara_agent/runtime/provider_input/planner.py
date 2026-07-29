@@ -101,7 +101,7 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeObservationWireSemanticFact,
     TerminalMonitorRuntimeObservationPayloadFact,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
     context_source_transition_kind,
     default_provider_user_carrier_protocol,
@@ -112,7 +112,7 @@ from pulsara_agent.runtime.context_input.sources.lifecycle import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.context_engine.types import CompiledContext
 from pulsara_agent.runtime.context_input.live import PreparedLiveContextSnapshot
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     LOWERING_CONTRACT_ID,
     LOWERING_CONTRACT_FINGERPRINT,
     LOWERING_CONTRACT_VERSION,

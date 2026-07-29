@@ -22,6 +22,8 @@ _Created: 2026-07-04_
   - 覆盖 settings/env-file、CLI 命令面、Host run/repl/inspect、REPL plan/approval/resume/compaction UI、bundled skills 管理入口。
 - [AGENT_RUNTIME_LOOP_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/AGENT_RUNTIME_LOOP_CONTRACT.zh.md)
   - 覆盖 `AgentRuntime` 的 run start、capability exposure、model/tool loop、pending state、plan workflow、MCP elicitation、mid-turn compact safe point、run finalization。
+- [RUN_EXECUTION_OWNERSHIP_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RUN_EXECUTION_OWNERSHIP_CONTRACT.zh.md)
+  - 覆盖稳定 `RunOwner`、per-activation coordinator、Host opaque handle/outcome、suspension、finalization、reopen 与 child parity。
 - [LLM_TRANSPORT_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/LLM_TRANSPORT_CONTRACT.zh.md)
   - 覆盖 LLM role/model selection、provider-neutral request、transport event translation、usage、retry、provider profiles。
 - [EVENT_LOG_STORAGE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/EVENT_LOG_STORAGE_CONTRACT.zh.md)

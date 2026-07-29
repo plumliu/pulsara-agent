@@ -126,7 +126,7 @@ from pulsara_agent.primitives.run_lifecycle import (
     RunStopReason,
     RunTerminalizationKind,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 
 
 EVENT_CONTEXT = EventContext(
@@ -247,7 +247,6 @@ async def _start_test_stream(
             if commit_port is not None
             else RuntimeSessionModelStreamEventCommitPort(
                 runtime_session=runtime_session,
-                state=None,
             )
         ),
         execution_registry=runtime_session.model_stream_execution_registry,
@@ -334,7 +333,7 @@ async def _completed_control_fixture(tmp_path):
         session,
         result,
         owner,
-        LoopState(
+        RunActivationWorkingState(
             session_id=session.runtime_session_id,
             run_id=EVENT_CONTEXT.run_id,
         ),
@@ -568,7 +567,7 @@ def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -
 
     class RecordingCommitPort(RuntimeSessionModelStreamEventCommitPort):
         def __init__(self, *, runtime_session):
-            super().__init__(runtime_session=runtime_session, state=None)
+            super().__init__(runtime_session=runtime_session)
             self.semantic_batch_sizes: list[int] = []
 
         async def commit_semantic(self, candidates, *, guard, live_cursor):
@@ -694,7 +693,6 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
             run_execution_activation=make_test_run_execution_activation(),
             commit_port=ObservingCommitPort(
                 runtime_session=session,
-                state=None,
             ),
         )
         await asyncio.wait_for(delta_committed.wait(), timeout=2)
@@ -887,7 +885,6 @@ def test_direct_model_start_has_no_reply_reservation_or_run_activation(
             start_bundle=bundle,
             commit_port=RuntimeSessionModelStreamEventCommitPort(
                 runtime_session=session,
-                state=None,
             ),
             execution_registry=session.model_stream_execution_registry,
         )
@@ -981,7 +978,6 @@ def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
             start_bundle=bundle,
             commit_port=RuntimeSessionModelStreamEventCommitPort(
                 runtime_session=session,
-                state=None,
             ),
             execution_registry=session.model_stream_execution_registry,
         )
@@ -1063,7 +1059,6 @@ def test_model_call_start_rejects_semantic_rollout_state_change_after_preparatio
             start_bundle=bundle,
             commit_port=RuntimeSessionModelStreamEventCommitPort(
                 runtime_session=session,
-                state=None,
             ),
             execution_registry=session.model_stream_execution_registry,
         )
@@ -1579,8 +1574,7 @@ def test_control_disposition_publication_after_commit_folds_full_before_permit(
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
 
         assert resolution.accepted_permit is not None
         assert await owner.permit_is_active(resolution.accepted_permit)
@@ -1665,8 +1659,7 @@ def test_control_disposition_precommit_failure_retries_exact_stable_candidate(
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
 
         assert len(attempts) == 2
         assert len(set(attempts)) == 1
@@ -1717,8 +1710,7 @@ def test_uncommitted_model_disposition_blocks_run_end_and_remains_retryable(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                state=state,
-            )
+                            )
 
         assert len(attempted) == 3
         assert len(set(attempted)) == 1
@@ -1785,8 +1777,7 @@ def test_control_disposition_cancel_after_full_adopts_session_winner(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                state=state,
-            )
+                            )
 
         durable = tuple(
             event
@@ -1822,7 +1813,6 @@ def test_model_commit_port_resolves_cancelled_writer_physical_outcome(
         session = in_memory_runtime_session(tmp_path)
         port = RuntimeSessionModelStreamEventCommitPort(
             runtime_session=session,
-            state=None,
         )
 
         async def cancelled_none(*_args, **_kwargs):
@@ -1902,8 +1892,7 @@ def test_control_disposition_observer_failure_does_not_revoke_durable_winner_or_
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
         for _ in range(20):
             if session.publisher.errors:
                 break
@@ -1944,8 +1933,7 @@ def test_control_disposition_reducer_failure_never_installs_execution_permit(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                state=state,
-            )
+                            )
 
         assert session.reconciliation_required is True
         assert any(
@@ -1986,8 +1974,7 @@ def test_control_disposition_event_requires_exact_call_result_and_start_activati
                 model_call_index=1,
                 event_context=wrong_context,
                 runtime_session=session,
-                state=state,
-            )
+                            )
 
         assert not any(
             event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
@@ -2032,8 +2019,7 @@ def test_control_disposition_partial_unknown_or_conflict_latches_and_blocks_exec
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                state=state,
-            )
+                            )
 
         assert session.reconciliation_required is True
 
@@ -2057,8 +2043,7 @@ def test_termination_intent_wins_shared_control_lock_and_commits_suppressed_disp
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
 
         assert resolution.accepted_permit is None
         assert (
@@ -2084,8 +2069,7 @@ def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
         permit = resolution.accepted_permit
         assert permit is not None and await owner.permit_is_active(permit)
 
@@ -2097,8 +2081,7 @@ def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-            state=state,
-        )
+                    )
         assert repeated == resolution
         assert (
             repeated.disposition_event.disposition

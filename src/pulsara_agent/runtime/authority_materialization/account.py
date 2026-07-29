@@ -53,6 +53,7 @@ from pulsara_agent.primitives.authority_materialization import (
     PhysicalOperationReservationFact,
     PhysicalOperationSuspensionTailFact,
     PhysicalOperationSettlementFact,
+    ToolDeltaBurstContractFact,
 )
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import build_frozen_fact
@@ -2062,6 +2063,7 @@ class LedgerMaterializationCoordinator:
         *,
         context: EventContext,
         reservation: PhysicalOperationReservationFact,
+        burst_contract: ToolDeltaBurstContractFact,
         business_events: Sequence[AgentEvent],
         suspension_id: str,
         binding_identity_fingerprint: str,
@@ -2074,9 +2076,21 @@ class LedgerMaterializationCoordinator:
         with self._lock:
             source = self._require_state()
             active = self._require_active_reservation(source, reservation)
-            if active.lifecycle_status != "active":
+            if active.lifecycle_status not in {"active", "suspended_tail"}:
                 raise MaterializationAccountContractError(
-                    "only an active physical reservation can suspend"
+                    "only an active or suspended-tail reservation can suspend"
+                )
+            if (
+                burst_contract.operation_kind is not reservation.owner_kind
+                or burst_contract.contract_fingerprint
+                != reservation.burst_contract_fingerprint
+                or burst_contract.terminal_tail_reserved_events
+                != reservation.terminal_tail_reserved_events
+                or burst_contract.terminal_tail_reserved_payload_bytes
+                != reservation.terminal_tail_reserved_payload_bytes
+            ):
+                raise MaterializationAccountContractError(
+                    "physical suspension burst contract identity drifted"
                 )
             prepared_business = tuple(
                 self._prepare_event(event) for event in business_events
@@ -2089,25 +2103,41 @@ class LedgerMaterializationCoordinator:
                 "PHYSICAL_OPERATION_RESERVATION_SUSPENDED",
                 contract=self.charge_contract,
             )
-            retained_events = reservation.terminal_tail_reserved_events
-            retained_bytes = reservation.terminal_tail_reserved_payload_bytes
-            required_events = (
-                business_charge.event_count
-                + suspension_charge.event_count
-                + retained_events
+            suspension_events = (
+                business_charge.event_count + suspension_charge.event_count
             )
-            required_bytes = (
+            suspension_bytes = (
                 business_charge.charged_payload_bytes
                 + suspension_charge.charged_payload_bytes
-                + retained_bytes
             )
-            if (
-                required_events > active.remaining_events
-                or required_bytes > active.remaining_payload_bytes
-            ):
-                raise PhysicalHeadroomExceeded(
-                    "physical suspension cannot preserve its terminal tail"
-                )
+            successor = active.lifecycle_status == "suspended_tail"
+            if successor:
+                retained_events = active.remaining_events - suspension_events
+                retained_bytes = active.remaining_payload_bytes - suspension_bytes
+                if (
+                    retained_events < burst_contract.minimum_terminal_tail_events
+                    or retained_bytes
+                    < burst_contract.minimum_terminal_tail_payload_bytes
+                ):
+                    raise PhysicalHeadroomExceeded(
+                        "successor suspension exhausted its bounded sub-tail"
+                    )
+                released_events = 0
+                released_bytes = 0
+            else:
+                retained_events = reservation.terminal_tail_reserved_events
+                retained_bytes = reservation.terminal_tail_reserved_payload_bytes
+                required_events = suspension_events + retained_events
+                required_bytes = suspension_bytes + retained_bytes
+                if (
+                    required_events > active.remaining_events
+                    or required_bytes > active.remaining_payload_bytes
+                ):
+                    raise PhysicalHeadroomExceeded(
+                        "physical suspension cannot preserve its terminal tail"
+                    )
+                released_events = active.remaining_events - required_events
+                released_bytes = active.remaining_payload_bytes - required_bytes
             suspension_identity = context_fingerprint(
                 "physical-suspension-identity:v1",
                 (reservation.reservation_id, suspension_id),
@@ -2124,8 +2154,6 @@ class LedgerMaterializationCoordinator:
                 prepared_business,
                 total_charge=business_charge,
             )
-            released_events = active.remaining_events - required_events
-            released_bytes = active.remaining_payload_bytes - required_bytes
             charged_candidate_events = (
                 active.charged_candidate_events_lifetime
                 + business_charge.event_count
@@ -2186,11 +2214,8 @@ class LedgerMaterializationCoordinator:
                 **resulting_active_payload,
                 suspension_fingerprint=suspension_chain_fingerprint,
             )
-            actual_events = business_charge.event_count + suspension_charge.event_count
-            actual_bytes = (
-                business_charge.charged_payload_bytes
-                + suspension_charge.charged_payload_bytes
-            )
+            actual_events = suspension_events
+            actual_bytes = suspension_bytes
             resulting = build_account_state(
                 runtime_session_id=self.runtime_session_id,
                 generation=source.generation,

@@ -26,7 +26,7 @@ from pulsara_agent.projection_jobs.contracts import (
 from pulsara_agent.memory.compaction.extension import (
     MemoryCompactionPostCompletionExtension,
 )
-from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+from pulsara_agent.blocking_executor import auxiliary_io_executor
 from pulsara_agent.memory.compaction.contracts import (
     CompactionHumanEvidenceManifestConsumedAbandoned,
 )

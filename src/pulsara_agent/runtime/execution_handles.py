@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
+from pulsara_agent.ports.run_execution import (
+    PreparedRunOwnerReservationKey,
+    RunOwnerIdentity,
+)
 
 
 class CapabilityExecutionBorrowUnavailable(RuntimeError):
@@ -14,6 +19,7 @@ class CapabilityExecutionBorrowUnavailable(RuntimeError):
 
 @dataclass(slots=True)
 class CapabilityExecutionBorrowTracker:
+    active_activation_borrows: int = 0
     active_parent_tool_call_borrows: int = 0
     active_child_tool_call_borrows: int = 0
     on_change: Callable[[], None] | None = field(default=None, repr=False)
@@ -50,7 +56,8 @@ class CapabilityExecutionBorrowTracker:
 
     def can_retire(self) -> bool:
         return (
-            self.active_parent_tool_call_borrows == 0
+            self.active_activation_borrows == 0
+            and self.active_parent_tool_call_borrows == 0
             and self.active_child_tool_call_borrows == 0
         )
 
@@ -77,6 +84,12 @@ class CapabilityExecutionBorrowTracker:
 
     def release_child_tool_call(self) -> None:
         self._change("active_child_tool_call_borrows", -1)
+
+    def borrow_activation(self) -> None:
+        self._change("active_activation_borrows", 1)
+
+    def release_activation(self) -> None:
+        self._change("active_activation_borrows", -1)
 
 @dataclass(frozen=True, slots=True)
 class CapabilityExecutionBorrowAuthority:
@@ -119,11 +132,11 @@ class CapabilityExecutionBorrowAuthority:
 
 
 @dataclass(slots=True)
-class BoundaryExecutionHandles:
+class RunExecutionHandleSet:
     handle_id: str
     handle_generation: int
-    owner_id: str
-    state: Literal["attempt_owned", "run_owned", "retiring", "closed"]
+    owner: PreparedRunOwnerReservationKey | RunOwnerIdentity
+    state: Literal["boundary_owned", "run_owned", "retiring", "closed"]
     mcp_installation: Any
     capability_runtime: Any
     tool_registry: Any
@@ -147,10 +160,16 @@ class BoundaryExecutionHandles:
             tracker=self.borrow_tracker,
         )
 
-    def transfer_to_run(self, run_id: str) -> None:
-        if self.state != "attempt_owned":
-            raise RuntimeError("only attempt-owned handles can transfer to a run")
-        self.owner_id = run_id
+    def transfer_to_run(self, owner: RunOwnerIdentity) -> None:
+        if self.state != "boundary_owned":
+            raise RuntimeError("only boundary-owned handles can transfer to a run")
+        if (
+            self.owner.runtime_session_id != owner.runtime_session_id
+            or self.owner.run_id != owner.run_id
+            or self.owner.run_start_event_id != owner.run_start_event_id
+        ):
+            raise RuntimeError("execution handle owner promotion mismatch")
+        self.owner = owner
         self.state = "run_owned"
         self.borrow_tracker.set_authority_active(
             handle_id=self.handle_id,
@@ -158,8 +177,29 @@ class BoundaryExecutionHandles:
             active=True,
         )
 
+    def borrow_for_activation(
+        self, *, activation_fingerprint: str
+    ) -> "RunExecutionHandleBorrow":
+        if self.state != "run_owned" or not isinstance(self.owner, RunOwnerIdentity):
+            raise CapabilityExecutionBorrowUnavailable(
+                "execution handles are not owned by a committed run"
+            )
+        self.borrow_tracker.borrow_activation()
+        authority = _RunExecutionHandleBorrowAuthority(
+            source=self,
+            activation_fingerprint=activation_fingerprint,
+        )
+        return RunExecutionHandleBorrow(
+            borrow_id=f"run_execution_borrow:{uuid4().hex}",
+            source_handle_id=self.handle_id,
+            source_handle_generation=self.handle_generation,
+            activation_fingerprint=activation_fingerprint,
+            state="active",
+            _authority=authority,
+        )
+
     def mark_retiring(self) -> None:
-        if self.state not in {"attempt_owned", "run_owned"}:
+        if self.state not in {"boundary_owned", "run_owned"}:
             raise RuntimeError("execution handles cannot re-enter retiring state")
         self.borrow_tracker.set_authority_active(
             handle_id=self.handle_id,
@@ -174,8 +214,50 @@ class BoundaryExecutionHandles:
         self.state = "closed"
 
 
+@dataclass(slots=True)
+class _RunExecutionHandleBorrowAuthority:
+    source: RunExecutionHandleSet
+    activation_fingerprint: str
+    released: bool = False
+
+    def validate_exact(self, borrow: "RunExecutionHandleBorrow") -> None:
+        if self.released or borrow.state != "active":
+            raise CapabilityExecutionBorrowUnavailable("activation borrow is released")
+        if (
+            self.source.handle_id != borrow.source_handle_id
+            or self.source.handle_generation != borrow.source_handle_generation
+            or self.activation_fingerprint != borrow.activation_fingerprint
+        ):
+            raise CapabilityExecutionBorrowUnavailable("activation borrow is stale")
+
+    def release(self, borrow: "RunExecutionHandleBorrow") -> None:
+        if self.released:
+            return
+        self.validate_exact(borrow)
+        self.released = True
+        borrow.state = "released"
+        self.source.borrow_tracker.release_activation()
+
+
+@dataclass(slots=True)
+class RunExecutionHandleBorrow:
+    borrow_id: str
+    source_handle_id: str
+    source_handle_generation: int
+    activation_fingerprint: str
+    state: Literal["active", "released"]
+    _authority: _RunExecutionHandleBorrowAuthority = field(repr=False)
+
+    def validate_exact(self) -> None:
+        self._authority.validate_exact(self)
+
+    def release(self) -> None:
+        self._authority.release(self)
+
+
 __all__ = [
-    "BoundaryExecutionHandles",
+    "RunExecutionHandleSet",
+    "RunExecutionHandleBorrow",
     "CapabilityExecutionBorrowAuthority",
     "CapabilityExecutionBorrowTracker",
     "CapabilityExecutionBorrowUnavailable",

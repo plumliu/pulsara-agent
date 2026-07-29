@@ -154,7 +154,7 @@ worker、direct Oxigraph mutation和V1 payload writer均已删除。
 Working context是recent activity cache，不是memory，也不是timeline authority。它只从已提交
 timeline projection生成，写`working_context_summaries`，并保留
 `do_not_write_back=true`。Timeline projection缺失时显示pending/unavailable，不能扫描当前
-process scratchpad补造。
+activation-local cache补造；cache miss只能显示pending/unavailable或走bounded durable refresh。
 
 Runtime semantic read side包括：
 

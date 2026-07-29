@@ -78,6 +78,82 @@ def test_cme5_dod_evidence_matches_frozen_suite() -> None:
     assert "### D5：Compaction-memory extension（`CLOSED`）" in debt
 
 
+def test_d6_dod_evidence_matches_ownership_hard_cut() -> None:
+    evidence = json.loads(
+        (DEFAULT_SUITE_ROOT / "d6_dod_evidence.json").read_text(encoding="utf-8")
+    )
+    suite = load_suite(DEFAULT_SUITE_ROOT)
+
+    assert evidence["schema_version"] == "pulsara.d6-dod-evidence.v1"
+    assert evidence["hard_cut"] == "D6-0-D6-5"
+    assert evidence["debt_item"] == "D6"
+    assert evidence["status"] == "passed"
+    assert tuple(item["gate_id"] for item in evidence["gates"]) == tuple(
+        f"D6-{index}" for index in range(6)
+    )
+    assert all(item["status"] == "passed" for item in evidence["gates"])
+    pytest_evidence = evidence["pytest"]
+    assert (
+        pytest_evidence["baseline_full_collection"]
+        + pytest_evidence["post_review_added_nodes"]["collected"]
+        == pytest_evidence["collected"]
+    )
+    assert (
+        pytest_evidence["post_review_added_nodes"]["passed"]
+        == pytest_evidence["post_review_added_nodes"]["collected"]
+    )
+    assert pytest_evidence["post_review_added_nodes"]["failed"] == 0
+    assert evidence["static_validation"]["forbidden_d4_observation_count"] == 0
+    assert (
+        evidence["static_validation"][
+            "residual_cross_package_scc_observation_count"
+        ]
+        == 0
+    )
+
+    dogfood = evidence["real_llm_dogfood"]
+    assert dogfood["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
+    assert dogfood["runner_build_fingerprint"] == runner_build_fingerprint(
+        DEFAULT_SUITE_ROOT.parents[1]
+    )
+    assert dogfood["status"] == "passed"
+    assert dogfood["passed_scenarios"] == len(suite.scenarios)
+    assert dogfood["failed_scenarios"] == 0
+    assert dogfood["isolated_postgres_databases_dropped"] is True
+
+    remediation = evidence["post_review_remediation"]
+    assert remediation["status"] == "passed"
+    assert tuple(remediation["findings"]) == (
+        "activation_driver_physical_exit_ownership",
+        "child_timeout_child_run_terminalization_order",
+        "canonical_bounded_final_output_materialization",
+        "pending_interaction_exact_source_authority",
+        "confirmed_run_end_finalization_snapshot",
+    )
+    assert all(item["failed"] == 0 for item in remediation["targeted_pytest"])
+    real_llm_union = remediation["real_llm_union"]
+    assert real_llm_union["status"] == "passed"
+    assert real_llm_union["union_passed_scenarios"] == len(suite.scenarios)
+    assert real_llm_union["union_failed_scenarios"] == 0
+    assert real_llm_union["failed_scenario_rerun"]["status"] == "passed"
+
+    repository_root = DEFAULT_SUITE_ROOT.parents[3]
+    implementation_spec = (
+        repository_root
+        / "PULSARA_AGENT_RUNTIME_AND_HOST_SESSION_OWNERSHIP_HARD_CUT_IMPLEMENTATION.zh.md"
+    ).read_text(encoding="utf-8")
+    dod = implementation_spec.split("## 22. Definition of Done", 1)[1].split(
+        "## 23. 最终裁决", 1
+    )[0]
+    assert "- [ ]" not in dod
+    assert "D6 CLOSED" in implementation_spec.splitlines()[2]
+
+    debt = (
+        repository_root / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
+    ).read_text(encoding="utf-8")
+    assert "### D6：AgentRuntime/HostSession ownership 拆分（`CLOSED`）" in debt
+
+
 def test_core_dogfood_suite_is_frozen_and_complete() -> None:
     suite = load_suite(DEFAULT_SUITE_ROOT)
 
@@ -93,6 +169,14 @@ def test_core_dogfood_suite_is_frozen_and_complete() -> None:
             "verify.py" != item.path or item.size_bytes > 0
             for item in scenario.file_inventory
         )
+
+
+def test_core_dogfood_runner_consumes_opaque_run_result() -> None:
+    runner_source = (
+        DEFAULT_SUITE_ROOT.parents[1] / "runner.py"
+    ).read_text(encoding="utf-8")
+    assert "result.state" not in runner_source
+    assert "result.run_id" in runner_source
 
 
 def test_suite_detects_fixture_or_verifier_drift(tmp_path: Path) -> None:

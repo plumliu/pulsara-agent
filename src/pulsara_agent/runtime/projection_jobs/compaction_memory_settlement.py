@@ -54,7 +54,7 @@ from pulsara_agent.projection_jobs.contracts import (
 from pulsara_agent.runtime.projection_jobs.postgres_repository import (
     PostgresDurableProjectionRepository,
 )
-from pulsara_agent.runtime.blocking_executor import projection_maintenance_executor
+from pulsara_agent.blocking_executor import projection_maintenance_executor
 from pulsara_agent.runtime.session import EventCommitError, RuntimeSession
 
 

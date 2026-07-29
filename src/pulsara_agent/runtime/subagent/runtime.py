@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Awaitable, Mapping
+from typing import Any, Mapping
 from uuid import uuid4
 
 from pulsara_agent.event import (
@@ -78,7 +78,6 @@ from pulsara_agent.runtime.session import (
     RuntimeSession,
     event_batch_commit_outcome_from_error,
 )
-from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.subagent.projection import (
     EventLogLocator,
     InMemoryEventLogLocator,
@@ -98,7 +97,16 @@ from pulsara_agent.runtime.subagent.facts import (
     SubagentTaskFact,
     subagent_dependency_generation,
 )
-from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
+from pulsara_agent.runtime.subagent.execution import (
+    ChildActivationOperationRegistry,
+    ChildAdmissionSessionRegistry,
+)
+from pulsara_agent.runtime.run_execution.commit_gateway import read_ledger_horizon
+from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.ports.subagent import (
+    SubagentChildActivationPort,
+    build_recovered_child_occupancy_proof,
+)
 from pulsara_agent.runtime.subagent.commands import (
     PlannedChildReservation,
     PlannedSubagentWrite,
@@ -163,9 +171,6 @@ class SubagentNotReady(SubagentRuntimeError):
 
 
 ChildEventLogFactory = Callable[[str], EventLog]
-SubagentChildRunner = Callable[
-    ["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]
-]
 SubagentRolloutAdmission = Callable[
     [tuple[SubagentRunStartedEvent, ...]], tuple[AgentEvent, ...]
 ]
@@ -182,7 +187,7 @@ class SubagentRuntime:
         child_event_log_factory: ChildEventLogFactory,
         event_log_locator: EventLogLocator | None = None,
         default_budget: SubagentBudget | None = None,
-        child_runner: SubagentChildRunner | None = None,
+        child_activation_port: SubagentChildActivationPort | None = None,
         rollout_admission: SubagentRolloutAdmission | None = None,
         rollout_terminal_augmenter: SubagentRolloutTerminalAugmenter | None = None,
     ) -> None:
@@ -195,10 +200,14 @@ class SubagentRuntime:
                 parent_runtime_session.event_log,
             )
         self.default_budget = default_budget or SubagentBudget()
-        self._child_runner = child_runner
+        self._child_activation_port = child_activation_port
         self._rollout_admission = rollout_admission
         self._rollout_terminal_augmenter = rollout_terminal_augmenter
-        self._execution_registry = ChildExecutionRegistry()
+        self._admission_registry = ChildAdmissionSessionRegistry()
+        self._activation_operations = ChildActivationOperationRegistry(
+            on_started=self._admission_registry.mark_activation_started,
+            on_exited=self._admission_registry.mark_activation_exited,
+        )
         self._command_planner = SubagentCommandPlanner()
         self._parent_capability_snapshot: SubagentCapabilityProfile | None = None
         graph_state = self.parent_runtime_session.subagent_graph_checkpoint_service.restore_for_live_store(
@@ -222,17 +231,17 @@ class SubagentRuntime:
             event_log_locator=self.event_log_locator,
         )
 
-    def bind_child_runner(self, child_runner: SubagentChildRunner | None) -> None:
-        """Bind the runner used for future child starts.
+    def bind_child_activation_port(
+        self,
+        port: SubagentChildActivationPort | None,
+    ) -> None:
+        """Bind the typed child activation capability for future starts."""
 
-        A ``RuntimeSession`` owns one durable subagent graph runtime.  A new
-        parent ``AgentRuntime`` may be constructed for a later turn against the
-        same session, so the graph owner is reused while its execution adapter
-        is rebound.  Already-running child coroutines retain the runner they
-        started with.
-        """
+        self._child_activation_port = port
 
-        self._child_runner = child_runner
+    @property
+    def child_activation_port_bound(self) -> bool:
+        return self._child_activation_port is not None
 
     def bind_rollout_admission(
         self,
@@ -279,8 +288,6 @@ class SubagentRuntime:
         """Detach the live reducer registration during parent session teardown."""
 
         self.parent_runtime_session.unregister_committed_reducer(self._graph_reducer_id)
-        if self.parent_runtime_session.subagent_runtime is self:
-            self.parent_runtime_session.subagent_runtime = None
 
     @property
     def runs(self) -> tuple[SubagentRunFact, ...]:
@@ -325,20 +332,108 @@ class SubagentRuntime:
     @property
     def child_sessions(self) -> tuple[RuntimeSession, ...]:
         return tuple(
-            handle.child_session
-            for handle in self._execution_registry.handles()
-            if handle.child_session is not None
+            owner.child_composition_lease.child_session
+            for owner in self._admission_registry.owners()
+            if owner.child_composition_lease.child_session is not None
         )
 
-    def attach_child_execution_handles(
+    def attach_child_activation_composition(
         self,
         subagent_run_id: str,
-        execution_handles: BoundaryExecutionHandles,
+        composition,
     ) -> None:
-        self._execution_registry.attach_execution_handles(
+        self._admission_registry.attach_activation_composition(
             subagent_run_id,
-            execution_handles,
+            composition,
         )
+
+    def borrow_child_activation_composition(self, subagent_run_id: str):
+        """Borrow the admission-owned composition for terminal maintenance."""
+
+        owner = self._admission_registry.get(subagent_run_id)
+        if owner is None:
+            return None
+        return owner.child_composition_lease.composition
+
+    def _confirm_parent_graph_terminal_full(self, subagent_run_id: str) -> None:
+        """Retire admission and activation borrows from one FULL authority."""
+
+        self._admission_registry.mark_parent_graph_terminal_full(subagent_run_id)
+        port = self._child_activation_port
+        if port is not None:
+            port.retire_child_activation(subagent_run_id)
+
+    async def hydrate_child_activation_run(
+        self,
+        subagent_run_id: str,
+    ) -> HydratedSubagentRunView:
+        """Hydrate the exact committed child task for the activation port."""
+
+        run = self._require_run(subagent_run_id)
+        view = await self._hydrator.hydrate_run(
+            run,
+            include_task_text=True,
+            include_child_native=False,
+            max_chars=200_000,
+        )
+        if not view.task_text_complete or view.task_text is None:
+            codes = ",".join(item.code for item in view.diagnostics) or "unknown"
+            raise SubagentRuntimeError(
+                "Child activation task artifact is unavailable or incomplete: "
+                f"{subagent_run_id} ({codes})"
+            )
+        return view
+
+    def _register_child_admission(
+        self,
+        *,
+        run: SubagentRunFact,
+        child_runtime: RuntimeSession,
+        reservation,
+        mcp_binding_identities: frozenset[McpBindingIdentity],
+    ) -> None:
+        state = self._graph_store.state
+        horizon = read_ledger_horizon(
+            self.parent_runtime_session.event_log,
+            through_sequence=state.through_sequence,
+        )
+        edge = state.edges.get(run.edge_id)
+        graph_state_fingerprint = context_fingerprint(
+            "subagent-parent-graph-authority:v1",
+            {
+                "through_sequence": state.through_sequence,
+                "run_id": run.subagent_run_id,
+                "run_created_event_id": run.provenance.created_event_id,
+                "run_created_sequence": run.provenance.created_sequence,
+                "run_status": run.status,
+                "edge_id": run.edge_id,
+                "edge_created_event_id": (
+                    edge.provenance.created_event_id if edge is not None else None
+                ),
+                "edge_created_sequence": (
+                    edge.provenance.created_sequence if edge is not None else None
+                ),
+                "ledger_horizon": horizon.horizon_fingerprint,
+            },
+        )
+        self._admission_registry.register_prepared(
+            subagent_run_id=run.subagent_run_id,
+            child_runtime_session_id=child_runtime.runtime_session_id,
+            child_session=child_runtime,
+            reservation=reservation,
+            parent_runtime_session_id=run.parent_runtime_session_id,
+            parent_run_id=run.parent_run_id,
+            spawn_edge_id=run.edge_id,
+            parent_graph_horizon=horizon,
+            parent_graph_state_fingerprint=graph_state_fingerprint,
+            mcp_binding_identities=mcp_binding_identities,
+        )
+
+    def _start_child_activation(self, run: SubagentRunFact) -> None:
+        if self._child_activation_port is None:
+            return
+        task = asyncio.create_task(self._run_child(run.subagent_run_id))
+        self._activation_operations.install(run.subagent_run_id, task)
 
     async def _commit_plan(
         self,
@@ -938,7 +1033,7 @@ class SubagentRuntime:
         reservation = None
         if run_infos:
             self.validate_can_start_batch(event_context.run_id, count=len(run_infos))
-            reservation = self._execution_registry.reserve(
+            reservation = self._admission_registry.reserve(
                 parent_run_id=event_context.run_id,
                 count=len(run_infos),
             )
@@ -974,14 +1069,15 @@ class SubagentRuntime:
                 raise
         else:
             if reservation is not None:
-                self._execution_registry.record_reservation_commit_outcome(
+                self._admission_registry.record_reservation_commit_outcome(
                     reservation,
                     status="full",
                 )
 
         runs: list[SubagentRunFact] = []
-        run_views: list[HydratedSubagentRunView] = []
         try:
+            if run_infos and reservation is None:
+                raise RuntimeError("materialized child batch lost its capacity owner")
             for info in run_infos:
                 subagent_run_id = str(info["subagent_run_id"])
                 child_runtime_session_id = str(info["child_runtime_session_id"])
@@ -991,11 +1087,10 @@ class SubagentRuntime:
                     parent_run_id=event_context.run_id,
                     capability_profile_id=info["capability_profile"].profile_id,
                 )
-                child_runtime.subagent_runtime = self
-                self._execution_registry.register_prepared(
-                    subagent_run_id=subagent_run_id,
-                    child_runtime_session_id=child_runtime_session_id,
-                    child_session=child_runtime,
+                run = self._require_run(subagent_run_id)
+                self._register_child_admission(
+                    run=run,
+                    child_runtime=child_runtime,
                     reservation=reservation,
                     mcp_binding_identities=_mcp_binding_identities(
                         child_runtime,
@@ -1004,27 +1099,14 @@ class SubagentRuntime:
                         ].allowed_tool_names,
                     ),
                 )
-                run = self._require_run(subagent_run_id)
-                run_view = HydratedSubagentRunView(
-                    fact=run,
-                    task_text=str(info["objective"]),
-                    task_text_complete=True,
-                    child_run_id=run.reported_child_run_id,
-                    child_terminal_status=None,
-                )
                 runs.append(run)
-                run_views.append(run_view)
-            if self._child_runner is not None:
-                for run_view in run_views:
-                    self._execution_registry.attach_coroutine(
-                        run_view.fact.subagent_run_id,
-                        asyncio.create_task(self._run_child(run_view)),
-                    )
+            for run in runs:
+                self._start_child_activation(run)
         except Exception:
             if reservation is not None:
                 # Release only slots that never attached. Attached closing
                 # handles keep their physical capacity until coroutine exit.
-                self._execution_registry.release_reservation(reservation)
+                self._admission_registry.release_reservation(reservation)
             await self.repair_materialized_batch(
                 _required_single_batch_id(task_infos),
                 event_context=event_context,
@@ -1050,7 +1132,7 @@ class SubagentRuntime:
         spawn_initiator_id: str | None = None,
     ) -> SubagentRunFact:
         task = self._require_task(task_id)
-        task_view = await self._hydrate_task_objective(task)
+        await self._hydrate_task_objective(task)
         if task.has_child_run:
             raise SubagentRuntimeError(f"Task already has a child run: {task_id}")
         if task.status not in {"created", "waiting_dependency"}:
@@ -1059,7 +1141,7 @@ class SubagentRuntime:
             )
         state = self._graph_store.state
         self.validate_can_start_batch(event_context.run_id, count=1)
-        reservation = self._execution_registry.reserve(
+        reservation = self._admission_registry.reserve(
             parent_run_id=event_context.run_id,
             count=1,
         )
@@ -1160,7 +1242,7 @@ class SubagentRuntime:
             if not self._adopt_full_reservation_commit(reservation, error=exc):
                 raise
         else:
-            self._execution_registry.record_reservation_commit_outcome(
+            self._admission_registry.record_reservation_commit_outcome(
                 reservation,
                 status="full",
             )
@@ -1171,32 +1253,19 @@ class SubagentRuntime:
                 parent_run_id=event_context.run_id,
                 capability_profile_id=capability_profile.profile_id,
             )
-            child_runtime.subagent_runtime = self
-            self._execution_registry.register_prepared(
-                subagent_run_id=subagent_run_id,
-                child_runtime_session_id=child_runtime_session_id,
-                child_session=child_runtime,
+            run = self._require_run(subagent_run_id)
+            self._register_child_admission(
+                run=run,
+                child_runtime=child_runtime,
                 reservation=reservation,
                 mcp_binding_identities=_mcp_binding_identities(
                     child_runtime,
                     allowed_tool_names=capability_profile.allowed_tool_names,
                 ),
             )
-            run = self._require_run(subagent_run_id)
-            run_view = HydratedSubagentRunView(
-                fact=run,
-                task_text=task_view.objective_text,
-                task_text_complete=True,
-                child_run_id=run.reported_child_run_id,
-                child_terminal_status=None,
-            )
-            if self._child_runner is not None:
-                self._execution_registry.attach_coroutine(
-                    subagent_run_id,
-                    asyncio.create_task(self._run_child(run_view)),
-                )
+            self._start_child_activation(run)
         except Exception as exc:
-            self._execution_registry.release_reservation(reservation)
+            self._admission_registry.release_reservation(reservation)
             await self.fail(
                 subagent_run_id,
                 event_context=event_context,
@@ -1261,7 +1330,7 @@ class SubagentRuntime:
             )
         state = self._graph_store.state
         self._enforce_spawn_limits(event_context.run_id, budget)
-        reservation = self._execution_registry.reserve(
+        reservation = self._admission_registry.reserve(
             parent_run_id=event_context.run_id,
             count=1,
         )
@@ -1285,7 +1354,7 @@ class SubagentRuntime:
                     },
                 )
         except BaseException:
-            self._execution_registry.release_reservation(reservation)
+            self._admission_registry.release_reservation(reservation)
             raise
         task_preview = _clip(task, 500)
         started = SubagentRunStartedEvent(
@@ -1347,7 +1416,7 @@ class SubagentRuntime:
             if not self._adopt_full_reservation_commit(reservation, error=exc):
                 raise
         else:
-            self._execution_registry.record_reservation_commit_outcome(
+            self._admission_registry.record_reservation_commit_outcome(
                 reservation,
                 status="full",
             )
@@ -1358,11 +1427,10 @@ class SubagentRuntime:
                 parent_run_id=event_context.run_id,
                 capability_profile_id=capability_profile.profile_id,
             )
-            child_runtime.subagent_runtime = self
-            self._execution_registry.register_prepared(
-                subagent_run_id=subagent_run_id,
-                child_runtime_session_id=child_runtime_session_id,
-                child_session=child_runtime,
+            run = self._require_run(subagent_run_id)
+            self._register_child_admission(
+                run=run,
+                child_runtime=child_runtime,
                 reservation=reservation,
                 mcp_binding_identities=_mcp_binding_identities(
                     child_runtime,
@@ -1370,7 +1438,7 @@ class SubagentRuntime:
                 ),
             )
         except Exception as exc:
-            self._execution_registry.release_reservation(reservation)
+            self._admission_registry.release_reservation(reservation)
             await self.fail(
                 subagent_run_id,
                 event_context=event_context,
@@ -1424,18 +1492,7 @@ class SubagentRuntime:
             profile_id=profile_id,
             task_artifact_id=task_artifact_id,
         )
-        if self._child_runner is not None:
-            run_view = HydratedSubagentRunView(
-                fact=run,
-                task_text=task,
-                task_text_complete=True,
-                child_run_id=run.reported_child_run_id,
-                child_terminal_status=None,
-            )
-            self._execution_registry.attach_coroutine(
-                run.subagent_run_id,
-                asyncio.create_task(self._run_child(run_view)),
-            )
+        self._start_child_activation(run)
         return run
 
     async def complete_fake(
@@ -1536,7 +1593,7 @@ class SubagentRuntime:
                 create_tool_call_id=run.create_tool_call_id,
             )
         )
-        self._execution_registry.release_handle(subagent_run_id)
+        self._confirm_parent_graph_terminal_full(subagent_run_id)
         if run.task_id is not None:
             await self._schedule_dependents_after_completion(
                 run.task_id, event_context=ctx
@@ -1692,7 +1749,7 @@ class SubagentRuntime:
             ),
             deadline_monotonic=deadline_monotonic,
         )
-        self._execution_registry.release_handle(subagent_run_id)
+        self._confirm_parent_graph_terminal_full(subagent_run_id)
         if run.task_id is not None:
             await self._schedule_dependents_after_completion(
                 run.task_id, event_context=ctx
@@ -2110,7 +2167,7 @@ class SubagentRuntime:
             ),
             deadline_monotonic=deadline_monotonic,
         )
-        self._execution_registry.release_handle(subagent_run_id)
+        self._confirm_parent_graph_terminal_full(subagent_run_id)
         if run.task_id is not None:
             await self._schedule_dependents_after_completion(
                 run.task_id, event_context=ctx
@@ -2211,12 +2268,10 @@ class SubagentRuntime:
             ),
             deadline_monotonic=deadline_monotonic,
         )
-        handle = self._execution_registry.get(subagent_run_id)
-        child_task = handle.coroutine if handle is not None else None
-        if child_task is asyncio.current_task():
-            self._execution_registry.release_handle(subagent_run_id)
-        else:
-            await self._execution_registry.cancel(
+        self._confirm_parent_graph_terminal_full(subagent_run_id)
+        child_task = self._activation_operations.task(subagent_run_id)
+        if child_task is not None and child_task is not asyncio.current_task():
+            await self._activation_operations.cancel(
                 subagent_run_id,
                 timeout_seconds=5.0,
             )
@@ -2278,7 +2333,7 @@ class SubagentRuntime:
         run = self._require_run(subagent_run_id)
         if run.status in _TERMINAL_STATUSES:
             return run
-        handle = self._execution_registry.get(subagent_run_id)
+        owner = self._admission_registry.get(subagent_run_id)
         admission = self.parent_runtime_session.event_log.get_by_id(
             f"subagent_rollout_budget_resolved:{subagent_run_id}"
         )
@@ -2287,13 +2342,35 @@ class SubagentRuntime:
         )
         native_child_owner = (
             has_rollout_admission
-            and handle is not None
-            and handle.child_session is not None
-            and handle.coroutine is not None
+            and owner is not None
+            and owner.child_composition_lease.child_session is not None
+            and owner.child_composition_lease.composition is not None
         )
         if native_child_owner and child_terminal_reference is None:
-            await self._execution_registry.cancel_for_terminal_handoff(
+            port = self._child_activation_port
+            if port is None:
+                raise SubagentRuntimeError(
+                    "native child terminalization port is unavailable"
+                )
+            loop = asyncio.get_running_loop()
+            terminal_deadline = deadline_monotonic
+            if terminal_deadline is None:
+                terminal_deadline = (
+                    float("inf")
+                    if drain_timeout_seconds is None
+                    else loop.time() + max(0.0, drain_timeout_seconds)
+                )
+            await port.terminalize_committed_child(
                 subagent_run_id,
+                termination_kind=(
+                    "host_teardown"
+                    if cancelled_by == "host_shutdown"
+                    else "parent_cancel"
+                ),
+                deadline_monotonic=terminal_deadline,
+            )
+            await self._activation_operations.wait_run_ids(
+                (subagent_run_id,),
                 timeout_seconds=drain_timeout_seconds,
             )
             child_log = self.event_log_locator.event_log_for_runtime_session(
@@ -2349,11 +2426,11 @@ class SubagentRuntime:
             if native_child_owner and self._terminal_commit_is_fully_applied(
                 subagent_run_id
             ):
-                self._execution_registry.release_handle(subagent_run_id)
+                self._confirm_parent_graph_terminal_full(subagent_run_id)
         if not native_child_owner:
-            await self._execution_registry.cancel(
-                subagent_run_id,
-                timeout_seconds=drain_timeout_seconds,
+            self._confirm_parent_graph_terminal_full(subagent_run_id)
+            await self._activation_operations.cancel(
+                subagent_run_id, timeout_seconds=drain_timeout_seconds
             )
         return self._require_run(subagent_run_id)
 
@@ -2372,7 +2449,7 @@ class SubagentRuntime:
         settlement are committed atomically.
         """
 
-        self._execution_registry.require_no_unresolved_commit_reservations()
+        self._admission_registry.require_no_unresolved_commit_reservations()
         active_runs = [run for run in self.runs if run.status in _ACTIVE_STATUSES]
         cancelled: list[SubagentRunFact] = []
         for run in active_runs:
@@ -2385,7 +2462,7 @@ class SubagentRuntime:
                     drain_timeout_seconds=timeout_seconds,
                 )
             )
-        self._execution_registry.require_no_unresolved_commit_reservations()
+        self._admission_registry.require_no_unresolved_commit_reservations()
         return tuple(cancelled)
 
     def _adopt_full_reservation_commit(
@@ -2398,18 +2475,18 @@ class SubagentRuntime:
 
         outcome = event_batch_commit_outcome_from_error(error)
         if outcome is None or outcome.status == "none":
-            self._execution_registry.record_reservation_commit_outcome(
+            self._admission_registry.record_reservation_commit_outcome(
                 reservation,
                 status="none",
             )
             return False
         if outcome.status == "unknown":
-            self._execution_registry.record_reservation_commit_outcome(
+            self._admission_registry.record_reservation_commit_outcome(
                 reservation,
                 status="unknown",
             )
             return False
-        self._execution_registry.record_reservation_commit_outcome(
+        self._admission_registry.record_reservation_commit_outcome(
             reservation,
             status="full",
         )
@@ -2425,11 +2502,11 @@ class SubagentRuntime:
 
         run_ids = tuple(
             sorted(
-                self._execution_registry.occupied_run_ids(parent_run_id=parent_run_id)
+                self._admission_registry.occupied_run_ids(parent_run_id=parent_run_id)
             )
         )
         if run_ids:
-            await self._execution_registry.wait_run_ids(
+            await self._activation_operations.wait_run_ids(
                 run_ids,
                 timeout_seconds=timeout_seconds,
             )
@@ -2463,10 +2540,40 @@ class SubagentRuntime:
                 raise TimeoutError("child reopen recovery deadline expired")
             if run.status not in _ACTIVE_STATUSES:
                 continue
-            handle = self._execution_registry.get(run.subagent_run_id)
-            task = handle.coroutine if handle is not None else None
+            task = self._activation_operations.task(run.subagent_run_id)
             if task is not None and not task.done():
                 continue
+            if self._admission_registry.get(run.subagent_run_id) is None:
+                horizon = read_ledger_horizon(
+                    self.parent_runtime_session.event_log,
+                    through_sequence=self._graph_store.state.through_sequence,
+                    deadline_monotonic=recovery_deadline,
+                )
+                graph_fingerprint = context_fingerprint(
+                    "subagent-recovered-parent-graph:v1",
+                    {
+                        "through_sequence": self._graph_store.state.through_sequence,
+                        "subagent_run_id": run.subagent_run_id,
+                        "spawn_edge_id": run.edge_id,
+                        "created_event_id": run.provenance.created_event_id,
+                        "created_sequence": run.provenance.created_sequence,
+                        "status": run.status,
+                        "horizon_fingerprint": horizon.horizon_fingerprint,
+                    },
+                )
+                proof = build_recovered_child_occupancy_proof(
+                    parent_runtime_session_id=run.parent_runtime_session_id,
+                    parent_run_id=run.parent_run_id,
+                    subagent_run_id=run.subagent_run_id,
+                    spawn_edge_id=run.edge_id,
+                    parent_graph_horizon=horizon,
+                    parent_graph_state_fingerprint=graph_fingerprint,
+                )
+                self._admission_registry.register_recovered(
+                    proof=proof,
+                    child_runtime_session_id=run.child_runtime_session_id,
+                    child_session=None,
+                )
             child_log = self.event_log_locator.event_log_for_runtime_session(
                 run.child_runtime_session_id
             )
@@ -2741,7 +2848,7 @@ class SubagentRuntime:
         *,
         reason_message: str,
     ) -> tuple[SubagentRunFact, ...]:
-        run_ids = self._execution_registry.child_ids_for_mcp_bindings(identities)
+        run_ids = self._admission_registry.child_ids_for_mcp_bindings(identities)
         cancelled: list[SubagentRunFact] = []
         for subagent_run_id in sorted(run_ids):
             run = self._graph_store.state.runs.get(subagent_run_id)
@@ -2783,7 +2890,7 @@ class SubagentRuntime:
                     operation="cancel_run_sync",
                 )
             )
-            self._execution_registry.cancel_now(run.subagent_run_id)
+            self._activation_operations.cancel_now(run.subagent_run_id)
             cancelled.append(self._require_run(run.subagent_run_id))
         return tuple(cancelled)
 
@@ -2801,8 +2908,7 @@ class SubagentRuntime:
         run = self._require_run(subagent_run_id)
         result_fact = _result_for_run(state, subagent_run_id, status="completed")
         if result_fact is None:
-            handle = self._execution_registry.get(subagent_run_id)
-            task = handle.coroutine if handle is not None else None
+            task = self._activation_operations.task(subagent_run_id)
             if task is not None:
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=0)
@@ -2857,8 +2963,7 @@ class SubagentRuntime:
         timeout_seconds: float | None = None,
     ) -> SubagentResult:
         if timeout_seconds is not None:
-            handle = self._execution_registry.get(subagent_run_id)
-            task = handle.coroutine if handle is not None else None
+            task = self._activation_operations.task(subagent_run_id)
             if (
                 task is not None
                 and not task.done()
@@ -3119,9 +3224,8 @@ class SubagentRuntime:
             for run in run_facts:
                 if run.status in _TERMINAL_STATUSES:
                     continue
-                handle = self._execution_registry.get(run.subagent_run_id)
-                if handle is not None and handle.coroutine is not None:
-                    await self._execution_registry.cancel_for_terminal_handoff(
+                if self._activation_operations.task(run.subagent_run_id) is not None:
+                    await self._activation_operations.cancel_for_terminal_handoff(
                         run.subagent_run_id,
                         timeout_seconds=5.0,
                     )
@@ -3255,9 +3359,9 @@ class SubagentRuntime:
             if self._rollout_terminal_augmenter is not None:
                 for run_id in active_run_ids:
                     if self._terminal_commit_is_fully_applied(run_id):
-                        self._execution_registry.release_handle(run_id)
+                        self._confirm_parent_graph_terminal_full(run_id)
         if self._rollout_terminal_augmenter is None:
-            await self._execution_registry.drain_run_ids(
+            await self._activation_operations.drain_run_ids(
                 tuple(active_run_ids),
                 timeout_seconds=5.0,
             )
@@ -3526,12 +3630,17 @@ class SubagentRuntime:
 
     def child_runtime_session(self, subagent_run_id: str) -> RuntimeSession:
         self._require_run(subagent_run_id)
-        handle = self._execution_registry.get(subagent_run_id)
-        if handle is None or handle.child_session is None:
+        owner = self._admission_registry.get(subagent_run_id)
+        child_session = (
+            owner.child_composition_lease.child_session
+            if owner is not None
+            else None
+        )
+        if child_session is None:
             raise SubagentNotReady(
                 f"Child runtime session is not attached in this process: {subagent_run_id}"
             )
-        return handle.child_session
+        return child_session
 
     def child_event_log(self, subagent_run_id: str) -> EventLog:
         """Open the durable child ledger without depending on a live handle."""
@@ -3722,23 +3831,47 @@ class SubagentRuntime:
         )
         return child
 
-    async def _run_child(self, run_view: HydratedSubagentRunView) -> None:
-        assert self._child_runner is not None
-        run = run_view.fact
-        retain_handle_for_reconciliation = False
+    async def _run_child(self, subagent_run_id: str) -> None:
+        port = self._child_activation_port
+        if port is None:
+            raise RuntimeError("child activation port is unavailable")
+        run = self._require_run(subagent_run_id)
         try:
+            loop = asyncio.get_running_loop()
+            timeout_seconds = run.budget.child_timeout_seconds
+            deadline = (
+                float("inf")
+                if timeout_seconds is None
+                else loop.time() + max(0.0, timeout_seconds)
+            )
             if run.budget.child_timeout_seconds is None:
-                await self._child_runner(self, run_view)
+                await port.activate_committed_child(
+                    run.subagent_run_id,
+                    deadline_monotonic=deadline,
+                )
             else:
                 await asyncio.wait_for(
-                    self._child_runner(self, run_view),
+                    port.activate_committed_child(
+                        run.subagent_run_id,
+                        deadline_monotonic=deadline,
+                    ),
                     timeout=max(0.0, run.budget.child_timeout_seconds),
                 )
         except TimeoutError:
             current = self._graph_store.state.runs.get(run.subagent_run_id)
             if current is not None and current.status in {"running", "suspended"}:
-                await self.fail(
+                # The activation waiter is shielded by design; its timeout does
+                # not stop the service-owned child driver. Confirm the native
+                # child RunEnd first, then let the parent graph reference that
+                # exact terminal authority.
+                terminal = await port.terminalize_committed_child(
                     run.subagent_run_id,
+                    termination_kind="child_timeout",
+                    deadline_monotonic=asyncio.get_running_loop().time() + 5.0,
+                )
+                await self.fail_from_native_child_terminal(
+                    run.subagent_run_id,
+                    child_run_id=terminal.owner_identity.run_id,
                     reason_code="subagent_timeout",
                     reason_message="Child agent exceeded its configured timeout.",
                     diagnostics=[{"timeout_seconds": run.budget.child_timeout_seconds}],
@@ -3747,12 +3880,11 @@ class SubagentRuntime:
             # The child ledger terminalizes first.  Keep the execution owner
             # until cancel() atomically commits the parent graph terminal and
             # root rollout settlement.
-            retain_handle_for_reconciliation = (
-                not self._terminal_commit_is_fully_applied(run.subagent_run_id)
-            )
             raise
         except SubagentRunEntryCommitUntrusted as exc:
-            retain_handle_for_reconciliation = True
+            self._admission_registry.mark_parent_graph_reconciliation_required(
+                run.subagent_run_id
+            )
             event = SubagentRunSuspendedEvent(
                 run_id=run.parent_run_id,
                 turn_id=run.parent_turn_id
@@ -3816,9 +3948,9 @@ class SubagentRuntime:
                         await self.fail_from_native_child_terminal(
                             run.subagent_run_id,
                             child_run_id=child_terminal.run_id,
-                            reason_code="subagent_child_runner_error",
+                            reason_code="subagent_child_activation_error",
                             reason_message=(
-                                "The child runtime stopped because its runner raised "
+                                "The child runtime stopped because activation raised "
                                 "an error after committing its native terminal fact."
                             ),
                             diagnostics=[{"error_type": type(exc).__name__}],
@@ -3826,16 +3958,13 @@ class SubagentRuntime:
                 else:
                     await self.fail(
                         run.subagent_run_id,
-                        reason_code="subagent_child_runner_error",
+                        reason_code="subagent_child_activation_error",
                         reason_message=(
-                            "The child runtime stopped because its runner raised "
+                            "The child runtime stopped because activation raised "
                             "an error before a native terminal fact was committed."
                         ),
                         diagnostics=[{"error_type": type(exc).__name__}],
                     )
-        finally:
-            if not retain_handle_for_reconciliation:
-                self._execution_registry.release_handle(run.subagent_run_id)
 
     def _require_run(self, subagent_run_id: str) -> SubagentRunFact:
         try:
@@ -3873,14 +4002,14 @@ class SubagentRuntime:
         # whose cancellation cleanup is still running remains in the union via
         # its attached execution handle until the done callback releases it.
         active_for_run.update(
-            self._execution_registry.occupied_run_ids(parent_run_id=parent_run_id)
+            self._admission_registry.occupied_run_ids(parent_run_id=parent_run_id)
         )
-        active_for_session.update(self._execution_registry.occupied_run_ids())
+        active_for_session.update(self._admission_registry.occupied_run_ids())
         total_for_run = [run for run in runs if run.parent_run_id == parent_run_id]
-        reserved_for_run = self._execution_registry.uncommitted_reservation_count(
+        reserved_for_run = self._admission_registry.uncommitted_reservation_count(
             parent_run_id=parent_run_id
         )
-        reserved_for_session = self._execution_registry.uncommitted_reservation_count()
+        reserved_for_session = self._admission_registry.uncommitted_reservation_count()
         if count < 1:
             raise ValueError("count must be positive")
         if (

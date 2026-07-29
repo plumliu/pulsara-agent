@@ -12,12 +12,12 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.memory.artifacts.archive import canonical_artifact_semantic_metadata
 from pulsara_agent.memory.foundation.records import (
-    ArtifactContentConflict,
     ArtifactPutConfirmation,
     ArtifactRecord,
     ArtifactTextSlice,
     ArtifactWriteResult,
 )
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,

@@ -1,6 +1,6 @@
 """Append-only provider-input generation runtime."""
 
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     RecursivelyImmutableProviderInputCarrier,
     hydrate_carrier,
 )

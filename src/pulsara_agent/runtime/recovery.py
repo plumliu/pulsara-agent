@@ -14,7 +14,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.capability.builtin_catalog import (
     FILE_WRITE_TOOL_NAMES,
     PLAN_WORKFLOW_TOOL_NAMES,
@@ -246,7 +246,7 @@ def project_recovery_from_events(
     )
 
 
-def project_recovery_from_state(state: LoopState) -> RecoveryProjection | None:
+def project_recovery_from_state(state: RunActivationWorkingState) -> RecoveryProjection | None:
     if state.in_run_recovery is None:
         return None
     return RecoveryProjection(
@@ -310,11 +310,11 @@ def _parse_abort_kind(value: str | None) -> AbortKind | None:
         return None
 
 
-def _plan_active_from_state(state: LoopState) -> bool:
-    plan_state = state.scratchpad.get("plan_state")
+def _plan_active_from_state(state: RunActivationWorkingState) -> bool:
+    plan_state = state.plan_progress.workflow_state
     if plan_state is not None and getattr(plan_state, "active", None) is not None:
         return plan_state.active
-    return bool(state.scratchpad.get("plan_active"))
+    return False
 
 
 def _classify_state(

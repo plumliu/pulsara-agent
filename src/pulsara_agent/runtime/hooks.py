@@ -5,14 +5,11 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable, Protocol, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from pulsara_agent.event import AgentEvent, EventType
-from pulsara_agent.message import Msg, ToolResultBlock
 from pulsara_agent.replay.message_assembler import BlockAssembler, BlockCompletion
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
-from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.runtime.state import LoopState
 
 
 @dataclass(slots=True)
@@ -21,7 +18,6 @@ class HookContext:
     run_id: str
     turn_id: str
     reply_id: str
-    state: LoopState | None = None
 
 
 @dataclass(slots=True)
@@ -104,7 +100,6 @@ class RuntimeHookManager:
             run_id=published.event.run_id,
             turn_id=published.event.turn_id,
             reply_id=published.event.reply_id,
-            state=published.state,
         )
         await self.dispatch_observer_event(context, published.event)
 
@@ -203,81 +198,3 @@ def _dispatch_error(
         event_id=event_id,
         block_id=block_id,
     )
-
-
-class MemoryHooks(Protocol):
-    @property
-    def memory_proposal_sink(self) -> MemoryProposalSink | None: ...
-
-    async def on_turn_start(self, state: LoopState, user_input: str) -> None: ...
-
-    async def on_session_start(self, state: LoopState, user_input: str) -> None: ...
-
-    def baseline_projection(
-        self, state: LoopState, *, token_budget: int
-    ) -> dict[str, Any] | None: ...
-
-    async def project(
-        self, state: LoopState, *, token_budget: int
-    ) -> dict[str, Any] | None: ...
-
-    async def after_model_reply(
-        self, state: LoopState, assistant: Msg
-    ) -> list[AgentEvent]: ...
-
-    async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
-    ) -> list[AgentEvent]: ...
-
-    async def should_compact(self, state: LoopState) -> bool: ...
-
-    async def on_turn_end(self, state: LoopState) -> list[AgentEvent]: ...
-
-    async def on_session_end(self, state: LoopState) -> list[AgentEvent]: ...
-
-
-class ToolResultPersistenceHook(Protocol):
-    async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
-    ) -> None: ...
-
-
-class NoopMemoryHooks:
-    @property
-    def memory_proposal_sink(self) -> MemoryProposalSink | None:
-        return None
-
-    async def on_session_start(self, state: LoopState, user_input: str) -> None:
-        return None
-
-    async def on_turn_start(self, state: LoopState, user_input: str) -> None:
-        return await self.on_session_start(state, user_input)
-
-    def baseline_projection(
-        self, state: LoopState, *, token_budget: int
-    ) -> dict[str, Any] | None:
-        return None
-
-    async def project(
-        self, state: LoopState, *, token_budget: int
-    ) -> dict[str, Any] | None:
-        return None
-
-    async def after_model_reply(
-        self, state: LoopState, assistant: Msg
-    ) -> list[AgentEvent]:
-        return []
-
-    async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
-    ) -> list[AgentEvent]:
-        return []
-
-    async def should_compact(self, state: LoopState) -> bool:
-        return False
-
-    async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
-        return []
-
-    async def on_turn_end(self, state: LoopState) -> list[AgentEvent]:
-        return await self.on_session_end(state)

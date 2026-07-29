@@ -1,7 +1,7 @@
 """Conversation resume recovery helpers.
 
 V1 resume reopens a durable runtime session in a new HostSession.  It cannot
-recover in-process coroutines, terminal managers, or suspended LoopState, so any
+recover in-process coroutines, terminal managers, or suspended RunActivationWorkingState, so any
 durable run that was left ``running`` by a dead host must be terminalized before
 the next prompt is rebuilt.
 """
@@ -23,8 +23,8 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
-from pulsara_agent.llm.recovery import ModelStreamRecoveryService
-from pulsara_agent.llm.control_recovery import (
+from pulsara_agent.runtime.model_stream_recovery import ModelStreamRecoveryService
+from pulsara_agent.runtime.model_control_recovery import (
     ModelCallControlDispositionRecoveryService,
 )
 from pulsara_agent.primitives.long_horizon import ContextWindowCloseReason
@@ -37,6 +37,17 @@ from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
 from pulsara_agent.runtime.mcp.recovery import (
     terminalize_reopened_mcp_input_required,
 )
+from pulsara_agent.ports.run_terminalization import (
+    RunFinalOutputMaterializationFull,
+)
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
+from pulsara_agent.runtime.run_execution.final_output import RunFinalOutputMaterializer
+from pulsara_agent.runtime.run_execution.recovery import (
+    confirm_recovered_terminal_batch,
+    freeze_recovered_terminal_batch,
+    materialize_dormant_run_owner,
+)
+from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
 from pulsara_agent.runtime.session import RuntimeSession
 from time import monotonic
 
@@ -127,6 +138,7 @@ async def repair_dangling_runs_for_resume(
         reopen_deadline_monotonic=deadline_monotonic,
     )
     state_store = runtime_session.long_horizon_state_store
+    recovery_registry = RunExecutionRegistry()
     repaired: list[str] = []
     skipped: list[str] = []
     try:
@@ -148,12 +160,15 @@ async def repair_dangling_runs_for_resume(
             ):
                 skipped.append(run_id)
                 continue
-            starts = [
-                event
-                for event in log.iter(
+            run_events = tuple(
+                log.iter(
                     run_id=run_id,
                     deadline_monotonic=deadline_monotonic,
                 )
+            )
+            starts = [
+                event
+                for event in run_events
                 if isinstance(event, RunStartEvent)
             ]
             if len(starts) != 1:
@@ -164,6 +179,17 @@ async def repair_dangling_runs_for_resume(
                 raise RuntimeError(
                     "Host resume cannot terminalize a child-native runtime ledger"
                 )
+            raw_starts = log.read_raw_events_by_id(
+                (started.id,),
+                deadline_monotonic=deadline_monotonic,
+            )
+            if len(raw_starts) != 1:
+                raise RuntimeError("dangling run lost its exact RunStart envelope")
+            recovered_owner = materialize_dormant_run_owner(
+                events=run_events,
+                run_start_envelope=raw_starts[0],
+            )
+            recovery_registry.register_recovered(recovered_owner)
             active_mcp = (
                 runtime_session.mcp_input_required_lifecycle_store.active_for_run(
                     run_id
@@ -260,10 +286,43 @@ async def repair_dangling_runs_for_resume(
                 mcp_input_required_closure_event_reference=closure_reference,
                 metadata=metadata,
             )
+            terminal_candidates = (window_close, account_close, run_end)
+            freeze_recovered_terminal_batch(
+                recovered_owner,
+                terminal_candidates,
+            )
             result = await runtime_session.write_events_with_deadline(
-                (window_close, account_close, run_end),
+                terminal_candidates,
                 deadline_monotonic=deadline_monotonic,
                 expected_last_sequence=next_sequence - 1,
+            )
+            stored_run_end = confirm_recovered_terminal_batch(
+                recovered_owner,
+                result.committed_events,
+            )
+            output = await RunFinalOutputMaterializer(
+                event_log=log,
+                runtime_session_id=runtime_session_id,
+                io_service=runtime_session.context_input_io_service,
+                transcript_projection=(
+                    runtime_session.transcript_projection_state_store
+                ),
+                archive=runtime_session.archive,
+            ).materialize(
+                owner_identity=recovered_owner.identity,
+                run_end_event_reference=event_reference_from_stored(
+                    stored_run_end,
+                    runtime_session_id=runtime_session_id,
+                ),
+                deadline_monotonic=deadline_monotonic,
+            )
+            if not isinstance(output, RunFinalOutputMaterializationFull):
+                raise RuntimeError(
+                    "dangling run final output could not be materialized"
+                )
+            recovery_registry.complete_terminal_output(
+                run_id,
+                receipt=output.receipt,
             )
             if (
                 result.publication_status == "unavailable"

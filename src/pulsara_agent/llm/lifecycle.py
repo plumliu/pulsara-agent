@@ -54,14 +54,14 @@ from pulsara_agent.primitives.run_boundary import (
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.host_ingress import HostActiveRunMonitorDeliveryFact
 from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.ports.model_lifecycle import (
+    ModelLifecycleRuntimeGateway,
+    PreparedProviderInputStartBundlePort,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.request import LLMContext
     from pulsara_agent.llm.resolution import ResolvedModelCall
-    from pulsara_agent.runtime.provider_input.planner import (
-        PreparedProviderInputStartBundle,
-    )
-    from pulsara_agent.runtime.session import RuntimeSession
 
 
 ModelLifecycleKind = Literal[
@@ -92,7 +92,7 @@ class ModelLifecycleStartCommitBundle:
     compaction_memory_extraction_input_attribution: (
         CompactionMemoryExtractionModelInputAttributionFact | None
     )
-    provider_input_start_bundle: PreparedProviderInputStartBundle | None
+    provider_input_start_bundle: PreparedProviderInputStartBundlePort | None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None
     active_run_monitor_source_event_references: tuple[
         ContextEventReferenceFact, ...
@@ -129,7 +129,7 @@ def prepare_model_lifecycle_start_bundle(
     call: ResolvedModelCall,
     context: LLMContext,
     event_context: EventContext,
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     lifecycle_kind: ModelLifecycleKind,
     run_execution_activation: RunExecutionActivationFact | None = None,
     window_compaction_started_event_id: str | None = None,
@@ -139,7 +139,7 @@ def prepare_model_lifecycle_start_bundle(
     compaction_memory_extraction_input_attribution: (
         CompactionMemoryExtractionModelInputAttributionFact | None
     ) = None,
-    provider_input_start_bundle: PreparedProviderInputStartBundle | None = None,
+    provider_input_start_bundle: PreparedProviderInputStartBundlePort | None = None,
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None,
     active_run_monitor_source_event_references: tuple[
         ContextEventReferenceFact, ...
@@ -247,7 +247,7 @@ def prepare_model_rollout_reservation(
     *,
     call: ResolvedModelCall,
     event_context: EventContext,
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
 ) -> PreparedModelRolloutReservation:
     reservation, accounting_mode, expected_fingerprint = _prepare_model_reservation(
         call=call,
@@ -386,7 +386,7 @@ def validate_model_lifecycle_start_bundle(
     elif base_companions:
         raise ValueError("direct lifecycle cannot carry start companions")
     if provider_bundle is not None:
-        from pulsara_agent.runtime.provider_input.materialization import (
+        from pulsara_agent.llm.provider_input_materialization import (
             validate_dispatch_context_against_plan,
         )
 
@@ -531,12 +531,8 @@ def _prepare_model_reservation(
     *,
     call: ResolvedModelCall,
     event_context: EventContext,
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
 ) -> tuple[RolloutReservationFact | None, RolloutAccountingMode, str | None]:
-    from pulsara_agent.runtime.long_horizon.accounting import (
-        resolve_run_rollout_binding,
-    )
-
     if call.fact.purpose not in {
         ModelCallPurpose.AGENT_MODEL_LOOP,
         ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY,
@@ -545,9 +541,8 @@ def _prepare_model_reservation(
     run_start = runtime_session.long_horizon_state_store.run_start(event_context.run_id)
     if run_start is None:
         return None, "not_rollout_accounted", None
-    binding = resolve_run_rollout_binding(
-        runtime_session,
-        run_id=event_context.run_id,
+    binding = runtime_session.resolve_run_rollout_binding(
+        run_id=event_context.run_id
     )
     account = binding.account
     state = binding.parent_state
@@ -574,11 +569,7 @@ def _prepare_model_reservation(
         accounting_mode: RolloutAccountingMode = "child_subaccount"
         expected_state_fingerprint = binding.child_state.state_fingerprint
     else:
-        from pulsara_agent.runtime.long_horizon.coordinator import (
-            plan_root_model_admission,
-        )
-
-        admission = plan_root_model_admission(
+        admission = runtime_session.plan_root_model_admission(
             account=account,
             state=state,
             quote=quote,
@@ -697,7 +688,7 @@ def _bundle_payload(
     compaction_memory_extraction_input_attribution: (
         CompactionMemoryExtractionModelInputAttributionFact | None
     ),
-    provider_input_start_bundle: PreparedProviderInputStartBundle | None,
+    provider_input_start_bundle: PreparedProviderInputStartBundlePort | None,
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None,
     active_run_monitor_source_event_references: tuple[
         ContextEventReferenceFact, ...
@@ -732,7 +723,7 @@ def build_active_run_monitor_start_companions(
     *,
     bundle: ModelLifecycleStartCommitBundle,
     start_event: ModelCallStartEvent,
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
 ) -> tuple[AgentEvent, ...]:
     delivery = bundle.active_run_monitor_delivery
     if delivery is None:

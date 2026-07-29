@@ -50,7 +50,7 @@ Runtime event publishing 是 in-process post-commit bus。
 
 ## 2. RuntimeSession committed writer boundary
 
-`RuntimeSession.write_event(s)(..., expected_last_sequence=..., state=...)` 是 canonical 写入口：
+`RuntimeSession.write_event(s)(..., expected_last_sequence=...)` 是 canonical 写入口：
 
 - 所有 input event 的 `sequence` 必须是 `None`；
 - async 与 thread writer 共享一个 session-owned、thread-safe serialization boundary；
@@ -62,6 +62,10 @@ Runtime event publishing 是 in-process post-commit bus。
 - 返回 `EventWriteResult`，分别表达 commit、reducer high-water/reconciliation、publication status/errors。
 
 `write_events_from_thread()` 使用同一 coordinator 与 reducer path，但不得等待 observer；只能报告 `enqueued` 或 `unavailable`。
+
+`RuntimePublishedEvent`只保存`runtime_session_id + committed AgentEvent`。Publisher、subscriber和
+`HookContext`都不得携带`RunActivationWorkingState`、`RunOwner`或任何scratchpad替代物；需要durable
+authority的hook必须从event reference读取，process-local control只能走其专用port。
 
 `emit/emit_many/emit_from_thread` 是 compatibility wrapper：
 
@@ -331,7 +335,7 @@ result。
 - reducer与publisher从各自 high-water独立 catch up。
 - batch observer failure不阻止后续 event/subscriber delivery。
 - reducer failure保留commit truth并阻断后续 mutation，rebuild后才能恢复。
-- `emit_from_thread()` 保留 `LoopState` 给 subscriber。
+- `RuntimePublishedEvent`只携带`runtime_session_id + committed AgentEvent`；thread writer与subscriber均不得取得activation working state。
 - `emit_from_thread()` 不等待慢 subscriber。
 - 慢 subscriber 最终仍收到 thread event。
 - mailbox/drain race 不遗留 unpublished item。

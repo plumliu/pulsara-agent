@@ -2179,6 +2179,7 @@ def _host_inspect_with_access(
         registry = build_runtime_tool_executor(
             build_runtime_tool_composition_input(
                 runtime_session,
+                subagent_runtime=None,
                 memory_proposal_sink=None,
                 memory_recall_service=None,
                 memory_query=None,

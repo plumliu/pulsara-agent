@@ -530,7 +530,7 @@ class CoreDogfoodRunner:
         result = await session.run_turn(prompt)
         _record_result(result, root_run_texts)
         self.progress(
-            f"{label}: run {result.status.value.upper()} run_id={result.state.run_id}"
+            f"{label}: run {result.status.value.upper()} run_id={result.run_id}"
         )
         return result
 
@@ -699,7 +699,7 @@ def _generate_linked_chapter_trail(
 
 
 def _record_result(result, root_run_texts: OrderedDict[str, str]) -> None:
-    root_run_texts[result.state.run_id] = result.final_text
+    root_run_texts[result.run_id] = result.final_text
 
 
 @contextmanager

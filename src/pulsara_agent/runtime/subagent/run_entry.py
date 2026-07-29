@@ -17,7 +17,6 @@ from pulsara_agent.runtime.run_entry import (
     AgentRunDraft,
     CommittedSubagentRunEntry,
     install_run_working_set,
-    prepare_agent_run_draft,
 )
 from pulsara_agent.primitives.permission import (
     parse_permission_mode,
@@ -27,7 +26,7 @@ from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.message import Msg
 from pulsara_agent.runtime.run_entry import PreparedSubagentRunEntry
 
@@ -66,12 +65,11 @@ class SubagentRunEntryDriver:
         self,
         *,
         child_agent: AgentRuntime,
-        state: LoopState,
+        state: RunActivationWorkingState,
         prepared: PreparedSubagentRunEntry,
         prior_messages: list[Msg] | None = None,
     ) -> CommittedSubagentRunEntryBundle:
-        draft = await prepare_agent_run_draft(
-            child_agent,
+        draft = await child_agent.prepare_run_draft(
             state,
             run_model_target=prepared.run_model_target,
             permission_snapshot=prepared.permission_snapshot,
@@ -107,28 +105,24 @@ class SubagentRunEntryDriver:
         )
         candidates = (candidate, window_open)
         try:
-            stored = tuple(
-                await child_agent.runtime_session.emit_many(candidates, state=state)
-            )
+            stored = await child_agent.commit_run_entry_events(candidates)
             publication_status = "completed"
         except EventPublicationAfterCommitError as exc:
             stored = exc.result.committed_events
             publication_status = "failed_after_commit"
             original_error = exc
         except BaseException as exc:
-            outcome = child_agent.runtime_session.resolved_event_write_outcome(exc)
+            outcome = child_agent.resolve_run_entry_write_failure(exc)
             if outcome.status == "unknown":
                 raise SubagentRunEntryCommitUntrusted(
                     durable_run_existence=DurableRunExistence.UNKNOWN,
                     child_runtime_session_id=(
-                        child_agent.runtime_session.runtime_session_id
+                        child_agent.runtime_session_id
                     ),
                     child_run_id=state.run_id,
                 ) from exc
             if outcome.status == "none":
-                child_agent.runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
-                    state.run_id
-                )
+                child_agent.discard_prepared_run_seed(state.run_id)
                 raise
             stored = outcome.committed_events
             publication_status = "failed_after_commit"
@@ -150,9 +144,7 @@ class SubagentRunEntryDriver:
             publication_status=publication_status,
             subagent_run_id=entry.subagent_run_id,
         )
-        child_agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
-            run_start
-        )
+        child_agent.adopt_committed_run_seed(run_start)
         install_run_working_set(
             state,
             committed,

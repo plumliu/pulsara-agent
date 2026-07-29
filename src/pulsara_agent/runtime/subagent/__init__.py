@@ -12,10 +12,14 @@ from pulsara_agent.runtime.subagent.facts import (
     SubagentTaskFact,
 )
 from pulsara_agent.runtime.subagent.execution import (
+    ChildActivationOperation,
+    ChildActivationOperationRegistry,
+    ChildAdmissionDiagnostic,
+    ChildAdmissionSessionOwner,
+    ChildAdmissionSessionRegistry,
     ChildCapacityReservation,
-    ChildExecutionDiagnostic,
-    ChildExecutionHandle,
-    ChildExecutionRegistry,
+    ChildRuntimeCompositionLease,
+    ParentSubagentGraphSlot,
 )
 from pulsara_agent.runtime.subagent.commands import (
     PlannedChildReservation,
@@ -75,10 +79,14 @@ from pulsara_agent.primitives.subagent import (
 
 __all__ = [
     "EventLogLocator",
+    "ChildActivationOperation",
+    "ChildActivationOperationRegistry",
+    "ChildAdmissionDiagnostic",
+    "ChildAdmissionSessionOwner",
+    "ChildAdmissionSessionRegistry",
     "ChildCapacityReservation",
-    "ChildExecutionDiagnostic",
-    "ChildExecutionHandle",
-    "ChildExecutionRegistry",
+    "ChildRuntimeCompositionLease",
+    "ParentSubagentGraphSlot",
     "InMemoryEventLogLocator",
     "PostgresEventLogLocator",
     "PlannedChildReservation",

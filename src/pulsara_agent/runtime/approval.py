@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +49,7 @@ class PendingApproval:
         }
 
 
-def pending_approval_from_state(state: LoopState, host_session_id: str) -> PendingApproval:
+def pending_approval_from_state(state: RunActivationWorkingState, host_session_id: str) -> PendingApproval:
     if state.status is not LoopStatus.WAITING_USER:
         raise ValueError("cannot create pending approval from a non-waiting state")
     if not state.pending_tool_calls:

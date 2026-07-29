@@ -129,7 +129,7 @@ Soft exact-recurrence只使用当前window仍有完整typed gate/result evidence
 - `PreparedContextCandidateSet`。
 
 live与replay分别收集同形状的`ContextSnapshotBuildInput`，再调用同一个pure builder。Compiler不得读取
-`LoopState`、`scratchpad`、live MCP supervisor、session defaults、`Msg`或EventLog。
+`RunActivationWorkingState`、任意scratchpad替代物、live MCP supervisor、session defaults、`Msg`或EventLog。
 
 `TranscriptCompileInput`必须保留message order、assistant tool-call原始arguments JSON、tool-call/result pairing、artifact与
 segment attribution。Malformed/non-object arguments作为typed status保留，不能通过重新序列化“修复”。Thinking与structured
@@ -222,7 +222,7 @@ Model context 中不得直接内联任意 binary/data body。
 ## 9. 禁止事项
 
 - 不允许把 `Msg` 当 durable truth。
-- 不允许把`Msg`、`LoopState.messages`或scratchpad作为compiler输入。
+- 不允许把`Msg`、`RunActivationWorkingState.messages`或任意process-local cache作为compiler输入。
 - 不允许从tool-result JSON推断terminal variant、essential envelope或terminal timing。
 - 不允许 context renderer 无界内联大 tool result。
 - 不允许 compact envelope 只保留第一个 artifact 而丢掉 primary preview artifact。

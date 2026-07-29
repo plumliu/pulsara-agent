@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from hashlib import sha256
+from time import monotonic
+from typing import Any, Literal, Mapping
+
+from pulsara_agent.event import AgentEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,4 +61,151 @@ class FrozenEventWriteCandidate:
         }
 
 
-__all__ = ["FrozenEventWriteCandidate"]
+@dataclass(frozen=True, slots=True)
+class CommittedReducerError:
+    reducer_id: str
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventPublicationError:
+    event_id: str
+    sequence: int
+    subscriber_id: str | None
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventWriteResult:
+    committed_events: tuple[AgentEvent, ...]
+    commit_status: Literal["committed"]
+    reducer_high_waters: Mapping[str, int]
+    reconciliation_required: bool
+    reducer_errors: tuple[CommittedReducerError, ...]
+    publication_status: Literal["completed", "enqueued", "unavailable"]
+    publisher_enqueued_through_sequence: int | None
+    publication_errors: tuple[EventPublicationError, ...] = ()
+    accounting_events: tuple[AgentEvent, ...] = ()
+
+    def require_reduced(self, reducer_id: str) -> tuple[AgentEvent, ...]:
+        last_sequence = max(
+            (event.sequence or 0 for event in self.committed_events),
+            default=0,
+        )
+        reducer_sequence = self.reducer_high_waters.get(reducer_id)
+        reducer_failed = any(
+            error.reducer_id == reducer_id for error in self.reducer_errors
+        )
+        if (
+            reducer_sequence is None
+            or reducer_sequence < last_sequence
+            or reducer_failed
+        ):
+            raise EventReconciliationRequired(
+                f"Committed reducer {reducer_id!r} did not apply through sequence "
+                f"{last_sequence}"
+            )
+        return self.committed_events
+
+
+@dataclass(frozen=True, slots=True)
+class EventBatchCommitOutcome:
+    status: Literal["full", "none", "unknown"]
+    deadline_monotonic: float
+    result: EventWriteResult | None = None
+
+    def __post_init__(self) -> None:
+        if self.status == "full" and self.result is None:
+            raise ValueError("FULL event commit outcome requires its write result")
+        if self.status != "full" and self.result is not None:
+            raise ValueError("non-FULL event commit outcome cannot carry a result")
+
+    @property
+    def committed_events(self) -> tuple[AgentEvent, ...]:
+        return self.result.committed_events if self.result is not None else ()
+
+
+class EventCommitError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        commit_outcome: Literal["none", "unknown"] = "none",
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        self.commit_outcome = commit_outcome
+        self.deadline_monotonic = deadline_monotonic
+        super().__init__(message)
+
+
+class EventWriteCancelled(asyncio.CancelledError):
+    def __init__(self, outcome: EventBatchCommitOutcome) -> None:
+        self.outcome = outcome
+        super().__init__(f"event write cancelled with {outcome.status} commit outcome")
+
+
+class EventReconciliationRequired(RuntimeError):
+    """A committed reducer is inconsistent and mutation must fail closed."""
+
+
+class EventPublicationAfterCommitError(RuntimeError):
+    def __init__(self, result: EventWriteResult) -> None:
+        self.result = result
+        super().__init__("Event batch committed but one or more observers failed")
+
+
+class PendingRuntimeEventWriteError(RuntimeError):
+    """The session cannot accept or drain another physical event write."""
+
+
+class RuntimeEventWriteCancelled(asyncio.CancelledError):
+    """Caller cancellation observed the terminal result of its physical owner."""
+
+    def __init__(
+        self,
+        *,
+        operation_result: Any | None,
+        operation_error: BaseException | None,
+        deadline_monotonic: float,
+    ) -> None:
+        self.operation_result = operation_result
+        self.operation_error = operation_error
+        self.deadline_monotonic = deadline_monotonic
+        super().__init__("runtime event write caller cancelled after physical resolution")
+
+
+def event_batch_commit_outcome_from_error(
+    error: BaseException,
+) -> EventBatchCommitOutcome | None:
+    if isinstance(error, EventWriteCancelled):
+        return error.outcome
+    if isinstance(error, EventPublicationAfterCommitError):
+        return EventBatchCommitOutcome(
+            status="full",
+            deadline_monotonic=monotonic(),
+            result=error.result,
+        )
+    if isinstance(error, EventCommitError):
+        return EventBatchCommitOutcome(
+            status=error.commit_outcome,
+            deadline_monotonic=error.deadline_monotonic or monotonic(),
+        )
+    return None
+
+
+__all__ = [
+    "CommittedReducerError",
+    "EventBatchCommitOutcome",
+    "EventCommitError",
+    "EventPublicationAfterCommitError",
+    "EventPublicationError",
+    "EventReconciliationRequired",
+    "EventWriteCancelled",
+    "EventWriteResult",
+    "FrozenEventWriteCandidate",
+    "PendingRuntimeEventWriteError",
+    "RuntimeEventWriteCancelled",
+    "event_batch_commit_outcome_from_error",
+]

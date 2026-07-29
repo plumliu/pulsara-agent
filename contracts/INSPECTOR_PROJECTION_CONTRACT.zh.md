@@ -21,7 +21,7 @@ Inspector 只读 Postgres / Oxigraph / artifact store / event log。
 
 它不得：
 
-- 查询 live `LoopState`；
+- 查询 live `RunActivationWorkingState` 或 `RunOwner`；
 - 依赖 live `HostSession`；
 - 修复数据；
 - 触发 worker；
@@ -123,7 +123,7 @@ named event ranges与durable descriptor/tool-result semantics重建snapshot、tr
 并报告`exact_replay|fact_replay_only|artifact_missing|contract_mismatch|ledger_untrusted`五种typed status；
 不得保留`partial`、`missing_artifact`或`untrusted_slice`兼容别名。
 
-Inspector不得读取live `LoopState`、scratchpad、当前capability exposure、当前capture policy或当前tool-result JSON来补造历史
+Inspector不得读取live `RunActivationWorkingState`、`RunOwner`、process-local cache、当前capability exposure、当前capture policy或当前tool-result JSON来补造历史
 input。Manifest缺失或fingerprint不一致必须显示diagnostic，不能退回旧message renderer。当前进程的builder build fingerprint只
 能作为诊断值显示，不得伪装成historical durable fact。
 
@@ -251,7 +251,7 @@ Inspector必须借用verify-only service签发的connection provider。Schema he
 
 - 不允许 Inspector 调用 LLM。
 - 不允许 Inspector 执行 tool 或 worker。
-- 不允许 Inspector 从 live runtime scratchpad 解释历史。
+- 不允许 Inspector 从 live runtime owner/cache 解释历史。
 - 不允许 nonexistent memory 返回成功空报告。
 - 不允许 capability history 用当前 provider snapshot 重新推断。
 - 不允许 diagnostics 产生写入副作用。

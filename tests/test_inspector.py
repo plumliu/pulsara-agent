@@ -967,6 +967,7 @@ def test_inspector_projects_primitive_child_entry_with_nullable_task(
             update={"source_kind": "subagent_primitive_objective"}
         )
         run_start = RunStartEvent(
+            id=f"run_start:test:{ctx.run_id}",
             **ctx.event_fields(),
             **fields,
             user_input_chars=len("primitive objective"),
@@ -1837,6 +1838,7 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
         child_log.extend(
             [
                 RunStartEvent(
+                    id=f"run_start:test:{child_ctx.run_id}",
                     **child_ctx.event_fields(),
                     **child_fields,
                     user_input_chars=5,

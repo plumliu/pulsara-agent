@@ -24,6 +24,7 @@ from pulsara_agent.host import (
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.session import EventPublicationAfterCommitError
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
@@ -1001,7 +1002,7 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         worker_release.set()
         await asyncio.wait_for(candidate_ready.wait(), timeout=0.2)
         suspended = await session.run_turn("request MCP input")
-        assert suspended.status.value == "waiting_user"
+        assert isinstance(suspended, RunSuspendedOutcome)
         pending = session.get_pending_interaction()
         assert pending is not None
         assert session.mcp_supervisor.pending_completion_count == 1
@@ -1037,13 +1038,14 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
             "extend_with_materialization_state",
             fail_resume_audit_once,
         )
-        with pytest.raises(Exception):
+        with pytest.raises(Exception) as first_failure:
             await session.resolve_mcp_input_required(
                 McpInputRequiredInteractionResolution(
                     interaction_id=pending.interaction_id,
                     responses={"choice": {"value": "yes"}},
                 )
             )
+        assert failed_once, repr(first_failure.value)
         assert session.get_pending_interaction() is pending
         assert session.mcp_supervisor.pending_completion_count == 1
         assert old_slot.lifecycle == "retiring"
@@ -1141,7 +1143,7 @@ def test_host_close_terminalizes_pending_mcp_and_drains_lease(
         worker_release.set()
         await asyncio.wait_for(candidate_ready.wait(), timeout=0.2)
         result = await session.run_turn("suspend on MCP input")
-        assert result.status.value == "waiting_user"
+        assert isinstance(result, RunSuspendedOutcome)
         supervisor = session.mcp_supervisor
         slot = supervisor.slots()[0]
         assert supervisor.pending_completion_count == 1

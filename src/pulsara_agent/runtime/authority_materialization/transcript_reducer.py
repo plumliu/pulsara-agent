@@ -121,6 +121,14 @@ class GovernanceTranscriptAuthoritySnapshot:
     snapshot_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalRunFinalAssistantProjection:
+    """One accepted, canonical assistant message at an exact ledger horizon."""
+
+    entry: TranscriptMessageLeafEntryFact
+    document: TerminalProjectionDocumentFact
+
+
 class TranscriptProjectionDocumentRegistry:
     """Hydrated immutable documents prepared before the pure committed fold."""
 
@@ -234,6 +242,63 @@ class TranscriptProjectionStateStore:
     def stable_entries(self) -> tuple[TranscriptProjectionLeafEntryFact, ...]:
         with self._lock:
             return tuple(self._stable_entries)
+
+    def final_assistant_projection(
+        self,
+        *,
+        run_id: str,
+        through_sequence: int,
+    ) -> CanonicalRunFinalAssistantProjection | None:
+        """Return the latest accepted non-tool assistant message for one run.
+
+        The resident store is itself restored from a canonical checkpoint plus a
+        bounded semantic delta.  This query therefore never reconstructs a run
+        from its physical EventLog range.
+        """
+
+        with self._lock:
+            if through_sequence > self._through_sequence:
+                raise ValueError(
+                    "transcript projection has not reached final-output horizon"
+                )
+            for entry in reversed(self._stable_entries):
+                if not isinstance(entry, TranscriptMessageLeafEntryFact):
+                    continue
+                attribution = entry.attribution
+                if (
+                    attribution.run_id != run_id
+                    or attribution.segment != "current_run_tail"
+                    or entry.semantic_identity.message_provider_semantic_identity.role
+                    != "assistant"
+                    or any(
+                        reference.sequence > through_sequence
+                        for reference in entry.source_event_refs
+                    )
+                ):
+                    continue
+                content = entry.content
+                if not isinstance(content, TerminalProjectionMessageContentRefFact):
+                    raise ValueError(
+                        "canonical assistant entry lacks terminal projection authority"
+                    )
+                document = self.documents.resolve(content.projection_reference)
+                payload = document.payload
+                if not isinstance(payload, ModelTerminalProjectionPayloadFact):
+                    raise ValueError(
+                        "canonical assistant entry points at non-model projection"
+                    )
+                selected = frozenset(content.selected_projection_orders)
+                if any(
+                    isinstance(item.semantic_identity, ModelToolCallBlockSemanticFact)
+                    for item in payload.items
+                    if item.semantic_identity.projection_order in selected
+                ):
+                    continue
+                return CanonicalRunFinalAssistantProjection(
+                    entry=entry,
+                    document=document,
+                )
+        return None
 
     def evidence_snapshot(self) -> TranscriptProjectionReducerEvidenceSnapshot:
         """Freeze live state, stable entries and required documents under one lock."""
@@ -1214,6 +1279,7 @@ def stable_entry_projection_references(
 
 
 __all__ = [
+    "CanonicalRunFinalAssistantProjection",
     "TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT",
     "TranscriptProjectionDocumentRegistry",
     "TranscriptProjectionReducerEvidenceSnapshot",

@@ -8,6 +8,8 @@ _Created: 2026-07-04_
 
 - [src/pulsara_agent/runtime/agent.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/agent.py)
 - [src/pulsara_agent/runtime/state.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/state.py)
+- [src/pulsara_agent/runtime/run_execution/](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/run_execution)
+- [src/pulsara_agent/ports/run_execution.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/ports/run_execution.py)
 - [src/pulsara_agent/runtime/plan.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/plan.py)
 - [src/pulsara_agent/runtime/session.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/session.py)
 - [src/pulsara_agent/tools/executor.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/tools/executor.py)
@@ -20,7 +22,9 @@ _Created: 2026-07-04_
 
 ## 1. 核心立场
 
-`AgentRuntime` 负责一次 active run 内的模型调用、工具调用、pending 状态和 run finalization。
+`AgentRuntime`执行一个activation内的模型/工具loop。稳定run ownership、activation task、pending
+interaction slot、terminalization与public completion由`RunExecutionRegistry`、`RunActivationService`
+和稳定`RunOwner`拥有，详见`RUN_EXECUTION_OWNERSHIP_CONTRACT.zh.md`。
 
 它不负责：
 
@@ -49,9 +53,10 @@ _Created: 2026-07-04_
 
 ---
 
-## 3. LoopState
+## 3. Activation working state
 
-`LoopState` 是 active run 的短生命周期工作缓存，不是 durable truth。
+`RunActivationWorkingState`是单个active activation的短生命周期工作缓存，不是RunOwner或durable
+truth。它由revocable state carrier持有，只能被matching activation/finalization owner借用。
 
 它可以保存：
 
@@ -62,10 +67,12 @@ _Created: 2026-07-04_
 - token usage；
 - in-run recovery state；
 - stop/abort state；
-- committed `RunWorkingSet`的process-local execution handles与projection；
+- 当前activation的模型/工具step缓存；
 - 当前segment的短生命周期状态。
 
-禁止把 `LoopState.scratchpad` 当作 resume / inspect / long-term facts。需要跨 run 或跨进程解释的事实必须写 typed event 或 durable projection。
+它没有`scratchpad`字段。需要跨activation解释的authority进入`RunGenesisAuthority`或immutable
+`RunAuthorityRevision`；需要跨进程解释的事实必须写typed event或durable projection。Working state
+不得复制pending interaction、active activation generation、finalization或run completion。
 
 ---
 
@@ -76,15 +83,16 @@ _Created: 2026-07-04_
 1. 冻结authority high-water、permission、model target、MCP installation、execution surface与typed current-user fact；
 2. 完成preflight compaction及required gates；
 3. 通过一个`emit_many()`原子提交`RunStartEvent`与本run首次引用的pending MCP installation audits；
-4. FULL commit后安装`CommittedRunExecutionOwner`与initial segment；
-5. AgentRuntime只消费`CommittedHostRunEntry`和frozen execution handles，生成typed capability exposure event；
+4. FULL receipt与exact raw stored envelope共同promote唯一`RunOwner`，并原子转移frozen execution handles；
+5. initial capability exposure FULL后安装第一个authority revision与activation；
 6. 构造immutable context input snapshot/transcript/tool units/candidates，确认input manifest durable后进入model loop。
 
-AgentRuntime不拥有Host `RunStartEvent`写权限，也不允许先创建active `LoopState`再补ledger。Child只通过
+AgentRuntime不拥有Host `RunStartEvent`写权限，也不允许先创建active working state再补ledger。Child只通过
 `CommittedSubagentRunEntry`进入。
 
 Approval、plan interaction与MCP input-required resume在safe point后必须先提交该safe point产生的pending MCP
-installation audit，再将suspended `LoopState`恢复为active。Audit commit失败时不允许model continuation，原pending
+installation audit，再由interaction transition owner创建新的resume activation。旧suspended activation
+receipt保持immutable。Audit commit失败时不允许model continuation，原pending
 interaction保持可重试；streaming resume把已提交audit作为本次stream的前缀事件返回。
 
 Capability descriptor/execution surface必须在RunStart前冻结；context-sensitive projection在RunStart FULL后解析并写typed
@@ -123,7 +131,7 @@ canonical lifecycle与普通miss相同，不能改变manifest fingerprint；over
 ## 5. System prompt composition
 
 每次模型调用的系统上下文必须从immutable `ContextFactSnapshot`与`PreparedContextCandidateSet` fresh compose，不从compaction
-summary、`LoopState`或scratchpad恢复。
+summary、activation working state或process-local fallback恢复。
 
 系统上下文包括：
 
@@ -185,15 +193,17 @@ V1 有三类 waiting user 状态：
 - pending plan interaction：`pending_interaction_kind="plan"`。
 - pending MCP input-required：`pending_interaction_kind="mcp_input_required"`。
 
-进入 pending 状态时：
+进入pending状态时：
 
-- `state.status = WAITING_USER`；
-- `state.stop_reason = RunStopReason.WAITING_USER`；production state不得赋自由字符串；
+- activation working state进入`WAITING_USER`并使用typed`RunStopReason.WAITING_USER`；
 - run 不 emit terminal `RUN_END`；
-- HostSession 必须暴露 typed pending interaction object；
+- registry原子安装typed `RunSuspensionSlot`；
+- `RunSuspendedOutcome`直接携带typed pending interaction authority，Host不得从state推断；
 - 后续普通 `run_turn` 必须拒绝，直到 pending 被 resolve/cancel/abort。
 
-Resume pending 后必须回到同一个 `LoopState` 继续，或在 durable resume 里先 repair dangling run；不得在没有上下文的情况下执行旧 pending tool。
+Live resume消费同一个suspension slot并创建新activation generation。旧activation completion永不改写；
+新activation通过immutable resume link引用predecessor。Process reopen不恢复旧working state或opaque MCP
+continuation；必须按recovery contract terminalize/repair，不能在缺少live owner时执行旧pending tool。
 
 ---
 
@@ -228,8 +238,8 @@ MCP input-required 使用通用 tool suspension seam。
 - 写 required typed `McpInputRequiredSuspensionFact`，冻结 interaction/server/round、
   binding、request envelope fingerprints、pending lease reservation、deadline与
   predecessor resolution；
-- 设置 `pending_interaction_kind="mcp_input_required"`；
-- 由 HostSession 暴露 `PendingMcpInputRequired`，并由supervisor保留exact pending slot lease。
+- 生成`PendingMcpInputRequiredAuthority`并原子安装RunOwner suspension slot；
+- Host只从`RunSuspendedOutcome`读取该authority，supervisor/port保留exact pending slot lease。
 
 用户 resolution 在 ingress admission、第一次 await 前被冻结为唯一 immutable
 `PreparedMcpInputRequiredResolution`；Host boundary与
@@ -264,7 +274,8 @@ Mid-turn inline compact 必须只 compact current run 之前的历史 prefix，�
 
 ## 12. Run finalization
 
-Run finalization 必须 emit exactly one `RUN_END`，除非 run 已经 finalized。
+Run finalization由稳定`RunFinalizationOwner`拥有，必须emit exactly one `RUN_END`，除非exact
+candidate已经FULL。它不依赖active segment继续存活。
 
 `RUN_END` 必须携带：
 
@@ -277,15 +288,19 @@ MCP publication failure或SESSION_REOPEN closure路径还必须携带 exact type
 publication-latched termination refs。Generic dangling-run repair必须在 MCP lifecycle
 recovery之后运行，遇到 active MCP suspension时 delegate/skip，不能提前生成普通 RunEnd。
 
-Memory `on_turn_end` hook 在正常 finalization 前运行；如果 hook 失败，runtime 必须 emit `RUN_ERROR` 并把 run 标记为 failed，而不是吞掉错误。
+Memory canonical hooks与durable projection按各自契约执行；derived projection lag/failure不得改变
+RunEnd canonical outcome。
 
-Abort / host teardown / stop request 必须通过 typed abort state，而不是 scratchpad magic key。
+Abort / host teardown / stop request必须通过typed termination intent和stable terminal candidate。
+RunEnd FULL后由`RunFinalOutputMaterializer`从ledger/transcript/usage重建public output；run completion只在
+terminal receipt安装后完成，不读取activation working state。
 
 ---
 
 ## 13. 禁止事项
 
-- 不允许直接把 transient scratchpad 当成 resume/inspect truth。
+- 不允许production scratchpad、metadata/extras/dict改名fallback。
+- 不允许`AgentRunResult.state`或Host保存/解释activation working state。
 - 不允许工具执行绕过 `ToolExecutor` 的 result event 边界。
 - 不允许 approval resume 后跳过 capability fail-closed。
 - 不允许 workflow tools 在 capability descriptor 缺失时执行。
@@ -294,6 +309,8 @@ Abort / host teardown / stop request 必须通过 typed abort state，而不是 
 - 不允许把 plan mode 做成 permission mode 枚举成员。
 - 不允许把 MCP input-required 格式化成普通 tool error 后继续。
 - 不允许恢复已删除的`mcp_elicitation`/`respond_elicitation`第二套production continuation。
+- 不允许Host/child分别创建run registry、AgentRuntime或driver。
+- 不允许finalization依赖active segment或observer存活。
 
 ---
 
@@ -315,6 +332,11 @@ Abort / host teardown / stop request 必须通过 typed abort state，而不是 
 - pending approval/plan/MCP 下不触发 auto compact。
 - mid-turn compact 保留 current run tail。
 - abort / host teardown run finalization exactly-once。
+- 每个initial/resume使用独立activation generation，至少覆盖两次resume；
+- activation completion与run completion物理分离；
+- observer detach/backpressure不取消service-owned driver；
+- final output live与owner退休后rebuild byte-identical；
+- scratchpad、legacy Host driver与child execution attach API的AST observation为零。
 
 ---
 
@@ -324,13 +346,13 @@ Abort / host teardown / stop request 必须通过 typed abort state，而不是 
 `RunStartEvent.new_run_boundary`，child 使用已提交的 `RunStartEvent.subagent_run_entry`。AgentRuntime 不拥有
 `RunStartEvent` 写权限，也不得根据 caller 类型伪造 entry。
 
-一个 durable run 由稳定 `CommittedRunExecutionOwner` 持有；每个 initial/resume activation 使用独立、单调递增的
-`RunExecutionSegmentOwner`。Host run 正常进入 `WAITING_USER` 只结束当前 segment，不写 RunEnd；child V1 不支持
+一个durable run由稳定`RunOwner`持有；每个initial/resume activation使用独立、单调递增的
+`RunActivationCoordinator`。Host run正常进入`WAITING_USER`只结束当前activation，不写RunEnd；child V1不支持
 WAITING_USER，必须先终结 child ledger，再终结 parent graph。
 
 `CurrentUserMessageFact`是run draft的唯一current-user真源；`UserMsg`的text/id/observed time与
 `RunStart.user_input_chars`必须从同一fact派生，不允许并行`user_input`参数。Agent exposure只消费
-`AgentRunDraft.frozen_execution_surface`，禁止回读scratchpad或current live wiring。
+`AgentRunDraft.frozen_execution_surface`，禁止回读current live wiring或另一个activation carrier。
 
 同步tool的execution ownership以真实worker thread completion为终点。取消awaiting coroutine不得提前释放borrow；
 tool-batch driver必须等待shielded thread task收口，Host stop/close在deadline耗尽时保留run/session owner并fail closed，
@@ -342,8 +364,9 @@ approval、plan、MCP input-required 的 live continuation 必须在执行前原
 2. `CapabilityExposureResolvedEvent(resolution_kind=continuation_*)`；
 3. `RunInteractionResumeBoundaryEvent`。
 
-continuation 始终重绑原 RunStart 的 model target 与 permission snapshot，只允许 capability exposure 语义完全复用或
-单调收窄。commit FULL 后才可安装新的 segment；commit NONE 保留原 pending/token/lease；partial/unknown 必须 latch，
+continuation始终重绑原RunStart的model target与permission snapshot，只允许capability exposure语义完全复用或
+单调收窄。commit FULL后先安装immutable authority revision，再与incoming handles和新activation原子进入OPEN；
+commit NONE保留原pending/token/lease；partial/unknown必须latch，
 不得用 bool 压成“未提交”。stop/close 在取消 segment 前必须先 CAS 安装 typed termination intent。
 
 ---
@@ -441,7 +464,7 @@ commit outcome结算。Caller cancellation不能跳过该矩阵：NONE释放rese
 Host close不得只遍历active child graph而漏过它。任何pending/unknown capacity owner存在时，close必须
 fail closed；不得把无durable child的裸reservation永久计入容量。
 
-## 18. Background derived model work
+## 21. Background derived model work
 
 Compaction-memory Call B不是Host run、autonomous ingress或Agent loop continuation。HostSession只提供
 borrower-scoped background model safe point：human ingress优先，active/preparing/waiting/closing时拒绝或

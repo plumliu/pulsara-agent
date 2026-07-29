@@ -6,7 +6,7 @@ _Created: 2026-06-27_
 
 核心立场:
 
-- **一个词汇,两个 producer。** `RecoveryProjection` 是唯一恢复词汇;cross-run(从 event log)与 in-run(从 live `LoopState`)是两个独立 producer。统一的是语义与文案真源,不统一的是数据通路。
+- **一个词汇,两个 producer。** `RecoveryProjection` 是唯一恢复词汇;cross-run(从 event log)与 in-run(从当前 `RunActivationWorkingState`)是两个独立 producer。统一的是语义与文案真源,不统一的是数据通路。
 - **guidance 文案两张表、同义不同口吻。** transcript(事后说明)与 runtime prompt(操作提示)共享 `GuidanceKind`,但各有一张文案表;不强制逐字共享。
 - **终结语义是 typed、可审计的事实。** 运行中用 `AbortKind` 表达 stop authority；durable
   `RunEndEvent` 同时保存 low-level `RunStopReason`、`RunTerminalizationKind` 与按分支要求的
@@ -66,13 +66,13 @@ class RecoveryProjection:
 `in_plan_workflow` **只能复用 `reduce_plan_workflow_state` 的语义边界**:
 
 - cross-run:把 `events_through_target_run_end` 喂 plan reducer,取其 `.active`。
-- in-run:从 `LoopState.scratchpad["plan_state"].active`(或 `["plan_active"]`)读。
+- in-run:只从typed `RunPlanProgressState.workflow_state.active`读取。
 
 **禁止**用"该 run 是否有未 resolve 的 `PlanQuestionAsked`/`PlanExitRequested`"来推断。反例:在一个已 active 的 plan 里发起的普通 read-only planning turn,中途被 stop,该 run 没有新的 question/request 事件,但 plan 仍 active——扫法会漏判成普通 abort,reducer 法不会。
 
 ### 2.3 in-run:project_recovery_from_state
 
-`project_recovery_from_state(state)` 从 live `LoopState` 产出,喂 runtime prompt。`state.in_run_recovery is None` 时返回 `None`。产出固定 `guidance_kind=IN_RUN_STEP_FAILED`、`run_status=None`、`unfinished_tools=()`。
+`project_recovery_from_state(state)` 从当前activation的 `RunActivationWorkingState` 产出,喂 runtime prompt。`state.in_run_recovery is None` 时返回 `None`。产出固定 `guidance_kind=IN_RUN_STEP_FAILED`、`run_status=None`、`unfinished_tools=()`。该working state不跨activation、不得进入Host或publisher，也不是reopen authority。
 
 ## 3. AbortKind:typed、可审计
 
@@ -84,7 +84,7 @@ class AbortKind(StrEnum):
     HOST_TEARDOWN = "host_teardown"
 ```
 
-- `LoopState.abort_kind: AbortKind | None`,在 `stream_abort_run` 设置。
+- `RunActivationWorkingState.abort_kind: AbortKind | None`只缓存当前activation控制结果；stable terminal authority仍是`RunOwner` finalization candidate与committed `RunEndEvent`。
 - **持久化到 hard-cut `RunEndEvent` contract**：`stop_reason` 必须属于
   `primitives.run_lifecycle.RunStopReason`，`terminalization_kind` 必须属于
   `RunTerminalizationKind`；只有 user-stop/host-teardown 分支携带 matching `abort_kind`。旧的缺字段

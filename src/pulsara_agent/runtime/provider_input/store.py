@@ -55,7 +55,7 @@ from pulsara_agent.primitives.runtime_observation import (
     PreparedRuntimeObservationProviderUnitFact,
     RuntimeObservationProjectionRewriteFact,
 )
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     RecursivelyImmutableProviderInputCarrier,
     build_provider_unit_semantic_document,
 )
@@ -656,11 +656,19 @@ class ProviderInputGenerationStore:
                 )
             key = self._resident_key("generation", generation_id)
             existing = self._resident_manager.get(key)
-            if existing is not None and existing != resident:
-                raise ProviderInputGenerationReducerError(
-                    "provider resident restore conflicts with live state"
-                )
-            self._resident_manager.admit(key, resident)
+            if existing is not None:
+                if not _same_resident_authority(existing, resident):
+                    raise ProviderInputGenerationReducerError(
+                        "provider resident restore conflicts with live state"
+                    )
+                # Persistent-vector chunk layout and the process-local set of
+                # previously reached artifacts are cache implementation details.
+                # A live append may retain a broader artifact set than a clean
+                # hydration of the same content-addressed root. Keep the current
+                # resident once its exact semantic authority has been rejoined.
+                resident = existing
+            else:
+                self._resident_manager.admit(key, resident)
             attribution = self._attributions.get(generation_id)
             if attribution is not None:
                 source_attributions = _source_head_attributions_from_resident(
@@ -1889,6 +1897,18 @@ class ProviderInputGenerationStore:
             self._resident_manager.discard_runtime_session(self._runtime_session_id)
         if events:
             self._apply_committed(events, require_staged_resident=False)
+
+
+def _same_resident_authority(
+    left: ProviderInputResidentGeneration,
+    right: ProviderInputResidentGeneration,
+) -> bool:
+    return (
+        left.vector_state.root_reference == right.vector_state.root_reference
+        and left.carrier.carrier_fingerprint == right.carrier.carrier_fingerprint
+        and left.authority_horizons == right.authority_horizons
+        and left.replay_bindings == right.replay_bindings
+    )
 
 
 def _source_head_attributions_from_resident(

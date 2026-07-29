@@ -123,7 +123,7 @@ from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
-from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+from pulsara_agent.blocking_executor import auxiliary_io_executor
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
@@ -133,6 +133,14 @@ from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
 from pulsara_agent.runtime.mcp.tool_execution_port import RuntimeMcpToolExecutionPort
 from pulsara_agent.runtime.mcp.types import McpInstalledCapabilitySnapshot
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
+from pulsara_agent.runtime.session_run_capabilities import (
+    build_agent_runtime_session_capabilities,
+)
+from pulsara_agent.runtime.run_execution.service import RunActivationService
+from pulsara_agent.runtime.run_execution.factory import RunActivationFactory
+from pulsara_agent.runtime.subagent.activation import SubagentChildActivationService
+from pulsara_agent.runtime.subagent.runtime import SubagentRuntime
 from pulsara_agent.runtime.terminal import TerminalRuntimeBinding
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
@@ -181,6 +189,53 @@ class RuntimeWiring:
 class AgentRuntimeWiring:
     agent_runtime: AgentRuntime
     runtime_wiring: RuntimeWiring
+    run_execution_registry: RunExecutionRegistry = field(
+        default_factory=RunExecutionRegistry
+    )
+    run_activation_service: RunActivationService | None = None
+    run_activation_factory: RunActivationFactory | None = None
+    child_activation_service: SubagentChildActivationService | None = None
+    subagent_runtime: SubagentRuntime | None = None
+
+    def bind_rollout_budget_feasibility_report(self, report: object) -> None:
+        self.agent_runtime.rollout_budget_feasibility_report = report
+        if self.child_activation_service is not None:
+            self.child_activation_service.rollout_budget_feasibility_report = report
+
+    def close(self) -> None:
+        """Release session-scoped runtime owners in composition order."""
+
+        self.agent_runtime.close()
+        if self.subagent_runtime is not None:
+            self.subagent_runtime.detach_from_parent_session()
+        self.runtime_wiring.runtime_session.close()
+
+    def __post_init__(self) -> None:
+        if self.subagent_runtime is None:
+            object.__setattr__(
+                self,
+                "subagent_runtime",
+                self.agent_runtime.subagent_runtime,
+            )
+        elif self.agent_runtime.subagent_runtime is not self.subagent_runtime:
+            raise ValueError("runtime wiring subagent owner identity mismatch")
+        current = self.agent_runtime.run_execution_registry
+        if current is not None and current is not self.run_execution_registry:
+            raise ValueError("AgentRuntime is bound to a different run registry")
+        self.agent_runtime.bind_run_execution_registry(self.run_execution_registry)
+        if self.run_activation_service is None:
+            object.__setattr__(
+                self,
+                "run_activation_service",
+                RunActivationService(
+                    registry=self.run_execution_registry,
+                    event_log=self.runtime_wiring.event_log,
+                    agent_runtime=self.agent_runtime,
+                    runtime_session_id=(
+                        self.runtime_wiring.runtime_session.runtime_session_id
+                    ),
+                ),
+            )
 
     def build_compaction_memory_extraction_driver(
         self,
@@ -557,29 +612,68 @@ def compose_agent_runtime_wiring(
         if runtime_wiring.compaction_service is not None
         else None
     )
-    agent_runtime = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=llm_runtime,
-        memory_hooks=_build_memory_hooks(
-            runtime_wiring=runtime_wiring,
-            llm_runtime=llm_runtime,
-            memory_reflection=memory_reflection,
-            memory_reflection_options=memory_reflection_options,
-        ),
-        model_role=model_role,
-        options=options,
-        system_prompt=system_prompt,
-        capability_runtime=effective_capability_runtime,
-        memory_domain=runtime_wiring.memory_domain,
-        workspace_kind=runtime_wiring.memory_domain.workspace_kind
-        if runtime_wiring.memory_domain is not None
-        else "transient",
-        permission_policy=effective_permission_policy,
-        context_compactor=context_compactor,
+    run_activation_factory = RunActivationFactory()
+    session_capabilities = build_agent_runtime_session_capabilities(
+        runtime_wiring.runtime_session
     )
+    activation_composition = run_activation_factory.create(
+        event_log=runtime_wiring.event_log,
+        runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+        agent_runtime_kwargs={
+            **session_capabilities,
+            "llm_runtime": llm_runtime,
+            "memory_hooks": _build_memory_hooks(
+                runtime_wiring=runtime_wiring,
+                llm_runtime=llm_runtime,
+                memory_reflection=memory_reflection,
+                memory_reflection_options=memory_reflection_options,
+            ),
+            "model_role": model_role,
+            "options": options,
+            "system_prompt": system_prompt,
+            "capability_runtime": effective_capability_runtime,
+            "memory_domain": runtime_wiring.memory_domain,
+            "workspace_kind": (
+                runtime_wiring.memory_domain.workspace_kind
+                if runtime_wiring.memory_domain is not None
+                else "transient"
+            ),
+            "permission_policy": effective_permission_policy,
+            "context_compactor": context_compactor,
+        },
+    )
+    parent_agent = activation_composition.agent_runtime
+    subagent_runtime = parent_agent.subagent_runtime
+    child_activation_service = None
+    if subagent_runtime is not None:
+        child_activation_service = SubagentChildActivationService(
+            run_identity=session_capabilities["run_identity"],
+            run_ledger_port=session_capabilities["run_ledger_port"],
+            run_long_horizon_port=session_capabilities["run_long_horizon_port"],
+            llm_runtime=llm_runtime,
+            model_role=model_role,
+            options=options,
+            budget=parent_agent.budget,
+            system_prompt=system_prompt,
+            capability_runtime=effective_capability_runtime,
+            workspace_kind=parent_agent.workspace_kind,
+            rollout_budget_feasibility_report=(
+                parent_agent.rollout_budget_feasibility_report
+            ),
+            activation_factory=run_activation_factory,
+            subagent_runtime=subagent_runtime,
+        )
+        subagent_runtime.bind_child_activation_port(
+            child_activation_service
+        )
     return AgentRuntimeWiring(
-        agent_runtime=agent_runtime,
+        agent_runtime=parent_agent,
         runtime_wiring=runtime_wiring,
+        run_execution_registry=activation_composition.registry,
+        run_activation_service=activation_composition.service,
+        run_activation_factory=run_activation_factory,
+        child_activation_service=child_activation_service,
+        subagent_runtime=subagent_runtime,
     )
 
 

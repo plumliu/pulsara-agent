@@ -7,6 +7,10 @@ from typing import Literal
 from pulsara_agent.event import EventType
 from pulsara_agent.event_log.serialization import canonical_event_payload_bytes
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.transcript_accumulators import (
+    EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+    EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+)
 
 
 TranscriptStorageDomain = Literal[
@@ -70,16 +74,6 @@ TRANSCRIPT_ACCELERATION_EVENT_TYPES = frozenset(
         EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED.value,
     }
 )
-
-EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR = context_fingerprint(
-    "transcript-prefix-accumulator:v1",
-    "empty",
-)
-EMPTY_LEDGER_CONTINUITY_ACCUMULATOR = context_fingerprint(
-    "ledger-continuity-accumulator:v1",
-    "empty",
-)
-
 
 def classify_transcript_event_type(event_type: str) -> TranscriptStorageDomain:
     if event_type in TRANSCRIPT_SEMANTIC_EVENT_TYPES:

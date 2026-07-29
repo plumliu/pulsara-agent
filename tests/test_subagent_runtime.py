@@ -1,3 +1,6 @@
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 import inspect
 import json
@@ -63,6 +66,7 @@ from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import LLMRuntime
 from tests.support import (
+    CallbackSubagentChildActivationPort,
     model_call_start_fields,
     run_agent_task,
     test_resolved_call,
@@ -80,7 +84,9 @@ from pulsara_agent.runtime.subagent import (
     SubagentRuntime,
 )
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
-from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
+from pulsara_agent.runtime.subagent.execution import ChildAdmissionSessionRegistry
+from pulsara_agent.runtime.run_execution.commit_gateway import read_ledger_horizon
+from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.runtime.subagent.run_entry import SubagentRunEntryDriver
 from pulsara_agent.runtime.subagent.tool_port import RuntimeSubagentControlPort
 from pulsara_agent.runtime.agent import AgentRuntime
@@ -300,8 +306,11 @@ def _runtime(
         child_event_log_factory=child_event_log_factory,
         event_log_locator=locator,
         default_budget=budget,
-        child_runner=child_runner,
     )
+    if child_runner is not None:
+        child_activation_port = CallbackSubagentChildActivationPort(child_runner)
+        child_activation_port.bind(runtime)
+        runtime.bind_child_activation_port(child_activation_port)
     return parent, locator, child_logs, runtime
 
 
@@ -327,8 +336,14 @@ def _resumed_runtime(parent, locator, child_logs):
     return resumed_parent, resumed
 
 
-def test_child_registry_indexes_exact_mcp_binding_identities() -> None:
-    registry = ChildExecutionRegistry()
+def test_child_registry_indexes_exact_mcp_binding_identities(tmp_path) -> None:
+    registry = ChildAdmissionSessionRegistry()
+    session = in_memory_runtime_session(
+        tmp_path,
+        runtime_session_id="runtime:child:mcp",
+    )
+    reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
+    horizon = read_ledger_horizon(session.event_log)
     identity = McpBindingIdentity(
         server_id="docs",
         slot_id="mcp_slot:1",
@@ -338,15 +353,22 @@ def test_child_registry_indexes_exact_mcp_binding_identities() -> None:
     registry.register_prepared(
         subagent_run_id="subagent_run:mcp",
         child_runtime_session_id="runtime:child:mcp",
-        child_session=None,
-        reservation=None,
+        child_session=session,
+        reservation=reservation,
+        parent_runtime_session_id="runtime:parent",
+        parent_run_id=CTX.run_id,
+        spawn_edge_id="edge:mcp",
+        parent_graph_horizon=horizon,
+        parent_graph_state_fingerprint=context_fingerprint(
+            "test-mcp-child-graph:v1", [horizon.horizon_fingerprint]
+        ),
         mcp_binding_identities=frozenset({identity}),
     )
 
     assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset(
         {"subagent_run:mcp"}
     )
-    registry.release_handle("subagent_run:mcp")
+    registry.mark_parent_graph_terminal_full("subagent_run:mcp")
     assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset()
 
 
@@ -398,22 +420,22 @@ def test_subagent_start_commit_cancellation_settles_capacity_by_durable_outcome(
 
     if commit_status == "full":
         asyncio.run(invoke())
-        [handle] = runtime._execution_registry.handles()  # noqa: SLF001
-        assert handle.capacity_reservation is not None
-        assert handle.capacity_reservation.commit_state == "full"
+        [owner] = runtime._admission_registry.owners()  # noqa: SLF001
+        reservation = owner.capacity_slot.reservation
+        assert reservation.commit_state == "full"
     else:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(invoke())
-        assert runtime._execution_registry.handles() == ()  # noqa: SLF001
+        assert runtime._admission_registry.owners() == ()  # noqa: SLF001
         if commit_status == "none":
-            assert runtime._execution_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
-            assert runtime._execution_registry.unresolved_commit_reservations() == ()  # noqa: SLF001
+            assert runtime._admission_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
+            assert runtime._admission_registry.unresolved_commit_reservations() == ()  # noqa: SLF001
         else:
             assert (
-                len(runtime._execution_registry.unresolved_commit_reservations()) == 1
+                len(runtime._admission_registry.unresolved_commit_reservations()) == 1
             )  # noqa: SLF001
             with pytest.raises(RuntimeError, match="require reconciliation"):
-                runtime._execution_registry.require_no_unresolved_commit_reservations()  # noqa: SLF001
+                runtime._admission_registry.require_no_unresolved_commit_reservations()  # noqa: SLF001
 
 
 def test_child_runtime_mcp_installation_owner_points_to_parent_session(
@@ -531,7 +553,7 @@ def test_child_start_failure_emits_terminal_repair(tmp_path, monkeypatch) -> Non
     )
     assert failed_event.reason_code == "subagent_child_start_failed"
     assert failed_event.repair_id is not None
-    assert runtime._execution_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
+    assert runtime._admission_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
 
 
 def test_materialized_batch_facts_are_applied_once(tmp_path) -> None:
@@ -1347,8 +1369,7 @@ def test_child_report_events_use_parent_spawn_context_not_child_native_context(
 
 def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    parent.subagent_runtime = runtime
-    executor = build_component_tool_executor(parent)
+    executor = build_component_tool_executor(parent, subagent_runtime=runtime)
     exposure = preview_capability_plan(
         CapabilityRuntime(),
         workspace_root=tmp_path,
@@ -1415,8 +1436,7 @@ def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
 
 def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    parent.subagent_runtime = runtime
-    executor = build_component_tool_executor(parent)
+    executor = build_component_tool_executor(parent, subagent_runtime=runtime)
     exposure = preview_capability_plan(
         CapabilityRuntime(),
         workspace_root=tmp_path,
@@ -1710,14 +1730,14 @@ def test_dependency_start_unavailable_fails_task_and_blocks_downstream(
             for item in payload["tasks"]
             if item["task_key"] == "a"
         )
-        reservation = runtime._execution_registry.reserve(  # noqa: SLF001 - simulate a concurrent command preflight.
+        reservation = runtime._admission_registry.reserve(  # noqa: SLF001 - simulate a concurrent command preflight.
             parent_run_id=CTX.run_id,
             count=1,
         )
         try:
             await runtime.complete_fake(a_run_id, summary="A done", event_context=CTX)
         finally:
-            runtime._execution_registry.release_reservation(reservation)  # noqa: SLF001
+            runtime._admission_registry.release_reservation(reservation)  # noqa: SLF001
 
     asyncio.run(run())
     tasks = {task.task_key: task for task in runtime.graph().tasks}
@@ -1874,7 +1894,9 @@ def test_materialized_batch_start_failure_commits_repair_before_bounded_drain(
         raise TimeoutError("synthetic stubborn child cleanup")
 
     monkeypatch.setattr(runtime, "_create_child_runtime_session", fail_child_session)
-    monkeypatch.setattr(runtime._execution_registry, "drain_run_ids", fail_first_drain)  # noqa: SLF001
+    monkeypatch.setattr(
+        runtime._activation_operations, "drain_run_ids", fail_first_drain
+    )  # noqa: SLF001
 
     async def run() -> None:
         result = await tool.execute_async(
@@ -1904,7 +1926,7 @@ def test_materialized_batch_start_failure_commits_repair_before_bounded_drain(
     asyncio.run(run())
 
 
-def test_start_task_failure_commits_terminal_facts_before_child_drain(
+def test_start_task_failure_commits_terminal_facts_without_phantom_operation(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1917,31 +1939,21 @@ def test_start_task_failure_commits_terminal_facts_before_child_drain(
             task_key="a",
         )
     )
-    observed_terminal_before_drain: list[bool] = []
 
     def fail_child_session(**_kwargs):
         raise OSError("synthetic child start failure")
 
-    async def fail_drain(run_id, *, timeout_seconds=None):
-        del timeout_seconds
-        observed_terminal_before_drain.append(
-            runtime._require_run(run_id).status == "failed"  # noqa: SLF001
-            and runtime._require_task(task.task_id).status == "failed"  # noqa: SLF001
-        )
-        raise TimeoutError("synthetic stubborn child cleanup")
-
     monkeypatch.setattr(runtime, "_create_child_runtime_session", fail_child_session)
-    monkeypatch.setattr(runtime._execution_registry, "cancel", fail_drain)  # noqa: SLF001
 
     async def run() -> None:
-        with pytest.raises(TimeoutError, match="stubborn child cleanup"):
+        with pytest.raises(OSError, match="synthetic child start failure"):
             await runtime.start_task(
                 task.task_id,
                 event_context=CTX,
                 spawn_initiator_id="tool:create",
             )
-        assert observed_terminal_before_drain == [True]
         assert runtime._require_task(task.task_id).status == "failed"  # noqa: SLF001
+        assert runtime._activation_operations.operations() == ()  # noqa: SLF001
 
     asyncio.run(run())
 
@@ -2965,7 +2977,7 @@ def test_closing_child_handle_continues_to_occupy_concurrency_capacity(
     async def run() -> None:
         child = await runtime.spawn_agent(task="stubborn", event_context=CTX)
         await started.wait()
-        with pytest.raises(TimeoutError, match="Timed out draining child coroutine"):
+        with pytest.raises(TimeoutError, match="Timed out draining child activation"):
             await runtime.cancel(
                 child.subagent_run_id,
                 event_context=CTX,
@@ -2973,7 +2985,7 @@ def test_closing_child_handle_continues_to_occupy_concurrency_capacity(
             )
         await cleanup_started.wait()
 
-        assert runtime._execution_registry.get(child.subagent_run_id) is not None  # noqa: SLF001
+        assert runtime._admission_registry.get(child.subagent_run_id) is not None  # noqa: SLF001
         with pytest.raises(
             SubagentLimitExceeded,
             match="max_concurrent_children_per_parent_run",
@@ -2981,9 +2993,9 @@ def test_closing_child_handle_continues_to_occupy_concurrency_capacity(
             runtime.validate_can_start_batch(CTX.run_id, count=1, budget=budget)
 
         allow_cleanup.set()
-        handle = runtime._execution_registry.get(child.subagent_run_id)  # noqa: SLF001
-        assert handle is not None and handle.coroutine is not None
-        await handle.coroutine
+        task = runtime._activation_operations.task(child.subagent_run_id)  # noqa: SLF001
+        assert task is not None
+        await task
         await asyncio.sleep(0)
         runtime.validate_can_start_batch(CTX.run_id, count=1, budget=budget)
 
@@ -3028,44 +3040,128 @@ def test_cancel_stops_running_child_task(tmp_path) -> None:
     async def run() -> None:
         subagent = await runtime.spawn_agent(task="long child task", event_context=CTX)
         await asyncio.wait_for(started.wait(), timeout=1)
-        handle = runtime._execution_registry.get(subagent.subagent_run_id)  # noqa: SLF001
-        assert handle is not None and handle.coroutine is not None
-        task = handle.coroutine
+        task = runtime._activation_operations.task(subagent.subagent_run_id)  # noqa: SLF001
+        assert task is not None
 
         await runtime.cancel(
             subagent.subagent_run_id, event_context=CTX, reason_code="test_cancel"
         )
         await asyncio.sleep(0)
 
-        assert task.cancelled()
+        assert task.done()
 
     asyncio.run(run())
 
 
-def test_child_timeout_marks_subagent_failed(tmp_path) -> None:
-    async def child_runner(_runtime: SubagentRuntime, _run) -> None:
-        await asyncio.Event().wait()
+def test_child_timeout_terminalizes_native_run_before_parent_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_started = asyncio.Event()
+    original_stream_committed_entry = AgentRuntime.stream_committed_entry
 
-    parent, _locator, _child_logs, runtime = _runtime(
+    async def block_child_run(
+        runtime,
+        draft,
+        committed,
+        *,
+        active_skill_names=None,
+    ):
+        if not runtime._is_subagent_child:  # noqa: SLF001
+            async for event in original_stream_committed_entry(
+                runtime, draft, committed, active_skill_names=active_skill_names
+            ):
+                yield event
+            return
+        child_started.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - preserve the async-generator contract.
+            yield None
+
+    monkeypatch.setattr(AgentRuntime, "stream_committed_entry", block_child_run)
+    transport = _PendingChildTransport()
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    parent = in_memory_runtime_session(
         tmp_path,
-        budget=SubagentBudget(child_timeout_seconds=0.001),
-        child_runner=child_runner,
+        runtime_session_id="runtime:parent:child-timeout",
     )
+    agent = build_test_agent_runtime(
+        runtime_session=parent,
+        llm_runtime=LLMRuntime(
+            config=_subagent_test_llm_config(
+                api_key="sk-test",
+                base_url="https://example.test/v1",
+                pro_model="pro",
+                flash_model="flash",
+                api="pending-child",
+            ),
+            registry=registry,
+        ),
+        capability_runtime=CapabilityRuntime(),
+    )
+    assert agent.subagent_runtime is not None
+    agent.subagent_runtime.default_budget = SubagentBudget(child_timeout_seconds=2.0)
 
     async def run() -> None:
-        await runtime.spawn_agent(task="timed child task", event_context=CTX)
-        for _ in range(20):
+        parent_task = asyncio.create_task(
+            run_agent_task(agent, "spawn a child that times out")
+        )
+        await asyncio.wait_for(child_started.wait(), timeout=30)
+        child = next(
+            item for item in agent.subagent_runtime.runs if item.status == "running"
+        )
+        assert child.budget.child_timeout_seconds == 2.0
+        admission = agent.subagent_runtime._admission_registry.get(  # noqa: SLF001
+            child.subagent_run_id
+        )
+        assert admission is not None
+        composition = admission.child_composition_lease.composition
+        assert composition is not None
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
+            activation_task = agent.subagent_runtime._activation_operations.task(  # noqa: SLF001
+                child.subagent_run_id
+            )
+            if activation_task is not None and activation_task.done():
+                activation_task.result()
             failed = [
                 event
                 for event in parent.event_log.iter()
                 if isinstance(event, SubagentRunFailedEvent)
+                and event.subagent_run_id == child.subagent_run_id
             ]
             if failed:
-                assert failed[-1].reason_code == "subagent_timeout"
-                assert runtime.runs[0].status == "failed"
-                return
-            await asyncio.sleep(0.001)
-        raise AssertionError("subagent timeout did not produce a failure event")
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("subagent timeout did not produce a failure event")
+
+        result = await asyncio.wait_for(parent_task, timeout=30)
+        assert result.status is LoopStatus.FINISHED
+        terminal_failure = failed[-1]
+        assert terminal_failure.reason_code == "subagent_timeout"
+        assert terminal_failure.child_terminal_reference is not None
+        child_events = agent.subagent_runtime.child_event_log(
+            child.subagent_run_id
+        ).iter()
+        child_starts = [
+            event for event in child_events if isinstance(event, RunStartEvent)
+        ]
+        child_ends = [event for event in child_events if isinstance(event, RunEndEvent)]
+        assert len(child_starts) == len(child_ends) == 1
+        assert (
+            terminal_failure.child_terminal_reference.terminal_event_id
+            == child_ends[0].id
+            == child_starts[0].terminal_run_end_event_id
+        )
+        assert composition.registry.owner_count == 0
+        assert (
+            agent.subagent_runtime._admission_registry.get(  # noqa: SLF001
+                child.subagent_run_id
+            )
+            is None
+        )
 
     asyncio.run(run())
 
@@ -3092,7 +3188,7 @@ def test_child_runner_failure_durable_diagnostic_redacts_exception_text(
             ]
             if failed:
                 event = failed[-1]
-                assert event.reason_code == "subagent_child_runner_error"
+                assert event.reason_code == "subagent_child_activation_error"
                 payload = json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
                 assert secret not in payload
                 assert event.diagnostics == [{"error_type": "RuntimeError"}]
@@ -3367,12 +3463,14 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
         parent_runtime_session=runtime_wiring.runtime_session,
         child_event_log_factory=child_event_log_factory,
         event_log_locator=locator,
-        child_runner=child_runner,
     )
+    child_activation_port = CallbackSubagentChildActivationPort(child_runner)
+    child_activation_port.bind(subagent_runtime)
+    subagent_runtime.bind_child_activation_port(child_activation_port)
     transport = _SubagentScriptedTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3402,15 +3500,14 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
             task="long child task", event_context=CTX
         )
         await asyncio.wait_for(started.wait(), timeout=1)
-        handle = subagent_runtime._execution_registry.get(subagent.subagent_run_id)  # noqa: SLF001
-        assert handle is not None and handle.coroutine is not None
-        task = handle.coroutine
+        task = subagent_runtime._activation_operations.task(subagent.subagent_run_id)  # noqa: SLF001
+        assert task is not None
 
         await session.aclose()
 
-        assert task.cancelled()
+        assert task.done()
         assert child_finalized.is_set()
-        assert subagent_runtime._execution_registry.handles() == ()  # noqa: SLF001
+        assert subagent_runtime._admission_registry.owners() == ()  # noqa: SLF001
         cancelled = [
             event
             for event in runtime_wiring.runtime_session.event_log.iter()
@@ -3447,12 +3544,14 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(
         parent_runtime_session=runtime_wiring.runtime_session,
         child_event_log_factory=child_event_log_factory,
         event_log_locator=locator,
-        child_runner=child_runner,
     )
+    child_activation_port = CallbackSubagentChildActivationPort(child_runner)
+    child_activation_port.bind(subagent_runtime)
+    subagent_runtime.bind_child_activation_port(child_activation_port)
     transport = _SubagentScriptedTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3482,9 +3581,8 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(
             task="long child task", event_context=CTX
         )
         await asyncio.wait_for(started.wait(), timeout=1)
-        handle = subagent_runtime._execution_registry.get(subagent.subagent_run_id)  # noqa: SLF001
-        assert handle is not None and handle.coroutine is not None
-        task = handle.coroutine
+        task = subagent_runtime._activation_operations.task(subagent.subagent_run_id)  # noqa: SLF001
+        assert task is not None
 
         session.set_permission_mode("read-only")
         await asyncio.sleep(0)
@@ -3765,7 +3863,7 @@ def test_list_agents_is_visible_but_gate_denied_outside_bypass(tmp_path) -> None
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3819,7 +3917,7 @@ def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
     transport = _FinalOnlyTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=resumed_parent,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3853,7 +3951,7 @@ def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> Non
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3871,7 +3969,7 @@ def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> Non
     async def run_parent() -> None:
         result = await run_agent_task(agent, "spawn a child that needs approval")
         assert result.status is LoopStatus.FINISHED
-        assert result.state.pending_interaction_kind is None
+        assert result.pending_interaction_kind is None
         deadline = asyncio.get_running_loop().time() + 2.0
         while asyncio.get_running_loop().time() < deadline:
             if any(
@@ -3904,7 +4002,7 @@ def test_child_run_start_none_atomically_settles_parent_reservation_zero(
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -3925,7 +4023,7 @@ def test_child_run_start_none_atomically_settles_parent_reservation_zero(
         for _ in range(200):
             if any(
                 isinstance(event, SubagentRunFailedEvent)
-                and event.reason_code == "subagent_child_runner_error"
+                and event.reason_code == "subagent_child_activation_error"
                 for event in parent_session.event_log.iter()
             ):
                 break
@@ -3940,7 +4038,7 @@ def test_child_run_start_none_atomically_settles_parent_reservation_zero(
         event
         for event in parent_events
         if isinstance(event, SubagentRunFailedEvent)
-        and event.reason_code == "subagent_child_runner_error"
+        and event.reason_code == "subagent_child_activation_error"
     )
     settlement = next(
         event
@@ -3978,9 +4076,9 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     child_started = asyncio.Event()
-    original_run_committed_entry = AgentRuntime.run_committed_entry
+    original_stream_committed_entry = AgentRuntime.stream_committed_entry
 
-    async def block_child_run(
+    async def block_child_stream(
         runtime,
         draft,
         committed,
@@ -3988,12 +4086,14 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
         active_skill_names=None,
     ):
         if not runtime._is_subagent_child:  # noqa: SLF001
-            return await original_run_committed_entry(
+            async for event in original_stream_committed_entry(
                 runtime,
                 draft,
                 committed,
                 active_skill_names=active_skill_names,
-            )
+            ):
+                yield event
+            return
         child_started.set()
         try:
             await asyncio.Event().wait()
@@ -4005,14 +4105,18 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
             )
             raise
 
-    monkeypatch.setattr(AgentRuntime, "run_committed_entry", block_child_run)
+    monkeypatch.setattr(
+        AgentRuntime,
+        "stream_committed_entry",
+        block_child_stream,
+    )
     transport = _PendingChildTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -4036,10 +4140,13 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
         run = next(
             item for item in agent.subagent_runtime.runs if item.status == "running"
         )
-        handle = agent.subagent_runtime._execution_registry.get(  # noqa: SLF001
+        owner = agent.subagent_runtime._admission_registry.get(  # noqa: SLF001
             run.subagent_run_id
         )
-        assert handle is not None and handle.coroutine is not None
+        task = agent.subagent_runtime._activation_operations.task(  # noqa: SLF001
+            run.subagent_run_id
+        )
+        assert owner is not None and task is not None
 
         original_write_events = RuntimeSession.write_events
         failed_once = False
@@ -4069,12 +4176,12 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
                 reason_code="test_native_cancel",
                 cancelled_by="parent_agent",
             )
-        assert handle.coroutine.done()
+        assert task.done()
         assert (
-            agent.subagent_runtime._execution_registry.get(  # noqa: SLF001
+            agent.subagent_runtime._admission_registry.get(  # noqa: SLF001
                 run.subagent_run_id
             )
-            is handle
+            is owner
         )
         assert (
             next(
@@ -4105,9 +4212,9 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
             cancelled_by="parent_agent",
         )
 
-        assert handle.coroutine.cancelled()
+        assert task.done()
         assert (
-            agent.subagent_runtime._execution_registry.get(  # noqa: SLF001
+            agent.subagent_runtime._admission_registry.get(  # noqa: SLF001
                 run.subagent_run_id
             )
             is None
@@ -4164,7 +4271,7 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -4180,7 +4287,8 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
     )
     assert agent.subagent_runtime is not None
     subagent_runtime = agent.subagent_runtime
-    original_child_runner = agent._run_child_agent  # noqa: SLF001
+    original_child_port = subagent_runtime._child_activation_port  # noqa: SLF001
+    assert original_child_port is not None
     original_complete = subagent_runtime.complete_native_result
     child_a_run_ids: set[str] = set()
     child_a_native_terminal = asyncio.Event()
@@ -4191,7 +4299,10 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
             child_b_pre_start.set()
             await asyncio.Event().wait()
         child_a_run_ids.add(run_view.fact.subagent_run_id)
-        await original_child_runner(runtime, run_view)
+        await original_child_port.activate_committed_child(
+            run_view.fact.subagent_run_id,
+            deadline_monotonic=monotonic() + 30.0,
+        )
 
     async def hold_child_a_after_native_terminal(
         subagent_run_id: str,
@@ -4206,7 +4317,12 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
             child_run_id=child_run_id,
         )
 
-    subagent_runtime.bind_child_runner(controlled_child_runner)
+    controlled_port = CallbackSubagentChildActivationPort(
+        controlled_child_runner,
+        delegate=original_child_port,
+    )
+    controlled_port.bind(subagent_runtime)
+    subagent_runtime.bind_child_activation_port(controlled_port)
     monkeypatch.setattr(
         subagent_runtime,
         "complete_native_result",
@@ -4324,10 +4440,10 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
     assert {task.status for task in subagent_runtime.tasks} == {"cancelled"}
     assert {run.status for run in subagent_runtime.runs} == {"cancelled"}
     assert (
-        subagent_runtime._execution_registry.get(child_a_run_id) is None  # noqa: SLF001
+        subagent_runtime._admission_registry.get(child_a_run_id) is None  # noqa: SLF001
     )
     assert (
-        subagent_runtime._execution_registry.get(child_b_run_id) is None  # noqa: SLF001
+        subagent_runtime._admission_registry.get(child_b_run_id) is None  # noqa: SLF001
     )
 
     parent_start = next(
@@ -4362,7 +4478,7 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=llm_runtime,
         capability_runtime=CapabilityRuntime(),
@@ -4532,7 +4648,7 @@ def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
     parent = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent:deterministic-child"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -4685,7 +4801,7 @@ def test_child_report_agent_result_finishes_child_without_followup_model_call(
     parent_session = in_memory_runtime_session(
         tmp_path, runtime_session_id="runtime:parent"
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -4792,7 +4908,7 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(
     transport = _BackgroundSubagentResultTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(
@@ -4828,7 +4944,7 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(
     )
     compiled = next(
         event
-        for event in parent.event_log.iter(run_id=result.state.run_id)
+        for event in parent.event_log.iter(run_id=result.run_id)
         if isinstance(event, ContextCompiledEvent)
     )
     subagent_section = next(
@@ -4906,7 +5022,7 @@ def test_transport_cannot_forge_second_model_start_or_duplicate_background_deliv
     transport = _MismatchedModelStartBackgroundTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=parent,
         llm_runtime=LLMRuntime(
             config=_subagent_test_llm_config(

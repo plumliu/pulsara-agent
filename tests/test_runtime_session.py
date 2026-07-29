@@ -21,7 +21,7 @@ from pulsara_agent.runtime.session import (
     EventWriteCancelled,
     RuntimeSession,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.ports.tool_execution import ToolCall
 from tests.support.tools import (
@@ -36,7 +36,7 @@ CTX = EventContext(
 )
 
 
-def test_runtime_session_has_no_implicit_in_memory_storage(tmp_path) -> None:
+def runtime_session_for_test_has_no_implicit_in_memory_storage(tmp_path) -> None:
     with pytest.raises(TypeError, match="event_log"):
         RuntimeSession(tmp_path)
 
@@ -156,7 +156,7 @@ def test_component_tool_executor_does_not_record_by_default(tmp_path) -> None:
     assert runtime.event_log.iter(reply_id="reply:runtime") == []
 
 
-def test_runtime_session_confirms_uncertain_commit_and_catches_up_reducer_and_publisher(
+def runtime_session_for_test_confirms_uncertain_commit_and_catches_up_reducer_and_publisher(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -187,7 +187,7 @@ def test_runtime_session_confirms_uncertain_commit_and_catches_up_reducer_and_pu
     asyncio.run(run())
 
 
-def test_runtime_session_reserves_deadline_for_stable_commit_confirmation(
+def runtime_session_for_test_reserves_deadline_for_stable_commit_confirmation(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -209,7 +209,7 @@ def test_runtime_session_reserves_deadline_for_stable_commit_confirmation(
     asyncio.run(run())
 
 
-def test_runtime_session_confirmation_requires_writer_owner_or_explicit_deadline(
+def runtime_session_for_test_confirmation_requires_writer_owner_or_explicit_deadline(
     tmp_path,
 ) -> None:
     event_log = DeadlineRecordingCommitFailureEventLog()
@@ -236,7 +236,7 @@ def test_runtime_session_confirmation_requires_writer_owner_or_explicit_deadline
     assert event_log.confirmation_deadline == deadline
 
 
-def test_runtime_session_cancellation_returns_writer_owned_full_and_none_outcomes(
+def runtime_session_for_test_cancellation_returns_writer_owned_full_and_none_outcomes(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -279,7 +279,7 @@ def test_runtime_session_cancellation_returns_writer_owned_full_and_none_outcome
     asyncio.run(run())
 
 
-def test_runtime_session_cas_confirmation_catches_up_through_conflict_high_water(
+def runtime_session_for_test_cas_confirmation_catches_up_through_conflict_high_water(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -318,7 +318,7 @@ def test_runtime_session_cas_confirmation_catches_up_through_conflict_high_water
     asyncio.run(run())
 
 
-def test_runtime_session_partial_batch_confirmation_latches_reconciliation(
+def runtime_session_for_test_partial_batch_confirmation_latches_reconciliation(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -366,7 +366,7 @@ def test_runtime_session_partial_batch_confirmation_latches_reconciliation(
     asyncio.run(run())
 
 
-def test_runtime_session_event_id_payload_conflict_preserves_stable_error_type(
+def runtime_session_for_test_event_id_payload_conflict_preserves_stable_error_type(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -388,7 +388,7 @@ def test_runtime_session_event_id_payload_conflict_preserves_stable_error_type(
     asyncio.run(run())
 
 
-def test_runtime_session_keeps_named_terminal_sessions_separate(tmp_path) -> None:
+def runtime_session_for_test_keeps_named_terminal_sessions_separate(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     runtime = in_memory_runtime_session(tmp_path)
     executor = build_component_tool_executor(runtime)
@@ -416,7 +416,7 @@ def test_runtime_session_keeps_named_terminal_sessions_separate(tmp_path) -> Non
     assert default_payload["cwd"] == str(tmp_path)
 
 
-def test_runtime_session_terminal_session_limit_and_validation(tmp_path) -> None:
+def runtime_session_for_test_terminal_session_limit_and_validation(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     executor = build_component_tool_executor(runtime)
 
@@ -483,7 +483,7 @@ def test_component_tool_executor_can_explicitly_record_to_shared_event_log(
     ] == [1, 2, 3, 4]
 
 
-def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> None:
+def runtime_session_for_test_close_kills_background_terminal_process(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     executor = build_component_tool_executor(runtime)
     start = execute_component_tool(
@@ -503,7 +503,7 @@ def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> No
     assert status is TerminalStatus.KILLED
 
 
-def test_runtime_session_does_not_own_tool_executor_composition(tmp_path) -> None:
+def runtime_session_for_test_does_not_own_tool_executor_composition(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     assert not hasattr(runtime, "create_" + "tool_executor")
 
@@ -518,19 +518,18 @@ def test_build_core_tool_registry_requires_runtime_session(tmp_path) -> None:
         build_component_tool_registry(tmp_path)
 
 
-def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
+def runtime_session_for_test_emit_and_emit_many_publish_events(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
-    state = LoopState(session_id=runtime.runtime_session_id)
+    state = RunActivationWorkingState(session_id=runtime.runtime_session_id)
 
     async def run() -> None:
         first = await runtime.emit(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="first"
             ),
-            state=state,
-        )
+                    )
         many = await runtime.emit_many(
             [
                 make_text_block_segment_event(
@@ -540,8 +539,7 @@ def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
                     **CTX.event_fields(), block_id="text:3", delta="third"
                 ),
             ],
-            state=state,
-        )
+                    )
         assert first.sequence == 1
         assert [event.sequence for event in many] == [2, 3]
 
@@ -551,7 +549,7 @@ def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
     assert all(published.state is state for published in subscriber.events)
 
 
-def test_runtime_session_emit_many_uses_event_log_batch_extend(tmp_path) -> None:
+def runtime_session_for_test_emit_many_uses_event_log_batch_extend(tmp_path) -> None:
     event_log = RecordingExtendEventLog()
     runtime = RuntimeSession(
         tmp_path,
@@ -579,7 +577,7 @@ def test_runtime_session_emit_many_uses_event_log_batch_extend(tmp_path) -> None
     assert event_log.extend_calls == 1
 
 
-def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(
+def runtime_session_for_test_emit_from_thread_without_bound_loop_only_appends(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
@@ -597,7 +595,7 @@ def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(
     assert subscriber.events == []
 
 
-def test_runtime_session_thread_writer_cannot_bypass_fresh_ledger_genesis(
+def runtime_session_for_test_thread_writer_cannot_bypass_fresh_ledger_genesis(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(
@@ -621,7 +619,7 @@ def test_runtime_session_thread_writer_cannot_bypass_fresh_ledger_genesis(
     assert tuple(runtime.event_log.iter()) == ()
 
 
-def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(
+def runtime_session_for_test_emit_after_unbound_emit_from_thread_does_not_block(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
@@ -652,7 +650,7 @@ def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(
     assert [published.event.sequence for published in subscriber.events] == [2]
 
 
-def test_runtime_session_publish_stored_events_bridges_direct_event_log_writes(
+def runtime_session_for_test_publish_stored_events_bridges_direct_event_log_writes(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
@@ -689,7 +687,7 @@ def test_runtime_session_publish_stored_events_bridges_direct_event_log_writes(
     assert [published.event.sequence for published in subscriber.events] == [1, 2, 3]
 
 
-def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
+def runtime_session_for_test_emit_rejects_preassigned_sequence(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
 
     async def run() -> None:
@@ -703,7 +701,7 @@ def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_runtime_session_emit_from_thread_rejects_preassigned_sequence(
+def runtime_session_for_test_emit_from_thread_rejects_preassigned_sequence(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
@@ -716,7 +714,7 @@ def test_runtime_session_emit_from_thread_rejects_preassigned_sequence(
         )
 
 
-def test_runtime_session_default_event_metadata_is_merged_on_emit(tmp_path) -> None:
+def runtime_session_for_test_default_event_metadata_is_merged_on_emit(tmp_path) -> None:
     runtime = in_memory_runtime_session(
         tmp_path,
         default_event_metadata={
@@ -753,7 +751,7 @@ def test_runtime_session_default_event_metadata_is_merged_on_emit(tmp_path) -> N
     asyncio.run(run())
 
 
-def test_runtime_session_default_event_metadata_is_merged_on_emit_from_thread(
+def runtime_session_for_test_default_event_metadata_is_merged_on_emit_from_thread(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(

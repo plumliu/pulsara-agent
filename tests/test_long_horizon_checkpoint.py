@@ -62,7 +62,7 @@ from pulsara_agent.llm.materialize import (
     MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES,
 )
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.foundation.records import ArtifactContentConflict
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.runtime.long_horizon.checkpoint import (
     SubagentGraphCheckpointContractMismatch,
     SubagentGraphCheckpointLedgerUntrusted,

@@ -206,7 +206,7 @@ recall 绝不能把被召回内容再回写成新 memory candidate 或 governed 
 
 防回写污染必须存在两层：
 
-1. `ProjectionLedger` 把本轮 surfaced 的 `memory_id` + snippet 指纹记录进 scratchpad
+1. `MemoryProjectionLedgerOwner`把本activation surfaced的`memory_id` + snippet指纹记录在typed `MemoryHookRunOwner`中；该cache不跨restart且不进入Host
 2. recall projection block 带 `do_not_write_back="true"`
 
 ### 4.5 显式多跳搜索边界

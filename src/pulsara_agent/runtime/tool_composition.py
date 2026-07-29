@@ -195,6 +195,7 @@ def build_runtime_tool_executor(
 def build_runtime_tool_composition_input(
     runtime_session: RuntimeSession,
     *,
+    subagent_runtime,
     memory_proposal_sink: MemoryProposalSink | None,
     memory_recall_service: MemoryRecallService | None,
     memory_query: MemoryQuery | None,
@@ -213,7 +214,6 @@ def build_runtime_tool_composition_input(
     )
     from pulsara_agent.runtime.tool_artifacts import RuntimeToolArtifactReadPort
 
-    subagent_runtime = runtime_session.subagent_runtime
     subagent_port = (
         RuntimeSubagentControlPort(subagent_runtime)
         if subagent_runtime is not None

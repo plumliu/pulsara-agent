@@ -32,7 +32,7 @@ same runtime_session_id
 
 不会恢复：
 
-- in-process `LoopState`；
+- in-process `RunActivationWorkingState`、`RunOwner` live resources或旧activation；
 - Python tasks；
 - old ToolExecutor；
 - old terminal manager process handles（workspace supervisor 可按其自身契约保留 shared terminal pool）；
@@ -121,7 +121,7 @@ Manifest mutation失败不允许退化为“session已移除，所以后续close
 2. 读取 manifest。
 3. 若用户没有显式 workspace override，使用 manifest workspace。
 4. 若用户有 workspace override，按 HostCore workspace identity 规则重新解析。
-5. 在重放 transcript 前调用 dangling run repair。
+5. 在重放 transcript 前调用 dangling run repair；repair必须先从exact stored RunStart envelope与后续authority events重建dormant `RunOwner`。
 6. 用相同 `runtime_session_id` 构造新的 `RuntimeSession`。
 7. 用新的 `HostSession` 承载该 runtime conversation。
 
@@ -136,10 +136,17 @@ Manifest mutation失败不允许退化为“session已移除，所以后续close
 Resume 必须先在`HostSessionRegistry`同一临界区原子取得携带`runtime_session_id`的reservation；live/reserved/tombstoned runtime identity会在此处fail closed，且此时不得修改event ledger/projection。只有reservation成功后、session wiring构造前，才执行 `repair_dangling_runs_for_resume()`：
 
 - 读取该 runtime session 中 running 且没有 RUN_END 的 runs。
-- 找到每个 run 最新 event 的 turn/reply context。
-- append typed `RunEndEvent(status="aborted", abort_kind="host_teardown")`。
+- exact-read stored `RunStartEvent` raw envelope，重建`RunGenesisAuthority`，并按revision顺序fold initial/continuation exposure与resume boundary。
+- 注册`INITIALIZING + UnboundRunResources` dormant owner；initial与continuation rebind使用不同closed reason，不恢复旧task、observer、borrow或handle。
+- 找到每个 run 最新 event 的 turn/reply context；若存在active MCP lifecycle，先按MCP契约写closure、terminal ToolResult与settlement。
+- 由稳定`RunFinalizationOwner`冻结window/account close与typed `RunEndEvent(status="aborted", abort_kind="host_teardown")`的exact batch。
 - metadata 写入 `recovered_by="resume"` 与 `resume_stop_reason="resume_recovered_interrupted"`。
-- 然后修复 projection rows。
+- RuntimeSession writer确认FULL后，finalization owner做逐candidate exact confirmation，再从matching RunEnd与canonical transcript/usage运行`RunFinalOutputMaterializer`。
+- 最后修复 projection rows。
+
+Continuation已经FULL、但新activation尚未安装便崩溃时，reopen只能得到
+`INITIALIZING + InstalledRunAuthorityRevision + Unbound(reopen_continuation_rebind_pending)`；
+不得回退成仍可提交原interaction的`SUSPENDED`，也不得在没有physical activation时伪造`OPEN`。
 
 禁止只更新 `runs.status` 而不写 `RUN_END` 事件。事件优先是为了让 transcript/recovery/inspector 都能解释中断。
 
@@ -250,7 +257,7 @@ RunEnd publication failure不再生成任何 event，只 bounded close。
 ## 10. 禁止事项
 
 - 不允许把 resume 实现成 JSONL transcript append/replay。
-- 不允许恢复旧 coroutine / old LoopState。
+- 不允许恢复旧 coroutine、旧 `RunActivationWorkingState`、旧activation receipt或physical handle。
 - 不允许在没有 durable event log 的生产路径声称支持 resume。
 - 不允许直接修改 projection 表来“补齐”中断，而不写 typed `RUN_END`。
 - 不允许把 manifest 当成 transcript 真源。
@@ -268,6 +275,8 @@ RunEnd publication failure不再生成任何 event，只 bounded close。
 - resume restores manifest permission mode when not overridden。
 - resume with workspace override uses override only for new binding。
 - dangling running run is repaired with typed aborted `RUN_END` before replay。
+- dangling repair先从exact raw RunStart envelope重建common dormant `RunOwner`，再经stable finalization owner提交并确认terminal batch。
+- 两次resume后的continuation chain在reopen时重建为revision 3与continuation rebind-pending，不伪造active segment。
 - repair is idempotent when another process repaired first。
 - `--continue` chooses most recent resumable session。
 - no resumable session returns friendly CLI error。

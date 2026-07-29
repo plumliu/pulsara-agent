@@ -38,7 +38,6 @@ from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
 from tests.support.runtime_session import in_memory_runtime_session
-from tests.support.mcp import prepared_test_mcp_pending_handle
 from tests.support import (
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
@@ -830,7 +829,6 @@ def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
         ),
         predecessor_resolution_submitted_event_reference=None,
     )
-    pending_handle = prepared_test_mcp_pending_handle(prepared)
     pending = PendingMcpInputRequired(
         interaction_id="mcp_input_required:test",
         kind="mcp_input_required",
@@ -853,7 +851,6 @@ def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
             ),
         ),
         suspension_fact=suspension,
-        pending_handle=pending_handle,
         input_requests=(),
     )
     session.get_pending_interaction = lambda: pending

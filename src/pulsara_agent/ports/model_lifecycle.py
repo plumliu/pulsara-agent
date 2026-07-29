@@ -56,6 +56,46 @@ class ModelLifecycleTransactionCompanionFactory(Protocol):
     ]: ...
 
 
+class PreparedProviderInputStartBundlePort(Protocol):
+    prepared_candidate: Any
+    committed_reference: Any
+    companion_events: tuple[Any, ...]
+    append_semantic_fingerprint: str
+    autonomy_delivery: Any
+
+    @property
+    def resulting_core_state(self) -> Any: ...
+
+    @property
+    def is_one_shot(self) -> bool: ...
+
+
+class ModelLifecycleRuntimeGateway(Protocol):
+    runtime_session_id: str
+    allow_unbootstrapped_test_events: bool
+    provider_input_generation_coordinator: Any
+    long_horizon_state_store: Any
+    event_log: Any
+
+    def resolve_run_rollout_binding(self, *, run_id: str) -> Any: ...
+
+    def plan_root_model_admission(
+        self,
+        *,
+        account: Any,
+        state: Any,
+        quote: Any,
+        purpose: Any,
+    ) -> Any: ...
+
+    def build_one_shot_generation_close_event(
+        self,
+        *,
+        bundle: PreparedProviderInputStartBundlePort,
+        event_context: Any,
+    ) -> Any: ...
+
+
 def _validate_identity(model: FrozenRuntimeStateBase, *, field: str, domain: str) -> None:
     expected = context_fingerprint(
         domain,

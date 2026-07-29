@@ -538,7 +538,7 @@ def _context_source_dispositions(
 ) -> tuple[ContextSourceDispositionFact, ...]:
     """Freeze every replacement-source transition before compiler allocation."""
 
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         context_source_lifecycle_entry,
         context_source_transition_kind,
     )

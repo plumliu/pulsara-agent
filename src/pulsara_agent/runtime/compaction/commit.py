@@ -17,7 +17,7 @@ from pulsara_agent.runtime.session import (
     RuntimeSession,
 )
 from pulsara_agent.runtime._retry import bounded_none_retry_delay_seconds
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +47,7 @@ class CompactionEventCommitPort(Protocol):
         *,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
         use_terminal_deadline: bool = False,
-        state: LoopState | None = None,
+        state: RunActivationWorkingState | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventCommitResult: ...
 
@@ -57,7 +57,7 @@ class CompactionEventCommitPort(Protocol):
         *,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
         use_terminal_deadline: bool = False,
-        state: LoopState | None = None,
+        state: RunActivationWorkingState | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventBatchCommitResult: ...
 
@@ -176,7 +176,7 @@ class RuntimeSessionCompactionEventCommitPort:
         *,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
         use_terminal_deadline: bool = False,
-        state: LoopState | None = None,
+        state: RunActivationWorkingState | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventCommitResult:
         deadline = (
@@ -232,7 +232,7 @@ class RuntimeSessionCompactionEventCommitPort:
         *,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
         use_terminal_deadline: bool = False,
-        state: LoopState | None = None,
+        state: RunActivationWorkingState | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> CompactionEventBatchCommitResult:
         if not events:
@@ -291,7 +291,7 @@ class RuntimeSessionCompactionEventCommitPort:
         event: AgentEvent,
         *,
         deadline_monotonic: float,
-        state: LoopState | None,
+        state: RunActivationWorkingState | None,
         publication_terminal_maintenance_lease: object | None,
     ) -> EventWriteResult:
         attempt_generation = 0
@@ -300,8 +300,7 @@ class RuntimeSessionCompactionEventCommitPort:
                 return await self.runtime_session.write_event_with_deadline(
                     event,
                     deadline_monotonic=deadline_monotonic,
-                    state=state,
-                    publication_terminal_maintenance_lease=(
+                                        publication_terminal_maintenance_lease=(
                         publication_terminal_maintenance_lease
                     ),
                 )
@@ -328,7 +327,7 @@ class RuntimeSessionCompactionEventCommitPort:
         events: tuple[AgentEvent, ...],
         *,
         deadline_monotonic: float,
-        state: LoopState | None,
+        state: RunActivationWorkingState | None,
         publication_terminal_maintenance_lease: object | None,
     ) -> EventWriteResult:
         attempt_generation = 0
@@ -337,8 +336,7 @@ class RuntimeSessionCompactionEventCommitPort:
                 return await self.runtime_session.write_events_with_deadline(
                     events,
                     deadline_monotonic=deadline_monotonic,
-                    state=state,
-                    publication_terminal_maintenance_lease=(
+                                        publication_terminal_maintenance_lease=(
                         publication_terminal_maintenance_lease
                     ),
                 )

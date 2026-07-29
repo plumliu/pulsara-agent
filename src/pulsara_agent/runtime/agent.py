@@ -1,10 +1,11 @@
-"""Claude Code-like main loop built on RuntimeSession."""
+"""Claude Code-like activation engine built from scoped run capabilities."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -14,25 +15,13 @@ from uuid import uuid4
 from pulsara_agent.capability.call_classifier import DefaultCapabilityCallClassifier
 from pulsara_agent.capability.descriptor import CapabilityAvailability
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
-from pulsara_agent.capability.provider import (
-    CapabilityDescriptorSnapshotOutput,
-    CapabilityProjectionOutput,
-)
-from pulsara_agent.capability.render import (
-    render_active_skill_prompt,
-    render_catalog_prompt,
-)
 from pulsara_agent.capability.runtime import (
     CapabilityRuntime,
+    FrozenCapabilityExecutionSurface,
 )
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityExecutionSurfaceSnapshotContext,
     CapabilityProjectionResolveContext,
-)
-from pulsara_agent.primitives.capability import (
-    CapabilityExecutionSurfaceIdentityFact,
-    build_capability_resolve_basis,
 )
 from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.event import (
@@ -92,14 +81,14 @@ from pulsara_agent.event import (
     UserConfirmResultEvent,
 )
 from pulsara_agent.event.events import utc_now
-from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
-from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+from pulsara_agent.event_log.serialization import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
+    freeze_event_write_candidate,
+)
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.terminal_projection import stable_event_identity
-from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.control import (
     ModelCallControlResolutionError,
-    RunModelCallControlOwner,
 )
 from pulsara_agent.llm.errors import (
     ModelContextIdentityMismatch,
@@ -109,7 +98,6 @@ from pulsara_agent.llm.errors import (
     ModelTargetCapabilityMismatch,
 )
 from pulsara_agent.llm.input import LLMMessage
-from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
 from pulsara_agent.memory.scope import MemoryDomainContext
@@ -119,6 +107,7 @@ from pulsara_agent.message import (
     ToolCallBlock,
     ToolCallState,
     ToolResultState,
+    Usage,
 )
 from pulsara_agent.primitives.model_call import (
     ContextBudgetReportEvent,
@@ -128,6 +117,7 @@ from pulsara_agent.primitives.model_call import (
     sha256_fingerprint,
 )
 from pulsara_agent.primitives.long_horizon import ToolActionClassificationFact
+from pulsara_agent.ports.run_execution import RunTerminalOutcome
 from pulsara_agent.ports.mcp import (
     McpInvocationOwner,
     McpPendingTerminalReason,
@@ -139,7 +129,6 @@ from pulsara_agent.ports.mcp import (
 from pulsara_agent.ports.tool_registry import McpToolBindingContract
 from pulsara_agent.primitives.mcp import (
     McpBindingIdentityFact,
-    McpInstallationReferenceFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
@@ -173,9 +162,15 @@ from pulsara_agent.runtime.compaction.inline import (
     NoopRuntimeContextCompactor,
     RuntimeContextCompactorProtocol,
 )
-from pulsara_agent.runtime.hooks import (
+from pulsara_agent.ports.memory_hooks import (
+    MemoryHookRunView,
     MemoryHooks,
     NoopMemoryHooks,
+    build_memory_hook_run_view,
+)
+from pulsara_agent.ports.host_ingress import (
+    HostIngressAdmissionStale,
+    build_active_run_monitor_delivery,
 )
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
@@ -199,7 +194,20 @@ from pulsara_agent.runtime.permission import (
     mode_for_policy,
     preset_to_policy,
 )
-from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
+from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
+from pulsara_agent.runtime.run_execution.owner import (
+    RunActivationCoordinator,
+    RunFinalizationOwner,
+)
+from pulsara_agent.runtime.run_execution.finalization import RunFinalizationService
+from pulsara_agent.runtime.run_execution.model_step import ModelStepAttempt
+from pulsara_agent.runtime.run_execution.tool_batch import ToolBatchAttempt
+from pulsara_agent.ports.run_terminalization import (
+    RunFinalOutputMaterializerPort,
+    RunFinalOutputMaterializationFull,
+    RunFinalOutputMaterializationReconciliationRequired,
+    RunFinalOutputMaterializationRetryableUnavailable,
+)
 from pulsara_agent.runtime.context_input.candidate import (
     DEFAULT_SYSTEM_PROMPT,
     render_plan_revision_instruction,
@@ -214,8 +222,6 @@ from pulsara_agent.runtime.context_input.event_slice import event_reference_from
 from pulsara_agent.runtime.context_input.live import (
     ContextInputPreparationError,
     descriptor_render_attribution,
-    prepare_live_context_snapshot,
-    prepare_live_transcript_projection,
 )
 from pulsara_agent.runtime.context_input.manifest import (
     ContextInputManifestConfirmedAbsent,
@@ -261,20 +267,12 @@ from pulsara_agent.capability.result_semantics import (
     build_unknown_result_semantics,
     tool_origin_for_descriptor_variant,
 )
-from pulsara_agent.primitives.run_entry import (
-    CapabilityExposureOwnerFact,
-    CurrentUserMessageFact,
-    SubagentRunEntryFact,
-    text_sha256,
-)
-from pulsara_agent.primitives.run_boundary import RunExecutionActivationFact
 from pulsara_agent.primitives.long_horizon import (
     ChildRolloutUsageHandoffFact,
     ContextWindowCloseReason,
     RolloutBudgetBucket,
     RolloutPhase,
     RolloutReservationFact,
-    RolloutReservationReferenceFact,
     build_child_rollout_usage_handoff,
     calculate_model_call_reservation,
     default_long_horizon_context_policy,
@@ -282,8 +280,6 @@ from pulsara_agent.primitives.long_horizon import (
 from pulsara_agent.primitives._context_base import context_fingerprint, thaw_json
 from pulsara_agent.primitives.subagent import (
     ChildNativeTerminalReferenceFact,
-    build_child_result_render_policy,
-    validate_child_render_policy_against_budget,
 )
 from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.primitives.run_lifecycle import RunTerminalizationKind
@@ -313,13 +309,19 @@ from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventPublicationAfterCommitError,
     EventWriteConflict,
-    RuntimeSession,
+)
+from pulsara_agent.runtime.session_run_capabilities import (
+    RunRuntimeIdentity,
+    RuntimeSessionRunAuditPort,
+    RuntimeSessionRunContextPort,
+    RuntimeSessionRunLedgerPort,
+    RuntimeSessionRunLongHorizonPort,
+    RuntimeSessionRunModelPort,
+    RuntimeSessionRunToolPort,
 )
 from pulsara_agent.runtime.run_entry import (
     AgentRunDraft,
-    CapabilityResolveBasis,
     CommittedRunEntry,
-    PreparedSubagentRunEntry,
     RunWorkingSet,
 )
 from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
@@ -332,13 +334,9 @@ from pulsara_agent.runtime.long_horizon.coordinator import (
     rollout_bucket_remaining,
 )
 from pulsara_agent.runtime.long_horizon.window_compaction_service import (
-    ContextWindowCompactionService,
     WindowCompactionRequest,
 )
-from pulsara_agent.runtime.long_horizon.accounting import (
-    child_settlement_aggregate,
-    resolve_run_rollout_binding,
-)
+from pulsara_agent.runtime.long_horizon.accounting import child_settlement_aggregate
 from pulsara_agent.runtime.long_horizon.projection import (
     LongHorizonPreparationBoundExceeded,
     ProjectionTargetUnreachable,
@@ -352,7 +350,6 @@ from pulsara_agent.runtime.long_horizon.projection import (
 from pulsara_agent.runtime.long_horizon.rollup import (
     default_observation_rollup_renderer_registry,
     derive_rollup_placement_anchor,
-    materialize_observation_rollup,
     prepared_observation_rollup_cache_key,
     prepare_observation_rollup_artifact,
 )
@@ -364,31 +361,22 @@ from pulsara_agent.runtime.long_horizon.feasibility import (
     ProductionRolloutBudgetFeasibilityReport,
     require_prevalidated_production_rollout_pair,
 )
-from pulsara_agent.runtime.tool_execution import (
-    RuntimeSessionToolExecutionEventCommitPort,
-    build_tool_result_terminal_event,
-)
+from pulsara_agent.runtime.tool_execution import build_tool_result_terminal_event
 from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.runtime.long_horizon.run_contract import (
-    build_child_rollout_subaccount,
-    prepare_child_long_horizon_run,
     prepare_child_rollout_reservation,
 )
-from pulsara_agent.runtime.long_horizon.store import LongHorizonReducerApplyError
+from pulsara_agent.primitives.long_horizon import LongHorizonReducerApplyError
 from pulsara_agent.runtime.state import (
     LoopBudget,
-    LoopState,
+    RunActivationWorkingState,
     LoopStatus,
     LoopTransition,
 )
 from pulsara_agent.runtime.subagent import (
-    HydratedSubagentRunView,
-    InMemoryEventLogLocator,
-    PostgresEventLogLocator,
     SubagentRuntime,
     SubagentRuntimeError,
 )
-from pulsara_agent.runtime.subagent.run_entry import SubagentRunEntryDriver
 from pulsara_agent.capability.builtin_catalog import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
@@ -410,7 +398,6 @@ from pulsara_agent.ports.tool_execution import (
 )
 from pulsara_agent.runtime.tool_executor import ToolExecutor
 from pulsara_agent.runtime.tool_composition import (
-    build_runtime_tool_composition_input,
     build_runtime_tool_executor,
 )
 
@@ -474,134 +461,6 @@ _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
         "rollout_tool_budget_unavailable",
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _ProfileFilteredExecutionSurfaceProvider:
-    provider: Any
-    allowed_tool_names: frozenset[str]
-    allowed_descriptor_ids: frozenset[str]
-
-    @property
-    def provider_id(self) -> str:
-        return str(getattr(self.provider, "provider_id", "profile-filtered"))
-
-    def snapshot_descriptors(
-        self,
-        context: CapabilityExecutionSurfaceSnapshotContext,
-    ) -> CapabilityDescriptorSnapshotOutput:
-        snapshot = self.provider.snapshot_descriptors
-        output = snapshot(context)
-        return CapabilityDescriptorSnapshotOutput(
-            descriptors=tuple(
-                descriptor
-                for descriptor in output.descriptors
-                if descriptor.name in self.allowed_tool_names
-                or descriptor.id in self.allowed_descriptor_ids
-            ),
-            diagnostics=output.diagnostics,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _ProfileFilteredProjectionProvider:
-    provider: Any
-    allowed_skill_names: frozenset[str]
-
-    @property
-    def provider_id(self) -> str:
-        return str(getattr(self.provider, "provider_id", "profile-filtered"))
-
-    def resolve_projection(
-        self,
-        context: CapabilityProjectionResolveContext,
-        *,
-        execution_surface: CapabilityExecutionSurfaceIdentityFact,
-    ) -> CapabilityProjectionOutput:
-        resolve_projection = self.provider.resolve_projection
-        output = resolve_projection(context, execution_surface=execution_surface)
-        catalog_entries = tuple(
-            entry
-            for entry in output.catalog_entries
-            if entry.name in self.allowed_skill_names
-        )
-        active_injections = tuple(
-            injection
-            for injection in output.active_injections
-            if injection.name in self.allowed_skill_names
-        )
-        catalog_rendered = render_catalog_prompt(catalog_entries)
-        active_rendered = render_active_skill_prompt(active_injections)
-        return CapabilityProjectionOutput(
-            catalog_entries=catalog_entries,
-            active_injections=active_injections,
-            diagnostics=(
-                *output.diagnostics,
-                *catalog_rendered.diagnostics,
-                *active_rendered.diagnostics,
-            ),
-            catalog_prompt=catalog_rendered.text,
-            active_skill_prompt=active_rendered.text,
-            catalog_rendered=catalog_rendered,
-            active_skill_rendered=active_rendered,
-        )
-
-
-def _subagent_event_log_backend(runtime_session: RuntimeSession):
-    parent_log = runtime_session.event_log
-    if isinstance(parent_log, InMemoryEventLog):
-        locator = InMemoryEventLogLocator()
-
-        def factory(runtime_session_id: str) -> EventLog:
-            event_log = InMemoryEventLog()
-            locator.register(runtime_session_id, event_log)
-            return event_log
-
-        return factory, locator
-    if isinstance(parent_log, PostgresEventLog):
-        locator = PostgresEventLogLocator(
-            connection_provider=parent_log.connection_provider,
-            workspace_root=runtime_session.workspace_root,
-        )
-        return locator.event_log_for_runtime_session, locator
-    raise TypeError(
-        "SubagentRuntime requires a supported EventLog backend "
-        f"(got {type(parent_log).__name__})"
-    )
-
-
-def _profile_filtered_capability_runtime(
-    parent: CapabilityRuntime, profile: Any
-) -> CapabilityRuntime:
-    allowed_tool_names = frozenset(getattr(profile, "allowed_tool_names", ()) or ())
-    allowed_descriptor_ids = frozenset(
-        getattr(profile, "allowed_descriptor_ids", ()) or ()
-    )
-    allowed_skill_names = frozenset(getattr(profile, "allowed_skill_names", ()) or ())
-    if (
-        not allowed_tool_names
-        and not allowed_descriptor_ids
-        and not allowed_skill_names
-    ):
-        return CapabilityRuntime(providers=())
-    filtered: list[Any] = []
-    for provider in parent.providers:
-        if hasattr(provider, "snapshot_descriptors"):
-            filtered.append(
-                _ProfileFilteredExecutionSurfaceProvider(
-                    provider=provider,
-                    allowed_tool_names=allowed_tool_names,
-                    allowed_descriptor_ids=allowed_descriptor_ids,
-                )
-            )
-        if hasattr(provider, "resolve_projection"):
-            filtered.append(
-                _ProfileFilteredProjectionProvider(
-                    provider=provider,
-                    allowed_skill_names=allowed_skill_names,
-                )
-            )
-    return CapabilityRuntime(providers=tuple(filtered))
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,17 +654,55 @@ def _optional_float(value: object) -> float | None:
 class AgentRunResult:
     status: LoopStatus
     stop_reason: RunStopReason | None
-    state: LoopState
+    run_id: str
     messages: list[Msg]
     final_text: str
+    token_usage: Usage
+    tool_call_count: int
+    pending_interaction_kind: str | None
+    finalized: bool
     error_message: str | None = None
+
+
+def agent_run_result_from_terminal_outcome(
+    outcome: RunTerminalOutcome,
+) -> AgentRunResult:
+    """Render the legacy public shell only from canonical terminal authority."""
+
+    output = outcome.output
+    return AgentRunResult(
+        status={
+            "finished": LoopStatus.FINISHED,
+            "failed": LoopStatus.FAILED,
+            "aborted": LoopStatus.ABORTED,
+        }[output.status],
+        stop_reason=output.stop_reason,
+        run_id=outcome.owner_identity.run_id,
+        messages=[],
+        final_text=output.final_text or "",
+        token_usage=Usage(
+            input_tokens=output.usage.input_tokens,
+            output_tokens=output.usage.output_tokens,
+            total_tokens=output.usage.total_tokens,
+        ),
+        tool_call_count=output.tool_call_count,
+        pending_interaction_kind=None,
+        finalized=True,
+        error_message=None,
+    )
 
 
 class AgentRuntime:
     def __init__(
         self,
         *,
-        runtime_session: RuntimeSession,
+        run_identity: RunRuntimeIdentity,
+        run_ledger_port: RuntimeSessionRunLedgerPort,
+        run_context_port: RuntimeSessionRunContextPort,
+        run_model_port: RuntimeSessionRunModelPort,
+        run_tool_port: RuntimeSessionRunToolPort,
+        run_long_horizon_port: RuntimeSessionRunLongHorizonPort,
+        run_audit_port: RuntimeSessionRunAuditPort,
         llm_runtime: LLMRuntime,
         memory_hooks: MemoryHooks | None = None,
         permission_gate: PermissionGate | None = None,
@@ -820,10 +717,24 @@ class AgentRuntime:
         context_compactor: RuntimeContextCompactorProtocol | None = None,
         subagent_runtime: SubagentRuntime | None = None,
         enable_subagents: bool = True,
+        run_execution_registry: RunExecutionRegistry | None = None,
     ) -> None:
         if capability_runtime is None:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
-        self.runtime_session = runtime_session
+        self._run_identity = run_identity
+        self._run_ledger = run_ledger_port
+        self._run_context = run_context_port
+        self._run_model = run_model_port
+        self._run_tools = run_tool_port
+        self._run_long_horizon = run_long_horizon_port
+        self._run_audit = run_audit_port
+        self.run_execution_registry = run_execution_registry
+        self._run_finalization_service = (
+            RunFinalizationService(registry=run_execution_registry)
+            if run_execution_registry is not None
+            else None
+        )
+        self._run_reconciliation_service = None
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         policy = permission_policy or default_permission_policy()
@@ -847,28 +758,13 @@ class AgentRuntime:
         self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
-        self._is_subagent_child = isinstance(
-            runtime_session.default_event_metadata.get("subagent"), dict
-        )
+        self._is_subagent_child = run_identity.is_subagent_child
         self._subagent_parent_features_enabled = (
             enable_subagents and not self._is_subagent_child
         )
         self.subagent_runtime = subagent_runtime
         if self._subagent_parent_features_enabled and self.subagent_runtime is None:
-            existing_subagent_runtime = runtime_session.subagent_runtime
-            if isinstance(existing_subagent_runtime, SubagentRuntime):
-                self.subagent_runtime = existing_subagent_runtime
-                self.subagent_runtime.bind_child_runner(self._run_child_agent)
-            else:
-                child_event_log_factory, event_log_locator = (
-                    _subagent_event_log_backend(runtime_session)
-                )
-                self.subagent_runtime = SubagentRuntime(
-                    parent_runtime_session=runtime_session,
-                    child_event_log_factory=child_event_log_factory,
-                    event_log_locator=event_log_locator,
-                    child_runner=self._run_child_agent,
-                )
+            self.subagent_runtime = run_tool_port.ensure_subagent_runtime(enabled=True)
         if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
             self.subagent_runtime.bind_rollout_admission(
                 self._prepare_child_rollout_admission_events
@@ -876,8 +772,6 @@ class AgentRuntime:
             self.subagent_runtime.bind_rollout_terminal_augmenter(
                 self._prepare_child_rollout_terminal_events
             )
-        self.runtime_session.subagent_runtime = self.subagent_runtime
-        self._subagent_dangling_repair_done = False
         self._mcp_terminal_commit_outcomes: dict[
             tuple[str, str],
             Literal["not_attempted", "attempting", "none", "full", "untrusted"],
@@ -892,27 +786,12 @@ class AgentRuntime:
         self.observation_rollup_renderer_registry = (
             default_observation_rollup_renderer_registry()
         )
-        existing_window_compactor = runtime_session.window_compaction_service
-        if existing_window_compactor is None:
-            existing_window_compactor = ContextWindowCompactionService(
-                runtime_session=runtime_session,
-                llm_runtime=llm_runtime,
-            )
-            runtime_session.window_compaction_service = existing_window_compactor
-        elif not isinstance(existing_window_compactor, ContextWindowCompactionService):
-            raise TypeError(
-                "RuntimeSession carries an incompatible window compaction service"
-            )
-        self.window_compaction_service = existing_window_compactor
-        self._tool_composition_input = build_runtime_tool_composition_input(
-            runtime_session,
-            memory_proposal_sink=getattr(
-                self.memory_hooks, "memory_proposal_sink", None
-            ),
-            memory_recall_service=getattr(self.memory_hooks, "recall", None),
-            memory_query=getattr(self.memory_hooks, "memory_query", None),
-            graph_id=getattr(self.memory_hooks, "graph_id", None),
-            memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
+        self.window_compaction_service = run_context_port.window_compaction_service(
+            llm_runtime=llm_runtime
+        )
+        self._tool_composition_input = run_tool_port.build_composition_input(
+            memory_hooks=self.memory_hooks,
+            subagent_runtime=self.subagent_runtime,
         )
         self.tool_executor = build_runtime_tool_executor(self._tool_composition_input)
 
@@ -937,6 +816,13 @@ class AgentRuntime:
             summarizer_target=summarizer_target.fact,
         )
 
+    def result_from_owned_state(
+        self, state: RunActivationWorkingState | None
+    ) -> AgentRunResult:
+        if state is None:
+            raise RuntimeError("run owner has no resident activation state")
+        return self._run_result(state)
+
     def refresh_capability_runtime(self, capability_runtime: CapabilityRuntime) -> None:
         """Replace per-turn capability facts and rebuild the executor registry.
 
@@ -947,21 +833,66 @@ class AgentRuntime:
         if capability_runtime is None:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
         self.capability_runtime = capability_runtime
-        self._tool_composition_input = build_runtime_tool_composition_input(
-            self.runtime_session,
-            memory_proposal_sink=getattr(
-                self.memory_hooks, "memory_proposal_sink", None
-            ),
-            memory_recall_service=getattr(self.memory_hooks, "recall", None),
-            memory_query=getattr(self.memory_hooks, "memory_query", None),
-            graph_id=getattr(self.memory_hooks, "graph_id", None),
-            memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
+        self._tool_composition_input = self._run_tools.build_composition_input(
+            memory_hooks=self.memory_hooks,
+            subagent_runtime=self.subagent_runtime,
         )
         self.tool_executor = build_runtime_tool_executor(self._tool_composition_input)
+
+    async def prepare_run_draft(
+        self,
+        state: RunActivationWorkingState,
+        **kwargs,
+    ) -> AgentRunDraft:
+        """Freeze one RunStart through the scoped context authority."""
+
+        from pulsara_agent.runtime.run_entry import prepare_agent_run_draft
+
+        frozen_surface = kwargs.get("frozen_execution_surface")
+        if not isinstance(frozen_surface, FrozenCapabilityExecutionSurface):
+            raise TypeError("run draft requires a frozen execution surface")
+        run_identity = replace(
+            self._run_identity,
+            mcp_installation_id=(
+                frozen_surface.identity.mcp_installation_id
+            ),
+        )
+        return await prepare_agent_run_draft(
+            state,
+            run_identity=run_identity,
+            run_context_port=self._run_context,
+            **kwargs,
+        )
+
+    async def commit_run_entry_events(
+        self, events: tuple[AgentEvent, ...]
+    ) -> tuple[AgentEvent, ...]:
+        return tuple(await self._run_ledger.emit_many(events))
+
+    def resolve_run_entry_write_failure(self, error: BaseException):
+        return self._run_ledger.resolved_write_outcome(error)
+
+    def discard_prepared_run_seed(self, run_id: str) -> None:
+        self._run_context.discard_prepared_run_seed(run_id)
+
+    def adopt_committed_run_seed(self, run_start: RunStartEvent) -> None:
+        self._run_context.adopt_committed_run_seed(run_start)
+
+    async def request_model_cancel(self, run_id: str, *, reason: str) -> int:
+        return await self._run_model.request_cancel_run(run_id, reason=reason)
 
     @property
     def permission_policy(self) -> EffectivePermissionPolicy:
         return self._permission_state.policy
+
+    @property
+    def runtime_session_id(self) -> str:
+        return self._run_identity.runtime_session_id
+
+    def event_reconciliation_required(self) -> bool:
+        """Expose only the ledger latch needed by the run-owner reducer."""
+
+        return self._run_ledger.reconciliation_required
 
     @property
     def permission_mode(self) -> PermissionMode | None:
@@ -989,7 +920,7 @@ class AgentRuntime:
 
     async def resume_after_approval(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: ApprovalResolution,
     ) -> AgentRunResult:
         async for _event in self.stream_after_approval(state, resolution):
@@ -998,7 +929,7 @@ class AgentRuntime:
 
     async def stream_after_approval(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: ApprovalResolution,
     ) -> AsyncIterator[AgentEvent]:
         async for event in self._stream_approval_resolution(state, resolution):
@@ -1006,7 +937,7 @@ class AgentRuntime:
 
     async def resume_after_plan_interaction(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PlanInteractionResolution,
     ) -> AgentRunResult:
         async for _event in self.stream_after_plan_interaction(state, resolution):
@@ -1015,7 +946,7 @@ class AgentRuntime:
 
     async def resume_after_mcp_input_required(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PreparedMcpInputRequiredResolution,
     ) -> AgentRunResult:
         async for _event in self.stream_after_mcp_input_required(state, resolution):
@@ -1024,7 +955,7 @@ class AgentRuntime:
 
     async def stream_after_plan_interaction(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PlanInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
         async for event in self._stream_plan_interaction_resolution(state, resolution):
@@ -1032,7 +963,7 @@ class AgentRuntime:
 
     async def stream_after_mcp_input_required(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PreparedMcpInputRequiredResolution,
     ) -> AsyncIterator[AgentEvent]:
         original_pending_tool_calls = list(state.pending_tool_calls)
@@ -1077,7 +1008,7 @@ class AgentRuntime:
                     ),
                 )
                 if not committed_result_events:
-                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    self._run_ledger.latch_event_commit_outcome_unknown()
                     state.pending_tool_calls = original_pending_tool_calls
                     state.pending_interaction_kind = original_pending_kind
                     state.pending_interaction_payload = original_pending_payload
@@ -1110,7 +1041,7 @@ class AgentRuntime:
 
     async def abort_run(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: AbortKind = AbortKind.USER_STOP,
     ) -> AgentRunResult:
@@ -1120,7 +1051,7 @@ class AgentRuntime:
 
     async def fail_committed_run(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         stop_reason: RunStopReason,
         error_message: str,
@@ -1140,7 +1071,50 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
-    async def retry_run_terminalization(self, state: LoopState) -> AgentRunResult:
+    def prepare_failed_run_terminalization(
+        self,
+        state: RunActivationWorkingState,
+        *,
+        stop_reason: RunStopReason,
+        error_message: str,
+    ) -> RunEndEvent:
+        """Freeze the one RunEnd owned after a driver can no longer continue."""
+
+        if state.finalized:
+            raise RuntimeError("a finalized run cannot freeze another RunEnd")
+        state.status = LoopStatus.FAILED
+        state.stop_reason = stop_reason
+        state.error_message = error_message
+        state.pending_tool_calls = []
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
+        state.pending_interaction_source_event_reference = None
+        state.pending_interaction_source_event_candidate = None
+        if state.last_transition is not LoopTransition.FAIL:
+            state.transition(LoopTransition.FAIL)
+        return self._freeze_run_end_candidate(state)
+
+    def continue_run_terminalization(
+        self,
+        state: RunActivationWorkingState,
+    ) -> asyncio.Task[tuple[AgentEvent, ...]]:
+        """Give retry ownership to the stable finalization service."""
+
+        service = self._run_finalization_service
+        if service is None:
+            raise RuntimeError("run finalization service is not installed")
+        return service.continue_terminalization(
+            run_id=state.run_id,
+            state=state,
+            operation=lambda: self._execute_run_finalization(
+                state,
+                run_session_end_hook=False,
+            ),
+        )
+
+    async def retry_run_terminalization(
+        self, state: RunActivationWorkingState
+    ) -> AgentRunResult:
         """Retry one frozen RunEnd candidate without changing its run outcome."""
 
         if not state.finalized:
@@ -1153,7 +1127,7 @@ class AgentRuntime:
 
     async def stream_abort_run(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: AbortKind = AbortKind.USER_STOP,
     ) -> AsyncIterator[AgentEvent]:
@@ -1211,7 +1185,7 @@ class AgentRuntime:
 
     async def _terminalize_pending_approval_for_abort(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: AbortKind,
     ) -> AsyncIterator[AgentEvent]:
@@ -1219,7 +1193,7 @@ class AgentRuntime:
 
         reason_code = f"pending_approval_aborted:{reason.value}"
         for block in tuple(state.pending_tool_calls):
-            stored_events = await self.runtime_session.emit_many(
+            stored_events = await self._run_ledger.emit_many(
                 self._typed_tool_result_error_events(
                     state,
                     tool_call_id=block.id,
@@ -1233,7 +1207,6 @@ class AgentRuntime:
                     failure_stage="permission_denied",
                     reason_code=reason_code,
                 ),
-                state=state,
             )
             for event in stored_events:
                 yield event
@@ -1246,7 +1219,7 @@ class AgentRuntime:
 
     async def _terminalize_pending_mcp_for_abort(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: AbortKind,
     ) -> AsyncIterator[AgentEvent]:
@@ -1287,10 +1260,9 @@ class AgentRuntime:
                     else None
                 ),
             )
-        closure_reason = state.scratchpad.pop(
-            "mcp_input_required_publication_closure_reason",
-            None,
-        )
+        finalization = self._require_run_finalization_owner(state)
+        closure_reason = finalization.mcp_publication_closure_reason
+        finalization.mcp_publication_closure_reason = None
         if closure_reason is not None and closure_reason not in {
             "suspension_publication_unavailable",
             "resume_boundary_publication_unavailable",
@@ -1300,7 +1272,7 @@ class AgentRuntime:
             "live_pending_lease_unavailable",
         }:
             raise RuntimeError("pending MCP closure reason is invalid")
-        deadline_budget = state.scratchpad.get("publication_terminal_deadline_budget")
+        deadline_budget = finalization.publication_deadline_budget
         if not isinstance(deadline_budget, RuntimeEventOperationDeadlineBudget):
             deadline_budget = build_runtime_event_deadline_budget(
                 admitted_at_monotonic=time.monotonic(),
@@ -1357,16 +1329,14 @@ class AgentRuntime:
             None,
         )
         if closure is not None:
-            state.scratchpad["mcp_input_required_closure_event_reference"] = (
-                event_reference_from_stored(
-                    closure,
-                    runtime_session_id=self.runtime_session.runtime_session_id,
-                )
+            finalization.mcp_closure_event_reference = event_reference_from_stored(
+                closure,
+                runtime_session_id=self._run_identity.runtime_session_id,
             )
 
     async def _terminalize_pending_plan_for_abort(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         reason: AbortKind,
     ) -> AsyncIterator[AgentEvent]:
@@ -1402,7 +1372,30 @@ class AgentRuntime:
                 yield event
 
     def close(self) -> None:
-        self.runtime_session.close()
+        # RuntimeSession and process-wide services are composition-owned.  This
+        # activation engine only owns the run-local attempts it installs.
+        return None
+
+    def bind_run_execution_registry(self, registry: RunExecutionRegistry) -> None:
+        current = self.run_execution_registry
+        if current is not None and current is not registry:
+            raise RuntimeError("AgentRuntime is already bound to another run registry")
+        self.run_execution_registry = registry
+        if self._run_finalization_service is None:
+            self._run_finalization_service = RunFinalizationService(registry=registry)
+
+    def bind_run_reconciliation_service(self, service) -> None:
+        current = self._run_reconciliation_service
+        if current is not None and current is not service:
+            raise RuntimeError(
+                "AgentRuntime is already bound to another reconciliation owner"
+            )
+        self._run_reconciliation_service = service
+
+    async def drain_run_finalizations(self, *, deadline_monotonic: float) -> None:
+        service = self._run_finalization_service
+        if service is not None:
+            await service.drain(deadline_monotonic=deadline_monotonic)
 
     def _prepare_child_rollout_admission_events(
         self,
@@ -1414,13 +1407,11 @@ class AgentRuntime:
         parent_run_ids = {event.parent_run_id for event in ordered}
         parent_runtime_ids = {event.parent_runtime_session_id for event in ordered}
         if parent_run_ids != {ordered[0].run_id} or parent_runtime_ids != {
-            self.runtime_session.runtime_session_id
+            self._run_identity.runtime_session_id
         }:
             raise RuntimeError("child rollout admission parent attribution mismatch")
         parent_run_id = ordered[0].parent_run_id
-        parent_start = self.runtime_session.long_horizon_state_store.run_start(
-            parent_run_id
-        )
+        parent_start = self._run_long_horizon.store.run_start(parent_run_id)
         if parent_start is None:
             raise RuntimeError("child rollout admission requires one parent RunStart")
         if any(
@@ -1432,10 +1423,8 @@ class AgentRuntime:
                 "child budget snapshot rollout policy differs from parent RunStart"
             )
         account_id = parent_start.long_horizon.rollout_account_id
-        account = self.runtime_session.long_horizon_state_store.rollout_account(
-            account_id
-        )
-        state = self.runtime_session.long_horizon_state_store.rollout_state(account_id)
+        account = self._run_long_horizon.store.rollout_account(account_id)
+        state = self._run_long_horizon.store.rollout_state(account_id)
         if account is None or state is None:
             raise RuntimeError("child rollout admission lost the parent account")
         if state.phase.value != "exploration":
@@ -1473,9 +1462,7 @@ class AgentRuntime:
                     ),
                     parent_account=account,
                     parent_state=state,
-                    source_sequence=(
-                        self.runtime_session.long_horizon_state_store.through_sequence
-                    ),
+                    source_sequence=(self._run_long_horizon.store.through_sequence),
                     child_policy=parent_start.long_horizon.child_rollout_policy,
                 ),
             )
@@ -1551,15 +1538,13 @@ class AgentRuntime:
         augmented = list(events)
         for terminal in terminal_events:
             parent_start = _run_start_for_id(
-                self.runtime_session,
+                self._run_long_horizon.store,
                 run_id=terminal.run_id,
             )
             account_id = parent_start.long_horizon.rollout_account_id
-            account_state = self.runtime_session.long_horizon_state_store.rollout_state(
-                account_id
-            )
+            account_state = self._run_long_horizon.store.rollout_state(account_id)
             if account_state is None:
-                admission = self.runtime_session.event_log.get_by_id(
+                admission = self._run_ledger.get_event(
                     f"subagent_rollout_budget_resolved:{terminal.subagent_run_id}"
                 )
                 if not isinstance(admission, SubagentRolloutBudgetResolvedEvent):
@@ -1708,392 +1693,25 @@ class AgentRuntime:
             child_terminal_reference=child_terminal_reference,
         )
 
-    async def _run_child_agent(
+    def new_state(
         self,
-        subagent_runtime: SubagentRuntime,
-        run_view: HydratedSubagentRunView,
-    ) -> None:
-        run = run_view.fact
-        capability_profile = run.capability_profile_value
-        child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
-        if capability_profile.permission_mode is None:
-            raise ValueError(
-                "child subagent run requires a preset child_profile permission mode"
-            )
-        child_permission_mode = parse_permission_mode(
-            capability_profile.permission_mode
-        )
-        child_agent = AgentRuntime(
-            runtime_session=child_session,
-            llm_runtime=self.llm_runtime,
-            memory_hooks=NoopMemoryHooks(),
-            model_role=self.model_role,
-            options=self.options,
-            budget=self.budget,
-            system_prompt=self.system_prompt,
-            capability_runtime=_profile_filtered_capability_runtime(
-                self.capability_runtime,
-                capability_profile,
-            ),
-            memory_domain=None,
-            workspace_kind=self.workspace_kind,
-            permission_policy=preset_to_policy(child_permission_mode),
-            context_compactor=NoopRuntimeContextCompactor(),
-            subagent_runtime=subagent_runtime,
-            enable_subagents=False,
-        )
-        child_agent.rollout_budget_feasibility_report = (
-            self.rollout_budget_feasibility_report
-        )
-        # A child profile is an execution-surface boundary, not merely a
-        # model-visible projection.  Keep descriptor and binding sets exact so
-        # disallowed parent tools cannot remain as unowned executable bindings.
-        child_agent.tool_executor.registry = (
-            child_agent.tool_executor.registry.restricted_to(
-                frozenset(capability_profile.allowed_tool_names)
-            )
-        )
-        if not run_view.task_text_complete or run_view.task_text is None:
-            raise ValueError(
-                "child subagent run requires a fully hydrated task artifact"
-            )
-        if run.task_artifact_id is None:
-            raise ValueError("child subagent run requires a durable task artifact")
-        child_state = child_agent.new_state()
-        child_target = child_agent.resolve_run_model_target()
-        child_summarizer_target = child_agent.llm_runtime.resolve_target(
-            role=ModelRole.FLASH
-        )
-        child_agent.require_prevalidated_rollout_pair(
-            execution_profile_kind="subagent_child",
-            execution_profile_id=run.profile_id or "general_worker",
-            primary_target=child_target,
-            summarizer_target=child_summarizer_target,
-        )
-        parent_run_start = self.runtime_session.long_horizon_state_store.run_start(
-            run.parent_run_id
-        )
-        if parent_run_start is None:
-            raise RuntimeError("child rollout contract requires one parent RunStart")
-        resolved_budget_event = self.runtime_session.event_log.get_by_id(
-            f"subagent_rollout_budget_resolved:{run.subagent_run_id}"
-        )
-        account_state = self.runtime_session.long_horizon_state_store.rollout_state(
-            parent_run_start.long_horizon.rollout_account_id
-        )
-        reservations = (
-            tuple(
-                item
-                for item in account_state.active_reservations
-                if item.owner_kind == "subagent_run"
-                and item.owner_id == run.subagent_run_id
-            )
-            if account_state is not None
-            else ()
-        )
-        if (
-            not isinstance(resolved_budget_event, SubagentRolloutBudgetResolvedEvent)
-            or len(reservations) != 1
-        ):
-            raise RuntimeError("child start lost its atomic rollout admission facts")
-        reservation = reservations[0]
-        stored_reservation = self.runtime_session.event_log.get_by_id(
-            f"rollout_budget_reservation_created:{reservation.reservation_id}"
-        )
-        if not isinstance(stored_reservation, RolloutBudgetReservationCreatedEvent):
-            raise RuntimeError("child start lost its rollout reservation fact")
-        if (
-            resolved_budget_event.budget_snapshot_event_id
-            != run.provenance.created_event_id
-            or stored_reservation.sequence is None
-            or stored_reservation.reservation.reserved_milliunits
-            != resolved_budget_event.resolved_budget.max_rollout_milliunits_per_child
-            or resolved_budget_event.resolved_budget.child_primary_target_fingerprint
-            != child_target.fact.target_fingerprint
-            or resolved_budget_event.resolved_budget.child_summarizer_target_fingerprint
-            != child_summarizer_target.fact.target_fingerprint
-        ):
-            raise RuntimeError("child rollout admission identity mismatch")
-        reservation_reference = RolloutReservationReferenceFact(
-            owner_runtime_session_id=self.runtime_session.runtime_session_id,
-            reservation_id=stored_reservation.reservation.reservation_id,
-            reservation_event_id=stored_reservation.id,
-            reservation_sequence=stored_reservation.sequence,
-            reservation_fingerprint=(
-                stored_reservation.reservation.semantic_fingerprint
-            ),
-        )
-        child_permission = child_agent._capture_run_permission_snapshot(child_state)
-        child_run_start_id = f"run_start:subagent:{uuid4().hex}"
-        child_long_horizon = prepare_child_long_horizon_run(
-            child_runtime_session_id=child_session.runtime_session_id,
-            child_run_id=child_state.run_id,
-            run_start_event_id=child_run_start_id,
-            primary_target=child_target.fact,
-            summarizer_target=child_summarizer_target.fact,
-            graph_reducer_contract=(
-                child_session.subagent_graph_checkpoint_service.reducer_binding.contract
-            ),
-            account_id=parent_run_start.long_horizon.rollout_account_id,
-            account_owner_runtime_session_id=(
-                parent_run_start.long_horizon.rollout_account_owner_runtime_session_id
-            ),
-            account_owner_run_id=(
-                parent_run_start.long_horizon.rollout_account_owner_run_id
-            ),
-            inherited_rollout_reservation=reservation_reference,
-        )
-        child_rollout_subaccount = build_child_rollout_subaccount(
-            child_runtime_session_id=child_session.runtime_session_id,
-            child_run_id=child_state.run_id,
-            resolved_budget=resolved_budget_event.resolved_budget,
-            reservation_reference=reservation_reference,
-            root_account_id=parent_run_start.long_horizon.rollout_account_id,
-        )
-        task_observed_at = run.created_at.isoformat()
-        render_policy = build_child_result_render_policy(
-            renderer_version="subagent-result:v1",
-            max_summary_chars=run.budget_snapshot.max_result_summary_chars_per_child,
-            max_artifact_refs=run.budget_snapshot.max_result_artifact_refs_per_child,
-        )
-        validate_child_render_policy_against_budget(render_policy, run.budget_snapshot)
-        frozen_surface = child_agent.capability_runtime.freeze_execution_surface(
-            CapabilityExecutionSurfaceSnapshotContext(
-                workspace_root=child_session.workspace_root,
-                workspace_kind=self.workspace_kind,
-                available_tool_names=frozenset(
-                    child_agent.tool_executor.registry.names()
-                ),
-                mcp_installation_id=child_session.mcp_installation_id,
-            ),
-            tool_registry=child_agent.tool_executor.registry,
-            archive=child_session.archive,
-            runtime_session_id=child_session.runtime_session_id,
-            owner_id=child_run_start_id,
-        )
-        child_execution_handles = BoundaryExecutionHandles(
-            handle_id=f"child_execution_handles:{uuid4().hex}",
-            handle_generation=1,
-            owner_id=run.subagent_run_id,
-            state="run_owned",
-            mcp_installation=child_session.mcp_installation_id,
-            capability_runtime=child_agent.capability_runtime,
-            tool_registry=child_agent.tool_executor.registry,
-            frozen_execution_surface=frozen_surface,
-        )
-        subagent_runtime.attach_child_execution_handles(
-            run.subagent_run_id,
-            child_execution_handles,
-        )
-        child_state.scratchpad["capability_execution_borrow_authority"] = (
-            child_execution_handles.borrow_authority
-        )
-        child_state.scratchpad["capability_execution_borrow_kind"] = "child"
-        exposure_owner = CapabilityExposureOwnerFact(
-            owner_kind="subagent_run_start",
-            owner_id=child_run_start_id,
-            host_boundary_kind=None,
-            runtime_session_id=child_session.runtime_session_id,
-            run_id=child_state.run_id,
-        )
-        capability_basis = build_capability_resolve_basis(
-            basis_id=f"capability_basis:subagent:{uuid4().hex}",
-            basis_kind="initial",
-            source_basis_id=None,
-            source_basis_fingerprint=None,
-            owner=exposure_owner,
-            workspace_identity_fingerprint=sha256_fingerprint(
-                "subagent-workspace-identity:v1",
-                [str(child_session.workspace_root), self.workspace_kind],
-            ),
-            memory_domain_id="memory_domain:subagent-disabled",
-            permission_snapshot_id=child_permission.snapshot_id,
-            plan_active=False,
-            active_skill_names=(),
-            user_intent_fingerprint=sha256_fingerprint(
-                "subagent-task-intent:v1", run_view.task_text
-            ),
-            prior_transcript_fingerprint=sha256_fingerprint(
-                "subagent-prior-transcript:v1", []
-            ),
-            mcp_installation_id=child_session.mcp_installation_id,
-            execution_surface_identity=frozen_surface.identity,
-        )
-        current_user = CurrentUserMessageFact(
-            message_id=f"user-message:{child_state.run_id}",
-            source_kind=(
-                "subagent_task"
-                if run.task_id is not None
-                else "subagent_primitive_objective"
-            ),
-            text=run_view.task_text,
-            observed_at_utc=task_observed_at,
-            content_sha256=text_sha256(run_view.task_text),
-            source_artifact_id=run.task_artifact_id,
-        )
-        child_entry = SubagentRunEntryFact(
-            subagent_run_id=run.subagent_run_id,
-            subagent_task_id=run.task_id,
-            parent_runtime_session_id=run.parent_runtime_session_id,
-            parent_run_id=run.parent_run_id,
-            spawn_edge_id=run.edge_id,
-            capability_profile_fingerprint=sha256_fingerprint(
-                "subagent-capability-profile:v1",
-                capability_profile.to_event_value(),
-            ),
-            task_artifact_id=run.task_artifact_id,
-            task_observed_at_utc=task_observed_at,
-            child_result_render_policy=render_policy,
-            permission_snapshot_id=child_permission.snapshot_id,
-            model_target_fingerprint=child_target.fact.target_fingerprint,
-            mcp_installation_id=child_session.mcp_installation_id,
-            mcp_installation_owner_runtime_session_id=(
-                child_session.mcp_installation_owner_runtime_session_id
-            ),
-        )
-        child_state.run_model_target = child_target
-        child_state.permission_snapshot = child_permission
-        child_state.scratchpad.update(
-            {
-                "run_start_event_id": child_run_start_id,
-                "current_user_message_fact": current_user,
-                "terminal_run_end_event_id": f"run_end:subagent:{uuid4().hex}",
-                "subagent_run_entry_fact": child_entry,
-                "capability_resolve_basis_fact": capability_basis,
-                "capability_resolve_basis": CapabilityResolveBasis(
-                    fact=capability_basis,
-                    user_input=run_view.task_text,
-                    prior_messages=(),
-                    active_skill_names=frozenset(),
-                    workspace_root=child_session.workspace_root,
-                    memory_domain_id="memory_domain:subagent-disabled",
-                ),
-                "frozen_capability_execution_surface": frozen_surface,
-            }
-        )
-        prepared_child_entry = PreparedSubagentRunEntry(
-            entry_fact=child_entry,
-            current_user_message=current_user,
-            run_model_target=child_target,
-            permission_snapshot=child_permission,
-            mcp_installation_fact=McpInstallationReferenceFact(
-                installation_id=child_session.mcp_installation_id,
-                owner_runtime_session_id=(
-                    child_session.mcp_installation_owner_runtime_session_id
-                ),
-                config_epoch=0,
-                event_safe_config_set_fingerprint=sha256_fingerprint(
-                    "subagent-mcp-installation-reference:v1",
-                    [
-                        child_session.mcp_installation_id,
-                        child_session.mcp_installation_owner_runtime_session_id,
-                    ],
-                ),
-                server_snapshot_semantic_fingerprints=(),
-                binding_identities=(),
-            ),
-            capability_basis=child_state.scratchpad["capability_resolve_basis"],
-            frozen_execution_surface=frozen_surface,
-            run_start_event_id=child_run_start_id,
-            terminal_run_end_event_id=child_state.scratchpad[
-                "terminal_run_end_event_id"
-            ],
-            long_horizon=child_long_horizon,
-            child_rollout_subaccount=child_rollout_subaccount,
-        )
-        entry_bundle = await SubagentRunEntryDriver().prepare_and_commit(
-            child_agent=child_agent,
-            state=child_state,
-            prepared=prepared_child_entry,
-            prior_messages=[],
-        )
-        working_set = child_state.run_working_set
-        if working_set is None:
-            raise RuntimeError("committed child run is missing its working set")
-        activation_payload = {
-            "schema_version": "run_execution_activation.v1",
-            "activation_owner_kind": "subagent_run_start",
-            "activation_owner_id": entry_bundle.committed.run_start_event.id,
-            "segment_generation": 1,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        reply_id: str | None = None,
+    ) -> RunActivationWorkingState:
+        payload: dict[str, object] = {
+            "session_id": session_id or self._run_identity.runtime_session_id,
+            "budget": self.budget,
         }
-        working_set.run_execution_activation = RunExecutionActivationFact(
-            **activation_payload,
-            activation_fingerprint=sha256_fingerprint(
-                "run-execution-activation:v1", activation_payload
-            ),
-        )
-        working_set.process_segment_id = f"child_segment:{run.subagent_run_id}:1"
-        working_set.model_call_control_owner = RunModelCallControlOwner(
-            run_id=child_state.run_id,
-            activation=working_set.run_execution_activation,
-            segment_id=working_set.process_segment_id,
-            segment_generation=1,
-        )
-        try:
-            result = await child_agent.run_committed_entry(
-                entry_bundle.draft,
-                entry_bundle.committed,
-            )
-        finally:
-            await working_set.model_call_control_owner.retire()
-            working_set.model_call_control_owner = None
-        if result.status is LoopStatus.FINISHED:
-            submitted = subagent_runtime.submitted_result(run.subagent_run_id)
-            if submitted is not None:
-                await subagent_runtime.complete_submitted_result(
-                    run.subagent_run_id,
-                    token_usage=result.state.token_usage.model_dump(),
-                    tool_call_count=result.state.tool_call_count,
-                    child_run_id=result.state.run_id,
-                )
-                return
-            await subagent_runtime.complete_native_result(
-                run.subagent_run_id,
-                child_run_id=result.state.run_id,
-            )
-            return
-        if result.status is LoopStatus.WAITING_USER:
-            await child_agent.fail_committed_run(
-                result.state,
-                stop_reason=RunStopReason.SUBAGENT_PENDING_UNSUPPORTED,
-                error_message=(
-                    "Child agent entered a pending interaction that V1 cannot route."
-                ),
-            )
-            await subagent_runtime.fail_from_native_child_terminal(
-                run.subagent_run_id,
-                child_run_id=result.state.run_id,
-                reason_code="subagent_pending_unsupported",
-                reason_message="Child agent entered a pending interaction that V1 subagent runtime cannot route.",
-                diagnostics=[
-                    {
-                        "status": result.status.value,
-                        "stop_reason": result.stop_reason,
-                        "pending_interaction_kind": result.state.pending_interaction_kind,
-                    }
-                ],
-            )
-            return
-        await subagent_runtime.fail_from_native_child_terminal(
-            run.subagent_run_id,
-            child_run_id=result.state.run_id,
-            reason_code=f"subagent_{result.status.value}",
-            reason_message=(
-                f"Child agent ended with status {result.status.value} without a usable result."
-            ),
-            diagnostics=[
-                {
-                    "status": result.status.value,
-                    "stop_reason": result.stop_reason,
-                    "child_error_present": result.error_message is not None,
-                }
-            ],
-        )
-
-    def new_state(self) -> LoopState:
-        return LoopState(
-            session_id=self.runtime_session.runtime_session_id, budget=self.budget
-        )
+        if run_id is not None:
+            payload["run_id"] = run_id
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
+        if reply_id is not None:
+            payload["reply_id"] = reply_id
+        return RunActivationWorkingState(**payload)  # type: ignore[arg-type]
 
     def resolve_run_model_target(self) -> ResolvedModelTarget:
         return self.llm_runtime.resolve_target(
@@ -2109,13 +1727,15 @@ class AgentRuntime:
         return self.llm_runtime.rebind_target(fact)
 
     @staticmethod
-    def _require_run_model_target(state: LoopState) -> ResolvedModelTarget:
+    def _require_run_model_target(
+        state: RunActivationWorkingState,
+    ) -> ResolvedModelTarget:
         if state.run_model_target is None:
             raise RuntimeError("active run is missing its ResolvedModelTarget")
         return state.run_model_target
 
     def _capture_run_permission_snapshot(
-        self, state: LoopState
+        self, state: RunActivationWorkingState
     ) -> RunPermissionSnapshot:
         if state.permission_snapshot is not None:
             return state.permission_snapshot
@@ -2137,7 +1757,7 @@ class AgentRuntime:
                 )
             source = "session_default"
         snapshot = snapshot_from_mode(
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
             run_id=state.run_id,
             permission_mode=mode,
             permission_snapshot_source=source,
@@ -2146,7 +1766,7 @@ class AgentRuntime:
         return snapshot
 
     def _require_run_permission_snapshot(
-        self, state: LoopState
+        self, state: RunActivationWorkingState
     ) -> RunPermissionSnapshot:
         if state.permission_snapshot is None:
             raise RuntimeError(
@@ -2154,15 +1774,19 @@ class AgentRuntime:
             )
         return state.permission_snapshot
 
-    def _run_permission_policy(self, state: LoopState) -> EffectivePermissionPolicy:
+    def _run_permission_policy(
+        self, state: RunActivationWorkingState
+    ) -> EffectivePermissionPolicy:
         return preset_to_policy(
             self._require_run_permission_snapshot(state).permission_mode
         )
 
-    def _run_permission_mode(self, state: LoopState) -> PermissionMode:
+    def _run_permission_mode(self, state: RunActivationWorkingState) -> PermissionMode:
         return self._require_run_permission_snapshot(state).permission_mode
 
-    def _permission_gate_for_state(self, state: LoopState) -> PolicyPermissionGate:
+    def _permission_gate_for_state(
+        self, state: RunActivationWorkingState
+    ) -> PolicyPermissionGate:
         return PolicyPermissionGate(
             self._require_run_permission_snapshot(state).to_permission_state(),
             inner=self.permission_gate.inner,
@@ -2170,14 +1794,14 @@ class AgentRuntime:
 
     def _tool_runtime_context(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         context_id: str | None = None,
         model_call_index: int | None = None,
     ) -> ToolRuntimeContext:
         snapshot = self._require_run_permission_snapshot(state)
         return ToolRuntimeContext(
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
             event_context=self._event_context(state),
             permission=tool_permission_invocation_from_snapshot(
                 snapshot.to_context_fact()
@@ -2227,7 +1851,8 @@ class AgentRuntime:
                 ):
                     raise
                 if not isinstance(
-                    state.scratchpad.get("pending_run_end_candidate"), RunEndEvent
+                    self._require_run_finalization_owner(state).run_end_candidate,
+                    RunEndEvent,
                 ):
                     state.status = LoopStatus.FAILED
                     state.stop_reason = RunStopReason.RUNTIME_EXECUTION_ERROR
@@ -2276,7 +1901,7 @@ class AgentRuntime:
         frozen_surface = draft.frozen_execution_surface
         resolved_exposure = self.capability_runtime.resolve_exposure_projection(
             CapabilityProjectionResolveContext(
-                workspace_root=self.runtime_session.workspace_root,
+                workspace_root=self._run_identity.workspace_root,
                 workspace_kind=self.workspace_kind,
                 memory_domain=self.memory_domain,
                 user_input=user_input,
@@ -2289,8 +1914,8 @@ class AgentRuntime:
                 plan_active=self._plan_state(state).active,
             ),
             frozen_surface=frozen_surface,
-            archive=self.runtime_session.archive,
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            archive=self._run_long_horizon.archive,
+            runtime_session_id=self._run_identity.runtime_session_id,
             owner=draft.capability_basis.owner,
             resolve_basis=draft.capability_basis,
             exposure_id=f"capability_exposure:{uuid4().hex}",
@@ -2303,15 +1928,14 @@ class AgentRuntime:
             exposure_revision=1,
         )
         try:
-            stored_exposure = await self.runtime_session.emit(
+            stored_exposure = await self._run_ledger.emit(
                 exposure_event,
-                state=state,
             )
         except BaseException as exc:
             if isinstance(exc, EventPublicationAfterCommitError):
                 confirmed = tuple(exc.result.committed_events)
             else:
-                outcome = self.runtime_session.resolved_event_write_outcome(exc)
+                outcome = self._run_ledger.resolved_write_outcome(exc)
                 if outcome.status != "full":
                     raise
                 confirmed = tuple(outcome.committed_events)
@@ -2326,9 +1950,14 @@ class AgentRuntime:
                 fact=resolved_exposure.fact,
                 event_ref=event_reference_from_stored(
                     confirmed[0],
-                    runtime_session_id=self.runtime_session.runtime_session_id,
+                    runtime_session_id=self._run_identity.runtime_session_id,
                 ),
             )
+            if self.run_execution_registry is not None:
+                self.run_execution_registry.install_initial_authority_full(
+                    run_id=state.run_id,
+                    stored_exposure=confirmed[0],
+                )
             raise
         if not isinstance(stored_exposure, CapabilityExposureResolvedEvent):
             raise RuntimeError("capability exposure commit returned wrong event type")
@@ -2337,9 +1966,14 @@ class AgentRuntime:
             fact=resolved_exposure.fact,
             event_ref=event_reference_from_stored(
                 stored_exposure,
-                runtime_session_id=self.runtime_session.runtime_session_id,
+                runtime_session_id=self._run_identity.runtime_session_id,
             ),
         )
+        if self.run_execution_registry is not None:
+            self.run_execution_registry.install_initial_authority_full(
+                run_id=state.run_id,
+                stored_exposure=stored_exposure,
+            )
         if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
             permission_snapshot = self._require_run_permission_snapshot(state)
             self.subagent_runtime.refresh_parent_capability_snapshot(
@@ -2352,7 +1986,9 @@ class AgentRuntime:
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
-    def _require_capability_exposure(self, state: LoopState) -> CapabilityExposurePlan:
+    def _require_capability_exposure(
+        self, state: RunActivationWorkingState
+    ) -> CapabilityExposurePlan:
         working_set = self._require_run_working_set(state)
         exposure = working_set.effective_exposure_plan
         if not isinstance(exposure, CapabilityExposurePlan):
@@ -2371,24 +2007,24 @@ class AgentRuntime:
 
         for cache_write in render_output.cache_write_candidates:
             try:
-                self.runtime_session.tool_result_render_cache.put(
+                self._run_context.tool_result_render_cache.put(
                     cache_write.cache_key,
                     cache_write.hint,
                 )
             except Exception as exc:
-                self.runtime_session.record_context_input_cache_diagnostic(
+                self._run_context.record_cache_diagnostic(
                     cache_kind="tool_result_render",
                     operation="write",
                     error=exc,
                 )
         for cache_write in prepared_context_input.candidate_cache_writes:
             try:
-                self.runtime_session.context_candidate_lifecycle_cache.put(
+                self._run_context.context_candidate_lifecycle_cache.put(
                     cache_write.key,
                     cache_write.candidate,
                 )
             except Exception as exc:
-                self.runtime_session.record_context_input_cache_diagnostic(
+                self._run_context.record_cache_diagnostic(
                     cache_kind="candidate_lifecycle",
                     operation="write",
                     error=exc,
@@ -2397,13 +2033,12 @@ class AgentRuntime:
     async def _ingest_new_tool_result_projections(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolved_call: ResolvedModelCall,
     ) -> tuple[AgentEvent, ...]:
         """Commit every newly terminal observation before context compilation."""
 
-        projection_input = await prepare_live_transcript_projection(
-            runtime_session=self.runtime_session,
+        projection_input = await self._run_context.prepare_live_transcript_projection(
             working_set=self._require_run_working_set(state),
             budget=self.budget,
         )
@@ -2412,7 +2047,7 @@ class AgentRuntime:
             transcript=projection_input.normalized_transcript.transcript,
             token_estimator=resolved_call.target.token_estimator,
         )
-        store = self.runtime_session.long_horizon_state_store
+        store = self._run_long_horizon.store
         window_state = store.window_state(state.run_id)
         if window_state is None or window_state.active_window_id is None:
             raise RuntimeError("projection ingest requires one active context window")
@@ -2457,7 +2092,7 @@ class AgentRuntime:
         )
         if plan is None:
             return ()
-        stored = tuple(await self.runtime_session.emit_many(plan.events, state=state))
+        stored = tuple(await self._run_ledger.emit_many(plan.events))
         if tuple(event.id for event in stored) != tuple(
             event.id for event in plan.events
         ):
@@ -2470,7 +2105,7 @@ class AgentRuntime:
     async def _prepare_active_observation_rollups(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolved_call: ResolvedModelCall,
         normalized_transcript,
         projection_state,
@@ -2513,9 +2148,7 @@ class AgentRuntime:
                 ),
                 carrier_contract_fingerprint=carrier.contract_fingerprint,
             )
-            cached = self.runtime_session.prepared_observation_rollup_cache.get(
-                cache_key
-            )
+            cached = self._run_context.prepared_observation_rollup_cache.get(cache_key)
             if cached is not None:
                 if cached.rollup != durable:
                     raise RuntimeError(
@@ -2536,14 +2169,13 @@ class AgentRuntime:
                 raise RuntimeError(
                     "active rollup differs from deterministic source materialization"
                 )
-            prepared_unit = await materialize_observation_rollup(
-                runtime_session=self.runtime_session,
+            prepared_unit = await self._run_context.materialize_observation_rollup(
                 run_id=state.run_id,
                 prepared=prepared,
                 carrier=carrier,
                 artifact_mode="read_confirm",
             )
-            self.runtime_session.prepared_observation_rollup_cache.put(
+            self._run_context.prepared_observation_rollup_cache.put(
                 cache_key, prepared_unit
             )
             prepared_units.append(prepared_unit)
@@ -2551,7 +2183,7 @@ class AgentRuntime:
 
     def _descriptor_render_attribution(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         descriptor,
     ) -> CapabilityDescriptorRenderAttributionFact:
         working_set = self._require_run_working_set(state)
@@ -2569,7 +2201,7 @@ class AgentRuntime:
 
     def _typed_tool_result_error_events(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         tool_call_id: str,
         tool_call_name: str,
@@ -2637,7 +2269,7 @@ class AgentRuntime:
         )
 
     @staticmethod
-    def _require_run_working_set(state: LoopState) -> RunWorkingSet:
+    def _require_run_working_set(state: RunActivationWorkingState) -> RunWorkingSet:
         working_set = state.run_working_set
         if working_set is None:
             raise RuntimeError("committed run requires a typed RunWorkingSet")
@@ -2645,7 +2277,7 @@ class AgentRuntime:
 
     def _capability_gate_decision_fact(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
@@ -2675,7 +2307,7 @@ class AgentRuntime:
             reason_code_override=reason_code_override,
         )
         capability_context = _terminal_capability_context(call, exposure)
-        subagent_context = self.runtime_session.default_event_metadata.get("subagent")
+        subagent_context = self._run_identity.default_event_metadata.get("subagent")
         if isinstance(subagent_context, dict):
             capability_context = dict(capability_context or {})
             capability_context["subagent"] = dict(subagent_context)
@@ -2711,17 +2343,16 @@ class AgentRuntime:
 
     async def _emit_capability_gate_decision(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         fact: CapabilityGateDecisionFact,
     ) -> AsyncIterator[AgentEvent]:
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             self._capability_gate_decision_event(state, fact),
-            state=state,
         )
 
     def _capability_gate_decision_event(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         fact: CapabilityGateDecisionFact,
     ) -> CapabilityGateDecisionEvent:
         return CapabilityGateDecisionEvent(
@@ -2749,7 +2380,7 @@ class AgentRuntime:
 
     async def _emit_capability_access_denial(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
@@ -2790,7 +2421,7 @@ class AgentRuntime:
 
     async def _emit_permission_gate_denial(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
@@ -2831,7 +2462,7 @@ class AgentRuntime:
 
     async def _commit_tool_denial(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
@@ -2875,13 +2506,11 @@ class AgentRuntime:
             )
         )
         run_start = _run_start_for_id(
-            self.runtime_session,
+            self._run_long_horizon.store,
             run_id=state.run_id,
         )
         account_id = run_start.long_horizon.rollout_account_id
-        rollout_state = self.runtime_session.long_horizon_state_store.rollout_state(
-            account_id
-        )
+        rollout_state = self._run_long_horizon.store.rollout_state(account_id)
         settlement = (
             self._tool_rollout_settlement_event(
                 state,
@@ -2909,18 +2538,20 @@ class AgentRuntime:
         )
         if track_mcp_terminal and mcp_pending_handle is None:
             raise RuntimeError("MCP denial lost its pending handle owner")
-        terminal_registry = self.runtime_session.tool_execution_terminal_registry
+        terminal_registry = self._run_tools.tool_execution_terminal_registry
         if (
             rollout_reservation is not None
             or mcp_input_required_terminal_source is not None
         ):
-            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                write_candidates,
-                deadline_monotonic=(
-                    deadline_budget.ordinary_deadline_monotonic
-                    if deadline_budget is not None
-                    else None
-                ),
+            write_candidates = (
+                await self._run_tools.tool_terminal_projection_service.prepare_batch(
+                    write_candidates,
+                    deadline_monotonic=(
+                        deadline_budget.ordinary_deadline_monotonic
+                        if deadline_budget is not None
+                        else None
+                    ),
+                )
             )
             write_candidates = self._attach_mcp_terminal_disposition(
                 state,
@@ -2942,7 +2573,7 @@ class AgentRuntime:
                 ),
             )
             if mcp_pending_handle is not None:
-                mcp_port = self.runtime_session.mcp_tool_execution_port
+                mcp_port = self._run_tools.mcp_tool_execution_port
                 if mcp_port is None:
                     raise RuntimeError("MCP denial lost its execution port")
                 prepared_mcp_settlement = mcp_port.prepare_terminal_settlement(
@@ -2952,10 +2583,7 @@ class AgentRuntime:
                 )
         try:
             if rollout_reservation is not None:
-                result = await RuntimeSessionToolExecutionEventCommitPort(
-                    runtime_session=self.runtime_session,
-                    state=state,
-                ).commit_terminal_batch_and_settlement(
+                result = await self._run_tools.event_commit_port().commit_terminal_batch_and_settlement(
                     terminal_candidates=tuple(
                         event for event in write_candidates if event.id != settlement.id
                     ),
@@ -2970,23 +2598,19 @@ class AgentRuntime:
                     ),
                 )
             elif rollout_state is None:
-                result = await self.runtime_session.write_events_with_deadline(
+                result = await self._run_ledger.write_events_with_deadline(
                     write_candidates,
                     deadline_monotonic=(
                         deadline_budget.ordinary_deadline_monotonic
                         if deadline_budget is not None
-                        else self.runtime_session.event_write_service.new_deadline_monotonic()
+                        else self._run_ledger.new_write_deadline_monotonic()
                     ),
                     expected_last_sequence=(
-                        self.runtime_session.long_horizon_state_store.through_sequence
+                        self._run_long_horizon.store.through_sequence
                     ),
-                    state=state,
                 )
             else:
-                result = await RuntimeSessionToolExecutionEventCommitPort(
-                    runtime_session=self.runtime_session,
-                    state=state,
-                ).commit_gate_and_denial(
+                result = await self._run_tools.event_commit_port().commit_gate_and_denial(
                     gate_candidate=gate_event,
                     denied_terminal_candidates=tuple(
                         event for event in write_candidates if event.id != gate_event.id
@@ -2995,15 +2619,17 @@ class AgentRuntime:
                     account_id=account_id,
                 )
         except BaseException as exc:
-            outcome = self.runtime_session.resolved_event_write_outcome(exc)
+            outcome = self._run_ledger.resolved_write_outcome(exc)
             if candidate_owner is not None and prepared_mcp_settlement is not None:
                 receipt = terminal_registry.confirm_stable_candidate_write(
                     owner_identity=candidate_owner,
                     outcome=outcome,
                 )
-                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
-                    settlement=prepared_mcp_settlement,
-                    commit_receipt=receipt,
+                transition = (
+                    self._run_tools.mcp_tool_execution_port.confirm_terminal_commit(
+                        settlement=prepared_mcp_settlement,
+                        commit_receipt=receipt,
+                    )
                 )
                 terminal_registry.accept_physical_owner_handoff(
                     transition.handoff_receipt
@@ -3035,7 +2661,7 @@ class AgentRuntime:
                 ),
             )
             transition = (
-                self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
+                self._run_tools.mcp_tool_execution_port.confirm_terminal_commit(
                     settlement=prepared_mcp_settlement,
                     commit_receipt=receipt,
                 )
@@ -3059,7 +2685,7 @@ class AgentRuntime:
 
     async def _stream_capability_access_filtered_calls(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         parsed_calls: list[ToolCall],
         *,
         exposure: CapabilityExposurePlan,
@@ -3080,41 +2706,37 @@ class AgentRuntime:
         yield (executable_calls,)
 
     async def _emit_pending_plan_entry_audit(
-        self, state: LoopState
+        self, state: RunActivationWorkingState
     ) -> AsyncIterator[AgentEvent]:
-        payload = state.scratchpad.get("plan_entry_audit")
-        if not isinstance(payload, dict):
+        payload = state.plan_progress.entry_audit
+        if payload is None:
             return
-        if state.scratchpad.get("plan_entry_audit_emitted"):
+        if state.plan_progress.entry_audit_emitted:
             return
-        event = await self.runtime_session.emit(
+        event = await self._run_ledger.emit(
             PlanModeEnteredEvent(
                 **self._event_context(state).event_fields(),
                 source="user",
-                previous_permission_mode=payload.get("previous_permission_mode"),
-                previous_permission_policy=dict(
-                    payload.get("previous_permission_policy") or {}
-                ),
-                reason=str(payload.get("reason") or ""),
+                previous_permission_mode=payload.previous_permission_mode,
+                previous_permission_policy=dict(payload.previous_permission_policy),
+                reason=payload.reason,
             ),
-            state=state,
         )
         plan_state = self._plan_state(state)
         plan_state.apply_durable_event(event)
         if state.run_working_set is not None:
             state.run_working_set.plan_snapshot = plan_workflow_state_fact(plan_state)
-        state.scratchpad["plan_entry_audit_emitted"] = True
+        state.plan_progress.entry_audit_emitted = True
         yield event
 
     async def _prepare_rollout_phase_for_model_call(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolved_call: ResolvedModelCall,
     ) -> tuple[AgentEvent | None, str | None]:
         for _attempt in range(3):
-            binding = resolve_run_rollout_binding(
-                self.runtime_session,
+            binding = self._run_long_horizon.resolve_rollout_binding(
                 run_id=state.run_id,
             )
             if binding.child_state is not None:
@@ -3167,14 +2789,14 @@ class AgentRuntime:
                 plan=plan,
             )
             try:
-                stored = await self.runtime_session.emit(candidate, state=state)
+                stored = await self._run_ledger.emit(candidate)
             except LongHorizonReducerApplyError:
                 # Terminal monitor/completion writers can advance the canonical
                 # ledger between rollout planning and this queued commit.  A
                 # stale candidate was not appended, so rebuild it from the new
                 # reducer head; a same-head failure is a real contract fault.
                 if (
-                    self.runtime_session.long_horizon_state_store.through_sequence
+                    self._run_long_horizon.store.through_sequence
                     > candidate.source_through_sequence
                 ):
                     continue
@@ -3185,7 +2807,7 @@ class AgentRuntime:
     async def _await_reclaimable_rollout_reservations(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         budget_bucket: RolloutBudgetBucket | None,
     ) -> bool:
         if budget_bucket is None:
@@ -3195,8 +2817,7 @@ class AgentRuntime:
         cancellation_takeover_at = loop.time() + 0.25
         cancelled_children: set[str] = set()
         while loop.time() < deadline:
-            binding = resolve_run_rollout_binding(
-                self.runtime_session,
+            binding = self._run_long_horizon.resolve_rollout_binding(
                 run_id=state.run_id,
             )
             blockers = tuple(
@@ -3251,7 +2872,7 @@ class AgentRuntime:
 
     async def _stream_model_loop(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         exposure: CapabilityExposurePlan,
     ) -> AsyncIterator[AgentEvent]:
         for recovered_event in await self.window_compaction_service.recover_interrupted(
@@ -3264,14 +2885,6 @@ class AgentRuntime:
             if self._apply_stop_request(state):
                 break
 
-            planned_model_call_index = (
-                phase_restart_model_call_index
-                if phase_restart_model_call_index is not None
-                else int(state.scratchpad.get("model_call_index", 0)) + 1
-            )
-            state.scratchpad["working_context_refresh_model_step_key"] = (
-                f"{state.run_id}:{planned_model_call_index}"
-            )
             async for event in self._project_memory(state):
                 yield event
 
@@ -3312,13 +2925,12 @@ class AgentRuntime:
                 )
                 state.error_message = rollout_terminal_reason
                 state.transition(LoopTransition.FAIL)
-                yield await self.runtime_session.emit(
+                yield await self._run_ledger.emit(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=rollout_terminal_reason,
                         code=rollout_terminal_reason,
                     ),
-                    state=state,
                 )
                 break
             for event in await self._ingest_new_tool_result_projections(
@@ -3327,8 +2939,8 @@ class AgentRuntime:
             ):
                 yield event
             active_run_monitor_lease = (
-                await self.runtime_session.borrow_active_run_monitor_safe_point(
-                    state=state,
+                await self._run_model.borrow_active_run_monitor_safe_point(
+                    run_id=state.run_id,
                     next_model_call_index=model_call_index,
                 )
             )
@@ -3337,7 +2949,7 @@ class AgentRuntime:
             )()
             working_set = self._require_run_working_set(state)
             window_policy = working_set.long_horizon_contract.window_policy
-            await self.runtime_session.transcript_projection_checkpoint_service.checkpoint_if_needed(
+            await self._run_context.transcript_projection_checkpoint_service.checkpoint_if_needed(
                 context=self._event_context(state),
                 run_seed_semantic=working_set.run_transcript_seed_semantic,
                 run_seed_reference=working_set.run_transcript_seed_reference,
@@ -3381,8 +2993,7 @@ class AgentRuntime:
                         else "UTC offset unknown"
                     )
                     timezone_name = local_clock.tzname() or offset_text
-                    prepared_context_input = await prepare_live_context_snapshot(
-                        runtime_session=self.runtime_session,
+                    prepared_context_input = await self._run_context.prepare_live_context_snapshot(
                         working_set=self._require_run_working_set(state),
                         resolved_call=resolved_call,
                         budget=self.budget,
@@ -3396,14 +3007,14 @@ class AgentRuntime:
                         session_timezone=f"{timezone_name} ({offset_text})",
                         workspace_kind=self.workspace_kind,
                         terminal_current_cwd=str(
-                            self.runtime_session.terminal_sessions.current_cwd(
+                            self._run_model.terminal_sessions.current_cwd(
                                 owner_host_session_id=(
-                                    self.runtime_session.terminal_owner_host_session_id
+                                    self._run_identity.terminal_owner_host_session_id
                                 )
                             )
                         ),
                         raw_suspended_state_token_for_validation=(
-                            state.scratchpad.get("suspended_state_token")
+                            _pending_interaction_authority_fingerprint(self, state)
                         ),
                         memory_scope_instruction=memory_prompt,
                     )
@@ -3433,7 +3044,7 @@ class AgentRuntime:
                         ),
                         token_estimator=resolved_call.target.token_estimator,
                     )
-                    long_horizon_store = self.runtime_session.long_horizon_state_store
+                    long_horizon_store = self._run_long_horizon.store
                     base_render_output = render_output
                     pre_manifest_failure_stage = (
                         ContextCompileFailureStage.TOOL_OBSERVATION_PROJECTION
@@ -3563,16 +3174,14 @@ class AgentRuntime:
                                 )
                             for prepared_rollup in plan.prepared_rollup_artifacts:
                                 assert carrier is not None
-                                await materialize_observation_rollup(
-                                    runtime_session=self.runtime_session,
+                                await self._run_context.materialize_observation_rollup(
                                     run_id=state.run_id,
                                     prepared=prepared_rollup,
                                     carrier=carrier,
                                 )
                             stored_rewrite = tuple(
-                                await self.runtime_session.emit_many(
+                                await self._run_ledger.emit_many(
                                     plan.events,
-                                    state=state,
                                 )
                             )
                             if tuple(event.id for event in stored_rewrite) != tuple(
@@ -3606,7 +3215,7 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.CANDIDATE_INVALID
                     )
-                    historical_provider_source_heads = self.runtime_session.provider_input_generation_coordinator.committed_source_heads_for_compiled_call(
+                    historical_provider_source_heads = self._run_model.provider_input_generation_coordinator.committed_source_heads_for_compiled_call(
                         prepared_context_input=prepared_context_input
                     )
                     draft_compiled_context = compile_context_from_facts(
@@ -3825,7 +3434,7 @@ class AgentRuntime:
                         prepared_context_input=prepared_context_input,
                         compiled_context=final_compiled_context,
                     )
-                    provider_input_planning_bundle = await self.runtime_session.provider_input_generation_coordinator.prepare_compiled_call(
+                    provider_input_planning_bundle = await self._run_model.provider_input_generation_coordinator.prepare_compiled_call(
                         call=resolved_call,
                         compiled_context=final_compiled_context,
                         prepared_context_input=prepared_context_input,
@@ -3987,7 +3596,7 @@ class AgentRuntime:
                         ) from exc
                     try:
                         manifest_write = await (
-                            self.runtime_session.context_input_manifest_service.persist(
+                            self._run_context.context_input_manifest_service.persist(
                                 manifest_candidate,
                                 deadline_monotonic=time.monotonic() + 30.0,
                             )
@@ -4008,7 +3617,7 @@ class AgentRuntime:
                         state.stop_reason = RunStopReason.MODEL_ERROR
                         state.error_message = str(exc)
                         state.transition(LoopTransition.FAIL)
-                        yield await self.runtime_session.emit(
+                        yield await self._run_ledger.emit(
                             ContextCompiledEvent(
                                 **self._event_context(state).event_fields(),
                                 status="failed",
@@ -4021,15 +3630,13 @@ class AgentRuntime:
                                 budget=_empty_context_budget_report(resolved_call),
                                 input_failure=input_failure,
                             ),
-                            state=state,
                         )
-                        yield await self.runtime_session.emit(
+                        yield await self._run_ledger.emit(
                             RunErrorEvent(
                                 **self._event_context(state).event_fields(),
                                 message=str(exc),
                                 code="context_input_manifest_write_failed",
                             ),
-                            state=state,
                         )
                         if isinstance(
                             exc,
@@ -4038,9 +3645,9 @@ class AgentRuntime:
                                 ContextInputManifestWriteOutcomeUnknown,
                             ),
                         ):
-                            state.scratchpad[
-                                "context_input_latch_after_terminalization"
-                            ] = True
+                            self._require_run_finalization_owner(
+                                state
+                            ).context_input_latch_after_terminalization = True
                         break
                     manifest_projection_reference = (
                         build_context_input_manifest_projection_reference(
@@ -4053,7 +3660,7 @@ class AgentRuntime:
                             ),
                         )
                     )
-                    provider_input_start_bundle = await self.runtime_session.provider_input_generation_coordinator.finalize_compiled_call(
+                    provider_input_start_bundle = await self._run_model.provider_input_generation_coordinator.finalize_compiled_call(
                         call=resolved_call,
                         compiled_context=final_compiled_context,
                         prepared_context_input=prepared_context_input,
@@ -4085,7 +3692,7 @@ class AgentRuntime:
                     if (
                         exc.reason_code
                         is ContextInputFailureReasonCode.LEDGER_UNTRUSTED
-                        or self.runtime_session.reconciliation_required
+                        or self._run_ledger.reconciliation_required
                     ):
                         raise
                     input_failure = _context_pre_manifest_input_failure(
@@ -4102,7 +3709,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -4123,15 +3730,13 @@ class AgentRuntime:
                             ],
                             input_failure=input_failure,
                         ),
-                        state=state,
                     )
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=str(exc),
                             code=f"context_input_{exc.reason_code.value}",
                         ),
-                        state=state,
                     )
                     break
                 except ContextBudgetExceeded as exc:
@@ -4164,7 +3769,7 @@ class AgentRuntime:
                             compile_attempt_index=compile_attempt_index,
                             context_retry_index=context_retry_index,
                         )
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="pressure",
@@ -4188,7 +3793,6 @@ class AgentRuntime:
                                 input_failure if pressure_input_failure else None
                             ),
                         ),
-                        state=state,
                     )
                     if (
                         context_retry_index == 0
@@ -4206,7 +3810,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -4228,19 +3832,17 @@ class AgentRuntime:
                                 input_failure if input_audit is None else None
                             ),
                         ),
-                        state=state,
                     )
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=str(exc),
                             code="context_budget_exceeded",
                         ),
-                        state=state,
                     )
                     break
                 except Exception as exc:
-                    if self.runtime_session.reconciliation_required:
+                    if self._run_ledger.reconciliation_required:
                         raise
                     input_failure = None
                     if input_audit is None:
@@ -4273,7 +3875,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -4295,24 +3897,22 @@ class AgentRuntime:
                             input_audit=input_audit,
                             input_failure=input_failure,
                         ),
-                        state=state,
                     )
-                    yield await self.runtime_session.emit(
+                    yield await self._run_ledger.emit(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=f"{type(exc).__name__}: {exc}",
                             code=diagnostic_code,
                         ),
-                        state=state,
                     )
                     break
             if compiled_context is None:
                 if active_run_monitor_lease is not None:
-                    self.runtime_session.release_active_run_monitor_safe_point(
+                    self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
                     )
                 if provider_input_start_bundle is not None:
-                    await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                         provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                         reason="run_terminated_before_start",
                     )
@@ -4336,10 +3936,10 @@ class AgentRuntime:
                 > resolved_call.target.context_budget.input_budget_tokens
             ):
                 if active_run_monitor_lease is not None:
-                    self.runtime_session.release_active_run_monitor_safe_point(
+                    self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
                     )
-                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                     reason="resolved_target_invalidated_before_start",
                 )
@@ -4373,8 +3973,8 @@ class AgentRuntime:
                     target_unreachable=input_manifest.projection_target_unreachable,
                 )
             )
-            state.scratchpad["current_context_id"] = compiled_context.context_id
-            state.scratchpad["current_model_call_index"] = model_call_index
+            state.model_tool_progress.current_context_id = compiled_context.context_id
+            state.model_tool_progress.current_model_call_index = model_call_index
             context_compiled_candidate = ContextCompiledEvent(
                 **self._event_context(state).event_fields(),
                 context_id=compiled_context.context_id,
@@ -4435,9 +4035,8 @@ class AgentRuntime:
                 ),
             )
             try:
-                stored_context_compiled = await self.runtime_session.emit(
+                stored_context_compiled = await self._run_ledger.emit(
                     context_compiled_candidate,
-                    state=state,
                 )
             except EventPublicationAfterCommitError as exc:
                 if any(
@@ -4480,6 +4079,13 @@ class AgentRuntime:
             reply_had_run_error = False
             accepted_control_permit = None
             active_run_monitor_replan_required = False
+            model_step_attempt = ModelStepAttempt.install(
+                self._require_active_activation_coordinator(state),
+                model_step_ordinal=model_call_index,
+            )
+            model_step_attempt.begin_dispatch(
+                self._require_active_activation_coordinator(state)
+            )
             try:
                 run_activation = (
                     state.run_working_set.run_execution_activation
@@ -4487,7 +4093,7 @@ class AgentRuntime:
                     else None
                 )
                 active_run_monitor_delivery = (
-                    _build_active_run_monitor_delivery(
+                    build_active_run_monitor_delivery(
                         lease=active_run_monitor_lease,
                         provider_input_start_bundle=provider_input_start_bundle,
                     )
@@ -4498,18 +4104,17 @@ class AgentRuntime:
                     tuple(
                         event_reference_from_stored(
                             event,
-                            runtime_session_id=self.runtime_session.runtime_session_id,
+                            runtime_session_id=self._run_identity.runtime_session_id,
                         )
                         for event in active_run_monitor_lease.source_events
                     )
                     if active_run_monitor_lease is not None
                     else ()
                 )
-                start_bundle = prepare_model_lifecycle_start_bundle(
+                start_bundle = self._run_model.prepare_lifecycle_start_bundle(
                     call=resolved_call,
                     context=context,
                     event_context=self._event_context(state),
-                    runtime_session=self.runtime_session,
                     lifecycle_kind="main_assistant_reply",
                     run_execution_activation=run_activation,
                     provider_input_start_bundle=provider_input_start_bundle,
@@ -4523,12 +4128,9 @@ class AgentRuntime:
                     context=context,
                     event_context=self._event_context(state),
                     start_bundle=start_bundle,
-                    commit_port=RuntimeSessionModelStreamEventCommitPort(
-                        runtime_session=self.runtime_session,
-                        state=state,
-                    ),
+                    commit_port=self._run_model.event_commit_port(),
                     execution_registry=(
-                        self.runtime_session.model_stream_execution_registry
+                        self._run_model.model_stream_execution_registry
                     ),
                 )
                 subscription = model_stream_handle.subscribe()
@@ -4592,19 +4194,21 @@ class AgentRuntime:
                             raise RuntimeError(
                                 "main model call lacks its live control owner"
                             )
-                        control_resolution = await control_owner.resolve_completed_call(
-                            result=committed_model_result,
-                            model_call_index=model_call_index,
-                            event_context=self._event_context(state),
-                            runtime_session=self.runtime_session,
-                            state=state,
+                        control_resolution = (
+                            await self._run_model.resolve_completed_control_call(
+                                control_owner,
+                                result=committed_model_result,
+                                model_call_index=model_call_index,
+                                event_context=self._event_context(state),
+                            )
                         )
-                        state.scratchpad[
-                            "latest_model_control_disposition_event_id"
-                        ] = control_resolution.disposition_event.id
-                        state.scratchpad[
-                            "latest_model_control_disposition_model_call_index"
-                        ] = model_call_index
+                        progress = state.model_tool_progress
+                        progress.latest_model_control_disposition_event_id = (
+                            control_resolution.disposition_event.id
+                        )
+                        progress.latest_model_control_disposition_model_call_index = (
+                            model_call_index
+                        )
                         yield control_resolution.disposition_event
                         accepted_control_permit = control_resolution.accepted_permit
                         if accepted_control_permit is None:
@@ -4624,7 +4228,7 @@ class AgentRuntime:
                 estimated_input_tokens = (
                     estimate.total_input_tokens if estimate is not None else None
                 )
-                yield await self.runtime_session.emit(
+                yield await self._run_ledger.emit(
                     ModelCallRejectedEvent(
                         **self._event_context(state).event_fields(),
                         resolved_call=resolved_call.fact,
@@ -4642,20 +4246,18 @@ class AgentRuntime:
                             ),
                         ),
                     ),
-                    state=state,
                 )
                 state.status = LoopStatus.FAILED
                 state.stop_reason = RunStopReason.MODEL_ERROR
                 state.error_message = str(exc)
                 state.transition(LoopTransition.FAIL)
                 reply_had_run_error = True
-                yield await self.runtime_session.emit(
+                yield await self._run_ledger.emit(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=f"{type(exc).__name__}: {exc}",
                         code=exc.reason_code,
                     ),
-                    state=state,
                 )
             except ModelCallControlResolutionError:
                 # The completed provider result remains owned by its stable
@@ -4663,7 +4265,6 @@ class AgentRuntime:
                 # cross that unresolved control fact, so fail closed here.
                 raise
             except Exception as exc:
-                from pulsara_agent.host.ingress import HostIngressAdmissionStale
                 from pulsara_agent.runtime.terminal.notification import (
                     TerminalNotificationAdmissionStale,
                 )
@@ -4674,28 +4275,42 @@ class AgentRuntime:
                 ):
                     active_run_monitor_replan_required = True
                 else:
-                    event = await self.runtime_session.emit(
+                    event = await self._run_ledger.emit(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=f"{type(exc).__name__}: {exc}",
                             code=str(getattr(exc, "reason_code", "model_stream_error")),
                         ),
-                        state=state,
                     )
                     reply_had_run_error = True
                     yield event
             finally:
                 if active_run_monitor_lease is not None:
-                    self.runtime_session.release_active_run_monitor_safe_point(
+                    self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
                     )
-                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                     reason=(
                         "run_terminated_before_start"
                         if state.status is not LoopStatus.RUNNING
                         else "caller_cancelled_before_start"
                     ),
+                )
+                coordinator = self._require_active_activation_coordinator(state)
+                if sys.exc_info()[0] is not None:
+                    model_step_disposition = "reconciliation_required"
+                elif active_run_monitor_replan_required:
+                    model_step_disposition = "replan_required"
+                elif state.status is not LoopStatus.RUNNING:
+                    model_step_disposition = "terminal_stop"
+                elif reply_had_run_error:
+                    model_step_disposition = "model_error"
+                else:
+                    model_step_disposition = "reply_ready"
+                model_step_attempt.settle(
+                    coordinator,
+                    disposition=model_step_disposition,
                 )
 
             if active_run_monitor_replan_required:
@@ -4728,13 +4343,15 @@ class AgentRuntime:
                     break
                 raise RuntimeError("accepted model result lost its live control permit")
 
-            assistant = self.runtime_session.event_log.replay(state.reply_id)
+            assistant = self._run_ledger.replay(state.reply_id)
             state.messages.append(assistant)
             _accumulate_usage(state, assistant)
             ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "after_model_reply",
-                lambda: self.memory_hooks.after_model_reply(state, assistant),
+                lambda: self.memory_hooks.after_model_reply(
+                    self._memory_hook_view(state), assistant
+                ),
             )
             for event in hook_events:
                 yield event
@@ -4750,9 +4367,7 @@ class AgentRuntime:
                         SystemMsg(
                             _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME,
                             render_plan_revision_instruction(
-                                str(
-                                    state.scratchpad.get("plan_revision_feedback") or ""
-                                )
+                                str(state.plan_progress.revision_feedback)
                             ),
                             metadata={"runtime_instruction": "plan_revision_required"},
                         )
@@ -4767,7 +4382,7 @@ class AgentRuntime:
 
             state.pending_tool_calls = tool_blocks
             state.transition(LoopTransition.CONTINUE_AFTER_MODEL)
-            async for event in self._execute_tool_blocks(state, tool_blocks):
+            async for event in self._execute_tool_batch_attempt(state, tool_blocks):
                 yield event
             if self._apply_stop_request(state):
                 break
@@ -4788,7 +4403,7 @@ class AgentRuntime:
         async for event in self._finalize_run(state):
             yield event
 
-    def _apply_stop_request(self, state: LoopState) -> bool:
+    def _apply_stop_request(self, state: RunActivationWorkingState) -> bool:
         request = state.stop_request
         if request is None:
             return False
@@ -4804,9 +4419,61 @@ class AgentRuntime:
         state.abort_kind = request.reason
         return True
 
+    def _require_active_activation_coordinator(
+        self,
+        state: RunActivationWorkingState,
+    ) -> RunActivationCoordinator:
+        registry = self.run_execution_registry
+        if registry is None:
+            raise RuntimeError("one-step attempt requires RunExecutionRegistry")
+        owner = registry.require(state.run_id)
+        coordinator = owner.active_segment
+        if coordinator is None:
+            raise RuntimeError("one-step attempt requires an active activation")
+        if (
+            coordinator.state_carrier is None
+            or coordinator.state_owner_token is None
+            or coordinator.state_carrier.borrow(
+                owner_token=coordinator.state_owner_token
+            )
+            is not state
+        ):
+            raise RuntimeError("one-step attempt working-state authority mismatch")
+        return coordinator
+
+    async def _execute_tool_batch_attempt(
+        self,
+        state: RunActivationWorkingState,
+        tool_blocks: list[ToolCallBlock],
+    ) -> AsyncIterator[AgentEvent]:
+        coordinator = self._require_active_activation_coordinator(state)
+        attempt = ToolBatchAttempt.install(
+            coordinator,
+            ordered_tool_call_ids=tuple(block.id for block in tool_blocks),
+        )
+        attempt.begin_dispatch(coordinator)
+        failed = False
+        try:
+            async for event in self._execute_tool_blocks(state, tool_blocks):
+                yield event
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            coordinator = self._require_active_activation_coordinator(state)
+            if failed:
+                disposition = "reconciliation_required"
+            elif state.status is LoopStatus.WAITING_USER:
+                disposition = "suspended"
+            elif state.status is not LoopStatus.RUNNING:
+                disposition = "terminalization_pending"
+            else:
+                disposition = "completed"
+            attempt.settle(coordinator, disposition=disposition)
+
     async def _stream_approval_resolution(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: ApprovalResolution,
     ) -> AsyncIterator[AgentEvent]:
         if state.status is not LoopStatus.WAITING_USER:
@@ -4836,12 +4503,11 @@ class AgentRuntime:
             )
             for call in state.pending_tool_calls
         ]
-        event = await self.runtime_session.emit(
+        event = await self._run_ledger.emit(
             UserConfirmResultEvent(
                 **self._event_context(state).event_fields(),
                 confirm_results=confirm_results,
             ),
-            state=state,
         )
         yield event
 
@@ -4868,7 +4534,7 @@ class AgentRuntime:
 
     async def _stream_plan_interaction_resolution(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PlanInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
         if state.status is not LoopStatus.WAITING_USER:
@@ -4898,6 +4564,8 @@ class AgentRuntime:
 
         state.pending_interaction_kind = None
         state.pending_interaction_payload = {}
+        state.pending_interaction_source_event_reference = None
+        state.pending_interaction_source_event_candidate = None
         if state.status is LoopStatus.WAITING_USER:
             state.status = LoopStatus.RUNNING
             state.stop_reason = None
@@ -4916,7 +4584,7 @@ class AgentRuntime:
 
     async def _stream_mcp_input_required_resolution(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         resolution: PreparedMcpInputRequiredResolution,
     ) -> AsyncIterator[AgentEvent]:
         if state.status is not LoopStatus.WAITING_USER:
@@ -5119,7 +4787,7 @@ class AgentRuntime:
                     ):
                         yield event
                 else:
-                    mcp_port = self.runtime_session.mcp_tool_execution_port
+                    mcp_port = self._run_tools.mcp_tool_execution_port
                     if mcp_port is None:
                         raise RuntimeError("MCP resume lost its execution port owner")
                     descriptor = exposure.descriptors_by_name.get(tool_name)
@@ -5176,7 +4844,7 @@ class AgentRuntime:
                                 redacted_message=outcome.sanitized_message,
                             ),
                         )
-                        audit_receipt = await self.runtime_session.mandatory_runtime_audit_owner.commit(
+                        audit_receipt = await self._run_audit.mandatory_owner.commit(
                             resume_failed,
                             deadline_budget=deadline_budget,
                             state=state,
@@ -5192,7 +4860,7 @@ class AgentRuntime:
                         working_set.latest_mcp_resume_failure_event_ref = (
                             audit_receipt.committed_event_reference
                         )
-                        stored_resume_failed = self.runtime_session.event_log.get_by_id(
+                        stored_resume_failed = self._run_ledger.get_event(
                             resume_failed.id
                         )
                         if not isinstance(
@@ -5211,12 +4879,11 @@ class AgentRuntime:
                             state.pending_interaction_payload = original_pending_payload
                             state.status = LoopStatus.WAITING_USER
                             state.stop_reason = RunStopReason.WAITING_USER
-                            state.scratchpad[
-                                "mcp_input_required_publication_closure_reason"
-                            ] = "resume_failed_publication_unavailable"
-                            state.scratchpad["publication_terminal_deadline_budget"] = (
-                                deadline_budget
+                            finalization = self._require_run_finalization_owner(state)
+                            finalization.mcp_publication_closure_reason = (
+                                "resume_failed_publication_unavailable"
                             )
+                            finalization.publication_deadline_budget = deadline_budget
                             closure_events: tuple[AgentEvent, ...] = ()
                             async for event in self._terminalize_pending_mcp_for_abort(
                                 state,
@@ -5224,10 +4891,7 @@ class AgentRuntime:
                             ):
                                 closure_events = (*closure_events, event)
                                 yield event
-                            if (
-                                "publication_latched_run_termination"
-                                not in state.scratchpad
-                            ):
+                            if finalization.publication_latched_termination is None:
                                 self._install_mcp_publication_latched_termination(
                                     state,
                                     committed_events=(
@@ -5365,7 +5029,7 @@ class AgentRuntime:
 
     async def _after_mcp_resume_terminal_result(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         interaction_id: str,
     ) -> AsyncIterator[AgentEvent]:
@@ -5384,15 +5048,14 @@ class AgentRuntime:
 
     async def _maybe_compact_mid_turn_before_followup(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
     ) -> MidTurnCompactionResult:
         model_visible_messages = [
             message.model_copy(deep=True) for message in state.messages
         ]
         protected_model_visible_messages_after: tuple[LLMMessage, ...] = ()
         if state.run_model_target is not None:
-            projection = await prepare_live_transcript_projection(
-                runtime_session=self.runtime_session,
+            projection = await self._run_context.prepare_live_transcript_projection(
                 working_set=self._require_run_working_set(state),
                 budget=self.budget,
             )
@@ -5425,7 +5088,7 @@ class AgentRuntime:
 
     async def _continue_after_tool_before_followup(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
     ) -> AsyncIterator[AgentEvent]:
         state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
         compaction_result = await self._maybe_compact_mid_turn_before_followup(state)
@@ -5462,7 +5125,7 @@ class AgentRuntime:
             references = tuple(
                 event_reference_from_stored(
                     event,
-                    runtime_session_id=self.runtime_session.runtime_session_id,
+                    runtime_session_id=self._run_identity.runtime_session_id,
                 )
                 for event in publication_failure.core_committed_events
                 if isinstance(
@@ -5494,7 +5157,8 @@ class AgentRuntime:
                     tuple(item.payload_fingerprint for item in references),
                 ),
             )
-            state.scratchpad["publication_latched_run_termination"] = termination
+            finalization = self._require_run_finalization_owner(state)
+            finalization.publication_latched_termination = termination
             terminal_deadline_budget = (
                 publication_failure.terminal_event_deadline_budget
             )
@@ -5502,9 +5166,7 @@ class AgentRuntime:
                 raise RuntimeError(
                     "compaction publication failure lost terminal write authority"
                 )
-            state.scratchpad["publication_terminal_deadline_budget"] = (
-                terminal_deadline_budget
-            )
+            finalization.publication_deadline_budget = terminal_deadline_budget
             state.status = LoopStatus.ABORTED
             state.stop_reason = RunStopReason.ABORTED
             state.abort_kind = AbortKind.HOST_TEARDOWN
@@ -5514,7 +5176,7 @@ class AgentRuntime:
 
     async def _resolve_plan_question(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         payload: dict,
         resolution: PlanQuestionResolution,
     ) -> AsyncIterator[AgentEvent]:
@@ -5525,14 +5187,13 @@ class AgentRuntime:
         question_id = str(payload.get("question_id") or "")
         tool_call_id = str(payload["tool_call_id"])
         tool_name = "ask_plan_question"
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             PlanQuestionAnsweredEvent(
                 **self._event_context(state).event_fields(),
                 question_id=question_id,
                 answer_text=resolution.answer_text,
                 selected_option=resolution.selected_option,
             ),
-            state=state,
         )
         output = json.dumps(
             {
@@ -5554,7 +5215,7 @@ class AgentRuntime:
 
     async def _resolve_plan_exit(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         payload: dict,
         resolution: PlanExitResolution,
     ) -> AsyncIterator[AgentEvent]:
@@ -5564,7 +5225,7 @@ class AgentRuntime:
         )
         exit_request_id = str(payload.get("exit_request_id") or "")
         tool_call_id = str(payload["tool_call_id"])
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             PlanExitResolvedEvent(
                 **self._event_context(state).event_fields(),
                 exit_request_id=exit_request_id,
@@ -5572,16 +5233,15 @@ class AgentRuntime:
                 decision=resolution.decision,
                 user_feedback=resolution.user_feedback,
             ),
-            state=state,
         )
         if resolution.decision == "revise":
-            revisions = int(state.scratchpad.get("plan_exit_revisions", 0)) + 1
-            state.scratchpad["plan_exit_revisions"] = revisions
+            revisions = state.plan_progress.exit_revisions + 1
+            state.plan_progress.exit_revisions = revisions
             if revisions > state.budget.max_plan_exit_revisions_per_run:
                 yield await self._mark_plan_budget_exceeded(state, kind="exit_revision")
             else:
-                state.scratchpad["plan_revision_required"] = True
-                state.scratchpad["plan_revision_feedback"] = resolution.user_feedback
+                state.plan_progress.revision_required = True
+                state.plan_progress.revision_feedback = resolution.user_feedback
         if resolution.decision in {"approve", "cancel"}:
             plan_state = self._plan_state(state)
             event_context = self._event_context(state)
@@ -5593,10 +5253,10 @@ class AgentRuntime:
                     event_context.run_id,
                     exit_request_id,
                 )
-                self.runtime_session.archive.put_text(
+                self._run_long_horizon.archive.put_text(
                     accepted_artifact_id,
                     accepted_plan_text,
-                    session_id=self.runtime_session.runtime_session_id,
+                    session_id=self._run_identity.runtime_session_id,
                     run_id=event_context.run_id,
                     media_type="text/plain; charset=utf-8",
                     metadata={
@@ -5609,7 +5269,7 @@ class AgentRuntime:
             restored_mode = plan_state.pre_plan_permission_mode
             restored_policy = self._policy_from_plan_state(plan_state)
             restored_mode_value = parse_permission_mode(restored_mode).value
-            stored_exit = await self.runtime_session.emit(
+            stored_exit = await self._run_ledger.emit(
                 PlanModeExitedEvent(
                     **event_context.event_fields(),
                     source="approved_exit_plan"
@@ -5625,7 +5285,6 @@ class AgentRuntime:
                     transition_owner="agent_run",
                     host_workflow_operation_id=None,
                 ),
-                state=state,
             )
             plan_state.apply_durable_event(stored_exit)
             yield stored_exit
@@ -5650,17 +5309,12 @@ class AgentRuntime:
 
     def _current_tool_result_batch_receipt(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
     ) -> CurrentToolResultBatchReceipt | None:
-        spans = state.scratchpad.get("tool_result_event_spans")
-        if not isinstance(spans, dict):
+        spans = state.model_tool_progress.tool_result_event_spans
+        if not spans:
             return None
-        consumed = state.scratchpad.setdefault(
-            "tool_result_audit_consumed_call_ids",
-            set(),
-        )
-        if not isinstance(consumed, set):
-            raise RuntimeError("ToolResult audit consumed-call state drifted")
+        consumed = state.model_tool_progress.tool_result_audit_consumed_call_ids
         items: list[CurrentToolResultReceiptItem] = []
         for result_block in state.tool_results:
             if result_block.id in consumed:
@@ -5670,7 +5324,7 @@ class AgentRuntime:
                 raise RuntimeError(
                     "current ToolResult lacks its exact durable event span"
                 )
-            snapshot = self.runtime_session.event_log.read_raw_range_snapshot(
+            snapshot = self._run_ledger.read_raw_range_snapshot(
                 minimum_sequence=span.start_sequence,
                 through_sequence=span.end_sequence,
                 max_events=4_096,
@@ -5698,11 +5352,11 @@ class AgentRuntime:
             projection = projections[0]
             end_ref = event_reference_from_stored(
                 end,
-                runtime_session_id=self.runtime_session.runtime_session_id,
+                runtime_session_id=self._run_identity.runtime_session_id,
             )
             projection_ref = event_reference_from_stored(
                 projection,
-                runtime_session_id=self.runtime_session.runtime_session_id,
+                runtime_session_id=self._run_identity.runtime_session_id,
             )
             payload = {
                 "result_block": result_block.model_copy(deep=True),
@@ -5739,7 +5393,9 @@ class AgentRuntime:
             ),
         )
 
-    async def _after_tool_results(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+    async def _after_tool_results(
+        self, state: RunActivationWorkingState
+    ) -> AsyncIterator[AgentEvent]:
         if self._finish_child_run_after_report_result(state):
             return
         current_receipt = self._current_tool_result_batch_receipt(state)
@@ -5771,7 +5427,9 @@ class AgentRuntime:
         ok, hook_events = await self._run_memory_hook_and_emit_events(
             state,
             "after_tool_results",
-            lambda: self.memory_hooks.after_tool_results(state, state.tool_results),
+            lambda: self.memory_hooks.after_tool_results(
+                self._memory_hook_view(state), state.tool_results
+            ),
         )
         for event in hook_events:
             yield event
@@ -5780,7 +5438,7 @@ class AgentRuntime:
         ok, should_compact, error_event = await self._run_memory_hook(
             state,
             "should_compact",
-            lambda: self.memory_hooks.should_compact(state),
+            lambda: self.memory_hooks.should_compact(self._memory_hook_view(state)),
         )
         if not ok:
             assert error_event is not None
@@ -5820,7 +5478,7 @@ class AgentRuntime:
                 total_timeout_seconds=30.0,
                 terminal_reserve_seconds=10.0,
             )
-            receipt = await self.runtime_session.mandatory_runtime_audit_owner.commit(
+            receipt = await self._run_audit.mandatory_owner.commit(
                 candidate,
                 deadline_budget=deadline_budget,
                 state=state,
@@ -5829,7 +5487,7 @@ class AgentRuntime:
                 raise RuntimeError(
                     "context compaction request audit requires reconciliation"
                 )
-            stored = self.runtime_session.event_log.get_by_id(candidate.id)
+            stored = self._run_ledger.get_event(candidate.id)
             if not isinstance(stored, ContextCompactionRequestedEvent):
                 raise RuntimeError("context compaction request cannot be rebound")
             yield stored
@@ -5841,13 +5499,15 @@ class AgentRuntime:
                 )
                 return
         if current_receipt is not None:
-            consumed = state.scratchpad["tool_result_audit_consumed_call_ids"]
+            consumed = state.model_tool_progress.tool_result_audit_consumed_call_ids
             consumed.update(item.tool_call_id for item in current_receipt.ordered_items)
 
-    def _finish_child_run_after_report_result(self, state: LoopState) -> bool:
+    def _finish_child_run_after_report_result(
+        self, state: RunActivationWorkingState
+    ) -> bool:
         if not self._is_subagent_child or self.subagent_runtime is None:
             return False
-        subagent_context = self.runtime_session.default_event_metadata.get("subagent")
+        subagent_context = self._run_identity.default_event_metadata.get("subagent")
         if not isinstance(subagent_context, dict):
             return False
         subagent_run_id = subagent_context.get("subagent_run_id")
@@ -5860,20 +5520,56 @@ class AgentRuntime:
         state.transition(LoopTransition.FINISH)
         return True
 
+    def _require_run_finalization_owner(
+        self, state: RunActivationWorkingState
+    ) -> RunFinalizationOwner:
+        registry = self.run_execution_registry
+        if registry is None:
+            raise RuntimeError("run finalization requires RunExecutionRegistry")
+        run_owner = registry.get(state.run_id)
+        if run_owner is None:
+            raise RuntimeError("run finalization requires a committed RunOwner")
+        finalization = run_owner.finalization_slot.owner
+        if not isinstance(finalization, RunFinalizationOwner):
+            raise RuntimeError("committed RunOwner lost its finalization owner")
+        if finalization.owner_identity != run_owner.identity:
+            raise RuntimeError("run finalization owner identity mismatch")
+        return finalization
+
     async def _finalize_run(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
+        *,
+        run_session_end_hook: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        service = self._run_finalization_service
+        if service is None:
+            raise RuntimeError("run finalization service is not installed")
+        committed = await service.finalize(
+            run_id=state.run_id,
+            state=state,
+            operation=lambda: self._execute_run_finalization(
+                state,
+                run_session_end_hook=run_session_end_hook,
+            ),
+        )
+        for event in committed:
+            yield event
+
+    async def _execute_run_finalization(
+        self,
+        state: RunActivationWorkingState,
         *,
         run_session_end_hook: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         if state.finalized:
             return
-        await self.runtime_session.provider_input_generation_coordinator.settle_run_preparations(
+        await self._run_model.provider_input_generation_coordinator.settle_run_preparations(
             state.run_id,
             reason="run_terminated_before_start",
         )
-        hook_done = bool(state.scratchpad.get("run_finalization_hook_done"))
-        if run_session_end_hook and not hook_done:
+        finalization = self._require_run_finalization_owner(state)
+        if run_session_end_hook and not finalization.finalization_hook_done:
             _ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "on_turn_end",
@@ -5881,58 +5577,29 @@ class AgentRuntime:
             )
             for event in hook_events:
                 yield event
-        state.scratchpad["run_finalization_hook_done"] = True
-        terminal_event_id = state.scratchpad.get("terminal_run_end_event_id")
-        if not isinstance(terminal_event_id, str):
-            raise RuntimeError("run finalization requires stable RunEnd event id")
-        if state.status is LoopStatus.FINISHED:
-            terminalization_kind = RunTerminalizationKind.NORMAL
-        elif state.status is LoopStatus.ABORTED:
-            terminalization_kind = (
-                RunTerminalizationKind.HOST_TEARDOWN
-                if state.abort_kind is AbortKind.HOST_TEARDOWN
-                else RunTerminalizationKind.USER_STOP
-            )
-        else:
-            terminalization_kind = RunTerminalizationKind.EXECUTION_FAILURE
+        finalization.finalization_hook_done = True
+        terminalization_kind = self._terminalization_kind(state)
         if (
             not self._is_subagent_child
             and self.subagent_runtime is not None
-            and not state.scratchpad.get("long_horizon_child_drain_done")
+            and not finalization.long_horizon_child_drain_done
         ):
             await self.subagent_runtime.drain_children_for_parent_run(
                 state.run_id,
                 timeout_seconds=5.0,
             )
-            state.scratchpad["long_horizon_child_drain_done"] = True
+            finalization.long_horizon_child_drain_done = True
         while True:
-            pending = state.scratchpad.get("pending_run_terminal_candidates")
-            if isinstance(pending, tuple) and pending:
+            pending = finalization.terminal_candidates
+            if pending:
                 candidates = pending
                 if not isinstance(candidates[-1], RunEndEvent):
                     raise RuntimeError("pending run terminal batch has invalid shape")
                 candidate = candidates[-1]
-            elif pending is not None:
-                raise RuntimeError("pending run terminal candidates have invalid type")
             else:
-                candidate = RunEndEvent(
-                    id=terminal_event_id,
-                    **self._event_context(state).event_fields(),
-                    status=state.status.value,
-                    stop_reason=state.stop_reason,
-                    terminalization_kind=terminalization_kind,
-                    abort_kind=state.abort_kind.value
-                    if state.abort_kind is not None
-                    else None,
-                    error_message=state.error_message,
-                    mcp_input_required_closure_event_reference=(
-                        state.scratchpad.get(
-                            "mcp_input_required_closure_event_reference"
-                        )
-                    ),
-                    publication_latched_termination=state.scratchpad.get(
-                        "publication_latched_run_termination"
-                    ),
+                candidate = (
+                    finalization.run_end_candidate
+                    or self._freeze_run_end_candidate(state)
                 )
                 candidates = self._build_run_terminal_candidates(
                     state=state,
@@ -5942,8 +5609,9 @@ class AgentRuntime:
             if not isinstance(candidates[0], ContextWindowClosedEvent):
                 raise RuntimeError("run terminal batch must start with window close")
             expected_last_sequence = candidates[0].source_through_sequence
-            state.scratchpad["pending_run_terminal_candidates"] = candidates
-            state.scratchpad["pending_run_end_candidate"] = candidate
+            finalization.terminal_candidates = candidates
+            finalization.run_end_candidate = candidate
+            finalization.state = "candidate_frozen"
             try:
                 stored = await self._write_run_terminal_candidates(
                     state=state,
@@ -5955,11 +5623,12 @@ class AgentRuntime:
                 await asyncio.sleep(0)
                 continue
             except BaseException as exc:
-                outcome = self.runtime_session.resolved_event_write_outcome(exc)
+                outcome = self._run_ledger.resolved_write_outcome(exc)
                 if outcome.status == "unknown":
+                    finalization.state = "reconciliation_required"
                     raise
                 if outcome.status == "none":
-                    state.scratchpad["run_end_commit_state"] = "pending"
+                    finalization.state = "retry_wait"
                     try:
                         stored_retry = await self._write_run_terminal_candidates(
                             state=state,
@@ -5971,10 +5640,8 @@ class AgentRuntime:
                         await asyncio.sleep(0)
                         continue
                     except BaseException as retry_error:
-                        retry_outcome = (
-                            self.runtime_session.resolved_event_write_outcome(
-                                retry_error
-                            )
+                        retry_outcome = self._run_ledger.resolved_write_outcome(
+                            retry_error
                         )
                         if retry_outcome.status != "full":
                             raise
@@ -5983,31 +5650,31 @@ class AgentRuntime:
                             retry_confirmed,
                             candidates,
                         ):
-                            self.runtime_session.latch_event_commit_outcome_unknown()
+                            self._run_ledger.latch_event_commit_outcome_unknown()
                             raise RuntimeError(
                                 "run terminal retry confirmation was not exact"
                             ) from retry_error
-                        self._mark_run_terminal_committed(state)
+                        await self._mark_run_terminal_committed(state)
                         raise
                     if not _is_exact_run_terminal_batch(stored_retry, candidates):
                         raise RuntimeError(
                             "run terminal bounded retry returned wrong batch"
                         )
-                    self._mark_run_terminal_committed(state)
+                    await self._mark_run_terminal_committed(state)
                     for event in stored_retry:
                         yield event
                     return
                 confirmed = tuple(outcome.committed_events)
                 if not _is_exact_run_terminal_batch(confirmed, candidates):
-                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    self._run_ledger.latch_event_commit_outcome_unknown()
                     raise RuntimeError(
                         "run terminal confirmation was not exact"
                     ) from exc
-                self._mark_run_terminal_committed(state)
+                await self._mark_run_terminal_committed(state)
                 raise
             if not _is_exact_run_terminal_batch(stored, candidates):
                 raise RuntimeError("run terminal commit returned wrong batch")
-            self._mark_run_terminal_committed(state)
+            await self._mark_run_terminal_committed(state)
             for event in stored:
                 yield event
             return
@@ -6015,27 +5682,27 @@ class AgentRuntime:
     async def _write_run_terminal_candidates(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         candidates: tuple[AgentEvent, ...],
         expected_last_sequence: int,
     ) -> tuple[AgentEvent, ...]:
-        termination = state.scratchpad.get("publication_latched_run_termination")
+        finalization = self._require_run_finalization_owner(state)
+        termination = finalization.publication_latched_termination
         if termination is None:
             return tuple(
-                await self.runtime_session.emit_many(
+                await self._run_ledger.emit_many(
                     candidates,
                     expected_last_sequence=expected_last_sequence,
-                    state=state,
                 )
             )
         if not isinstance(termination, PublicationLatchedRunTerminationFact):
             raise RuntimeError("publication-latched RunEnd fact is invalid")
-        budget = state.scratchpad.get("publication_terminal_deadline_budget")
+        budget = finalization.publication_deadline_budget
         if not isinstance(budget, RuntimeEventOperationDeadlineBudget):
             raise RuntimeError(
                 "publication-latched RunEnd lost its frozen deadline budget"
             )
-        lease = state.scratchpad.get("publication_run_end_maintenance_lease")
+        lease = finalization.publication_maintenance_lease
         if lease is None:
             owner_kind = (
                 "compaction_publication_latched_run_termination_bundle"
@@ -6047,53 +5714,229 @@ class AgentRuntime:
                     else "mcp_publication_latched_run_termination_bundle"
                 )
             )
-            lease = self.runtime_session.issue_publication_terminal_maintenance_lease(
+            lease = self._run_ledger.issue_publication_terminal_maintenance_lease(
                 owner_kind=owner_kind,
                 ordered_events=candidates,
                 transaction_companion=None,
                 deadline_budget=budget,
             )
-            state.scratchpad["publication_run_end_maintenance_lease"] = lease
-        result = await self.runtime_session.write_events_with_deadline(
+            finalization.publication_maintenance_lease = lease
+        finalization.state = "committing"
+        result = await self._run_ledger.write_events_with_deadline(
             candidates,
             deadline_monotonic=budget.terminal_deadline_monotonic,
             expected_last_sequence=expected_last_sequence,
-            state=state,
             publication_terminal_maintenance_lease=lease,
         )
         return tuple(result.committed_events)
 
-    def _prepare_run_terminal_replan(self, state: LoopState) -> None:
-        previous = state.scratchpad.get("run_terminal_replan_count", 0)
-        if not isinstance(previous, int) or isinstance(previous, bool):
-            raise RuntimeError("run terminal replan count is invalid")
-        attempt = previous + 1
+    def _prepare_run_terminal_replan(self, state: RunActivationWorkingState) -> None:
+        finalization = self._require_run_finalization_owner(state)
+        attempt = finalization.terminal_replan_count + 1
         if attempt > 8:
             raise RuntimeError("run terminalization exceeded its replan bound")
-        state.scratchpad["run_terminal_replan_count"] = attempt
-        state.scratchpad["run_end_commit_state"] = "replanning"
-        state.scratchpad.pop("pending_run_end_candidate", None)
-        state.scratchpad.pop("pending_run_terminal_candidates", None)
+        finalization.terminal_replan_count = attempt
+        finalization.state = "retry_wait"
+        finalization.terminal_candidates = ()
 
-    def _mark_run_terminal_committed(self, state: LoopState) -> None:
+    def _freeze_run_end_candidate(
+        self,
+        state: RunActivationWorkingState,
+    ) -> RunEndEvent:
+        finalization = self._require_run_finalization_owner(state)
+        existing = finalization.run_end_candidate
+        if existing is not None:
+            if (
+                existing.id != finalization.terminal_event_id
+                or existing.run_id != state.run_id
+            ):
+                raise RuntimeError("run finalization candidate identity drifted")
+            return existing
+        if state.stop_reason is None:
+            raise RuntimeError("run terminalization requires a stop reason")
+        candidate = RunEndEvent(
+            id=finalization.terminal_event_id,
+            **self._event_context(state).event_fields(),
+            status=state.status.value,
+            stop_reason=state.stop_reason,
+            terminalization_kind=self._terminalization_kind(state),
+            abort_kind=(
+                state.abort_kind.value if state.abort_kind is not None else None
+            ),
+            error_message=state.error_message,
+            mcp_input_required_closure_event_reference=(
+                finalization.mcp_closure_event_reference
+            ),
+            publication_latched_termination=(
+                finalization.publication_latched_termination
+            ),
+        )
+        finalization.candidate_generation += 1
+        finalization.run_end_candidate = candidate
+        finalization.state = "candidate_frozen"
+        finalization.commit_state = "candidate_frozen"
+        registry = self.run_execution_registry
+        if registry is not None:
+            owner = registry.require(state.run_id)
+            owner.finalization_slot.state = "active"
+            owner.lifecycle = "terminalizing"
+        return candidate
+
+    @staticmethod
+    def _terminalization_kind(
+        state: RunActivationWorkingState,
+    ) -> RunTerminalizationKind:
+        if state.status is LoopStatus.FINISHED:
+            return RunTerminalizationKind.NORMAL
+        if state.status is LoopStatus.ABORTED:
+            return (
+                RunTerminalizationKind.HOST_TEARDOWN
+                if state.abort_kind is AbortKind.HOST_TEARDOWN
+                else RunTerminalizationKind.USER_STOP
+            )
+        return RunTerminalizationKind.EXECUTION_FAILURE
+
+    async def _mark_run_terminal_committed(
+        self, state: RunActivationWorkingState
+    ) -> None:
         state.finalized = True
         self._latch_context_input_after_terminalization(state)
-        state.scratchpad["run_end_commit_state"] = "committed"
-        state.scratchpad.pop("run_terminal_replan_count", None)
-        state.scratchpad.pop("pending_run_end_candidate", None)
-        state.scratchpad.pop("pending_run_terminal_candidates", None)
-        state.scratchpad.pop("publication_run_end_maintenance_lease", None)
+        finalization = self._require_run_finalization_owner(state)
+        finalization.state = "full_output_pending"
+        stored = self._run_ledger.get_event(finalization.terminal_event_id)
+        if not isinstance(stored, RunEndEvent) or stored.sequence is None:
+            finalization.state = "reconciliation_required"
+            raise RuntimeError("confirmed run terminal batch lost its RunEnd authority")
+        run_end_reference = event_reference_from_stored(
+            stored,
+            runtime_session_id=self._run_identity.runtime_session_id,
+        )
+        finalization.confirmed_run_end_event_reference = run_end_reference
+        if self.run_execution_registry is not None:
+            owner = self.run_execution_registry.get(state.run_id)
+            if owner is not None:
+                owner.finalization_owner.commit_state = "confirmed"
+                owner.lifecycle = "terminal"
+                owner.finalization_slot.state = "run_end_full_pending_output"
+        finalization.terminal_replan_count = 0
+        finalization.run_end_candidate = None
+        finalization.terminal_candidates = ()
+        finalization.publication_maintenance_lease = None
+        materializer = self._run_ledger.final_output_materializer()
+        settled = await self._attempt_run_final_output_materialization(
+            state=state,
+            stored_run_end=stored,
+            materializer=materializer,
+            run_end_reference=run_end_reference,
+        )
+        if settled:
+            return
+        service = self._run_finalization_service
+        if service is None:
+            raise RuntimeError("run finalization service is not installed")
+        service.continue_output_materialization(
+            run_id=state.run_id,
+            operation=lambda: self._continue_run_final_output_materialization(
+                state=state,
+                stored_run_end=stored,
+                materializer=materializer,
+                run_end_reference=run_end_reference,
+            ),
+        )
+
+    async def _continue_run_final_output_materialization(
+        self,
+        *,
+        state: RunActivationWorkingState,
+        stored_run_end: RunEndEvent,
+        materializer: RunFinalOutputMaterializerPort,
+        run_end_reference: ContextEventReferenceFact,
+    ) -> None:
+        delay_seconds = 0.01
+        while True:
+            await asyncio.sleep(delay_seconds)
+            if await self._attempt_run_final_output_materialization(
+                state=state,
+                stored_run_end=stored_run_end,
+                materializer=materializer,
+                run_end_reference=run_end_reference,
+            ):
+                return
+            delay_seconds = min(delay_seconds * 2.0, 0.25)
+
+    async def _attempt_run_final_output_materialization(
+        self,
+        *,
+        state: RunActivationWorkingState,
+        stored_run_end: RunEndEvent,
+        materializer: RunFinalOutputMaterializerPort,
+        run_end_reference: ContextEventReferenceFact,
+    ) -> bool:
+        finalization = self._require_run_finalization_owner(state)
+        finalization.materialization_attempt_generation += 1
+        outcome = await materializer.materialize(
+            owner_identity=finalization.owner_identity,
+            run_end_event_reference=run_end_reference,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+        finalization.materialization_owner = outcome.owner
+        if isinstance(outcome, RunFinalOutputMaterializationReconciliationRequired):
+            finalization.state = "reconciliation_required"
+            finalization.materialization_last_diagnostic_code = outcome.diagnostic_code
+            if self.run_execution_registry is not None:
+                owner = self.run_execution_registry.get(state.run_id)
+                if owner is not None:
+                    service = self._run_reconciliation_service
+                    if service is None:
+                        raise RuntimeError(
+                            "final-output reconciliation lacks its session owner"
+                        )
+                    horizon = await asyncio.to_thread(
+                        service.current_ledger_horizon,
+                        deadline_monotonic=time.monotonic() + 30.0,
+                    )
+                    service.install(
+                        run_id=state.run_id,
+                        attempt_kind="final_output_materialization",
+                        stable_candidate_id=(
+                            outcome.owner.run_end_event_reference.event_id
+                        ),
+                        stable_candidate_fingerprint=(outcome.owner.owner_fingerprint),
+                        expected_ledger_horizon=horizon,
+                        repair_mode="live_resident",
+                        resident_owner_generation=(owner.next_segment_generation or 1),
+                    )
+            raise RuntimeError(
+                "run final-output authority requires reconciliation: "
+                f"{outcome.diagnostic_code}"
+            )
+        if isinstance(outcome, RunFinalOutputMaterializationRetryableUnavailable):
+            finalization.materialization_last_diagnostic_code = outcome.diagnostic_code
+            return False
+        if not isinstance(outcome, RunFinalOutputMaterializationFull):
+            raise RuntimeError("unknown run final-output materialization outcome")
+        finalization.materialization_last_diagnostic_code = None
+        finalization.terminal_receipt = outcome.receipt
+        finalization.state = "completed"
+        if self.run_execution_registry is not None:
+            owner = self.run_execution_registry.get(state.run_id)
+            if owner is not None:
+                self.run_execution_registry.complete_terminal_output(
+                    state.run_id,
+                    receipt=outcome.receipt,
+                )
+        return True
 
     def _build_run_terminal_candidates(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         run_end: RunEndEvent,
         terminalization_kind: RunTerminalizationKind,
     ) -> tuple[AgentEvent, ...]:
         if state.run_working_set is None:
             raise RuntimeError("run terminalization requires committed working set")
-        store = self.runtime_session.long_horizon_state_store
+        store = self._run_long_horizon.store
         window_state = store.window_state(state.run_id)
         if window_state is None or window_state.active_window_id is None:
             raise RuntimeError("run terminalization requires one active context window")
@@ -6101,7 +5944,7 @@ class AgentRuntime:
         projection_state = store.projection_state(window.window_id)
         if projection_state is None:
             raise RuntimeError("run terminalization lost projection state")
-        source_through_sequence = self.runtime_session.event_log.next_sequence() - 1
+        source_through_sequence = self._run_ledger.next_sequence() - 1
         event_fields = self._event_context(state).event_fields()
         window_close = ContextWindowClosedEvent(
             id=window.stable_close_event_id,
@@ -6121,7 +5964,7 @@ class AgentRuntime:
             compaction_terminal_event_id=None,
         )
         run_start = _run_start_for_id(
-            self.runtime_session,
+            self._run_long_horizon.store,
             run_id=state.run_id,
         )
         contract = run_start.long_horizon
@@ -6163,10 +6006,8 @@ class AgentRuntime:
             )
         else:
             subaccount = run_start.child_rollout_subaccount
-            child_state = (
-                self.runtime_session.long_horizon_state_store.child_rollout_state(
-                    run_start.run_id
-                )
+            child_state = self._run_long_horizon.store.child_rollout_state(
+                run_start.run_id
             )
             if child_state is None or child_state.subaccount != subaccount:
                 raise RuntimeError("child rollout state is unavailable at close")
@@ -6183,46 +6024,106 @@ class AgentRuntime:
             )
         return (window_close, rollout_close, run_end)
 
-    def _latch_context_input_after_terminalization(self, state: LoopState) -> None:
-        if state.scratchpad.pop("context_input_latch_after_terminalization", False):
-            self.runtime_session.latch_context_input_reconciliation_required()
+    def _latch_context_input_after_terminalization(
+        self, state: RunActivationWorkingState
+    ) -> None:
+        finalization = self._require_run_finalization_owner(state)
+        if finalization.context_input_latch_after_terminalization:
+            finalization.context_input_latch_after_terminalization = False
+            self._run_ledger.latch_context_input_reconciliation_required()
 
-    def _run_result(self, state: LoopState) -> AgentRunResult:
+    def _run_result(self, state: RunActivationWorkingState) -> AgentRunResult:
+        finalization = (
+            self._require_run_finalization_owner(state)
+            if self.run_execution_registry is not None
+            and self.run_execution_registry.get(state.run_id) is not None
+            else None
+        )
+        receipt = (
+            finalization.terminal_receipt
+            if finalization is not None and state.finalized
+            else None
+        )
+        output = getattr(receipt, "output", None)
+        status = state.status
+        stop_reason = state.stop_reason
+        final_text = _final_text(state.messages)
+        usage = state.token_usage.model_copy(deep=True)
+        if output is not None:
+            status = {
+                "finished": LoopStatus.FINISHED,
+                "failed": LoopStatus.FAILED,
+                "aborted": LoopStatus.ABORTED,
+            }[output.status]
+            stop_reason = output.stop_reason
+            final_text = output.final_text or ""
+            usage = Usage(
+                input_tokens=output.usage.input_tokens,
+                output_tokens=output.usage.output_tokens,
+                total_tokens=output.usage.total_tokens,
+            )
         return AgentRunResult(
-            status=state.status,
-            stop_reason=state.stop_reason,
-            state=state,
-            messages=list(state.messages),
-            final_text=_final_text(state.messages),
+            status=status,
+            stop_reason=stop_reason,
+            run_id=state.run_id,
+            messages=[message.model_copy(deep=True) for message in state.messages],
+            final_text=final_text,
+            token_usage=usage,
+            tool_call_count=state.tool_call_count,
+            pending_interaction_kind=state.pending_interaction_kind,
+            finalized=state.finalized,
             error_message=state.error_message,
         )
 
-    async def _run_memory_hook(self, state: LoopState, hook_name: str, call):
+    async def _run_memory_hook(
+        self, state: RunActivationWorkingState, hook_name: str, call
+    ):
         try:
             return True, await call(), None
         except Exception as exc:
             event = await self._mark_memory_hook_failed(state, hook_name, exc)
             return False, None, event
 
-    async def _call_turn_start_hook(self, state: LoopState, user_input: str):
+    async def _call_turn_start_hook(
+        self, state: RunActivationWorkingState, user_input: str
+    ):
+        view = self._memory_hook_view(state)
         hook = getattr(self.memory_hooks, "on_turn_start", None)
         if hook is not None and _is_overridden_hook(
             self.memory_hooks, "on_turn_start", NoopMemoryHooks
         ):
-            return await hook(state, user_input)
-        return await self.memory_hooks.on_session_start(state, user_input)
+            return await hook(view, user_input)
+        return await self.memory_hooks.on_session_start(view, user_input)
 
-    async def _call_turn_end_hook(self, state: LoopState):
+    async def _call_turn_end_hook(self, state: RunActivationWorkingState):
+        view = self._memory_hook_view(state)
         hook = getattr(self.memory_hooks, "on_turn_end", None)
         if hook is not None and _is_overridden_hook(
             self.memory_hooks, "on_turn_end", NoopMemoryHooks
         ):
-            return await hook(state)
-        return await self.memory_hooks.on_session_end(state)
+            return await hook(view)
+        return await self.memory_hooks.on_session_end(view)
+
+    def _memory_hook_view(self, state: RunActivationWorkingState) -> MemoryHookRunView:
+        model_step_index = (
+            state.model_tool_progress.current_model_call_index
+            or state.model_tool_progress.model_call_index + 1
+        )
+        return build_memory_hook_run_view(
+            runtime_session_id=state.session_id,
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+            status=state.status.value,
+            messages=state.messages,
+            usage=state.token_usage,
+            current_projection=state.memory_projection,
+            model_step_key=f"{state.run_id}:{model_step_index}",
+        )
 
     async def _run_memory_hook_and_emit_events(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         hook_name: str,
         call,
     ) -> tuple[bool, list[AgentEvent]]:
@@ -6235,9 +6136,7 @@ class AgentRuntime:
         emitted_events: list[AgentEvent] = []
         try:
             for event in produced_events or ():
-                emitted_events.append(
-                    await self.runtime_session.emit(event, state=state)
-                )
+                emitted_events.append(await self._run_ledger.emit(event))
         except Exception as exc:
             emitted_events.append(
                 await self._mark_memory_hook_failed(state, hook_name, exc)
@@ -6246,27 +6145,28 @@ class AgentRuntime:
         return True, emitted_events
 
     async def _mark_memory_hook_failed(
-        self, state: LoopState, hook_name: str, exc: Exception
+        self, state: RunActivationWorkingState, hook_name: str, exc: Exception
     ) -> AgentEvent:
         message = f"memory hook {hook_name} failed: {type(exc).__name__}: {exc}"
         state.status = LoopStatus.FAILED
         state.stop_reason = RunStopReason.MEMORY_HOOK_ERROR
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self.runtime_session.emit(
+        return await self._run_ledger.emit(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
                 code="memory_hook_error",
                 metadata={"hook": hook_name},
             ),
-            state=state,
         )
 
-    async def _project_memory(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+    async def _project_memory(
+        self, state: RunActivationWorkingState
+    ) -> AsyncIterator[AgentEvent]:
         projection_id = f"projection:{state.turn_id}"
         context = self._event_context(state)
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             ProjectionRequestedEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -6274,17 +6174,17 @@ class AgentRuntime:
                 scope=state.current_scope or "session",
                 token_budget=self.budget.projection_token_budget,
             ),
-            state=state,
         )
         baseline = None
+        view = self._memory_hook_view(state)
         try:
             baseline = self.memory_hooks.baseline_projection(
-                state,
+                view,
                 token_budget=self.budget.projection_token_budget,
             )
             projection = await asyncio.wait_for(
                 self.memory_hooks.project(
-                    state,
+                    view,
                     token_budget=self.budget.projection_token_budget,
                 ),
                 timeout=self.budget.recall_hard_timeout_ms / 1000,
@@ -6292,7 +6192,7 @@ class AgentRuntime:
         except TimeoutError:
             state.memory_projection = baseline
             if baseline is not None:
-                yield await self.runtime_session.emit(
+                yield await self._run_ledger.emit(
                     ProjectionReadyEvent(
                         **context.event_fields(),
                         projection_id=projection_id,
@@ -6311,10 +6211,9 @@ class AgentRuntime:
                             "fallback": "baseline_projection",
                         },
                     ),
-                    state=state,
                 )
                 return
-            yield await self.runtime_session.emit(
+            yield await self._run_ledger.emit(
                 ProjectionFailedEvent(
                     **context.event_fields(),
                     projection_id=projection_id,
@@ -6323,12 +6222,11 @@ class AgentRuntime:
                     token_budget=self.budget.projection_token_budget,
                     error="recall_timeout",
                 ),
-                state=state,
             )
             return
         except Exception as exc:
             state.memory_projection = None
-            yield await self.runtime_session.emit(
+            yield await self._run_ledger.emit(
                 ProjectionFailedEvent(
                     **context.event_fields(),
                     projection_id=projection_id,
@@ -6337,11 +6235,10 @@ class AgentRuntime:
                     token_budget=self.budget.projection_token_budget,
                     error=f"{type(exc).__name__}: {exc}",
                 ),
-                state=state,
             )
             return
         state.memory_projection = projection
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             ProjectionReadyEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -6353,12 +6250,11 @@ class AgentRuntime:
                 recalled_memory_entries=_typed_recalled_memory_entries(projection),
                 summary=_projection_summary(projection),
             ),
-            state=state,
         )
 
     async def _execute_tool_blocks(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_blocks: list[ToolCallBlock],
     ) -> AsyncIterator[AgentEvent]:
         parsed_calls: list[ToolCall] = []
@@ -6366,7 +6262,7 @@ class AgentRuntime:
             try:
                 parsed_calls.append(_parse_tool_call(block))
             except ValueError as exc:
-                stored_events = await self.runtime_session.emit_many(
+                stored_events = await self._run_ledger.emit_many(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -6374,7 +6270,6 @@ class AgentRuntime:
                         message=str(exc),
                         failure_stage="malformed_arguments",
                     ),
-                    state=state,
                 )
                 for event in stored_events:
                     yield event
@@ -6397,7 +6292,7 @@ class AgentRuntime:
             ]
             for duplicate_id in sorted(duplicate_ids):
                 call = next(call for call in parsed_calls if call.id == duplicate_id)
-                stored_events = await self.runtime_session.emit_many(
+                stored_events = await self._run_ledger.emit_many(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=call.id,
@@ -6406,7 +6301,6 @@ class AgentRuntime:
                         arguments=call.arguments,
                         failure_stage="policy_denied",
                     ),
-                    state=state,
                 )
                 for event in stored_events:
                     yield event
@@ -6526,11 +6420,20 @@ class AgentRuntime:
             state.status = LoopStatus.WAITING_USER
             state.stop_reason = RunStopReason.WAITING_USER
             state.transition(LoopTransition.WAIT_FOR_USER)
-            event = await self.runtime_session.emit(
+            event = await self._run_ledger.emit(
                 RequireUserConfirmEvent(
                     **self._event_context(state).event_fields(), tool_calls=blocks
                 ),
-                state=state,
+            )
+            state.pending_interaction_payload = {}
+            state.pending_interaction_source_event_reference = (
+                event_reference_from_stored(
+                    event,
+                    runtime_session_id=self._run_identity.runtime_session_id,
+                )
+            )
+            state.pending_interaction_source_event_candidate = (
+                freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
             )
             yield event
             return
@@ -6550,7 +6453,7 @@ class AgentRuntime:
 
     async def _emit_workflow_gate_decisions(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         parsed_calls: list[ToolCall],
         *,
         exposure: CapabilityExposurePlan,
@@ -6578,7 +6481,7 @@ class AgentRuntime:
 
     async def _handle_workflow_tool_batch(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
         workflow_index = next(
@@ -6694,7 +6597,7 @@ class AgentRuntime:
 
     async def _execute_enter_plan(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         rollout_reservation: RolloutReservationFact,
@@ -6727,7 +6630,7 @@ class AgentRuntime:
             reason=reason,
             pending_entry_audit=False,
         )
-        stored_entered = await self.runtime_session.emit(
+        stored_entered = await self._run_ledger.emit(
             PlanModeEnteredEvent(
                 **self._event_context(state).event_fields(),
                 source="agent",
@@ -6735,7 +6638,6 @@ class AgentRuntime:
                 previous_permission_policy=previous_policy.to_dict(),
                 reason=reason,
             ),
-            state=state,
         )
         plan_state.apply_durable_event(stored_entered)
         yield stored_entered
@@ -6759,7 +6661,7 @@ class AgentRuntime:
 
     async def _execute_ask_plan_question(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         rollout_reservation: RolloutReservationFact,
@@ -6793,7 +6695,7 @@ class AgentRuntime:
         reason = _optional_str(call.arguments.get("reason"))
         question_id = f"plan_question:{uuid4().hex}"
         interaction_id = f"plan_interaction:{uuid4().hex}"
-        yield await self.runtime_session.emit(
+        stored_question = await self._run_ledger.emit(
             PlanQuestionAskedEvent(
                 **self._event_context(state).event_fields(),
                 question_id=question_id,
@@ -6803,8 +6705,8 @@ class AgentRuntime:
                 allow_free_text=allow_free_text,
                 reason=reason,
             ),
-            state=state,
         )
+        yield stored_question
         state.pending_tool_calls = []
         state.pending_interaction_kind = "plan"
         state.pending_interaction_payload = {
@@ -6820,13 +6722,20 @@ class AgentRuntime:
                 rollout_reservation.semantic_fingerprint
             ),
         }
+        state.pending_interaction_source_event_reference = event_reference_from_stored(
+            stored_question,
+            runtime_session_id=self._run_identity.runtime_session_id,
+        )
+        state.pending_interaction_source_event_candidate = freeze_event_write_candidate(
+            stored_question.model_copy(update={"sequence": None})
+        )
         state.status = LoopStatus.WAITING_USER
         state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
 
     async def _execute_exit_plan(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         rollout_reservation: RolloutReservationFact,
@@ -6855,11 +6764,11 @@ class AgentRuntime:
             return
         plan_text = _required_str(call.arguments.get("plan"), "plan")
         summary = _optional_str(call.arguments.get("summary"))
-        state.scratchpad.pop("plan_revision_required", None)
-        state.scratchpad.pop("plan_revision_feedback", None)
+        state.plan_progress.revision_required = False
+        state.plan_progress.revision_feedback = ""
         exit_request_id = f"plan_exit:{uuid4().hex}"
         interaction_id = f"plan_interaction:{uuid4().hex}"
-        yield await self.runtime_session.emit(
+        stored_exit_request = await self._run_ledger.emit(
             PlanExitRequestedEvent(
                 **self._event_context(state).event_fields(),
                 exit_request_id=exit_request_id,
@@ -6867,8 +6776,8 @@ class AgentRuntime:
                 plan_text=plan_text,
                 summary=summary,
             ),
-            state=state,
         )
+        yield stored_exit_request
         state.pending_tool_calls = []
         state.pending_interaction_kind = "plan"
         state.pending_interaction_payload = {
@@ -6883,13 +6792,20 @@ class AgentRuntime:
                 rollout_reservation.semantic_fingerprint
             ),
         }
+        state.pending_interaction_source_event_reference = event_reference_from_stored(
+            stored_exit_request,
+            runtime_session_id=self._run_identity.runtime_session_id,
+        )
+        state.pending_interaction_source_event_candidate = freeze_event_write_candidate(
+            stored_exit_request.model_copy(update={"sequence": None})
+        )
         state.status = LoopStatus.WAITING_USER
         state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
 
     def _mcp_terminal_source(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         payload: dict[str, Any],
     ) -> McpInputRequiredTerminalSourceFact:
@@ -6909,7 +6825,7 @@ class AgentRuntime:
 
     def _attach_mcp_terminal_disposition(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         prepared_candidates: tuple[AgentEvent, ...],
         source: McpInputRequiredTerminalSourceFact | None,
@@ -6945,7 +6861,7 @@ class AgentRuntime:
         resolution_ref = source.source_resolution_submitted_event_reference
         terminal_identity = stable_event_identity(
             terminal,
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
         )
         event_fields = self._event_context(state).event_fields()
         if closure_reason is not None:
@@ -7020,7 +6936,7 @@ class AgentRuntime:
 
     def _install_mcp_publication_latched_termination(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         committed_events: tuple[AgentEvent, ...],
         reason: Literal[
@@ -7033,7 +6949,7 @@ class AgentRuntime:
         references = tuple(
             event_reference_from_stored(
                 event,
-                runtime_session_id=self.runtime_session.runtime_session_id,
+                runtime_session_id=self._run_identity.runtime_session_id,
             )
             for event in sorted(
                 (
@@ -7068,26 +6984,27 @@ class AgentRuntime:
                 tuple(item.payload_fingerprint for item in references),
             ),
         )
-        state.scratchpad["publication_latched_run_termination"] = termination
-        state.scratchpad["publication_terminal_deadline_budget"] = deadline_budget
+        finalization = self._require_run_finalization_owner(state)
+        finalization.publication_latched_termination = termination
+        finalization.publication_deadline_budget = deadline_budget
 
     def _install_mandatory_audit_publication_latched_termination(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         committed_event: AgentEvent,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
     ) -> None:
         if (
             committed_event.sequence is None
-            or not self.runtime_session.publication_reconciliation_required
+            or not self._run_ledger.publication_reconciliation_required
         ):
             raise RuntimeError(
                 "mandatory audit publication termination lacks committed authority"
             )
         reference = event_reference_from_stored(
             committed_event,
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
         )
         termination = build_frozen_fact(
             PublicationLatchedRunTerminationFact,
@@ -7099,8 +7016,9 @@ class AgentRuntime:
                 (reference.payload_fingerprint,),
             ),
         )
-        state.scratchpad["publication_latched_run_termination"] = termination
-        state.scratchpad["publication_terminal_deadline_budget"] = deadline_budget
+        finalization = self._require_run_finalization_owner(state)
+        finalization.publication_latched_termination = termination
+        finalization.publication_deadline_budget = deadline_budget
         state.status = LoopStatus.ABORTED
         state.stop_reason = RunStopReason.ABORTED
         state.abort_kind = AbortKind.HOST_TEARDOWN
@@ -7111,7 +7029,7 @@ class AgentRuntime:
 
     async def _emit_tool_result_and_record(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         tool_call_id: str,
         tool_call_name: str,
@@ -7140,8 +7058,7 @@ class AgentRuntime:
         mcp_terminal_reason: McpPendingTerminalReason | None = None,
         deadline_budget: RuntimeEventOperationDeadlineBudget | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        prior_result_events = _tool_result_boundary_events(
-            self.runtime_session.event_log,
+        prior_result_events = self._run_tools.tool_result_boundary_events(
             run_id=state.run_id,
             tool_call_id=tool_call_id,
             start_event_id=_tool_timing_start_event_id(tool_observation_timing_seed),
@@ -7279,18 +7196,20 @@ class AgentRuntime:
         )
         if track_mcp_terminal and mcp_pending_handle is None:
             raise RuntimeError("MCP terminal candidate lost its pending handle owner")
-        terminal_registry = self.runtime_session.tool_execution_terminal_registry
+        terminal_registry = self._run_tools.tool_execution_terminal_registry
         if (
             rollout_reservation is not None
             or mcp_input_required_terminal_source is not None
         ):
-            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                write_candidates,
-                deadline_monotonic=(
-                    deadline_budget.ordinary_deadline_monotonic
-                    if deadline_budget is not None
-                    else None
-                ),
+            write_candidates = (
+                await self._run_tools.tool_terminal_projection_service.prepare_batch(
+                    write_candidates,
+                    deadline_monotonic=(
+                        deadline_budget.ordinary_deadline_monotonic
+                        if deadline_budget is not None
+                        else None
+                    ),
+                )
             )
             write_candidates = self._attach_mcp_terminal_disposition(
                 state,
@@ -7315,7 +7234,7 @@ class AgentRuntime:
                 ),
             )
             if mcp_pending_handle is not None:
-                mcp_port = self.runtime_session.mcp_tool_execution_port
+                mcp_port = self._run_tools.mcp_tool_execution_port
                 if mcp_port is None:
                     raise RuntimeError("MCP terminal candidate lost its execution port")
                 prepared_mcp_settlement = mcp_port.prepare_terminal_settlement(
@@ -7334,14 +7253,14 @@ class AgentRuntime:
         mcp_handoff_confirmed = False
         if (
             mcp_closure_reason is not None
-            and self.runtime_session.publication_reconciliation_required
+            and self._run_ledger.publication_reconciliation_required
         ):
             if deadline_budget is None:
                 raise RuntimeError(
                     "publication-latched MCP closure requires a frozen deadline budget"
                 )
             publication_maintenance_lease = (
-                self.runtime_session.issue_publication_terminal_maintenance_lease(
+                self._run_ledger.issue_publication_terminal_maintenance_lease(
                     owner_kind="mcp_interaction_closure_bundle",
                     ordered_events=write_candidates,
                     transaction_companion=None,
@@ -7350,7 +7269,7 @@ class AgentRuntime:
             )
         try:
             if rollout_reservation is None:
-                result = await self.runtime_session.write_events_with_deadline(
+                result = await self._run_ledger.write_events_with_deadline(
                     write_candidates,
                     deadline_monotonic=(
                         deadline_budget.terminal_deadline_monotonic
@@ -7360,19 +7279,15 @@ class AgentRuntime:
                         )
                         else deadline_budget.ordinary_deadline_monotonic
                         if deadline_budget is not None
-                        else self.runtime_session.event_write_service.new_deadline_monotonic()
+                        else self._run_ledger.new_write_deadline_monotonic()
                     ),
-                    state=state,
                     publication_terminal_maintenance_lease=(
                         publication_maintenance_lease
                     ),
                 )
                 stored_events = list(result.committed_events)
             else:
-                result = await RuntimeSessionToolExecutionEventCommitPort(
-                    runtime_session=self.runtime_session,
-                    state=state,
-                ).commit_terminal_batch_and_settlement(
+                result = await self._run_tools.event_commit_port().commit_terminal_batch_and_settlement(
                     terminal_candidates=tuple(
                         event for event in write_candidates if event.id != settlement.id
                     ),
@@ -7396,7 +7311,7 @@ class AgentRuntime:
                 )
                 stored_events = list(result.committed_events)
                 if result.reconciliation_required:
-                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    self._run_ledger.latch_event_commit_outcome_unknown()
             if candidate_owner is not None and prepared_mcp_settlement is not None:
                 receipt = terminal_registry.confirm_stable_candidate_write(
                     owner_identity=candidate_owner,
@@ -7410,9 +7325,11 @@ class AgentRuntime:
                         result=result,
                     ),
                 )
-                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
-                    settlement=prepared_mcp_settlement,
-                    commit_receipt=receipt,
+                transition = (
+                    self._run_tools.mcp_tool_execution_port.confirm_terminal_commit(
+                        settlement=prepared_mcp_settlement,
+                        commit_receipt=receipt,
+                    )
                 )
                 terminal_registry.accept_physical_owner_handoff(
                     transition.handoff_receipt
@@ -7438,9 +7355,9 @@ class AgentRuntime:
                         result=exc.result,
                     ),
                 )
-                mcp_port = self.runtime_session.mcp_tool_execution_port
+                mcp_port = self._run_tools.mcp_tool_execution_port
                 if mcp_port is None:
-                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    self._run_ledger.latch_event_commit_outcome_unknown()
                     raise RuntimeError(
                         "MCP terminal publication failure lost its execution port"
                     ) from exc
@@ -7477,7 +7394,7 @@ class AgentRuntime:
             )
             raise
         except BaseException as error:
-            outcome = self.runtime_session.resolved_event_write_outcome(error)
+            outcome = self._run_ledger.resolved_write_outcome(error)
             if (
                 candidate_owner is not None
                 and prepared_mcp_settlement is not None
@@ -7487,9 +7404,11 @@ class AgentRuntime:
                     owner_identity=candidate_owner,
                     outcome=outcome,
                 )
-                transition = self.runtime_session.mcp_tool_execution_port.confirm_terminal_commit(
-                    settlement=prepared_mcp_settlement,
-                    commit_receipt=receipt,
+                transition = (
+                    self._run_tools.mcp_tool_execution_port.confirm_terminal_commit(
+                        settlement=prepared_mcp_settlement,
+                        commit_receipt=receipt,
+                    )
                 )
                 terminal_registry.accept_physical_owner_handoff(
                     transition.handoff_receipt
@@ -7578,12 +7497,11 @@ class AgentRuntime:
         )
         matches = tuple(
             reservation
-            for state in self.runtime_session.long_horizon_state_store.rollout_states()
+            for state in self._run_long_horizon.store.rollout_states()
             for reservation in state.active_reservations
             if reservation.reservation_id == reservation_id
         )
-        binding = resolve_run_rollout_binding(
-            self.runtime_session,
+        binding = self._run_long_horizon.resolve_rollout_binding(
             run_id=run_id,
         )
         if binding.child_state is not None:
@@ -7606,7 +7524,7 @@ class AgentRuntime:
             or reservation.owner_id != tool_call_id
         ):
             raise RuntimeError("pending tool rollout reservation identity mismatch")
-        terminal_registry = self.runtime_session.tool_execution_terminal_registry
+        terminal_registry = self._run_tools.tool_execution_terminal_registry
         if (
             terminal_registry.owner_for_call(
                 run_id=run_id,
@@ -7622,7 +7540,7 @@ class AgentRuntime:
 
     def _tool_rollout_settlement_event(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         terminal_event: ToolResultEndEvent | ToolResultEndCandidate,
         reservation: RolloutReservationFact,
@@ -7646,7 +7564,7 @@ class AgentRuntime:
 
     def _mcp_terminal_commit_key(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_call_id: str,
     ) -> tuple[str, str]:
         key = (state.run_id, tool_call_id)
@@ -7656,7 +7574,7 @@ class AgentRuntime:
 
     def _mark_mcp_terminal_commit_attempt(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_call_id: str,
     ) -> None:
         key = self._mcp_terminal_commit_key(state, tool_call_id)
@@ -7664,7 +7582,7 @@ class AgentRuntime:
 
     def _mark_mcp_terminal_commit_none(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_call_id: str,
     ) -> None:
         key = self._mcp_terminal_commit_key(state, tool_call_id)
@@ -7672,7 +7590,7 @@ class AgentRuntime:
 
     def _mark_mcp_terminal_commit_full(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_call_id: str,
     ) -> None:
         key = self._mcp_terminal_commit_key(state, tool_call_id)
@@ -7680,7 +7598,7 @@ class AgentRuntime:
 
     def _mark_mcp_terminal_commit_untrusted(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         tool_call_id: str,
     ) -> None:
         key = self._mcp_terminal_commit_key(state, tool_call_id)
@@ -7688,7 +7606,7 @@ class AgentRuntime:
 
     def _resolve_mcp_terminal_commit_failure(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         tool_call_id: str,
         candidates: tuple[AgentEvent, ...],
@@ -7698,7 +7616,7 @@ class AgentRuntime:
             self._mark_mcp_terminal_commit_full(state, tool_call_id)
             return
         del candidates
-        outcome = self.runtime_session.resolved_event_write_outcome(error)
+        outcome = self._run_ledger.resolved_write_outcome(error)
         if outcome.status == "unknown":
             self._mark_mcp_terminal_commit_untrusted(state, tool_call_id)
             return
@@ -7709,13 +7627,12 @@ class AgentRuntime:
 
     def _committed_tool_result_events(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         tool_call_id: str,
         start_event_id: str | None = None,
     ) -> list[AgentEvent]:
-        events = _completed_tool_result_events(
-            self.runtime_session.event_log,
+        events = self._run_tools.completed_tool_result_events(
             run_id=state.run_id,
             tool_call_id=tool_call_id,
             start_event_id=start_event_id,
@@ -7726,7 +7643,7 @@ class AgentRuntime:
 
     def _record_tool_result_events(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         stored_events: list[AgentEvent],
         tool_call_id: str,
@@ -7745,34 +7662,33 @@ class AgentRuntime:
             )
         )
 
-    def _plan_state(self, state: LoopState) -> PlanWorkflowState:
-        plan_state = state.scratchpad.get("plan_state")
+    def _plan_state(self, state: RunActivationWorkingState) -> PlanWorkflowState:
+        plan_state = state.plan_progress.workflow_state
         if isinstance(plan_state, PlanWorkflowState):
             return plan_state
         plan_state = PlanWorkflowState()
-        state.scratchpad["plan_state"] = plan_state
+        state.plan_progress.workflow_state = plan_state
         return plan_state
 
-    def _plan_revision_required(self, state: LoopState) -> bool:
-        return (
-            bool(state.scratchpad.get("plan_revision_required"))
-            and self._plan_state(state).active
-        )
+    def _plan_revision_required(self, state: RunActivationWorkingState) -> bool:
+        return state.plan_progress.revision_required and self._plan_state(state).active
 
-    def _consume_plan_interaction_budget(self, state: LoopState) -> bool:
-        consumed = int(state.scratchpad.get("plan_interactions", 0))
+    def _consume_plan_interaction_budget(
+        self, state: RunActivationWorkingState
+    ) -> bool:
+        consumed = state.plan_progress.interactions
         if consumed >= state.budget.max_plan_interactions_per_run:
             state.status = LoopStatus.FAILED
             state.stop_reason = RunStopReason.PLAN_INTERACTION_BUDGET
             state.error_message = "plan interaction budget exceeded"
             state.transition(LoopTransition.FAIL)
             return False
-        state.scratchpad["plan_interactions"] = consumed + 1
+        state.plan_progress.interactions = consumed + 1
         return True
 
     async def _emit_plan_budget_error_result(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         call: ToolCall,
         *,
         kind: str,
@@ -7790,30 +7706,28 @@ class AgentRuntime:
             rollout_reservation=rollout_reservation,
         ):
             yield event
-        yield await self.runtime_session.emit(
+        yield await self._run_ledger.emit(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
                 code="plan_interaction_budget_exceeded",
             ),
-            state=state,
         )
 
     async def _mark_plan_budget_exceeded(
-        self, state: LoopState, *, kind: str
+        self, state: RunActivationWorkingState, *, kind: str
     ) -> AgentEvent:
         message = f"plan {kind} budget exceeded"
         state.status = LoopStatus.FAILED
         state.stop_reason = RunStopReason.PLAN_INTERACTION_BUDGET
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self.runtime_session.emit(
+        return await self._run_ledger.emit(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
                 code="plan_interaction_budget_exceeded",
             ),
-            state=state,
         )
 
     def _policy_from_plan_state(
@@ -7839,7 +7753,7 @@ class AgentRuntime:
 
     async def _stream_confirmed_tool_blocks(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         decisions_by_id,
     ) -> AsyncIterator[AgentEvent]:
         parsed_calls: list[ToolCall] = []
@@ -7877,7 +7791,7 @@ class AgentRuntime:
             if not decision.confirmed:
                 async for event in flush_parsed_calls():
                     yield event
-                stored_events = await self.runtime_session.emit_many(
+                stored_events = await self._run_ledger.emit_many(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -7887,7 +7801,6 @@ class AgentRuntime:
                         arguments=_tool_block_arguments_for_semantics(block),
                         failure_stage="permission_denied",
                     ),
-                    state=state,
                 )
                 for event in stored_events:
                     yield event
@@ -7905,7 +7818,7 @@ class AgentRuntime:
             except ValueError as exc:
                 async for event in flush_parsed_calls():
                     yield event
-                stored_events = await self.runtime_session.emit_many(
+                stored_events = await self._run_ledger.emit_many(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -7913,7 +7826,6 @@ class AgentRuntime:
                         message=str(exc),
                         failure_stage="malformed_arguments",
                     ),
-                    state=state,
                 )
                 for event in stored_events:
                     yield event
@@ -7930,7 +7842,7 @@ class AgentRuntime:
 
     async def _stream_parsed_tool_calls(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
         exposure = self._require_capability_exposure(state)
@@ -7941,14 +7853,14 @@ class AgentRuntime:
         ):
             remaining = list(logical_batch)
             while remaining:
-                capacity = self.runtime_session.physical_dispatch_capacity(
+                capacity = self._run_tools.physical_dispatch_capacity(
                     PhysicalOperationKind.TOOL_CALL
                 )
                 if capacity <= 0:
-                    await self.runtime_session.ensure_physical_operation_headroom(
+                    await self._run_tools.ensure_physical_operation_headroom(
                         PhysicalOperationKind.TOOL_CALL
                     )
-                    capacity = self.runtime_session.physical_dispatch_capacity(
+                    capacity = self._run_tools.physical_dispatch_capacity(
                         PhysicalOperationKind.TOOL_CALL
                     )
                 if capacity <= 0:
@@ -7968,7 +7880,7 @@ class AgentRuntime:
 
     async def _stream_physically_admitted_tool_batch(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         batch: list[ToolCall],
         *,
         exposure: CapabilityExposurePlan,
@@ -8020,7 +7932,7 @@ class AgentRuntime:
 
     async def _commit_tool_admissions(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         calls: list[ToolCall],
         *,
         exposure: CapabilityExposurePlan,
@@ -8033,8 +7945,7 @@ class AgentRuntime:
             raise ValueError("tool admission batch cannot be empty")
         prelude_events: list[AgentEvent] = []
         for _attempt in range(len(RolloutPhase) + 1):
-            binding = resolve_run_rollout_binding(
-                self.runtime_session,
+            binding = self._run_long_horizon.resolve_rollout_binding(
                 run_id=state.run_id,
             )
             if binding.child_state is not None:
@@ -8046,14 +7957,13 @@ class AgentRuntime:
                 attempted_tool_call_count=len(calls),
             )
             if plan.action == "transition":
-                transition = await self.runtime_session.emit(
+                transition = await self._run_ledger.emit(
                     build_rollout_phase_transition_event(
                         event_context=self._event_context(state),
                         account=binding.account,
                         state=binding.parent_state,
                         plan=plan,
                     ),
-                    state=state,
                 )
                 prelude_events.append(transition)
                 continue
@@ -8230,10 +8140,7 @@ class AgentRuntime:
             )
             gate_items.append((gate_event, reservation_event, ()))
             reservations[call.id] = reservation
-        result = await RuntimeSessionToolExecutionEventCommitPort(
-            runtime_session=self.runtime_session,
-            state=state,
-        ).commit_gate_batch(
+        result = await self._run_tools.event_commit_port().commit_gate_batch(
             gate_items=gate_items,
             expected_account_state_fingerprint=rollout_state.state_fingerprint,
             account_id=account_id,
@@ -8244,14 +8151,14 @@ class AgentRuntime:
             )
         if reservations:
             try:
-                self.runtime_session.tool_execution_terminal_registry.install_admitted_batch(
+                self._run_tools.tool_execution_terminal_registry.install_admitted_batch(
                     run_id=state.run_id,
                     reservations=tuple(reservations.values()),
                 )
             except BaseException:
                 # Admission is already durable.  Losing its sole process owner is
                 # an unknown execution state, so no physical tool may start.
-                self.runtime_session.latch_event_commit_outcome_unknown()
+                self._run_ledger.latch_event_commit_outcome_unknown()
                 raise
         executable_calls = [call for call in calls if call.id in reservations]
         return (
@@ -8262,7 +8169,7 @@ class AgentRuntime:
 
     async def _commit_tool_terminal(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         *,
         terminal_event: ToolResultEndCandidate,
         reservation: RolloutReservationFact,
@@ -8270,7 +8177,7 @@ class AgentRuntime:
         prepared_notification_reservation=None,
         prepared_monitor_cancellation=None,
     ) -> tuple[AgentEvent, ...]:
-        await self.runtime_session.terminal_monitor_coordinator.ensure_terminal_receipt_observation(
+        await self._run_tools.terminal_monitor_coordinator.ensure_terminal_receipt_observation(
             terminal_event.terminal_process_observation_receipt
         )
         settlement = self._tool_rollout_settlement_event(
@@ -8294,7 +8201,7 @@ class AgentRuntime:
             settlement,
         )
         prepared_candidates = (
-            await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+            await self._run_tools.tool_terminal_projection_service.prepare_batch(
                 source_candidates
             )
         )
@@ -8324,7 +8231,7 @@ class AgentRuntime:
                 ),
                 None,
             )
-            notification_event = self.runtime_session.terminal_notification_account_coordinator.freeze_created_event(
+            notification_event = self._run_tools.terminal_notification_account_coordinator.freeze_created_event(
                 prepared=prepared_notification_reservation,
                 cause_events=tuple(
                     item
@@ -8342,17 +8249,14 @@ class AgentRuntime:
                     else (candidate,)
                 )
             )
-        terminal_registry = self.runtime_session.tool_execution_terminal_registry
+        terminal_registry = self._run_tools.tool_execution_terminal_registry
         terminal_registry.freeze_terminal(
             run_id=state.run_id,
             reservation=reservation,
             candidates=candidates,
         )
         try:
-            result = await RuntimeSessionToolExecutionEventCommitPort(
-                runtime_session=self.runtime_session,
-                state=state,
-            ).commit_terminal_batch_and_settlement(
+            result = await self._run_tools.event_commit_port().commit_terminal_batch_and_settlement(
                 terminal_candidates=tuple(
                     event for event in candidates if event.id != settlement.id
                 ),
@@ -8360,7 +8264,7 @@ class AgentRuntime:
                 expected_reservation_fingerprint=reservation.semantic_fingerprint,
             )
         except BaseException:
-            if self.runtime_session.reconciliation_required:
+            if self._run_ledger.reconciliation_required:
                 terminal_registry.mark_commit_outcome_unknown(
                     run_id=state.run_id,
                     reservation=reservation,
@@ -8390,11 +8294,15 @@ class AgentRuntime:
         *,
         tool_result_end: ToolResultEndEvent,
     ) -> tuple[AgentEvent, ...]:
-        receipt_applications = self.runtime_session.terminal_monitor_coordinator.prepare_receipt_applications(
-            tool_result_end
+        receipt_applications = (
+            self._run_tools.terminal_monitor_coordinator.prepare_receipt_applications(
+                tool_result_end
+            )
         )
-        dominated = self.runtime_session.terminal_notification_store.receipt_dominated_notifications(
-            tool_result_end
+        dominated = (
+            self._run_tools.terminal_notification_store.receipt_dominated_notifications(
+                tool_result_end
+            )
         )
         if not dominated:
             return receipt_applications
@@ -8403,7 +8311,7 @@ class AgentRuntime:
                 (
                     event_reference_from_stored(
                         item.source_event,
-                        runtime_session_id=self.runtime_session.runtime_session_id,
+                        runtime_session_id=self._run_identity.runtime_session_id,
                     )
                     for item in dominated
                 ),
@@ -8425,7 +8333,7 @@ class AgentRuntime:
             outcome="explicitly_observed",
             tool_result_end_event_identity=stable_event_identity(
                 tool_result_end,
-                runtime_session_id=self.runtime_session.runtime_session_id,
+                runtime_session_id=self._run_identity.runtime_session_id,
             ),
         )
         terminal_process_ids = tuple(
@@ -8438,7 +8346,7 @@ class AgentRuntime:
             )
         )
         releases = (
-            self.runtime_session.terminal_notification_account_coordinator.freeze_released_events(
+            self._run_tools.terminal_notification_account_coordinator.freeze_released_events(
                 reservation_ids=tuple(
                     f"terminal_completion_head:{process_id}"
                     for process_id in terminal_process_ids
@@ -8452,7 +8360,7 @@ class AgentRuntime:
 
     async def _stream_tool_batch_events(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         batch: list[ToolCall],
         batch_events: list[AgentEvent],
         *,
@@ -8460,13 +8368,13 @@ class AgentRuntime:
         reservations: dict[str, RolloutReservationFact],
     ) -> AsyncIterator[AgentEvent]:
         tap = _ToolBatchTap({call.id for call in batch})
-        self.runtime_session.publisher.subscribe(tap)
+        self._run_tools.publisher.subscribe(tap)
         executor = ToolExecutor(
             registry=self.tool_executor.registry,
-            record_event=self.runtime_session.make_thread_recorder(state=state),
+            record_event=self._run_tools.make_thread_recorder(),
             artifact_service=self.tool_executor.artifact_service,
             artifact_policies=self.tool_executor.artifact_policies,
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
             semantics_registry=self.tool_executor.semantics_registry,
             essential_capture_policy=(self.tool_executor.essential_capture_policy),
         )
@@ -8475,12 +8383,9 @@ class AgentRuntime:
             call: ToolCall,
         ) -> ToolExecutionResult | ToolExecutionSuspended:
             descriptor = exposure.descriptors_by_name.get(call.name)
-            borrow_authority = state.scratchpad.get(
-                "capability_execution_borrow_authority"
-            )
-            borrow_kind = str(
-                state.scratchpad.get("capability_execution_borrow_kind", "parent")
-            )
+            resources = state.execution_resources
+            borrow_authority = resources.capability_execution_borrow_authority
+            borrow_kind = resources.capability_execution_borrow_kind
             is_async = executor.is_async(call)
 
             def acquire_borrow() -> None:
@@ -8509,19 +8414,15 @@ class AgentRuntime:
                         descriptor_attribution=self._descriptor_render_attribution(
                             state, descriptor
                         ),
-                        context_id=_optional_scratchpad_str(
-                            state, "current_context_id"
-                        ),
-                        model_call_index=_optional_scratchpad_int(
-                            state, "current_model_call_index"
+                        context_id=state.model_tool_progress.current_context_id,
+                        model_call_index=(
+                            state.model_tool_progress.current_model_call_index
                         ),
                         runtime_context=self._tool_runtime_context(
                             state,
-                            context_id=_optional_scratchpad_str(
-                                state, "current_context_id"
-                            ),
-                            model_call_index=_optional_scratchpad_int(
-                                state, "current_model_call_index"
+                            context_id=state.model_tool_progress.current_context_id,
+                            model_call_index=(
+                                state.model_tool_progress.current_model_call_index
                             ),
                         ),
                     )
@@ -8536,17 +8437,15 @@ class AgentRuntime:
                     descriptor_attribution=self._descriptor_render_attribution(
                         state, descriptor
                     ),
-                    context_id=_optional_scratchpad_str(state, "current_context_id"),
-                    model_call_index=_optional_scratchpad_int(
-                        state, "current_model_call_index"
+                    context_id=state.model_tool_progress.current_context_id,
+                    model_call_index=(
+                        state.model_tool_progress.current_model_call_index
                     ),
                     runtime_context=self._tool_runtime_context(
                         state,
-                        context_id=_optional_scratchpad_str(
-                            state, "current_context_id"
-                        ),
-                        model_call_index=_optional_scratchpad_int(
-                            state, "current_model_call_index"
+                        context_id=state.model_tool_progress.current_context_id,
+                        model_call_index=(
+                            state.model_tool_progress.current_model_call_index
                         ),
                     ),
                 ),
@@ -8639,7 +8538,7 @@ class AgentRuntime:
                         settlement = terminal_settlements.pop(event.tool_call_id)
                         yield settlement
         finally:
-            self.runtime_session.publisher.unsubscribe(tap)
+            self._run_tools.publisher.unsubscribe(tap)
             pending_tasks = tuple(pending)
             for task in pending_tasks:
                 if not task.done():
@@ -8693,7 +8592,7 @@ class AgentRuntime:
 
     async def _suspend_tool_execution(
         self,
-        state: LoopState,
+        state: RunActivationWorkingState,
         suspended: ToolExecutionSuspended,
         *,
         reservation: RolloutReservationFact,
@@ -8719,11 +8618,14 @@ class AgentRuntime:
                 .isoformat()
                 .replace("+00:00", "Z")
             )
-        predecessor = state.scratchpad.get(
-            "latest_mcp_input_required_resolution_reference"
+        predecessor = (
+            state.execution_resources.latest_mcp_input_required_resolution_reference
         )
         if interaction.round_count == 1:
             predecessor = None
+        working_set = state.run_working_set
+        if working_set is None:
+            raise RuntimeError("MCP suspension requires committed run authority")
         suspension_fact = build_frozen_fact(
             McpInputRequiredSuspensionFact,
             schema_version="mcp_input_required_suspension.v1",
@@ -8733,7 +8635,9 @@ class AgentRuntime:
             request_envelope=view.request_envelope,
             rollout_reservation_id=reservation.reservation_id,
             rollout_reservation_fingerprint=reservation.semantic_fingerprint,
-            source_mcp_installation_id=self.runtime_session.mcp_installation_id,
+            source_mcp_installation_id=(
+                working_set.frozen_execution_surface.identity.mcp_installation_id
+            ),
             durable_deadline_utc=deadline_utc,
             deadline_policy_fingerprint=context_fingerprint(
                 "mcp-input-required-deadline-policy:v1",
@@ -8763,6 +8667,12 @@ class AgentRuntime:
         original_pending_tool_calls = list(state.pending_tool_calls)
         original_pending_kind = state.pending_interaction_kind
         original_pending_payload = dict(state.pending_interaction_payload)
+        original_pending_source_reference = (
+            state.pending_interaction_source_event_reference
+        )
+        original_pending_source_candidate = (
+            state.pending_interaction_source_event_candidate
+        )
         original_status = state.status
         original_stop_reason = state.stop_reason
         original_transition = state.last_transition
@@ -8786,10 +8696,10 @@ class AgentRuntime:
             tool_name=suspended.tool_name,
             suspension=suspension_fact,
         )
-        mcp_port = self.runtime_session.mcp_tool_execution_port
+        mcp_port = self._run_tools.mcp_tool_execution_port
         if mcp_port is None:
             raise RuntimeError("MCP suspension lost its execution port owner")
-        terminal_registry = self.runtime_session.tool_execution_terminal_registry
+        terminal_registry = self._run_tools.tool_execution_terminal_registry
         candidate_owner = terminal_registry.freeze_suspension(
             run_id=state.run_id,
             reservation=reservation,
@@ -8805,10 +8715,7 @@ class AgentRuntime:
         suspension_publication_unavailable = False
         suspension_reconciliation_required = False
         try:
-            commit_result = await RuntimeSessionToolExecutionEventCommitPort(
-                runtime_session=self.runtime_session,
-                state=state,
-            ).commit_suspension(
+            commit_result = await self._run_tools.event_commit_port().commit_suspension(
                 suspension_candidate=suspension_event,
                 reservation_id=reservation.reservation_id,
                 expected_reservation_fingerprint=reservation.semantic_fingerprint,
@@ -8841,9 +8748,7 @@ class AgentRuntime:
                 result=exc.result,
             )
         except BaseException as suspension_error:
-            outcome = self.runtime_session.resolved_event_write_outcome(
-                suspension_error
-            )
+            outcome = self._run_ledger.resolved_write_outcome(suspension_error)
             receipt = terminal_registry.confirm_stable_candidate_write(
                 owner_identity=candidate_owner,
                 outcome=outcome,
@@ -8859,6 +8764,12 @@ class AgentRuntime:
                 state.pending_tool_calls = original_pending_tool_calls
                 state.pending_interaction_kind = original_pending_kind
                 state.pending_interaction_payload = original_pending_payload
+                state.pending_interaction_source_event_reference = (
+                    original_pending_source_reference
+                )
+                state.pending_interaction_source_event_candidate = (
+                    original_pending_source_candidate
+                )
                 state.status = original_status
                 state.stop_reason = original_stop_reason
                 state.last_transition = original_transition
@@ -8900,14 +8811,21 @@ class AgentRuntime:
             )
         payload["source_suspension_event_reference"] = event_reference_from_stored(
             stored,
-            runtime_session_id=self.runtime_session.runtime_session_id,
+            runtime_session_id=self._run_identity.runtime_session_id,
+        )
+        state.pending_interaction_source_event_reference = payload[
+            "source_suspension_event_reference"
+        ]
+        state.pending_interaction_source_event_candidate = freeze_event_write_candidate(
+            stored.model_copy(update={"sequence": None})
         )
         yield stored
         if suspension_publication_unavailable:
-            state.scratchpad["mcp_input_required_publication_closure_reason"] = (
+            finalization = self._require_run_finalization_owner(state)
+            finalization.mcp_publication_closure_reason = (
                 "suspension_publication_unavailable"
             )
-            state.scratchpad["publication_terminal_deadline_budget"] = deadline_budget
+            finalization.publication_deadline_budget = deadline_budget
             closure_events: tuple[AgentEvent, ...] = ()
             terminal_key = (state.run_id, suspended.tool_call_id)
             self._mcp_terminal_commit_outcomes[terminal_key] = "not_attempted"
@@ -8922,7 +8840,7 @@ class AgentRuntime:
             finally:
                 self._mcp_terminal_commit_outcomes.pop(terminal_key, None)
                 self._mcp_terminal_pending_handles.pop(terminal_key, None)
-            if "publication_latched_run_termination" not in state.scratchpad:
+            if finalization.publication_latched_termination is None:
                 self._install_mcp_publication_latched_termination(
                     state,
                     committed_events=(stored, *closure_events),
@@ -8938,7 +8856,7 @@ class AgentRuntime:
             state.abort_kind = AbortKind.HOST_TEARDOWN
             return
 
-    def _recover_or_fail_model(self, state: LoopState) -> bool:
+    def _recover_or_fail_model(self, state: RunActivationWorkingState) -> bool:
         state.consecutive_model_failures += 1
         state.in_run_recovery = InRunRecoveryState(
             cause=InRunRecoveryCause.MODEL_FAILURE,
@@ -8956,30 +8874,32 @@ class AgentRuntime:
         state.transition(LoopTransition.CONTINUE_AFTER_RECOVERY)
         return True
 
-    def _event_context(self, state: LoopState) -> EventContext:
+    def _event_context(self, state: RunActivationWorkingState) -> EventContext:
         return EventContext(
             run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
         )
 
 
-def _next_model_call_index(state: LoopState) -> int:
-    value = state.scratchpad.get("model_call_index")
-    if not isinstance(value, int):
-        value = 0
-    value += 1
-    state.scratchpad["model_call_index"] = value
+def _next_model_call_index(state: RunActivationWorkingState) -> int:
+    value = state.model_tool_progress.model_call_index + 1
+    state.model_tool_progress.model_call_index = value
     return value
 
 
-def _build_active_run_monitor_delivery(*, lease, provider_input_start_bundle):
-    # Lazy import keeps runtime.agent independent from host package import-time
-    # initialization while preserving Host ownership of the admission contract.
-    from pulsara_agent.host.ingress import build_active_run_monitor_delivery
-
-    return build_active_run_monitor_delivery(
-        lease=lease,
-        provider_input_start_bundle=provider_input_start_bundle,
-    )
+def _pending_interaction_authority_fingerprint(
+    agent: AgentRuntime,
+    state: RunActivationWorkingState,
+) -> str | None:
+    registry = agent.run_execution_registry
+    if registry is None:
+        return None
+    owner = registry.get(state.run_id)
+    if owner is None:
+        return None
+    authority = getattr(owner.suspension_slot, "authority", None)
+    identity = getattr(authority, "identity", None)
+    fingerprint = getattr(identity, "interaction_fingerprint", None)
+    return fingerprint if isinstance(fingerprint, str) else None
 
 
 def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
@@ -9004,8 +8924,8 @@ def _compiled_source_included(compiled_context, source_id: str) -> bool:
     )
 
 
-def _tool_call_in_flight(state: LoopState) -> bool:
-    authority = state.scratchpad.get("capability_execution_borrow_authority")
+def _tool_call_in_flight(state: RunActivationWorkingState) -> bool:
+    authority = state.execution_resources.capability_execution_borrow_authority
     tracker = getattr(authority, "tracker", None)
     if tracker is None:
         return False
@@ -9398,89 +9318,11 @@ def _bind_compiled_context_to_provider_input(
     )
 
 
-def _optional_scratchpad_str(state: LoopState, key: str) -> str | None:
-    value = state.scratchpad.get(key)
-    return value if isinstance(value, str) else None
-
-
-def _run_start_for_id(runtime_session: RuntimeSession, *, run_id: str) -> RunStartEvent:
-    start = runtime_session.long_horizon_state_store.run_start(run_id)
+def _run_start_for_id(long_horizon_store, *, run_id: str) -> RunStartEvent:
+    start = long_horizon_store.run_start(run_id)
     if start is None:
         raise RuntimeError("run terminalization requires exactly one RunStart")
     return start
-
-
-def _tool_result_boundary_events(
-    event_log: EventLog,
-    *,
-    run_id: str,
-    tool_call_id: str,
-    start_event_id: str | None = None,
-) -> list[AgentEvent]:
-    ids = (
-        start_event_id or f"tool_result_start:{run_id}:{tool_call_id}",
-        f"tool_result_end:{run_id}:{tool_call_id}",
-    )
-    decoded = [
-        raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
-        for raw in event_log.read_raw_events_by_id(ids)
-    ]
-    if any(
-        event.run_id != run_id
-        or getattr(event, "tool_call_id", None) != tool_call_id
-        or not isinstance(event, (ToolResultStartEvent, ToolResultEndEvent))
-        for event in decoded
-    ):
-        raise RuntimeError("tool-result boundary exact reference identity mismatch")
-    return decoded
-
-
-def _completed_tool_result_events(
-    event_log: EventLog,
-    *,
-    run_id: str,
-    tool_call_id: str,
-    start_event_id: str | None = None,
-) -> list[AgentEvent]:
-    boundaries = _tool_result_boundary_events(
-        event_log,
-        run_id=run_id,
-        tool_call_id=tool_call_id,
-        start_event_id=start_event_id,
-    )
-    starts = tuple(
-        event for event in boundaries if isinstance(event, ToolResultStartEvent)
-    )
-    ends = tuple(event for event in boundaries if isinstance(event, ToolResultEndEvent))
-    if not ends:
-        return []
-    if len(starts) != 1 or len(ends) != 1:
-        raise RuntimeError("completed tool result lacks unique boundaries")
-    start_sequence = starts[0].sequence
-    end_sequence = ends[0].sequence
-    if start_sequence is None or end_sequence is None or end_sequence < start_sequence:
-        raise RuntimeError("completed tool-result sequence range is invalid")
-    snapshot = event_log.read_raw_range_snapshot(
-        minimum_sequence=start_sequence,
-        through_sequence=end_sequence,
-        max_events=4_096,
-        max_payload_bytes=16 * 1024 * 1024,
-    )
-    return [
-        decoded
-        for raw in snapshot.events
-        if (decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).run_id == run_id
-        and getattr(decoded, "tool_call_id", None) == tool_call_id
-        and isinstance(
-            decoded,
-            (
-                ToolResultStartEvent,
-                ToolResultTextDeltaEvent,
-                ToolResultDataDeltaEvent,
-                ToolResultEndEvent,
-            ),
-        )
-    ]
 
 
 def _tool_timing_start_event_id(seed: dict[str, Any] | None) -> str | None:
@@ -9533,11 +9375,6 @@ def _tool_block_arguments_for_semantics(block: ToolCallBlock) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _optional_scratchpad_int(state: LoopState, key: str) -> int | None:
-    value = state.scratchpad.get(key)
-    return value if isinstance(value, int) else None
-
-
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:
     method = getattr(type(instance), name, None)
     return method is not None and method is not getattr(base, name, None)
@@ -9576,7 +9413,7 @@ def _required_str(value: object, name: str) -> str:
     return value
 
 
-def _remove_plan_runtime_instructions(state: LoopState) -> None:
+def _remove_plan_runtime_instructions(state: RunActivationWorkingState) -> None:
     state.messages = [
         message
         for message in state.messages

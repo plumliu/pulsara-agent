@@ -147,7 +147,7 @@ TerminalRuntimeBinding = OwnedTerminalRuntime | BorrowedWorkspaceTerminalRuntime
 
 ---
 
-## 6. HostSession：拥有 run state machine
+## 6. HostSession：拥有 session control，不拥有 run execution
 
 HostSession 有显式状态：
 
@@ -155,18 +155,20 @@ HostSession 有显式状态：
 OPEN -> CLOSING -> CLOSED
 ```
 
-并统一处理 active run、stopping run、suspended approval / plan interaction、plan workflow state、runtime-local close。
+HostSession拥有ingress、public control routing、session resource与close coordination。Committed run的稳定
+ownership属于composition-owned `RunExecutionRegistry`；每个initial/resume segment由独立
+`RunActivationCoordinator`驱动。Host只消费opaque run handle、typed progress view、activation outcome和observer。
 
 ### 6.1 统一 execution handle
 
-所有 `run_turn` / `stream_turn` / approval resume / plan resume（streaming 与非 streaming）**必须共用同一个内部 execution task/cancel handle**：
+所有 `run_turn` / `stream_turn` / approval resume / plan resume（streaming 与非 streaming）**必须共用registry安装的唯一service-owned driver**：
 
-- HostSession 始终拥有内部 `_active_task` + `_active_state`；transport 只消费结果或事件流。
+- HostSession不得保存`_active_task`、active/suspended/preparing working state或run driver；它只借用`RunHandle`并调用capability-scoped service。
 - 是否使用 async generator 只是观察方式差异，**不得改变 task ownership、stop、drain、close 语义**。
-- `stop_current_turn` 与 `drain_active_run` 因此能覆盖所有 active 执行入口，不再只覆盖 `run_turn`。
+- `stop_current_turn`只提交typed termination intent；drain通过run service等待activation/finalization owner，不能直接cancel任意内部task。
 - streaming observer queue 必须有固定上限并通过 `await put` 施加背压，不得让慢消费者无限积压 delta。v1 上限为 128 个 event item。
-- transport 关闭/放弃 async generator 只表示 observer detach：清空该 observer 的 bounded queue，后续 event 仍持久化但不再投递给它；**不得取消 HostSession-owned `_active_task`**。只有 typed stop、HostSession close 或 HostCore shutdown 可以取消执行。
-- observer detach 后 `_run_lock` 即使因 transport generator 退出而释放，所有 turn/resume/mode/plan 入口仍必须通过 `_active_task` gate 拒绝并发执行，直至 driver 自行 finalization。
+- transport 关闭/放弃 async generator 只表示observer detach：清空该observer的bounded queue，后续event仍持久化但不再投递；不得取消service-owned driver。只有typed stop、HostSession close或HostCore shutdown可改变run lifecycle。
+- observer detach 后所有turn/resume/mode/plan入口仍必须通过registry progress/lifecycle gate拒绝并发执行，直至driver自行finalization。
 
 ### 6.2 close 与 run finalization（决策 1）
 
@@ -247,7 +249,7 @@ OPEN -> CLOSING -> CLOSED
 - 不得在持有 asyncio lock 时执行同步 kill / reader-join；也不得在 supervisor 同步方法里偷偷起 background task。
 - 不得只对 `open_session` 做 shutdown gate 而放过 resume / stop / mode switch。
 - 不得用裸 `task.cancel()` + 字段清空决定 active/suspended run 的可审计语义；host-teardown 必须 typed。
-- 不得让 `_active_task` 只覆盖 `run_turn`；streaming 与 resume 必须共用同一 execution handle。
+- 不得在Host重新建立`_active_task`；run、streaming与resume必须借用registry中同一service-owned activation driver。
 - 不得用 `owner_conversation_id` 与 `host_session_id` 做“任一匹配即放行”的授权。
 - 不得让 CLI / UI 把静态 workspace inspect 的空 `workspace_supervisors: []` 当作真实运行时列表消费。
 - HostCore 主路径不得再保留 `use_workspace_supervisor` 兼容分叉。

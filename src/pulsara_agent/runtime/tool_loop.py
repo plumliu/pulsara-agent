@@ -16,7 +16,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
     utc_now,
 )
-from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_events
+from pulsara_agent.replay.provenance import runtime_event_span_from_events
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.replay.message_assembler import completed_tool_result_from_events
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
@@ -24,7 +24,7 @@ from pulsara_agent.runtime.publisher import (
     RuntimeEventSubscriber,
     RuntimePublishedEvent,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.primitives.tool_result import ToolResultExecutionSemanticsFact
 from pulsara_agent.primitives.tool_result import ToolResultStateFact
@@ -254,7 +254,7 @@ def _call_can_run_concurrently(
 
 
 def _remember_tool_result_event_span(
-    state: LoopState, events: list[AgentEvent], tool_call_id: str
+    state: RunActivationWorkingState, events: list[AgentEvent], tool_call_id: str
 ) -> None:
     try:
         span = runtime_event_span_from_events(
@@ -262,8 +262,7 @@ def _remember_tool_result_event_span(
         )
     except KeyError:
         return
-    spans = state.scratchpad.setdefault("tool_result_event_spans", {})
-    spans[tool_call_id] = span
+    state.model_tool_progress.tool_result_event_spans[tool_call_id] = span
 
 
 def _tool_result_from_event_slice(

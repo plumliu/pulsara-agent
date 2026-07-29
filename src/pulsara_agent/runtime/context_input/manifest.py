@@ -11,7 +11,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Callable, Literal
 from uuid import uuid4
 
-from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+from pulsara_agent.blocking_executor import auxiliary_io_executor
 
 from pulsara_agent.primitives.context import (
     ContextCompileInputAuditFact,
@@ -519,7 +519,7 @@ class ContextInputManifestWriteService:
         result: object,
         error: BaseException | None,
     ) -> None:
-        from pulsara_agent.memory.foundation.records import ArtifactContentConflict
+        from pulsara_agent.ports.artifact import ArtifactContentConflict
 
         if operation.kind is ContextInputManifestPhysicalOperationKind.WRITE:
             if error is None:

@@ -110,6 +110,7 @@ def test_child_log_hydrates_native_run_id(tmp_path) -> None:
         )
         await session.emit(
             RunStartEvent(
+                id=f"run_start:test:{child_ctx.run_id}",
                 **child_ctx.event_fields(),
                 **run_start_permission_fields(
                     child_ctx.run_id, source="child_profile", user_input="x" * 7
@@ -172,6 +173,7 @@ def test_child_log_multiple_native_runs_is_v1_error(tmp_path) -> None:
             )
             stored = await session.emit(
                 RunStartEvent(
+                    id=f"run_start:test:{child_ctx.run_id}",
                     **child_ctx.event_fields(),
                     **fields,
                     user_input_chars=1,
@@ -211,6 +213,7 @@ def test_reported_and_native_child_run_id_must_match(tmp_path) -> None:
         )
         await session.emit(
             RunStartEvent(
+                id=f"run_start:test:{child_ctx.run_id}",
                 **child_ctx.event_fields(),
                 **run_start_permission_fields(
                     child_ctx.run_id, source="child_profile", user_input="x"

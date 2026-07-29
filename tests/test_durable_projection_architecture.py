@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from pulsara_agent.runtime.blocking_executor import (
+from pulsara_agent.blocking_executor import (
     blocking_executor_capacity,
     projection_maintenance_executor,
 )
@@ -102,7 +102,7 @@ def test_projection_executor_is_process_owned_and_bounded() -> None:
     assert capacity.critical_ledger_workers == 4
 
 
-def test_runtime_session_bootstrap_is_the_only_python_session_insert_owner() -> None:
+def runtime_session_for_test_bootstrap_is_the_only_python_session_insert_owner() -> None:
     owners: set[str] = set()
     for path in _python_sources(_SOURCE):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

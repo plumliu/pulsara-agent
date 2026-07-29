@@ -1,4 +1,4 @@
-"""Business-level run timeline assembled from runtime events."""
+"""Business-level run timeline assembled from committed events."""
 
 from __future__ import annotations
 

@@ -1,0 +1,243 @@
+{
+  "schema_version": "pulsara.d6-dod-evidence.v1",
+  "hard_cut": "D6-0-D6-5",
+  "debt_item": "D6",
+  "status": "passed",
+  "completed_on": "2026-07-29",
+  "schema_subcut": {
+    "agent_event_catalog_schema_version": 7,
+    "child_initial_capability_basis_required": true,
+    "postgres_oxigraph_world_reset": true,
+    "postgres_migration_head_version": 9,
+    "registry_prefix_fingerprint": "sha256:5ecbc55255f53e41f1daa58efd2573ba8c9f5cb9b6b43e03e3505194f018d411",
+    "deep_verification_result_fingerprint": "sha256:53a5025a59d1a068b9094376bdcd19ec747636a0b264d79eb7d2a9c2e6705433"
+  },
+  "gates": [
+    {
+      "gate_id": "D6-0",
+      "status": "passed",
+      "evidence": [
+        "tests/test_event_log_contract.py",
+        "tests/test_run_boundary_contract.py",
+        "tests/test_run_ownership_architecture.py"
+      ]
+    },
+    {
+      "gate_id": "D6-1",
+      "status": "passed",
+      "evidence": [
+        "tests/test_run_boundary_host_lifecycle.py",
+        "tests/test_host_lifecycle_contract.py"
+      ]
+    },
+    {
+      "gate_id": "D6-2",
+      "status": "passed",
+      "evidence": [
+        "tests/test_host_lifecycle_contract.py",
+        "tests/test_recovery.py"
+      ]
+    },
+    {
+      "gate_id": "D6-3",
+      "status": "passed",
+      "evidence": [
+        "tests/test_agent_runtime_loop.py",
+        "tests/test_mcp_host_lifecycle.py",
+        "tests/test_host_lifecycle_contract.py"
+      ]
+    },
+    {
+      "gate_id": "D6-4",
+      "status": "passed",
+      "evidence": [
+        "tests/test_agent_runtime_loop.py",
+        "tests/test_llm_runtime.py",
+        "tests/test_tool_execution_stable_candidate_owner.py"
+      ]
+    },
+    {
+      "gate_id": "D6-5",
+      "status": "passed",
+      "evidence": [
+        "tests/test_subagent_execution_registry.py",
+        "tests/test_subagent_runtime.py",
+        "tests/test_dependency_architecture.py",
+        "benchmarks/suites/core/v1"
+      ]
+    }
+  ],
+  "pytest": {
+    "collected": 2578,
+    "baseline_full_collection": 2572,
+    "initial_partition": {
+      "passed": 20,
+      "failed": 0
+    },
+    "remaining_partition": {
+      "passed": 2518,
+      "failed": 31,
+      "skipped": 2,
+      "deselected_already_covered": 17
+    },
+    "failed_node_reruns": {
+      "required": 31,
+      "passed": 31,
+      "failed": 0
+    },
+    "new_opaque_runner_contract_passed": 1,
+    "d6_core_matrix_passed": 320,
+    "modified_fixture_files_passed": 186,
+    "durable_dataset_runner_nodes_passed": 12,
+    "core_dogfood_contract_nodes_passed": 11,
+    "post_review_added_nodes": {
+      "collected": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "closure_policy": "partitioned_full_run_then_rerun_only_failed_or_modified_nodes"
+  },
+  "static_validation": {
+    "ruff": "passed",
+    "compileall": "passed",
+    "git_diff_check": "passed",
+    "import_observation_count": 3383,
+    "forbidden_d4_observation_count": 0,
+    "residual_cross_package_scc_observation_count": 0,
+    "residual_scc_observation_fingerprint": "sha256:1d878fdf3d452528c94c7c2f065a0b44841d78332e3f1f402c9808e48c70d898"
+  },
+  "real_llm_dogfood": {
+    "suite_id": "pulsara-core-dogfood-v1",
+    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+    "runner_build_fingerprint": "c5a85c5fcbd184c00bce77d12c8752345f7721c7606fae89fe4d0d021f476737",
+    "status": "passed",
+    "passed_scenarios": 6,
+    "failed_scenarios": 0,
+    "elapsed_seconds": 446.1,
+    "model_call_count": 45,
+    "tool_call_count": 38,
+    "total_tokens": 790579,
+    "cached_input_tokens": 550656,
+    "summary_record_sha256": "213d8705033da5ebb02d1e611ec30438f25e81bec2fbe148cb665f9ec9b44583",
+    "results_jsonl_sha256": "2b6df91834e8ede8e1e7c2c4b82c8a9269110c2523977f8836643f9674911876",
+    "isolated_postgres_databases_dropped": true
+  },
+  "post_review_remediation": {
+    "status": "passed",
+    "findings": [
+      "activation_driver_physical_exit_ownership",
+      "child_timeout_child_run_terminalization_order",
+      "canonical_bounded_final_output_materialization",
+      "pending_interaction_exact_source_authority",
+      "confirmed_run_end_finalization_snapshot"
+    ],
+    "current_collection": 2578,
+    "targeted_pytest": [
+      {
+        "scope": "run_reconciliation_and_boundary",
+        "passed": 24,
+        "failed": 0
+      },
+      {
+        "scope": "host_mcp_subagent_lifecycle",
+        "passed": 150,
+        "failed": 0
+      },
+      {
+        "scope": "agent_recovery_host_resume",
+        "passed": 106,
+        "failed": 0
+      },
+      {
+        "scope": "architecture_contract_gates",
+        "passed": 106,
+        "failed": 0
+      },
+      {
+        "scope": "canonical_final_output_no_raw_reply_regression",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "scope": "finalization_single_owner_followup",
+        "passed": 80,
+        "failed": 0
+      }
+    ],
+    "static_validation": {
+      "ruff": "passed",
+      "compileall": "passed",
+      "git_diff_check": "passed"
+    },
+    "real_llm_union": {
+      "policy": "full_suite_then_rerun_only_failed_scenario",
+      "status": "passed",
+      "union_passed_scenarios": 6,
+      "union_failed_scenarios": 0,
+      "initial_full_suite": {
+        "passed_scenarios": 5,
+        "failed_scenarios": 1,
+        "failed_scenario_ids": [
+          "manual-compaction-trail"
+        ],
+        "failure_classification": "model_output_format_variance_with_all_durable_lifecycle_and_compaction_assertions_passed",
+        "elapsed_seconds": 522.3,
+        "model_call_count": 46,
+        "tool_call_count": 40,
+        "total_tokens": 794894,
+        "cached_input_tokens": 558208,
+        "summary_record_sha256": "5f715545d8fe4661710d7178eef233b71480b9a966895ebde778d4eaf3eb09c4",
+        "results_jsonl_sha256": "62958aca15a5d41ac72e29c7e27f1d20c1a6c8f27c779ad2b3a3d52213dd774f"
+      },
+      "failed_scenario_rerun": {
+        "scenario_id": "manual-compaction-trail",
+        "status": "passed",
+        "elapsed_seconds": 169.7,
+        "model_call_count": 12,
+        "tool_call_count": 7,
+        "total_tokens": 250812,
+        "cached_input_tokens": 153216,
+        "summary_record_sha256": "2d2f9b8c6e9b6d1a19adbbddbbf80e01c6c3420454bcf48e0bc19fc6bb52cbab",
+        "results_jsonl_sha256": "2e0cb249c9cc4dcc565e4c7e1b4d6e693e1ff72c6ad29d04586d5823602e617c"
+      }
+    }
+  },
+  "latest_review_remediation": {
+    "status": "passed",
+    "findings": [
+      "driver_exit_stable_terminalization_repair",
+      "closed_activation_outcome_production_cut",
+      "finalization_owner_alias_removal",
+      "pending_interaction_nonblocking_exact_rebind"
+    ],
+    "current_collection": 2581,
+    "validation_policy": "existing full-suite baseline plus rerun only modified failing nodes",
+    "targeted_pytest": [
+      {
+        "scope": "host_mcp_closed_outcome_failure_union",
+        "passed": 31,
+        "failed": 0
+      },
+      {
+        "scope": "latest_ownership_runtime_matrix",
+        "passed": 18,
+        "failed": 0
+      },
+      {
+        "scope": "architecture_contract_gates",
+        "passed": 75,
+        "failed": 0
+      }
+    ],
+    "new_driver_exit_regression": {
+      "passed": 1,
+      "failed": 0
+    },
+    "static_validation": {
+      "ruff_check": "passed",
+      "ruff_format_check": "passed",
+      "compileall": "passed",
+      "git_diff_check": "passed"
+    }
+  }
+}

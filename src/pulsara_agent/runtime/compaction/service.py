@@ -120,7 +120,7 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_runtime_event_deadline_budget,
 )
 from pulsara_agent.runtime.session import EventPublicationError, RuntimeSession
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 
 ContextCompactionTrigger = Literal["manual", "auto"]
 
@@ -1078,7 +1078,7 @@ class ContextCompactionService:
         event_metadata: dict[str, object] | None = None,
         host_boundary_id: str | None = None,
         host_boundary_kind: Literal["pre_run"] | None = None,
-        runtime_state: LoopState | None = None,
+        runtime_state: RunActivationWorkingState | None = None,
     ) -> ContextCompactionAttemptResult:
         return await self.compact(
             target_model_target=target_model_target,
@@ -1176,7 +1176,7 @@ class ContextCompactionService:
         event_metadata: dict[str, object] | None = None,
         host_boundary_id: str | None = None,
         host_boundary_kind: Literal["pre_run"] | None = None,
-        runtime_state: LoopState | None = None,
+        runtime_state: RunActivationWorkingState | None = None,
     ) -> ContextCompactionAttemptResult:
         not_attempted_reason: (
             Literal[
@@ -1259,7 +1259,7 @@ class ContextCompactionService:
         *,
         trigger: ContextCompactionTrigger,
         event_metadata: dict[str, object] | None,
-        runtime_state: LoopState | None,
+        runtime_state: RunActivationWorkingState | None,
     ) -> CompactionPublicationTerminalizationScope:
         metadata = event_metadata or {}
         mid_turn = runtime_state is not None or metadata.get("phase") == "mid_turn"
@@ -1273,9 +1273,9 @@ class ContextCompactionService:
                 "scope_kind": "mid_turn_active_run",
                 "runtime_session_id": self.runtime_session_id,
                 "active_run_id": runtime_state.run_id,
-                "active_context_window_id": runtime_state.scratchpad.get(
-                    "active_context_window_id",
-                    contract.initial_window_id,
+                "active_context_window_id": (
+                    runtime_state.model_tool_progress.active_context_window_id
+                    or contract.initial_window_id
                 ),
                 "active_rollout_account_id": contract.rollout_account_id,
                 "host_state_generation": int(
@@ -2094,7 +2094,6 @@ class ContextCompactionService:
                 start_bundle=start_bundle,
                 commit_port=RuntimeSessionModelStreamEventCommitPort(
                     runtime_session=self.runtime_session,
-                    state=None,
                 ),
                 execution_registry=(
                     self.runtime_session.model_stream_execution_registry

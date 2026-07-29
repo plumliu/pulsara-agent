@@ -129,10 +129,9 @@ def test_accounted_physical_handoff_latches_critical_publication_unavailable(
         stored_events,
         *,
         catch_up_through_sequence,
-        state,
         await_delivery,
     ):
-        del catch_up_through_sequence, state, await_delivery
+        del catch_up_through_sequence, await_delivery
         assert self is runtime_session
         assert stored_events == (critical_event,)
         return SimpleNamespace(
@@ -150,7 +149,6 @@ def test_accounted_physical_handoff_latches_critical_publication_unavailable(
     runtime_session._handoff_accounted_business_batch_attempt(
         stored_events=(critical_event,),
         business_events=(critical_event,),
-        state=None,
         deadline_monotonic=time.monotonic() + 1.0,
     )
 

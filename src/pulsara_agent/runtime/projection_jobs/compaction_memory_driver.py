@@ -109,7 +109,7 @@ from pulsara_agent.projection_jobs.contracts import (
 from pulsara_agent.runtime.projection_jobs.compaction_budget import (
     resolve_extraction_input_budget,
 )
-from pulsara_agent.runtime.blocking_executor import (
+from pulsara_agent.blocking_executor import (
     auxiliary_io_executor,
     projection_maintenance_executor,
 )
@@ -924,7 +924,6 @@ class CompactionMemoryExtractionSessionDriver:
                 start_bundle=start_bundle,
                 commit_port=RuntimeSessionModelStreamEventCommitPort(
                     runtime_session=self.runtime_session,
-                    state=None,
                     start_transaction_companion=start_companion,
                     terminal_transaction_companion=terminal_companion,
                 ),

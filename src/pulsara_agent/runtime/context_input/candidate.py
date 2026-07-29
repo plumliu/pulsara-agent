@@ -28,7 +28,7 @@ from pulsara_agent.primitives.context_source import (
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
     context_source_transition_kind,
 )

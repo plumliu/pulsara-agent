@@ -367,7 +367,7 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
 
 
 def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
-    assert AGENT_EVENT_SCHEMA_VERSION == 6
+    assert AGENT_EVENT_SCHEMA_VERSION == 7
     assert "CUSTOM" not in EventType.__members__
     assert all(
         getattr(event_type, "__name__", "") != "CustomEvent"

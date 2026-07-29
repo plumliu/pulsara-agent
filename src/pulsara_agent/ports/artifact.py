@@ -4,13 +4,51 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.message import ToolResultArtifactRef
 from pulsara_agent.message import ToolResultPreviewMetadata
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+
+
+class ArtifactContentConflict(RuntimeError):
+    """A deterministic artifact id already names different semantic content."""
+
+
+class ArtifactWriteResultView(Protocol):
+    id: str
+    digest: str
+    size_bytes: int
+
+
+class ArtifactPutConfirmationView(Protocol):
+    result: ArtifactWriteResultView
+
+
+class ModelArtifactStore(Protocol):
+    """Narrow artifact authority needed by model lifecycle recovery."""
+
+    def get_text(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> str: ...
+
+    def put_text_if_absent_or_confirm_identical(
+        self,
+        blob_id: str,
+        content: str,
+        *,
+        session_id: str | None,
+        run_id: str | None,
+        media_type: str,
+        semantic_metadata: dict[str, Any],
+        deadline_monotonic: float | None = None,
+    ) -> ArtifactPutConfirmationView: ...
 
 
 class ToolArtifactMode(StrEnum):
@@ -430,6 +468,10 @@ class ToolResultArtifactProcessingPort(Protocol):
 
 __all__ = [
     "AdaptivePreview",
+    "ArtifactContentConflict",
+    "ArtifactPutConfirmationView",
+    "ArtifactWriteResultView",
+    "ModelArtifactStore",
     "ToolArtifactInfoView",
     "ToolArtifactMode",
     "ToolArtifactReadPort",

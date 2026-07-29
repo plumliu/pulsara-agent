@@ -8,7 +8,7 @@ from typing import cast
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.event_log.transcript_prefix import (
+from pulsara_agent.primitives.transcript_accumulators import (
     EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
     EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
 )

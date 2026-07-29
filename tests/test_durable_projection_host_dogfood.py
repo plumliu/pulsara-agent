@@ -165,7 +165,7 @@ def test_durable_host_projection_backlog_recovers_after_core_restart(
         assert result.status.value == "finished", result.error_message
         assert result.final_text == "durable projection dogfood complete"
         runtime_session_id = session.runtime_session_id
-        run_id = result.state.run_id
+        run_id = result.run_id
 
         store = PostgresInspectorStore(
             verified_postgres_provider(migrated_postgres_database.runtime_dsn)

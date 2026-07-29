@@ -374,7 +374,7 @@ terminal-maintenance owner写 `started_publication` Failed。Completed publicati
 side LLM model stream各自有唯一 owner，caller cancellation不能让任一方用 ledger post-scan
 猜测结果。
 
-## 14. Background compaction-memory model call
+## 20. Background compaction-memory model call
 
 Memory extraction使用独立`direct_internal_call` lifecycle与
 `ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION`，不复用Call A request、provider prefix、Host ingress
@@ -385,3 +385,21 @@ authority；parser只读取confirmed projection，不另存raw output artifact�
 Purpose-neutral model lifecycle companion在ModelCallStart事务内推进job dispatch ordinal并reserve
 existing model quote，在ModelCallEnd事务内settle同一reservation。`llm`层不得import memory/job/account
 concrete DTO，也不得接受result settlement再次修改background budget。
+
+---
+
+## 21. Run activation / model-step ownership
+
+主run的循环owner是per-segment `RunActivationCoordinator`；一次模型step由
+`ModelStepAttempt`通过capability-scoped `ModelExecutionPort`发起。Coordinator和attempt都不得
+持有`RuntimeSession`、transport stream task或generic event writer。
+
+`LLMRuntime`继续唯一拥有一次physical model lifecycle：provider request、stream、cancel/drain、
+terminal projection与ModelCallStart/End confirmation。ModelStep只消费已经确认的closed outcome，
+再由RunExecutionRegistry推进typed progress与activation phase。Caller/observer cancellation只detach
+waiter；只有typed run termination或LLM lifecycle自己的physical cancellation规则能改变stream。
+
+每个主run ModelStart必须携带existing `RunExecutionActivationFact`，并与registry安装的
+`RunActivationIdentity`做kind、owner ID、segment ID/generation与run identity exact join。
+Process reopen的`reopen_rebind`只是installation reason，不能形成第四种durable activation kind。
+Stale activation generation不得写control disposition、usage/progress或清理新的model step。

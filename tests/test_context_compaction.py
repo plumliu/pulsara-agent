@@ -1,3 +1,6 @@
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +23,9 @@ from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
     RawProviderTextBlockStart,
     RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
 )
 
 from tests.support.model_stream import (
@@ -35,8 +41,6 @@ from tests.support.model_stream import (
 )
 
 from pulsara_agent.event import (
-    CapabilityGateDecisionEvent,
-    CapabilityExposureResolvedEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
@@ -47,16 +51,15 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
-    RolloutBudgetReservationCreatedEvent,
     RunEndEvent,
     RunStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
-    ToolExecutionSuspendedEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.host import HostSession, HostWorkspaceInput, resolve_workspace
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import (
@@ -75,7 +78,9 @@ from tests.support import (
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from tests.support.model_call import model_call_end_fields, model_call_start_fields
-from tests.support.mcp import prepared_test_mcp_pending_handle
+from tests.support.host import component_test_host_core
+from tests.support.mcp import queue_ready_test_mcp_candidate
+from tests.support.settings import compatibility_storage_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.errors import (
     CompactionSummarizerInputBudgetExceeded,
@@ -93,8 +98,6 @@ from pulsara_agent.memory.compaction.extension import (
 )
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
-from pulsara_agent.capability.types import CapabilityProjectionResolveContext
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
@@ -106,10 +109,8 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.runtime.agent import AgentRunResult, AgentRuntime
 from pulsara_agent.runtime.approval import (
     ApprovalResolution,
-    PendingApproval,
     ToolApprovalDecision,
 )
 from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
@@ -119,20 +120,11 @@ from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
 from pulsara_agent.primitives.runtime_event_vocabulary import (
-    McpInputRequiredSuspensionFact,
     build_runtime_event_deadline_budget,
-    prepare_mcp_input_required_suspension,
 )
-from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.primitives.mcp import McpBindingIdentityFact
-from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.session import EventWriteResult
-from pulsara_agent.runtime.tool_execution import (
-    RuntimeSessionToolExecutionEventCommitPort,
-)
 from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
-from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionAttemptResult,
     ContextCompactionInvocationFailed,
@@ -142,7 +134,7 @@ from pulsara_agent.runtime.compaction.service import (
     build_metadata_only_compaction_input,
     production_compaction_prompt,
 )
-from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+from pulsara_agent.blocking_executor import auxiliary_io_executor
 import pulsara_agent.runtime.compaction.service as compaction_service_module
 from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
@@ -150,10 +142,10 @@ from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
     PlanQuestionResolution,
 )
-from pulsara_agent.runtime.recovery import AbortKind
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.state import (
-    LoopState,
-    LoopStatus,
+    RunActivationWorkingState,
     LoopTransition,
 )
 from pulsara_agent.runtime.transcript import (
@@ -174,10 +166,16 @@ from pulsara_agent.primitives.model_call import (
     RunTerminationIntentAttributionFact,
     sha256_fingerprint,
 )
-from pulsara_agent.primitives.long_horizon import (
-    RolloutBudgetBucket,
-    RolloutReservationFact,
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.types import (
+    McpInputRequestDTO,
+    McpInputRequired,
+    McpOriginalRequest,
+    McpRequestSourceMethod,
+    McpServerConfig,
+    McpStdioConfig,
 )
+from pulsara_agent.settings import PulsaraSettings
 from tests.support.model_call import test_resolved_target_fact
 
 
@@ -207,6 +205,60 @@ class CompactScriptedTransport:
         yield RawProviderTextBlockEnd(
             **event_context.event_fields(), block_id="text:compact"
         )
+        yield TransportUsageReport(
+            usage_status="missing",
+            usage=None,
+            reported_model_id=call.target.fact.model_id,
+        )
+
+
+class HostInteractionTransport:
+    api = "compact_scripted"
+    binding_id = "test.host_interaction"
+    contract_version = "v1"
+
+    def __init__(self, replies: list[dict[str, object]]) -> None:
+        self.replies = replies
+        self.contexts: list[LLMContext] = []
+
+    async def stream(
+        self,
+        *,
+        call,
+        context: LLMContext,
+        event_context: EventContext,
+    ) -> AsyncIterator:
+        self.contexts.append(context)
+        reply = self.replies.pop(0)
+        text = reply.get("text")
+        if isinstance(text, str):
+            block_id = f"text:host:{len(self.contexts)}"
+            yield RawProviderTextBlockStart(
+                **event_context.event_fields(), block_id=block_id
+            )
+            yield RawProviderTextDelta(
+                **event_context.event_fields(), block_id=block_id, delta=text
+            )
+            yield RawProviderTextBlockEnd(
+                **event_context.event_fields(), block_id=block_id
+            )
+        for item in reply.get("tool_calls", ()):  # type: ignore[union-attr]
+            tool_call = dict(item)
+            tool_call_id = str(tool_call["id"])
+            tool_name = str(tool_call["name"])
+            yield RawProviderToolCallStart(
+                **event_context.event_fields(),
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+            )
+            yield RawProviderToolCallDelta(
+                **event_context.event_fields(),
+                tool_call_id=tool_call_id,
+                delta=str(tool_call["arguments"]),
+            )
+            yield RawProviderToolCallEnd(
+                **event_context.event_fields(), tool_call_id=tool_call_id
+            )
         yield TransportUsageReport(
             usage_status="missing",
             usage=None,
@@ -253,90 +305,6 @@ class BlockingCompactTransport(CompactScriptedTransport):
         await asyncio.Event().wait()
         if False:  # pragma: no cover - keeps this an async generator
             yield None
-
-
-async def _seed_suspended_run_model_contract(
-    agent,
-    runtime_wiring,
-    session: HostSession,
-    state: LoopState,
-) -> None:
-    """Create a real committed Host entry, then stop before continuation.
-
-    Resume tests must not manufacture a bare ``RunStartEvent``: production
-    PRE_RESUME requires the committed run owner, typed ``RunWorkingSet`` and
-    initial capability exposure that a genuine PRE_RUN establishes.
-    """
-
-    identity = session._new_run_boundary_identity(state)
-
-    async def prepare():
-        async def run_ingress(owner):
-            async with session._run_lock:
-                return await session._prepare_and_commit_new_run_boundary(
-                    ingress_owner=owner,
-                    user_input="",
-                    active_skill_names=frozenset(),
-                    state=state,
-                    identity=identity,
-                )
-
-        return await session._ingress_coordinator.submit(
-            kind="human",
-            payload="",
-            ingress_id=f"host_ingress:test:{state.run_id}",
-            runner=run_ingress,
-        )
-
-    draft, _committed, _stored = await session._create_owned_boundary_task(
-        prepare,
-        preparing_state=state,
-        preparing_identity=identity,
-    )
-    async with session._run_lock:
-        frozen_surface = state.scratchpad.get("frozen_capability_execution_surface")
-        if not isinstance(frozen_surface, FrozenCapabilityExecutionSurface):
-            raise AssertionError("test PRE_RUN did not freeze a capability surface")
-        resolved = agent.capability_runtime.resolve_exposure_projection(
-            CapabilityProjectionResolveContext(
-                workspace_root=session.workspace.workspace_root,
-                workspace_kind=session.workspace.workspace_kind,
-                memory_domain=session.workspace.memory_domain,
-                user_input="",
-                prior_messages=draft.prior_messages,
-                active_skill_names=frozenset(),
-                plan_active=False,
-            ),
-            frozen_surface=frozen_surface,
-            archive=runtime_wiring.archive,
-            runtime_session_id=session.runtime_session_id,
-            owner=draft.capability_basis.owner,
-            resolve_basis=draft.capability_basis,
-            exposure_id=f"capability_exposure:test:{uuid4().hex}",
-            resolution_kind="initial",
-        )
-        stored_exposure = await runtime_wiring.runtime_session.emit(
-            CapabilityExposureResolvedEvent(
-                run_id=state.run_id,
-                turn_id=state.turn_id,
-                reply_id=state.reply_id,
-                exposure=resolved.fact,
-                exposure_revision=1,
-            ),
-            state=state,
-        )
-        assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
-        assert state.run_working_set is not None
-        state.run_working_set.install_initial_exposure(
-            plan=resolved.plan,
-            fact=resolved.fact,
-            event_ref=event_reference_from_stored(
-                stored_exposure,
-                runtime_session_id=session.runtime_session_id,
-            ),
-        )
-    state.status = LoopStatus.WAITING_USER
-    state.scratchpad["suspended_state_token"] = f"suspended_state:test:{uuid4().hex}"
 
 
 def _target(service: ContextCompactionService):
@@ -411,7 +379,6 @@ class _CompactionRuntimeSessionTestFacade:
         return await self.write_events_with_deadline(
             (event,),
             deadline_monotonic=deadline_monotonic,
-            state=state,
             publication_terminal_maintenance_lease=(
                 publication_terminal_maintenance_lease
             ),
@@ -793,7 +760,6 @@ async def _emit_turn(
         start_bundle=start_bundle,
         commit_port=RuntimeSessionModelStreamEventCommitPort(
             runtime_session=runtime_session,
-            state=None,
         ),
         execution_registry=runtime_session.model_stream_execution_registry,
     ).wait_result()
@@ -832,8 +798,8 @@ async def _emit_turn(
 
 def _current_tail_state(
     runtime_session_id: str, *, run_id: str = "run:current"
-) -> LoopState:
-    state = LoopState(session_id=runtime_session_id, run_id=run_id)
+) -> RunActivationWorkingState:
+    state = RunActivationWorkingState(session_id=runtime_session_id, run_id=run_id)
     state.messages = [
         UserMsg(
             name="user",
@@ -887,7 +853,9 @@ def _current_tail_state(
     return state
 
 
-def _protected_current_run_messages(state: LoopState) -> tuple[LLMMessage, ...]:
+def _protected_current_run_messages(
+    state: RunActivationWorkingState,
+) -> tuple[LLMMessage, ...]:
     """Minimal compaction fixture; typed renderer behavior is tested separately."""
 
     user = next(message for message in state.messages if message.role == "user")
@@ -1015,6 +983,39 @@ class _FakeHostCompactionService(_FakeCompactionServiceBase):
     async def compact_if_needed(self, **kwargs) -> ContextCompactionAttemptResult:
         self.calls.append({"method": "compact_if_needed", **kwargs})
         return _fake_compaction_attempt()
+
+
+def _host_interaction_fixture(
+    tmp_path: Path,
+    *,
+    replies: list[dict[str, object]],
+    compaction_service: _FakeHostCompactionService | None = None,
+    ask_permissions: bool = False,
+):
+    runtime_wiring = build_component_runtime_wiring(tmp_path)
+    fake = compaction_service or _FakeHostCompactionService()
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    transport = HostInteractionTransport(replies)
+    agent = build_test_agent_runtime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=_llm_runtime(transport),
+        permission_policy=(
+            preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+            if ask_permissions
+            else preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+        ),
+        enable_subagents=False,
+    )
+    session = HostSession(
+        host_session_id=f"host:interaction:{uuid4().hex}",
+        conversation_id=f"conversation:interaction:{uuid4().hex}",
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
+        ),
+        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+    )
+    return session, agent, transport, fake
 
 
 class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
@@ -1358,9 +1359,7 @@ def test_completed_extraction_request_batch_retires_terminal_owner(tmp_path) -> 
             event.type == "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED"
             for event in wiring.event_log.iter()
         )
-        await extension.stop_admission_and_drain(
-            deadline_monotonic=monotonic() + 2.0
-        )
+        await extension.stop_admission_and_drain(deadline_monotonic=monotonic() + 2.0)
 
     asyncio.run(scenario())
 
@@ -1898,7 +1897,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
             min_events_after_last_compact=1, keep_recent_runs=1
         ),
     )
-    runtime_state = LoopState(
+    runtime_state = RunActivationWorkingState(
         session_id=log.runtime_session_id,
         run_id=current.run_id,
         turn_id=current.turn_id,
@@ -1907,7 +1906,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     runtime_state.run_working_set = SimpleNamespace(
         long_horizon_contract=current_start.long_horizon
     )
-    runtime_state.scratchpad["active_context_window_id"] = (
+    runtime_state.model_tool_progress.active_context_window_id = (
         current_start.long_horizon.initial_window_id
     )
     completed = asyncio.run(
@@ -2155,7 +2154,6 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
                         reply_id=state.reply_id,
                     ),
                 ),
-                state=state,
             ),
             timeout=1,
         )
@@ -2823,7 +2821,7 @@ def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
@@ -2867,7 +2865,7 @@ def test_host_session_invokes_compaction_at_preflight_only(tmp_path) -> None:
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
@@ -2930,7 +2928,7 @@ def test_host_session_does_not_notify_compaction_listener_after_run_end(
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
@@ -2981,7 +2979,7 @@ def test_preflight_compaction_rebuilds_prior_messages_and_continues_original_use
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
@@ -3036,7 +3034,7 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
@@ -3094,7 +3092,7 @@ def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> No
             HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
         ),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=build_test_agent_runtime(
                 capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
@@ -3121,60 +3119,34 @@ def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> No
 
 
 def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
-    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    session, _agent, _transport, _fake = _host_interaction_fixture(
+        tmp_path,
+        compaction_service=fake,
+        ask_permissions=True,
+        replies=[
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:test",
+                        "name": "terminal",
+                        "arguments": '{"command":"printf ok"}',
+                    }
+                ]
+            },
+            {"text": "resumed"},
+        ],
     )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
-    state = agent.new_state()
-    pending = PendingApproval(
-        approval_id="approval:test",
-        host_session_id=session.host_session_id,
-        runtime_session_id=session.runtime_session_id,
-        run_id=state.run_id,
-        turn_id=state.turn_id,
-        reply_id=state.reply_id,
-        tool_calls=(
-            ToolCallBlock(id="call:test", name="terminal", state=ToolCallState.ASKING),
-        ),
-    )
-
-    async def fake_resume(resume_state, resolution):
-        resume_state.status = LoopStatus.FINISHED
-        resume_state.stop_reason = "final"
-        return AgentRunResult(
-            status=resume_state.status,
-            stop_reason=resume_state.stop_reason,
-            state=resume_state,
-            messages=resume_state.messages,
-            final_text="resumed",
-        )
-
-    agent.resume_after_approval = fake_resume
 
     async def run() -> None:
         try:
-            await _seed_suspended_run_model_contract(
-                agent, runtime_wiring, session, state
-            )
+            await session.run_turn("run one command")
+            pending = session.get_pending_approval()
+            assert pending is not None
             fake.calls.clear()
-            session.pending_interaction = pending
-            session._suspended_state = state
-            session.suspended_run_id = state.run_id
             await session.resolve_approval(
                 ApprovalResolution(
-                    approval_id="approval:test",
+                    approval_id=pending.approval_id,
                     decisions=(
                         ToolApprovalDecision(tool_call_id="call:test", confirmed=False),
                     ),
@@ -3189,65 +3161,36 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
 
 
 def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_component_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
-    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    session, _agent, _transport, _fake = _host_interaction_fixture(
+        tmp_path,
+        compaction_service=fake,
+        replies=[
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:plan",
+                        "name": "ask_plan_question",
+                        "arguments": '{"question":"choose"}',
+                    }
+                ]
+            },
+            {"text": "resumed"},
+        ],
     )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
-    state = agent.new_state()
-    state.pending_interaction_kind = "plan"
-    state.pending_interaction_payload = {
-        "interaction_id": "plan:test",
-        "kind": "question",
-        "tool_call_id": "call:plan",
-    }
-    pending = PendingPlanInteraction(
-        interaction_id="plan:test",
-        kind="question",
-        host_session_id=session.host_session_id,
-        runtime_session_id=session.runtime_session_id,
-        run_id=state.run_id,
-        turn_id=state.turn_id,
-        reply_id=state.reply_id,
-        tool_call_id="call:plan",
-        question="choose",
-    )
-
-    async def fake_resume(resume_state, resolution):
-        resume_state.status = LoopStatus.FINISHED
-        resume_state.stop_reason = "final"
-        return AgentRunResult(
-            status=resume_state.status,
-            stop_reason=resume_state.stop_reason,
-            state=resume_state,
-            messages=resume_state.messages,
-            final_text="resumed",
-        )
-
-    agent.resume_after_plan_interaction = fake_resume
 
     async def run() -> None:
         try:
-            await _seed_suspended_run_model_contract(
-                agent, runtime_wiring, session, state
-            )
+            session.enter_plan(reason="compaction resume contract")
+            await session.run_turn("ask a plan question")
+            pending = session.get_pending_interaction()
+            assert isinstance(pending, PendingPlanInteraction)
             fake.calls.clear()
-            session.pending_interaction = pending
-            session._suspended_state = state
-            session.suspended_run_id = state.run_id
             await session.resolve_plan_interaction(
-                PlanQuestionResolution(interaction_id="plan:test", answer_text="A")
+                PlanQuestionResolution(
+                    interaction_id=pending.interaction_id,
+                    answer_text="A",
+                )
             )
         finally:
             await session.aclose()
@@ -3257,250 +3200,174 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
     assert fake.calls == []
 
 
-def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
-    runtime_wiring = build_component_runtime_wiring(tmp_path)
-    fake = _FakeHostCompactionService()
-    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+def test_mcp_input_required_resume_does_not_auto_compact(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = McpServerConfig(
+        server_id="slow-docs",
+        transport=McpStdioConfig(command="fake-mcp"),
+        required=False,
+        connect_timeout_ms=100,
+        discovery_timeout_ms=100,
+        startup_deadline_ms=250,
     )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
+    import pulsara_agent.host.core as host_core
+    import pulsara_agent.host.session as host_session
+    import pulsara_agent.runtime.wiring as runtime_wiring_module
+    from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
+
+    monkeypatch.setattr(
+        host_core, "load_mcp_server_configs", lambda **_kwargs: (config,)
+    )
+    monkeypatch.setattr(
+        host_session, "load_mcp_server_configs", lambda **_kwargs: (config,)
+    )
+
+    worker_release = asyncio.Event()
+    candidate_ready = asyncio.Event()
+    handler_calls = 0
+
+    def input_required_then_complete(arguments):
+        nonlocal handler_calls
+        handler_calls += 1
+        if handler_calls > 2:
+            return {"status": "resumed"}
+        return McpInputRequired(
+            interaction_id="mcp_input_required:compaction-contract",
+            server_id=config.server_id,
+            protocol_version="2026-07-28",
+            request_state=f"state:compaction-contract:{handler_calls}",
+            input_requests=(
+                McpInputRequestDTO(
+                    key="choice",
+                    method="elicitation/create",
+                    params={"message": f"choose round {handler_calls}"},
+                ),
+            ),
+            original_request=McpOriginalRequest(
+                source_method=McpRequestSourceMethod.TOOL_CALL,
+                tool_name="lookup",
+                arguments=arguments,
+            ),
+            round_count=handler_calls,
+        )
+
+    async def controlled_worker(self, runtime):
+        await worker_release.wait()
+        await queue_ready_test_mcp_candidate(
+            self,
+            runtime,
+            handler=input_required_then_complete,
+        )
+        candidate_ready.set()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", controlled_worker)
+    installed_generations: list[int] = []
+    original_install_segment = RunExecutionRegistry.install_segment
+
+    def record_install_segment(self, *args, **kwargs):
+        installed = original_install_segment(self, *args, **kwargs)
+        generation = getattr(installed, "segment_generation", None)
+        if isinstance(generation, int):
+            installed_generations.append(generation)
+        return installed
+
+    monkeypatch.setattr(
+        RunExecutionRegistry,
+        "install_segment",
+        record_install_segment,
+    )
+
+    transport = HostInteractionTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:mcp",
+                        "name": "mcp__slow-docs__lookup",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "resumed"},
+        ]
+    )
+    settings = PulsaraSettings(
+        llm=test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api=transport.api,
         ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+        storage=compatibility_storage_config(),
     )
-    state = agent.new_state()
-    state.pending_interaction_kind = "mcp_input_required"
-    state.pending_interaction_payload = {
-        "interaction_id": "mcp:test",
-        "tool_call_id": "call:mcp",
-        "tool_name": "mcp__docs__lookup",
-        "server_id": "docs",
-        "protocol_version": "2026-07-28",
-        "request_state": "request:test",
-        "input_requests": [],
-        "original_request": {
-            "source_method": "tools/call",
-            "tool_name": "lookup",
-            "arguments": {},
-        },
-    }
-    binding_identity = McpBindingIdentityFact(
-        server_id="docs",
-        slot_id="slot:docs",
-        snapshot_id="snapshot:docs",
-        discovery_generation=1,
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    core = component_test_host_core(settings)
+    monkeypatch.setattr(
+        runtime_wiring_module,
+        "build_llm_runtime",
+        lambda _config: LLMRuntime(config=settings.llm, registry=registry),
     )
-    prepared_suspension = prepare_mcp_input_required_suspension(
-        interaction_id="mcp:test",
-        tool_call_id="call:mcp",
-        tool_name="mcp__docs__lookup",
-        server_id="docs",
-        round_count=1,
-        binding_identity=binding_identity,
-        pending_lease_reservation_id="mcp_pending_lease:mcp:test",
-        protocol_version="2026-07-28",
-        input_requests=(),
-        original_request={
-            "source_method": "tools/call",
-            "tool_name": "lookup",
-            "arguments": {},
-        },
-        request_state="request:test",
-        deadline_monotonic=None,
-    )
-    pending_handle = prepared_test_mcp_pending_handle(prepared_suspension)
+    fake = _FakeHostCompactionService()
 
-    async def fake_mcp_resume(resume_state, resolution):
-        resume_state.scratchpad["mcp_input_required_publication_closure_reason"] = (
-            "live_pending_lease_unavailable"
-        )
-        async for _event in agent._terminalize_pending_mcp_for_abort(
-            resume_state,
-            reason=AbortKind.HOST_TEARDOWN,
-        ):
-            pass
-        resume_state.status = LoopStatus.FINISHED
-        resume_state.stop_reason = "final"
-        return AgentRunResult(
-            status=resume_state.status,
-            stop_reason=resume_state.stop_reason,
-            state=resume_state,
-            messages=resume_state.messages,
-            final_text="resumed",
-        )
+    async def record_auto_compaction(_service, **kwargs):
+        return await fake.compact_if_needed(**kwargs)
 
-    agent.resume_after_mcp_input_required = fake_mcp_resume
+    monkeypatch.setattr(
+        ContextCompactionService,
+        "compact_if_needed",
+        record_auto_compaction,
+    )
 
     async def run() -> None:
         try:
-            await _seed_suspended_run_model_contract(
-                agent, runtime_wiring, session, state
-            )
-            rollout_states = (
-                runtime_wiring.runtime_session.long_horizon_state_store.rollout_states()
-            )
-            assert len(rollout_states) == 1
-            rollout_state = rollout_states[0]
-            rollout_account = (
-                runtime_wiring.runtime_session.long_horizon_state_store.rollout_account(
-                    rollout_state.account_id
-                )
-            )
-            assert rollout_account is not None
-            reservation_payload = {
-                "reservation_id": "rollout_reservation:mcp:test",
-                "account_id": rollout_account.account_id,
-                "owner_kind": "tool_call",
-                "owner_id": "call:mcp",
-                "phase_at_reservation": rollout_state.phase,
-                "budget_bucket": RolloutBudgetBucket.EXPLORATION,
-                "reserved_milliunits": (
-                    rollout_account.policy.tool_cost_unit_weight_milli
+            session = await core.open_session(
+                HostWorkspaceInput(
+                    workspace_root=tmp_path,
+                    workspace_kind="project",
+                    memory_domain_id="u_test",
                 ),
-                "model_call_reservation_quote": None,
-                "source_sequence": rollout_state.through_sequence,
-            }
-            rollout_reservation = RolloutReservationFact(
-                **reservation_payload,
-                semantic_fingerprint=context_fingerprint(
-                    "rollout-reservation:v1",
-                    reservation_payload,
-                ),
+                host_session_id="host:mcp-compaction",
+                conversation_id="conversation:mcp-compaction",
+                model_role=ModelRole.FLASH,
+                memory_reflection=False,
+                permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
             )
-            reservation_event = RolloutBudgetReservationCreatedEvent(
-                **EventContext(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                ).event_fields(),
-                reservation=rollout_reservation,
-            )
-            await RuntimeSessionToolExecutionEventCommitPort(
-                runtime_session=runtime_wiring.runtime_session,
-                state=state,
-            ).commit_gate_batch(
-                gate_items=(
-                    (
-                        CapabilityGateDecisionEvent(
-                            **EventContext(
-                                run_id=state.run_id,
-                                turn_id=state.turn_id,
-                                reply_id=state.reply_id,
-                            ).event_fields(),
-                            tool_call_id="call:mcp",
-                            tool_name="mcp__docs__lookup",
-                            descriptor_id=None,
-                            decision="allow",
-                        ),
-                        reservation_event,
-                        (),
-                    ),
-                ),
-                expected_account_state_fingerprint=rollout_state.state_fingerprint,
-                account_id=rollout_account.account_id,
-            )
-            runtime_wiring.runtime_session.tool_execution_terminal_registry.install_admitted_batch(
-                run_id=state.run_id,
-                reservations=(rollout_reservation,),
-            )
-            state.pending_interaction_payload.update(
-                {
-                    "rollout_reservation_id": rollout_reservation.reservation_id,
-                    "rollout_reservation_fingerprint": (
-                        rollout_reservation.semantic_fingerprint
-                    ),
-                }
-            )
-            suspension_fact = build_frozen_fact(
-                McpInputRequiredSuspensionFact,
-                schema_version="mcp_input_required_suspension.v1",
-                interaction=prepared_suspension.interaction,
-                binding_identity=prepared_suspension.binding_identity,
-                pending_lease_reservation=prepared_suspension.pending_lease_reservation,
-                request_envelope=prepared_suspension.request_envelope,
-                rollout_reservation_id=rollout_reservation.reservation_id,
-                rollout_reservation_fingerprint=(
-                    rollout_reservation.semantic_fingerprint
-                ),
-                source_mcp_installation_id="mcp_installation:test",
-                durable_deadline_utc=None,
-                deadline_policy_fingerprint=context_fingerprint(
-                    "mcp-input-required-deadline-policy:v1",
-                    "test",
-                ),
-                predecessor_resolution_submitted_event_reference=None,
-            )
-            suspension_result = await RuntimeSessionToolExecutionEventCommitPort(
-                runtime_session=runtime_wiring.runtime_session,
-                state=state,
-            ).commit_suspension(
-                suspension_candidate=ToolExecutionSuspendedEvent(
-                    id="tool_execution_suspended:mcp:test",
-                    **EventContext(
-                        run_id=state.run_id,
-                        turn_id=state.turn_id,
-                        reply_id=state.reply_id,
-                    ).event_fields(),
-                    interaction_kind="mcp_input_required",
-                    tool_call_id="call:mcp",
-                    tool_name="mcp__docs__lookup",
-                    suspension=suspension_fact,
-                ),
-                reservation_id=rollout_reservation.reservation_id,
-                expected_reservation_fingerprint=(
-                    rollout_reservation.semantic_fingerprint
-                ),
-            )
-            suspension_event = suspension_result.committed_events[-1]
-            assert isinstance(suspension_event, ToolExecutionSuspendedEvent)
-            source_reference = event_reference_from_stored(
-                suspension_event,
-                runtime_session_id=session.runtime_session_id,
-            )
-            state.pending_interaction_payload.update(
-                {
-                    "mcp_pending_handle": pending_handle,
-                    "suspension_fact": suspension_fact,
-                    "source_suspension_event_reference": source_reference,
-                }
-            )
+            worker_release.set()
+            await asyncio.wait_for(candidate_ready.wait(), timeout=0.5)
+            suspended = await session.run_turn("request MCP input")
+            assert isinstance(suspended, RunSuspendedOutcome)
+            pending = session.get_pending_interaction()
+            assert isinstance(pending, PendingMcpInputRequired)
+
             fake.calls.clear()
-            session.pending_interaction = PendingMcpInputRequired(
-                interaction_id="mcp:test",
-                kind="mcp_input_required",
-                host_session_id=session.host_session_id,
-                runtime_session_id=session.runtime_session_id,
-                run_id=state.run_id,
-                turn_id=state.turn_id,
-                reply_id=state.reply_id,
-                tool_call_id="call:mcp",
-                tool_name="mcp__docs__lookup",
-                server_id="docs",
-                source_suspension_event_reference=source_reference,
-                suspension_fact=suspension_fact,
-                pending_handle=pending_handle,
-                input_requests=(),
-            )
-            session._suspended_state = state
-            session.suspended_run_id = state.run_id
-            await session.resolve_mcp_input_required(
+            suspended_again = await session.resolve_mcp_input_required(
                 McpInputRequiredInteractionResolution(
-                    interaction_id="mcp:test",
-                    responses={"value": {"value": "secret"}},
+                    interaction_id=pending.interaction_id,
+                    responses={"choice": {"value": "yes"}},
                 )
             )
+            assert isinstance(suspended_again, RunSuspendedOutcome)
+            successor = session.get_pending_interaction()
+            assert isinstance(successor, PendingMcpInputRequired)
+            assert successor.suspension_fact.interaction.round_count == 2
+
+            resumed = await session.resolve_mcp_input_required(
+                McpInputRequiredInteractionResolution(
+                    interaction_id=successor.interaction_id,
+                    responses={"choice": {"value": "yes again"}},
+                )
+            )
+            assert resumed.status.value == "finished"
+            assert handler_calls == 3
+            assert fake.calls == []
+            assert installed_generations == [1, 2, 3]
         finally:
-            await session.aclose()
+            await core.shutdown()
 
     asyncio.run(run())
-
-    assert fake.calls == []
 
 
 def _contract_compaction_service(
@@ -4436,65 +4303,54 @@ def test_compaction_terminal_event_preserves_usage_or_missing_status() -> None:
 
 
 async def _resume_contract_fixture(tmp_path):
-    runtime_wiring = build_component_runtime_wiring(tmp_path)
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    session, agent, transport, _fake = _host_interaction_fixture(
+        tmp_path,
+        ask_permissions=True,
+        replies=[
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:model-contract",
+                        "name": "terminal",
+                        "arguments": '{"command":"printf ok"}',
+                    }
+                ]
+            },
+            {"text": "resumed"},
+        ],
     )
-    session = HostSession(
-        host_session_id="host:resume-model-contract",
-        conversation_id="conversation:resume-model-contract",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=agent,
-            runtime_wiring=runtime_wiring,
-        ),
-    )
-    state = agent.new_state()
-    await _seed_suspended_run_model_contract(agent, runtime_wiring, session, state)
-    pending = PendingApproval(
-        approval_id="approval:model-contract",
-        host_session_id=session.host_session_id,
-        runtime_session_id=session.runtime_session_id,
-        run_id=state.run_id,
-        turn_id=state.turn_id,
-        reply_id=state.reply_id,
-        tool_calls=(),
-    )
-    session.pending_interaction = pending
-    session._suspended_state = state
-    session.suspended_run_id = state.run_id
-    return session, agent, state, pending
+    suspended = await session.run_turn("freeze the model target")
+    pending = session.get_pending_approval()
+    assert pending is not None
+    assert isinstance(suspended, RunSuspendedOutcome)
+    return session, agent, transport, suspended.owner_identity.run_id, pending
 
 
 def test_resume_rebinds_original_run_target(tmp_path) -> None:
     async def run() -> None:
-        session, _agent, state, pending = await _resume_contract_fixture(tmp_path)
+        session, _agent, transport, run_id, pending = await _resume_contract_fixture(
+            tmp_path
+        )
         try:
             durable_target = next(
                 event.model_target
                 for event in session.wiring.runtime_wiring.event_log.iter()
-                if isinstance(event, RunStartEvent) and event.run_id == state.run_id
+                if isinstance(event, RunStartEvent) and event.run_id == run_id
             )
-            state.run_model_target = None
-            identity = session._new_resume_boundary_identity(
-                state,
-                interaction_id=pending.approval_id,
+            await session.resolve_approval(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=(
+                        ToolApprovalDecision(
+                            tool_call_id="call:model-contract",
+                            confirmed=False,
+                        ),
+                    ),
+                )
             )
-            (
-                resumed,
-                _committed,
-                _stored,
-            ) = await session._prepare_and_commit_resume_boundary(
-                pending=pending,
-                interaction_kind="approval",
-                identity=identity,
+            assert transport.contexts[-1].target_fingerprint == (
+                durable_target.target_fingerprint
             )
-            assert resumed.run_model_target is not None
-            assert resumed.run_model_target.fact == durable_target
         finally:
             await session.aclose()
 
@@ -4503,21 +4359,25 @@ def test_resume_rebinds_original_run_target(tmp_path) -> None:
 
 def test_resume_rejects_changed_model_target(tmp_path) -> None:
     async def run() -> None:
-        session, agent, _state, pending = await _resume_contract_fixture(tmp_path)
+        session, agent, _transport, _run_id, pending = await _resume_contract_fixture(
+            tmp_path
+        )
         agent.llm_runtime._config = replace(
             agent.llm_runtime._config,
             pro=test_model_slot("changed-pro-model"),
         )
         try:
-            identity = session._new_resume_boundary_identity(
-                _state,
-                interaction_id=pending.approval_id,
-            )
             with pytest.raises(ModelTargetBindingMismatch):
-                await session._prepare_and_commit_resume_boundary(
-                    pending=pending,
-                    interaction_kind="approval",
-                    identity=identity,
+                await session.resolve_approval(
+                    ApprovalResolution(
+                        approval_id=pending.approval_id,
+                        decisions=(
+                            ToolApprovalDecision(
+                                tool_call_id="call:model-contract",
+                                confirmed=False,
+                            ),
+                        ),
+                    )
                 )
         finally:
             await session.aclose()

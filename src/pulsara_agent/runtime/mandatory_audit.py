@@ -171,7 +171,7 @@ class RuntimeSessionMandatoryAuditOwner:
                     deadline_monotonic=(
                         deadline_budget.ordinary_deadline_monotonic
                     ),
-                    state=state,  # type: ignore[arg-type]
+                    # type: ignore[arg-type]
                 )
             except asyncio.CancelledError:
                 raise

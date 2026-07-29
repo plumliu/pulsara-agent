@@ -9,14 +9,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.runtime.state import LoopState
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimePublishedEvent:
     runtime_session_id: str
     event: AgentEvent
-    state: LoopState | None = None
 
 
 class RuntimeEventSubscriber(Protocol):

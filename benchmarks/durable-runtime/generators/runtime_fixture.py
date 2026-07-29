@@ -76,7 +76,7 @@ from pulsara_agent.runtime.run_entry import (
     RunWorkingSet,
 )
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.llm.resolution import ResolvedModelTarget
 from pulsara_agent.llm.user_carrier import encode_human_input
 
@@ -89,7 +89,7 @@ class BenchmarkContextRun:
     event_context: EventContext
     target: ResolvedModelTarget
     activation: RunExecutionActivationFact
-    state: LoopState
+    state: RunActivationWorkingState
     working_set: RunWorkingSet
     capability_runtime: CapabilityRuntime
 
@@ -555,7 +555,7 @@ def _bind_benchmark_context_run(
             runtime_session_id=runtime_session.runtime_session_id,
         ),
     )
-    state = LoopState(
+    state = RunActivationWorkingState(
         session_id=runtime_session.runtime_session_id,
         run_id=event_context.run_id,
         turn_id=event_context.turn_id,

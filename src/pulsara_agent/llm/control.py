@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from threading import RLock
 from time import monotonic
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import Any, Literal, Mapping
 
 from pulsara_agent.event import (
     EventContext,
@@ -29,10 +29,11 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.primitives.run_boundary import RunExecutionActivationFact
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.ports.event_write import (
+    EventCommitError,
+    EventWriteResult,
+    RuntimeEventWriteCancelled,
+)
 
 
 class ModelCallControlResolutionError(RuntimeError):
@@ -238,11 +239,9 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
     def __init__(
         self,
         *,
-        runtime_session: RuntimeSession,
-        state: LoopState,
+        runtime_session: Any,
     ) -> None:
         self._runtime_session = runtime_session
-        self._state = state
 
     async def commit_and_confirm_resolution(
         self,
@@ -254,17 +253,13 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
             try:
                 return self._runtime_session.commit_reduce_events_from_thread(
                     (candidate,),
-                    state=self._state,
-                )
+                                    )
             except BaseException as original:
                 try:
                     return self._runtime_session.confirm_and_reduce_event_batch(
                         (candidate,),
-                        state=self._state,
-                    )
+                                            )
                 except BaseException as confirmation_error:
-                    from pulsara_agent.runtime.session import EventCommitError
-
                     if isinstance(confirmation_error, EventCommitError):
                         raise original
                     self._runtime_session.latch_event_commit_outcome_unknown()
@@ -279,11 +274,6 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
                 deadline_monotonic=deadline_monotonic,
             )
         except BaseException as cancelled:
-            from pulsara_agent.runtime.event_write_service import (
-                RuntimeEventWriteCancelled,
-            )
-            from pulsara_agent.runtime.session import EventCommitError, EventWriteResult
-
             if not isinstance(cancelled, RuntimeEventWriteCancelled):
                 raise
             if isinstance(cancelled.operation_result, EventWriteResult):
@@ -354,8 +344,7 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
         try:
             status = self._runtime_session.publish_committed_through_from_thread(
                 through_sequence=folded.disposition_sequence,
-                state=self._state,
-            )
+                            )
         except BaseException:
             status = "unavailable"
         return ModelCallControlDispositionPublicationResult(
@@ -421,8 +410,7 @@ class RunModelCallControlOwner:
         result: CommittedModelCallResult,
         model_call_index: int,
         event_context: EventContext,
-        runtime_session: RuntimeSession,
-        state: LoopState,
+        runtime_session: Any,
     ) -> ModelCallControlResolutionResult:
         if result.control_disposition is not ModelCallResultControlDisposition.SUCCESS_ELIGIBLE:
             raise ModelCallControlResolutionError(
@@ -467,7 +455,6 @@ class RunModelCallControlOwner:
         )
         commit_port = RuntimeSessionModelCallControlDispositionCommitPort(
             runtime_session=runtime_session,
-            state=state,
         )
         pending_publication: ModelCallControlResolutionResult | None = None
         folded: ModelCallControlDispositionFoldResult | None = None

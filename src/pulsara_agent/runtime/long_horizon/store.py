@@ -25,6 +25,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.primitives.long_horizon import (
     ContextWindowProjectionState,
+    LongHorizonReducerApplyError,
     RolloutBudgetAccountFact,
     RolloutBudgetStateFact,
 )
@@ -36,10 +37,6 @@ from pulsara_agent.runtime.long_horizon.window import (
     ContextWindowChainState,
     apply_context_window_event,
 )
-
-
-class LongHorizonReducerApplyError(RuntimeError):
-    """Committed window or rollout facts violated the frozen contract."""
 
 
 class LongHorizonStateStore:

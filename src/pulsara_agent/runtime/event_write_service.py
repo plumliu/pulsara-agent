@@ -15,7 +15,11 @@ from uuid import uuid4
 from pulsara_agent.primitives.authority_materialization import (
     LedgerWriteAdmissionClass,
 )
-from pulsara_agent.runtime.blocking_executor import critical_ledger_executor
+from pulsara_agent.blocking_executor import critical_ledger_executor
+from pulsara_agent.ports.event_write import (
+    PendingRuntimeEventWriteError,
+    RuntimeEventWriteCancelled,
+)
 
 T = TypeVar("T")
 
@@ -37,26 +41,6 @@ class _WriteAdmissionCoordinator(Protocol):
         *,
         operation_owner_ids: tuple[str, ...],
     ) -> tuple[Any, ...]: ...
-
-
-class PendingRuntimeEventWriteError(RuntimeError):
-    """The session cannot accept or drain another physical event write."""
-
-
-class RuntimeEventWriteCancelled(asyncio.CancelledError):
-    """Caller cancellation observed the terminal result of its physical owner."""
-
-    def __init__(
-        self,
-        *,
-        operation_result: Any | None,
-        operation_error: BaseException | None,
-        deadline_monotonic: float,
-    ) -> None:
-        self.operation_result = operation_result
-        self.operation_error = operation_error
-        self.deadline_monotonic = deadline_monotonic
-        super().__init__("runtime event write caller cancelled after physical resolution")
 
 
 @dataclass(slots=True)

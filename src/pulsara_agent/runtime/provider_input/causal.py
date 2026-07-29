@@ -49,7 +49,7 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptToolPairLeafEntryFact,
     TranscriptToolResultLeafEntryFact,
 )
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     freeze_provider_message_fragment,
 )
 from pulsara_agent.runtime.provider_input.vector import VECTOR_CONTRACT_FINGERPRINT

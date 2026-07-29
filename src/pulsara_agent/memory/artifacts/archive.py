@@ -10,12 +10,12 @@ from threading import RLock
 from typing import Any
 
 from pulsara_agent.memory.foundation.records import (
-    ArtifactContentConflict,
     ArtifactPutConfirmation,
     ArtifactRecord,
     ArtifactTextSlice,
     ArtifactWriteResult,
 )
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.primitives.model_call import canonical_json_bytes
 
 

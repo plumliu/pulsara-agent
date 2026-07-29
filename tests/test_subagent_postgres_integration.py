@@ -148,6 +148,7 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
             await child_session.write_events(
                 (
                     RunStartEvent(
+                        id=f"run_start:test:{child_context.run_id}",
                         **child_context.event_fields(),
                         **run_start_permission_fields(
                             child_context.run_id,
@@ -239,6 +240,7 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             await child_session.write_event(
                 RunStartEvent(
+                    id=f"run_start:test:{child_context.run_id}",
                     **child_context.event_fields(),
                     **run_start_permission_fields(
                         child_context.run_id,
@@ -344,8 +346,9 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             await child_session.write_events(
                 (
-                    RunStartEvent(
-                        **native_context.event_fields(),
+                        RunStartEvent(
+                            id=f"run_start:test:{native_run_id}",
+                            **native_context.event_fields(),
                         **run_start_permission_fields(
                             native_run_id,
                             source="child_profile",
