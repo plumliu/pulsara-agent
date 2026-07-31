@@ -16,8 +16,8 @@ from pulsara_agent.primitives.run_boundary import (
     ResumeGatePolicy,
 )
 from pulsara_agent.primitives.run_entry import HostRunBoundaryIdentityFact
+from pulsara_agent.ports.mcp import PreparedMcpInputRequiredResolution
 from pulsara_agent.primitives.runtime_event_vocabulary import (
-    PreparedMcpInputRequiredResolution,
     RuntimeEventOperationDeadlineBudget,
 )
 from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet

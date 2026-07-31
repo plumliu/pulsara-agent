@@ -239,5 +239,87 @@
       "compileall": "passed",
       "git_diff_check": "passed"
     }
+  },
+  "latest_real_llm_revalidation": {
+    "revalidated_on": "2026-07-31",
+    "execution_policy": "two_disjoint_selected_runs_under_one_runner_build",
+    "suite_id": "pulsara-core-dogfood-v1",
+    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+    "runner_build_fingerprint": "125a77233f85f85e776f3cee90dd1e6cc2ba8e6dc393c0858a638d3736921e8e",
+    "status": "passed",
+    "passed_scenarios": 6,
+    "failed_scenarios": 0,
+    "elapsed_seconds": 591.1256474591792,
+    "model_call_count": 46,
+    "tool_call_count": 41,
+    "total_tokens": 845422,
+    "cached_input_tokens": 591488,
+    "selected_runs": [
+      {
+        "scenario_ids": [
+          "plan-workflow",
+          "workspace-patch"
+        ],
+        "passed_scenarios": 2,
+        "failed_scenarios": 0,
+        "summary_record_sha256": "2d04c2c06cd1ee6a352e357f5eb4cbdcd196a3f8bec90d40e2e0ee7615638479",
+        "results_jsonl_sha256": "1856c70473ec192c1660e725b82250f3786e01883b9138887e7f3fe272d1d453"
+      },
+      {
+        "scenario_ids": [
+          "cache-continuity",
+          "durable-resume",
+          "manual-compaction-trail",
+          "subagent-delegation"
+        ],
+        "passed_scenarios": 4,
+        "failed_scenarios": 0,
+        "summary_record_sha256": "b694489243a6f3fda43c33842c78adf3fbe7a605091a754acd96960f74fc8591",
+        "results_jsonl_sha256": "e9711d2ca40b8e294698a66170e8d350a546140694cd924407d7d33227f490d7"
+      }
+    ],
+    "isolated_postgres_databases_dropped": true
+  },
+  "latest_subagent_difficulty_revalidation": {
+    "revalidated_on": "2026-07-31",
+    "execution_policy": "initial_attempt_then_fixture_only_repair_and_failed_scenario_rerun",
+    "suite_id": "pulsara-core-dogfood-v1",
+    "suite_contract_fingerprint": "fcdf99b275ad4c491cda7515f0c71a5883691b08eff0a7a2d29ee956496c91d1",
+    "scenario_id": "subagent-delegation",
+    "scenario_contract_fingerprint": "914670eda5aac3c977063840fdd7e9a99c18ae01d2ebe383edb3e0e7b39f209b",
+    "runner_build_fingerprint": "a6e912205eec3c516f89ffac034a1dc897c322eacd269588aede7ea80ef8f0b5",
+    "status": "passed",
+    "difficulty_contract": {
+      "linked_file_count": 8,
+      "minimum_child_tool_calls": 10,
+      "observed_child_tool_calls": 12,
+      "parent_tool_call_count": 3,
+      "requires_search": true,
+      "requires_individual_reads": true,
+      "requires_trace_write_and_reread": true,
+      "requires_explicit_result": true
+    },
+    "initial_attempt": {
+      "status": "failed",
+      "failure_classification": "hidden_verifier_expected_basename_but_child_emitted_workspace_relative_paths",
+      "child_tool_gate_passed": true,
+      "observed_child_tool_calls": 12,
+      "result_record_sha256": "87cc883d6f11ab7add8df6c0fb9c78fe7cc627d1e6b0d407c4c607ee25eed14f",
+      "summary_record_sha256": "0100c1e23b9ae1f7cd0dfdf51090907dafde42415da88e999bb59539ba134d7a",
+      "results_jsonl_sha256": "ce9f79bf711f2f99044733550e0eb17ba4dc3f6eefb915bd5302f0eb5f9c7a5b"
+    },
+    "successful_rerun": {
+      "elapsed_seconds": 94.04991762526333,
+      "model_call_count": 4,
+      "parent_tool_call_count": 3,
+      "observed_child_tool_calls": 12,
+      "total_tokens": 59602,
+      "cached_input_tokens": 43648,
+      "hidden_verifier_passed": true,
+      "result_record_sha256": "4777cab9e9e061806864e4952f37afe4be5162b458447e85341ab746e162f6e0",
+      "summary_record_sha256": "a8b23c4f20f4396ca86c31dd2baa026d103fb7d58b60e6a08ee1c6e29b7a58c9",
+      "results_jsonl_sha256": "eee945b5cad0c0b6af06a10cd38af9b5a63cd4ad7dbe83c71b3aab2d697f8d66"
+    },
+    "isolated_postgres_databases_dropped": true
   }
 }

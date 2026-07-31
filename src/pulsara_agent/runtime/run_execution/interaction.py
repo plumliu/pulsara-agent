@@ -31,6 +31,7 @@ from pulsara_agent.runtime.plan import (
     pending_plan_interaction_from_state,
 )
 from pulsara_agent.runtime.run_execution.owner import RunOwner
+from pulsara_agent.runtime.run_execution.prepared import RunActivationStateCarrier
 from pulsara_agent.runtime.run_execution.commit_gateway import (
     rebind_confirmed_event_candidate,
 )
@@ -195,6 +196,72 @@ def materialize_pending_interaction(
         owner=owner,
         authority=authority,
         public_view=pending,
+    )
+    return authority, resources
+
+
+def materialize_recovered_mcp_interaction(
+    *,
+    owner: RunOwner,
+    host_session_id: str,
+    state_carrier: RunActivationStateCarrier,
+    state_owner_token: str,
+    resource_generation: int,
+) -> tuple[PendingMcpInputRequiredAuthority, McpSuspensionResources]:
+    """Rebuild a suspension slot from its exact stored candidate on reopen."""
+
+    if resource_generation < 1:
+        raise ValueError("recovered MCP resource generation must be positive")
+    state = state_carrier.borrow(owner_token=state_owner_token)
+    if state.status is not LoopStatus.WAITING_USER:
+        raise ValueError("recovered MCP interaction requires a waiting state")
+    pending = pending_mcp_input_required_from_state(state, host_session_id)
+    source_ref = pending.source_suspension_event_reference
+    source = _read_exact_source(
+        state=state,
+        owner=owner,
+        source_ref=source_ref,
+        event_type=ToolExecutionSuspendedEvent,
+    )
+    identity = _identity(
+        owner=owner,
+        interaction_kind="mcp_input_required",
+        interaction_id=source.suspension.interaction.interaction_id,
+        source_ref=source_ref,
+    )
+    authority = _build_runtime_fact(
+        PendingMcpInputRequiredAuthority,
+        domain="pending-mcp-input-authority:v1",
+        fingerprint_field="authority_fingerprint",
+        interaction_kind="mcp_input_required",
+        identity=identity,
+        suspension=source.suspension,
+    )
+    pending_handle = state.pending_interaction_payload.get("mcp_pending_handle")
+    if pending_handle is None or not hasattr(pending_handle, "identity"):
+        raise RuntimeError("recovered MCP suspension lost its pending handle")
+    resource_fingerprint = context_fingerprint(
+        "run-suspension-resource:v1",
+        {
+            "owner_fingerprint": owner.identity.owner_fingerprint,
+            "interaction_fingerprint": identity.interaction_fingerprint,
+            "resource_kind": "mcp_input_required",
+            "resource_generation": resource_generation,
+        },
+    )
+    resources = McpSuspensionResources(
+        resource_kind="mcp_input_required",
+        resource_generation=resource_generation,
+        pending_interaction_fingerprint=identity.interaction_fingerprint,
+        resource_identity_fingerprint=resource_fingerprint,
+        public_view=pending,
+        pending_handle=pending_handle,
+        activation_payload=_freeze_activation_payload(
+            state.pending_interaction_payload,
+            omitted_keys=frozenset({"mcp_pending_handle"}),
+        ),
+        state_carrier=state_carrier,
+        state_owner_token=state_owner_token,
     )
     return authority, resources
 
@@ -375,4 +442,7 @@ def _build_runtime_fact(
     )
 
 
-__all__ = ["materialize_pending_interaction"]
+__all__ = [
+    "materialize_pending_interaction",
+    "materialize_recovered_mcp_interaction",
+]

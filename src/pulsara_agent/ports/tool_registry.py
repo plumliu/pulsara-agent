@@ -93,6 +93,24 @@ def build_tool_binding_contract(
     resolved_origin = ToolBindingOrigin(origin)
     if not tool_name or not contract_id or not contract_version:
         raise ValueError("tool binding name/id/version are required")
+    mcp_identity = (
+        mcp_binding_identity or _mcp_identity_from_attributes(binding_attributes)
+        if resolved_origin is ToolBindingOrigin.MCP
+        else None
+    )
+    if resolved_origin is ToolBindingOrigin.MCP:
+        if mcp_identity is None or not original_tool_name:
+            raise ValueError("MCP binding requires exact identity and original name")
+        # The base fingerprint is model/capability semantic authority. A slot is
+        # a process occurrence and belongs only to the exact contract fact.
+        semantic_binding_attributes: object = {
+            "server_id": mcp_identity.server_id,
+            "snapshot_id": mcp_identity.snapshot_id,
+            "discovery_generation": mcp_identity.discovery_generation,
+            "original_tool_name": original_tool_name,
+        }
+    else:
+        semantic_binding_attributes = binding_attributes
     base = ToolBindingContractBase(
         tool_name=tool_name,
         origin=resolved_origin,
@@ -105,26 +123,22 @@ def build_tool_binding_contract(
                 resolved_origin.value,
                 contract_id,
                 contract_version,
-                binding_attributes,
+                semantic_binding_attributes,
             ],
         ),
     )
     if resolved_origin is ToolBindingOrigin.MCP:
-        identity = mcp_binding_identity or _mcp_identity_from_attributes(
-            binding_attributes
-        )
-        if identity is None or not original_tool_name:
-            raise ValueError("MCP binding requires exact identity and original name")
+        assert mcp_identity is not None
         payload = {
             "binding_kind": "mcp",
             "base": asdict(base),
-            "binding_identity": identity.model_dump(mode="json"),
+            "binding_identity": mcp_identity.model_dump(mode="json"),
             "original_tool_name": original_tool_name,
         }
         return McpToolBindingContract(
             binding_kind="mcp",
             base=base,
-            binding_identity=identity,
+            binding_identity=mcp_identity,
             original_tool_name=original_tool_name,
             contract_fact_fingerprint=sha256_fingerprint(
                 "tool-binding-contract-fact:v1", payload

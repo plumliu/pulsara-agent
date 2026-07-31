@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 import json
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +17,8 @@ from benchmarks.suites.contracts import (
 )
 from benchmarks.suites.graders import grade_durable_evidence, run_hidden_verifier
 from benchmarks.suites.run_core_dogfood import DEFAULT_SUITE_ROOT, main
-from benchmarks.suites.runner import _prepare_fixture
+from benchmarks.suites.runner import CoreDogfoodRunner, _prepare_fixture, _record_result
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 
 
 EXPECTED_SCENARIOS = (
@@ -47,19 +51,19 @@ def test_cme5_dod_evidence_matches_frozen_suite() -> None:
     )
     assert all(item["status"] == "passed" for item in evidence["gates"])
 
-    dogfood = evidence["real_llm_dogfood"]
-    assert dogfood["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
-    assert (
-        dogfood["scenario_contract_fingerprint"]
-        == scenario.scenario_contract_fingerprint
-    )
-    assert dogfood["runner_build_fingerprint"] == runner_build_fingerprint(
-        DEFAULT_SUITE_ROOT.parents[1]
-    )
+    assert evidence["real_llm_dogfood"]["status"] == "passed"
+    dogfood = evidence["latest_real_llm_revalidation"]
     assert dogfood["status"] == "passed"
     assert dogfood["candidate_count"] >= 1
     assert dogfood["terminal_status"] in {"governed_no_write", "governed_write"}
     assert dogfood["isolated_postgres_database_dropped"] is True
+    rebase = evidence["latest_suite_contract_rebase"]
+    assert rebase["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
+    assert (
+        rebase["manual_compaction_scenario_contract_fingerprint"]
+        == scenario.scenario_contract_fingerprint
+    )
+    assert rebase["manual_compaction_behavior_changed"] is False
 
     repository_root = DEFAULT_SUITE_ROOT.parents[3]
     implementation_spec = (
@@ -111,15 +115,34 @@ def test_d6_dod_evidence_matches_ownership_hard_cut() -> None:
         == 0
     )
 
-    dogfood = evidence["real_llm_dogfood"]
-    assert dogfood["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
-    assert dogfood["runner_build_fingerprint"] == runner_build_fingerprint(
-        DEFAULT_SUITE_ROOT.parents[1]
-    )
+    assert evidence["real_llm_dogfood"]["status"] == "passed"
+    dogfood = evidence["latest_real_llm_revalidation"]
     assert dogfood["status"] == "passed"
     assert dogfood["passed_scenarios"] == len(suite.scenarios)
     assert dogfood["failed_scenarios"] == 0
     assert dogfood["isolated_postgres_databases_dropped"] is True
+    subagent = evidence["latest_subagent_difficulty_revalidation"]
+    scenario = next(
+        item
+        for item in suite.scenarios
+        if item.contract.scenario_id == "subagent-delegation"
+    )
+    assert subagent["suite_contract_fingerprint"] == suite.suite_contract_fingerprint
+    assert (
+        subagent["scenario_contract_fingerprint"]
+        == scenario.scenario_contract_fingerprint
+    )
+    assert subagent["runner_build_fingerprint"] == runner_build_fingerprint(
+        DEFAULT_SUITE_ROOT.parents[1]
+    )
+    assert subagent["status"] == "passed"
+    assert (
+        subagent["difficulty_contract"]["observed_child_tool_calls"]
+        >= subagent["difficulty_contract"]["minimum_child_tool_calls"]
+    )
+    assert subagent["initial_attempt"]["child_tool_gate_passed"] is True
+    assert subagent["successful_rerun"]["hidden_verifier_passed"] is True
+    assert subagent["isolated_postgres_databases_dropped"] is True
 
     remediation = evidence["post_review_remediation"]
     assert remediation["status"] == "passed"
@@ -177,6 +200,61 @@ def test_core_dogfood_runner_consumes_opaque_run_result() -> None:
     ).read_text(encoding="utf-8")
     assert "result.state" not in runner_source
     assert "result.run_id" in runner_source
+
+
+def test_core_dogfood_runner_accepts_plan_suspension_without_final_text() -> None:
+    suspended = RunSuspendedOutcome.model_construct(
+        owner_identity=SimpleNamespace(run_id="run:plan"),
+        pending_interaction=SimpleNamespace(interaction_kind="plan"),
+    )
+    recorded: OrderedDict[str, str] = OrderedDict()
+    progress: list[str] = []
+    runner = object.__new__(CoreDogfoodRunner)
+    runner.progress = progress.append
+
+    class _SuspendingSession:
+        async def run_turn(self, prompt: str):
+            assert prompt == "plan"
+            return suspended
+
+    result = asyncio.run(
+        runner._run_turn(
+            _SuspendingSession(),
+            "plan",
+            recorded,
+            "plan-workflow:plan",
+            allow_suspension=True,
+        )
+    )
+
+    assert result is suspended
+    assert recorded == {}
+    assert progress[-1] == "plan-workflow:plan: run SUSPENDED run_id=run:plan"
+    _record_result(suspended, recorded)
+    assert recorded == {}
+
+
+def test_core_dogfood_runner_rejects_unexpected_suspension() -> None:
+    suspended = RunSuspendedOutcome.model_construct(
+        owner_identity=SimpleNamespace(run_id="run:workspace"),
+        pending_interaction=SimpleNamespace(interaction_kind="approval"),
+    )
+    runner = object.__new__(CoreDogfoodRunner)
+    runner.progress = lambda _message: None
+
+    class _SuspendingSession:
+        async def run_turn(self, prompt: str):
+            return suspended
+
+    with pytest.raises(RuntimeError, match="unexpectedly suspended"):
+        asyncio.run(
+            runner._run_turn(
+                _SuspendingSession(),
+                "workspace task",
+                OrderedDict(),
+                "workspace-patch",
+            )
+        )
 
 
 def test_suite_detects_fixture_or_verifier_drift(tmp_path: Path) -> None:
@@ -494,6 +572,112 @@ def test_manual_compaction_grader_requires_exact_memory_extraction_chain() -> No
     )
 
 
+def test_subagent_grader_requires_durable_child_tool_count() -> None:
+    suite = load_suite(DEFAULT_SUITE_ROOT)
+    scenario = next(
+        item.contract
+        for item in suite.scenarios
+        if item.contract.scenario_id == "subagent-delegation"
+    )
+    counts = {
+        "MODEL_CALL_START": 2,
+        "MODEL_CALL_END": 2,
+        "RUN_START": 1,
+        "RUN_END": 1,
+        "SUBAGENT_RESULT_CONSUMED": 1,
+        "SUBAGENT_RUN_COMPLETED": 1,
+        "SUBAGENT_RUN_STARTED": 1,
+        "SUBAGENT_TASK_COMPLETED": 1,
+        "SUBAGENT_TASK_CREATED": 1,
+        "TOOL_CALL_START": 3,
+        "TOOL_RESULT_END": 3,
+    }
+    session_report = {
+        "runs": [{"id": "run:parent", "status": "finished"}],
+        "event_counts": counts,
+        "event_count": sum(counts.values()),
+        "events": [
+            {
+                "type": "SUBAGENT_RUN_COMPLETED",
+                "subagent_run_id": "subagent:1",
+                "tool_call_count": 10,
+            }
+        ],
+        "diagnostics": [],
+        "model_usage_by_run": [
+            {
+                "run_id": "run:parent",
+                "total_tokens": 200,
+                "cached_input_tokens": 0,
+                "reported_call_count": 2,
+                "missing_usage_call_count": 0,
+            }
+        ],
+        "provider_input_generations": [
+            {
+                "generation_id": "generation:subagent",
+                "rollover": None,
+                "model_calls": [
+                    {"cached_input_tokens": 0},
+                    {"cached_input_tokens": 0},
+                ],
+            }
+        ],
+    }
+    root_reports = (
+        {
+            "run": {"id": "run:parent", "status": "finished"},
+            "timeline": {
+                "items": [
+                    {
+                        "kind": "tool_call",
+                        "metadata": {"tool_name": tool_name},
+                    }
+                    for tool_name in (
+                        "create_agent_tasks",
+                        "wait_agent_tasks",
+                        "write_file",
+                    )
+                ]
+            },
+        },
+    )
+    verifier = HiddenVerifierResultFact(
+        passed=True,
+        exit_code=0,
+        elapsed_seconds=0,
+        stdout="ok",
+        stderr="",
+    )
+
+    grade = grade_durable_evidence(
+        scenario=scenario,
+        session_report=session_report,
+        root_run_reports=root_reports,
+        final_texts=("done",),
+        verifier=verifier,
+    )
+    assert grade.passed, tuple(
+        (item.assertion_id, item.detail)
+        for item in grade.assertions
+        if not item.passed
+    )
+
+    session_report["events"][0]["tool_call_count"] = 9
+    below_minimum = grade_durable_evidence(
+        scenario=scenario,
+        session_report=session_report,
+        root_run_reports=root_reports,
+        final_texts=("done",),
+        verifier=verifier,
+    )
+    assert not next(
+        item
+        for item in below_minimum.assertions
+        if item.assertion_id == "subagent_child_tool_call_minimum"
+    ).passed
+
+
 def test_core_dogfood_cli_validate_and_list_are_offline(capsys) -> None:
     assert main(["validate"]) == 0
     validate_output = capsys.readouterr().out
@@ -528,7 +712,27 @@ def _install_known_good_solution(scenario_id: str, root: Path) -> None:
         (root / "answer.txt").write_text("Asterford-Veylan")
         return
     if scenario_id == "subagent-delegation":
-        (root / "result.txt").write_text("86")
+        (root / "child_trace.json").write_text(
+            json.dumps(
+                {
+                    "chain": [
+                        "data/start.txt",
+                        "data/node-quartz.txt",
+                        "data/node-ember.txt",
+                        "data/node-lantern.txt",
+                        "data/node-slate.txt",
+                        "data/node-harbor.txt",
+                        "data/node-maple.txt",
+                        "data/node-crown.txt",
+                    ],
+                    "values": [13, 21, 34, 55, 89, 8, 3, 144],
+                    "sum": 367,
+                    "weighted_checksum": 2043,
+                    "terminal_marker": "TRAIL_COMPLETE_V2",
+                }
+            )
+        )
+        (root / "result.txt").write_text("367:2043")
         return
     if scenario_id == "workspace-patch":
         (root / "retry_queue.py").write_text(

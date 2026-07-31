@@ -22,6 +22,7 @@ class PostgresSchemaFailureCode(StrEnum):
     RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1 = (
         "schema_reset_required_for_compaction_memory_extraction_v1"
     )
+    RESET_REQUIRED_FOR_MCP_V2 = "schema_reset_required_for_mcp_v2"
     MIGRATION_CONFIRMATION_CONFLICT = "schema_migration_confirmation_conflict"
     MIGRATION_CONFIRMATION_UNRESOLVED = "schema_migration_confirmation_unresolved"
     CATALOG_DRIFT = "schema_catalog_drift"

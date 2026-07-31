@@ -23,7 +23,10 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 from tests.support.runtime_session import in_memory_runtime_session
-from tests.support.mcp import install_prepared_test_mcp_pending_handle
+from tests.support.mcp import (
+    install_prepared_test_mcp_pending_handle,
+    prepare_test_mcp_input_required_suspension,
+)
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -123,7 +126,6 @@ from pulsara_agent.primitives.mcp import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     MidTurnCompactionSkipFact,
     build_runtime_event_deadline_budget,
-    prepare_mcp_input_required_suspension,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
@@ -809,6 +811,9 @@ def _pending_mcp_installation_audit() -> McpPendingInstallationAudit:
         discovery_generation=1,
         event_safe_config_fingerprint="sha256:server",
         snapshot_semantic_fingerprint="sha256:catalog",
+        protocol_version="2026-07-28",
+        protocol_behavior_era="stateless_per_request",
+        negotiation_wire_receipt_fingerprint="sha256:wire-receipt",
         tool_count=1,
         lifecycle_timing=timing,
         catalog_artifact_id=None,
@@ -1085,6 +1090,12 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
     prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
         interaction_id="mcp_input_required:post-commit",
         tool_call_id="call:mcp-post-commit",
         tool_name="mcp__docs__lookup",
@@ -1243,6 +1254,12 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
     prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
         interaction_id="mcp_input_required:user-stop",
         tool_call_id="call:mcp-user-stop",
         tool_name="mcp__docs__lookup",
@@ -1325,6 +1342,12 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
     state = agent.new_state()
     committed = asyncio.Event()
     prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
         interaction_id="mcp_input_required:suspend-cancel",
         tool_call_id="call:mcp-suspend-cancel",
         tool_name="mcp__docs__lookup",
@@ -1384,6 +1407,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
             suspension_candidate,
             reservation_id,
             expected_reservation_fingerprint,
+            transaction_companion=None,
             deadline_monotonic=None,
         ):
             assert self.runtime_session is runtime_session
@@ -1392,6 +1416,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
                 suspension_candidate=suspension_candidate,
                 reservation_id=reservation_id,
                 expected_reservation_fingerprint=(expected_reservation_fingerprint),
+                transaction_companion=transaction_companion,
                 deadline_monotonic=deadline_monotonic,
             )
             committed.set()
@@ -1472,6 +1497,8 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
             prepared = _prepared_test_mcp_suspension(
+                runtime_session_id=runtime_session.runtime_session_id,
+                event_context=runtime_context.event_context,
                 interaction_id="mcp_input_required:precommit-none",
                 tool_call_id=call.id,
                 tool_name=call.name,
@@ -1583,6 +1610,8 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
             prepared = _prepared_test_mcp_suspension(
+                runtime_session_id=runtime_session.runtime_session_id,
+                event_context=runtime_context.event_context,
                 interaction_id="mcp_input_required:physical-tail",
                 tool_call_id=call.id,
                 tool_name=call.name,
@@ -1775,6 +1804,12 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
     prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
         interaction_id=interaction_id,
         tool_call_id=tool_call_id,
         tool_name="mcp__docs__lookup",
@@ -3666,17 +3701,22 @@ _BUILTIN_TOOL_NAMES = frozenset(
 
 def _prepared_test_mcp_suspension(
     *,
+    runtime_session_id: str,
+    event_context: EventContext,
     interaction_id: str,
     tool_call_id: str,
     tool_name: str,
     pending_lease_reservation_id: str,
 ):
-    return prepare_mcp_input_required_suspension(
+    return prepare_test_mcp_input_required_suspension(
         interaction_id=interaction_id,
+        runtime_session_id=runtime_session_id,
+        run_id=event_context.run_id,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         server_id="docs",
-        round_count=1,
         binding_identity=McpBindingIdentityFact(
             server_id="docs",
             slot_id="slot:docs",
@@ -3684,15 +3724,8 @@ def _prepared_test_mcp_suspension(
             discovery_generation=1,
         ),
         pending_lease_reservation_id=pending_lease_reservation_id,
-        protocol_version="2026-07-28",
-        input_requests=(),
-        original_request={
-            "source_method": "tools/call",
-            "tool_name": tool_name,
-            "arguments": {},
-        },
+        protocol_revision="2026-07-28",
         request_state=None,
-        deadline_monotonic=None,
     )
 
 

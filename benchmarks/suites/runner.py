@@ -22,6 +22,7 @@ from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.plan import PlanExitResolution, PlanQuestionResolution
@@ -440,7 +441,11 @@ class CoreDogfoodRunner:
     ) -> None:
         session.enter_plan(reason=workflow.plan_reason)
         result = await self._run_turn(
-            session, workflow.plan_prompt, root_run_texts, f"{label}:plan"
+            session,
+            workflow.plan_prompt,
+            root_run_texts,
+            f"{label}:plan",
+            allow_suspension=True,
         )
         answer_index = 0
         approved = False
@@ -525,9 +530,22 @@ class CoreDogfoodRunner:
         prompt: str,
         root_run_texts: OrderedDict[str, str],
         label: str,
+        *,
+        allow_suspension: bool = False,
     ):
         self.progress(f"{label}: run START")
         result = await session.run_turn(prompt)
+        if isinstance(result, RunSuspendedOutcome):
+            if not allow_suspension:
+                raise RuntimeError(
+                    f"{label} unexpectedly suspended with "
+                    f"{result.pending_interaction.interaction_kind}"
+                )
+            self.progress(
+                f"{label}: run SUSPENDED "
+                f"run_id={result.owner_identity.run_id}"
+            )
+            return result
         _record_result(result, root_run_texts)
         self.progress(
             f"{label}: run {result.status.value.upper()} run_id={result.run_id}"
@@ -699,6 +717,13 @@ def _generate_linked_chapter_trail(
 
 
 def _record_result(result, root_run_texts: OrderedDict[str, str]) -> None:
+    if isinstance(result, RunSuspendedOutcome):
+        return
+    if getattr(result, "outcome_kind", None) is not None:
+        raise RuntimeError(
+            "dogfood workflow cannot consume non-terminal activation outcome "
+            f"{result.outcome_kind!r}"
+        )
     root_run_texts[result.run_id] = result.final_text
 
 

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log.protocol import EventLogTransactionCompanion
+from pulsara_agent.ports.mcp import McpContinuationTransactionAuthority
 from pulsara_agent.event_log.serialization import freeze_event_write_candidate
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import FrozenRuntimeStateBase
@@ -126,13 +127,24 @@ class _LeaseRecord:
 
 
 def transaction_companion_fingerprint(
-    companion: EventLogTransactionCompanion | None,
+    companion: EventLogTransactionCompanion
+    | McpContinuationTransactionAuthority
+    | None,
 ) -> str | None:
     if companion is None:
         return None
     declared = getattr(companion, "transaction_companion_fingerprint", None)
     if isinstance(declared, str) and declared.startswith("sha256:"):
         return declared
+    storage_plan = getattr(companion, "storage_mutation_plan_fingerprint", None)
+    if isinstance(storage_plan, str) and storage_plan.startswith("sha256:"):
+        return context_fingerprint(
+            "mcp-transaction-companion-process-identity:v1",
+            {
+                "storage_mutation_plan_fingerprint": storage_plan,
+                "object_identity": id(companion),
+            },
+        )
     return context_fingerprint(
         "event-log-transaction-companion-process-identity:v1",
         {
@@ -146,7 +158,9 @@ def transaction_companion_fingerprint(
 def _batch_identity(
     events: Sequence[AgentEvent],
     *,
-    transaction_companion: EventLogTransactionCompanion | None,
+    transaction_companion: EventLogTransactionCompanion
+    | McpContinuationTransactionAuthority
+    | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...], str | None, str]:
     candidates = tuple(
         freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
@@ -538,7 +552,9 @@ class PublicationTerminalMaintenanceCoordinator:
         publication_latch_generation: int,
         owner_kind: PublicationTerminalMaintenanceOwnerKind,
         ordered_events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: EventLogTransactionCompanion
+        | McpContinuationTransactionAuthority
+        | None,
         terminal_deadline_monotonic: float,
     ) -> PublicationTerminalMaintenanceLease:
         if owner_kind not in _OWNER_KINDS:
@@ -578,7 +594,9 @@ class PublicationTerminalMaintenanceCoordinator:
         handle: object,
         publication_latch_generation: int,
         events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: EventLogTransactionCompanion
+        | McpContinuationTransactionAuthority
+        | None,
         deadline_monotonic: float,
     ) -> PublicationTerminalMaintenanceAttempt:
         record = self.preflight(
@@ -601,7 +619,9 @@ class PublicationTerminalMaintenanceCoordinator:
         handle: object,
         publication_latch_generation: int,
         events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: EventLogTransactionCompanion
+        | McpContinuationTransactionAuthority
+        | None,
         deadline_monotonic: float,
     ) -> _LeaseRecord:
         """Validate one exact issued batch without advancing lease ownership."""

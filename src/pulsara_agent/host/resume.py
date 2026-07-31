@@ -16,9 +16,11 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.event import (
     ContextWindowClosedEvent,
+    McpInputRequiredResolutionSubmittedEvent,
     RolloutBudgetAccountClosedEvent,
     RunEndEvent,
     RunStartEvent,
+    ToolExecutionSuspendedEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
@@ -36,6 +38,9 @@ from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
 from pulsara_agent.runtime.mcp.recovery import (
     terminalize_reopened_mcp_input_required,
+)
+from pulsara_agent.runtime.mcp.continuation_store import (
+    PostgresMcpContinuationSecretStore,
 )
 from pulsara_agent.ports.run_terminalization import (
     RunFinalOutputMaterializationFull,
@@ -68,6 +73,7 @@ class DanglingRunRepairResult:
     projection_rows_updated: int
     recovered_model_call_ids: tuple[str, ...]
     recovered_model_control_call_ids: tuple[str, ...]
+    deferred_mcp_run_ids: tuple[str, ...] = ()
 
     @property
     def repaired_count(self) -> int:
@@ -80,6 +86,7 @@ async def repair_dangling_runs_for_resume(
     runtime_session_id: str,
     workspace_root: str | None = None,
     deadline_monotonic: float,
+    defer_recoverable_stateless_mcp: bool = False,
 ) -> DanglingRunRepairResult:
     """Append host-teardown ``RUN_END`` events for canonical running runs.
 
@@ -125,6 +132,7 @@ async def repair_dangling_runs_for_resume(
             ),
             recovered_model_call_ids=recovered_model_call_ids,
             recovered_model_control_call_ids=recovered_model_control_call_ids,
+            deferred_mcp_run_ids=(),
         )
 
     runtime_session = RuntimeSession(
@@ -132,15 +140,15 @@ async def repair_dangling_runs_for_resume(
         runtime_session_id=runtime_session_id,
         event_log=log,
         archive=archive,
-        tool_result_artifacts=PostgresToolResultArtifactIndex(
-            connection_provider
-        ),
+        tool_result_artifacts=PostgresToolResultArtifactIndex(connection_provider),
         reopen_deadline_monotonic=deadline_monotonic,
     )
+    continuation_repository = PostgresMcpContinuationSecretStore(connection_provider)
     state_store = runtime_session.long_horizon_state_store
     recovery_registry = RunExecutionRegistry()
     repaired: list[str] = []
     skipped: list[str] = []
+    deferred_mcp: list[str] = []
     try:
         for row in running:
             _require_reopen_deadline(deadline_monotonic)
@@ -166,11 +174,7 @@ async def repair_dangling_runs_for_resume(
                     deadline_monotonic=deadline_monotonic,
                 )
             )
-            starts = [
-                event
-                for event in run_events
-                if isinstance(event, RunStartEvent)
-            ]
+            starts = [event for event in run_events if isinstance(event, RunStartEvent)]
             if len(starts) != 1:
                 skipped.append(run_id)
                 continue
@@ -195,15 +199,21 @@ async def repair_dangling_runs_for_resume(
                     run_id
                 )
             )
+            if defer_recoverable_stateless_mcp and _can_defer_stateless_mcp_recovery(
+                event_log=log,
+                active_records=active_mcp,
+                deadline_monotonic=deadline_monotonic,
+            ):
+                deferred_mcp.append(run_id)
+                continue
             closure_reference = None
             if active_mcp:
-                recovered_closure = (
-                    await terminalize_reopened_mcp_input_required(
-                        runtime_session,
-                        run_id=run_id,
-                        closure_reason="session_reopen_lease_unavailable",
-                        deadline_monotonic=deadline_monotonic,
-                    )
+                recovered_closure = await terminalize_reopened_mcp_input_required(
+                    runtime_session,
+                    run_id=run_id,
+                    closure_reason="session_reopen_lease_unavailable",
+                    deadline_monotonic=deadline_monotonic,
+                    continuation_repository=continuation_repository,
                 )
                 closure_reference = recovered_closure.closure_event_reference
             window_state = state_store.window_state(run_id)
@@ -230,9 +240,7 @@ async def repair_dangling_runs_for_resume(
             projection_state = state_store.projection_state(window.window_id)
             if projection_state is None:
                 raise RuntimeError("dangling run is missing projection state")
-            next_sequence = log.next_sequence(
-                deadline_monotonic=deadline_monotonic
-            )
+            next_sequence = log.next_sequence(deadline_monotonic=deadline_monotonic)
             metadata = {
                 "recovered_by": "resume",
                 "resume_stop_reason": RESUME_RECOVERED_STOP_REASON,
@@ -324,13 +332,8 @@ async def repair_dangling_runs_for_resume(
                 run_id,
                 receipt=output.receipt,
             )
-            if (
-                result.publication_status == "unavailable"
-                or result.publication_errors
-            ):
-                raise RuntimeError(
-                    "dangling run recovery publication is unavailable"
-                )
+            if result.publication_status == "unavailable" or result.publication_errors:
+                raise RuntimeError("dangling run recovery publication is unavailable")
             repaired.append(run_id)
     finally:
         runtime_session.close()
@@ -344,6 +347,60 @@ async def repair_dangling_runs_for_resume(
         ),
         recovered_model_call_ids=recovered_model_call_ids,
         recovered_model_control_call_ids=recovered_model_control_call_ids,
+        deferred_mcp_run_ids=tuple(deferred_mcp),
+    )
+
+
+def _can_defer_stateless_mcp_recovery(
+    *,
+    event_log: PostgresEventLog,
+    active_records: tuple[object, ...],
+    deadline_monotonic: float,
+) -> bool:
+    """Select only durable states that may be rebound without replaying a send.
+
+    This is deliberately a source-only preflight. Secret-row, key, endpoint,
+    auth, and current SDK-generation joins happen after the new MCP supervisor
+    has completed real discovery. A failed later join is terminalized; it never
+    falls back to the historical process-local lease.
+    """
+
+    if len(active_records) != 1:
+        return False
+    record = active_records[0]
+    status = getattr(record, "status", None)
+    if status not in {"suspended", "resolution_submitted"}:
+        return False
+    source_reference = getattr(record, "source_suspension_event_reference", None)
+    if source_reference is None:
+        return False
+    source = event_log.get_by_id(
+        source_reference.event_id,
+        deadline_monotonic=deadline_monotonic,
+    )
+    if (
+        not isinstance(source, ToolExecutionSuspendedEvent)
+        or source.sequence != source_reference.sequence
+        or source.suspension.request_envelope.protocol_revision != "2026-07-28"
+    ):
+        return False
+    if status == "suspended":
+        return (
+            getattr(record, "latest_resolution_submitted_event_reference", None) is None
+        )
+    resolution_reference = getattr(
+        record, "latest_resolution_submitted_event_reference", None
+    )
+    if resolution_reference is None:
+        return False
+    resolution = event_log.get_by_id(
+        resolution_reference.event_id,
+        deadline_monotonic=deadline_monotonic,
+    )
+    return bool(
+        isinstance(resolution, McpInputRequiredResolutionSubmittedEvent)
+        and resolution.sequence == resolution_reference.sequence
+        and resolution.source.source_suspension_event_reference == source_reference
     )
 
 

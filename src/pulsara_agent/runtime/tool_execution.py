@@ -14,13 +14,19 @@ from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
     EventContext,
+    McpContinuationDispatchReservedEvent,
     McpInputRequiredBindingChangedEvent,
     McpInputRequiredExpiredEvent,
     McpInputRequiredInteractionClosedEvent,
+    PhysicalOperationReservationCreatedEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     ToolExecutionSuspendedEvent,
     ToolResultEndEvent,
+)
+from pulsara_agent.ports.mcp import (
+    McpContinuationTransactionIntent,
+    McpDispatchReservationCommitGuard,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.event_log.serialization import (
@@ -42,10 +48,16 @@ from pulsara_agent.runtime.long_horizon.accounting import (
 )
 from pulsara_agent.primitives.long_horizon import RolloutReservationFact
 from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
+from pulsara_agent.primitives.mcp_continuation import (
+    default_mcp_continuation_bounds,
+    mcp_continuation_charge_contract_fingerprint,
+    mcp_continuation_lifetime_reservation_bytes,
+)
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.authority_materialization import (
     PhysicalDispatchReservationRequest,
     PhysicalOneShotReservationRequest,
+    physical_reservation_event_id,
 )
 from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
@@ -83,6 +95,7 @@ class ToolExecutionTerminalOwner:
     candidate_batch_fingerprint: str | None = None
     physical_owner_kind: Literal["mcp_pending"] | None = None
     physical_owner_identity_fingerprint: str | None = None
+    transaction_companion: McpContinuationTransactionIntent | None = None
     last_commit_receipt_fingerprint: str | None = None
 
 
@@ -170,6 +183,7 @@ class ToolExecutionTerminalRegistry:
         reservation: RolloutReservationFact,
         candidates: Sequence[AgentEvent],
         physical_owner_identity_fingerprint: str | None = None,
+        transaction_companion: McpContinuationTransactionIntent | None = None,
     ) -> ToolExecutionStableCandidateOwnerIdentity:
         with self._lock:
             current = self._require_owner_locked(run_id, reservation.owner_id)
@@ -190,6 +204,7 @@ class ToolExecutionTerminalRegistry:
                 else ToolExecutionNonePolicy.ABANDON_ON_NONE
             ),
             physical_owner_identity_fingerprint=physical_owner_identity_fingerprint,
+            transaction_companion=transaction_companion,
         )
 
     def mark_suspended(
@@ -211,6 +226,7 @@ class ToolExecutionTerminalRegistry:
             owner.state = ToolExecutionTerminalOwnerState.SUSPENDED
             owner.stable_candidates = ()
             owner.sealed_candidates = ()
+            owner.transaction_companion = None
 
     def confirm_stable_candidate_write(
         self,
@@ -403,6 +419,7 @@ class ToolExecutionTerminalRegistry:
                 owner.state = ToolExecutionTerminalOwnerState.SUSPENDED
                 owner.stable_candidates = ()
                 owner.sealed_candidates = ()
+                owner.transaction_companion = None
                 return
             if (
                 owner.none_policy is ToolExecutionNonePolicy.ABANDON_ON_NONE
@@ -416,6 +433,7 @@ class ToolExecutionTerminalRegistry:
                 owner.candidate_batch_fingerprint = None
                 owner.physical_owner_kind = None
                 owner.physical_owner_identity_fingerprint = None
+                owner.transaction_companion = None
                 owner.last_commit_receipt_fingerprint = None
                 return
             raise ToolExecutionCommitContractError(
@@ -445,7 +463,33 @@ class ToolExecutionTerminalRegistry:
             candidate_kind=ToolExecutionStableCandidateKind.TERMINAL,
             none_policy=ToolExecutionNonePolicy.RETRY_SAME_CANDIDATE,
             physical_owner_identity_fingerprint=physical_owner_identity_fingerprint,
+            transaction_companion=None,
         )
+
+    def bind_transaction_companion(
+        self,
+        *,
+        owner_identity: ToolExecutionStableCandidateOwnerIdentity,
+        transaction_companion: McpContinuationTransactionIntent,
+    ) -> None:
+        """Bind the exact storage mutation to an already-frozen candidate batch."""
+
+        with self._lock:
+            owner = self._owners.get(owner_identity.owner_id)
+            if owner is None or self._identity_locked(owner) != owner_identity:
+                raise ToolExecutionCommitContractError(
+                    "transaction companion does not own this frozen tool batch"
+                )
+            existing = owner.transaction_companion
+            if existing is not None and (
+                existing.storage_mutation_plan_fingerprint
+                != transaction_companion.storage_mutation_plan_fingerprint
+                or existing.companion_kind is not transaction_companion.companion_kind
+            ):
+                raise ToolExecutionCommitContractError(
+                    "frozen tool batch already owns another transaction companion"
+                )
+            owner.transaction_companion = transaction_companion
 
     def _validate_mcp_terminal_batch(
         self,
@@ -718,6 +762,7 @@ class ToolExecutionTerminalRegistry:
                 reservation_id=owner.reservation_id,
                 expected_reservation_fingerprint=owner.reservation_fingerprint,
                 deadline_monotonic=deadline_monotonic,
+                transaction_companion=owner.transaction_companion,
             )
 
         terminals = tuple(
@@ -745,7 +790,8 @@ class ToolExecutionTerminalRegistry:
                     candidates,
                     reservation=physical_reservation,
                     terminal_outcome=terminal_outcome,
-                                    ),
+                    transaction_companion=owner.transaction_companion,
+                ),
                 deadline_monotonic=deadline_monotonic,
                 operation_kind=PhysicalOperationKind.TOOL_CALL,
                 operation_owner_id=owner.tool_call_id,
@@ -778,6 +824,7 @@ class ToolExecutionTerminalRegistry:
         candidate_kind: ToolExecutionStableCandidateKind,
         none_policy: ToolExecutionNonePolicy,
         physical_owner_identity_fingerprint: str | None,
+        transaction_companion: McpContinuationTransactionIntent | None,
     ) -> ToolExecutionStableCandidateOwnerIdentity:
         sealed = tuple(freeze_event_write_candidate(item) for item in candidates)
         frozen = tuple(decode_event_write_candidate(item) for item in sealed)
@@ -811,6 +858,7 @@ class ToolExecutionTerminalRegistry:
             owner.physical_owner_identity_fingerprint = (
                 physical_owner_identity_fingerprint
             )
+            owner.transaction_companion = transaction_companion
             owner.last_commit_receipt_fingerprint = None
             return self._identity_locked(owner)
 
@@ -1211,6 +1259,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         expected_reservation_fingerprint: str,
         deadline_monotonic: float | None = None,
         publication_terminal_maintenance_lease: object | None = None,
+        transaction_companion: McpContinuationTransactionIntent | None = None,
     ) -> EventWriteResult:
         ends = tuple(
             event
@@ -1253,7 +1302,122 @@ class RuntimeSessionToolExecutionEventCommitPort:
             publication_terminal_maintenance_lease=(
                 publication_terminal_maintenance_lease
             ),
+            transaction_companion=transaction_companion,
         )
+
+    def build_mcp_dispatch_commit_guard(
+        self,
+        *,
+        interaction_id: str,
+        tool_call_id: str,
+        guard_generation: int,
+    ) -> McpDispatchReservationCommitGuard:
+        """Bind dispatch admission to the exact active physical reservation fact."""
+
+        if guard_generation < 1:
+            raise ValueError("MCP dispatch guard generation must be positive")
+        reservation = self.runtime_session.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=tool_call_id,
+        )
+        if reservation is None:
+            raise ToolExecutionCommitContractError(
+                "MCP dispatch lacks its active physical tool reservation"
+            )
+        reservation_event = self.runtime_session.event_log.get_by_id(
+            physical_reservation_event_id(reservation.reservation_id)
+        )
+        if (
+            not isinstance(reservation_event, PhysicalOperationReservationCreatedEvent)
+            or reservation_event.sequence is None
+            or reservation_event.reservation != reservation
+        ):
+            raise ToolExecutionCommitContractError(
+                "MCP dispatch physical reservation authority is not exact"
+            )
+        reference = event_reference_from_stored(
+            reservation_event,
+            runtime_session_id=self.runtime_session.runtime_session_id,
+        )
+        payload = {
+            "runtime_session_id": self.runtime_session.runtime_session_id,
+            "interaction_id": interaction_id,
+            "tool_call_id": tool_call_id,
+            "physical_operation_id": reservation.reservation_id,
+            "physical_reservation_event_reference": reference.model_dump(mode="json"),
+            "physical_reservation_fingerprint": reservation.reservation_fingerprint,
+            "guard_generation": guard_generation,
+        }
+        return McpDispatchReservationCommitGuard(
+            runtime_session_id=payload["runtime_session_id"],
+            interaction_id=interaction_id,
+            tool_call_id=tool_call_id,
+            physical_operation_id=reservation.reservation_id,
+            physical_reservation_event_reference=reference,
+            physical_reservation_fingerprint=reservation.reservation_fingerprint,
+            guard_generation=guard_generation,
+            guard_fingerprint=context_fingerprint(
+                "mcp-dispatch-reservation-commit-guard:v1", payload
+            ),
+        )
+
+    async def commit_mcp_continuation_dispatch_reservation(
+        self,
+        *,
+        dispatch_candidate: McpContinuationDispatchReservedEvent,
+        commit_guard: McpDispatchReservationCommitGuard,
+        transaction_companion: McpContinuationTransactionIntent,
+        deadline_monotonic: float,
+    ) -> EventWriteResult:
+        """Atomically reserve replay dispatch and advance its sealed carrier."""
+
+        fact = dispatch_candidate.dispatch_reservation
+        if (
+            dispatch_candidate.id == ""
+            or fact.runtime_session_id != commit_guard.runtime_session_id
+            or fact.interaction_id != commit_guard.interaction_id
+            or fact.physical_operation_id != commit_guard.physical_operation_id
+            or fact.source_physical_operation_reservation_event_reference
+            != commit_guard.physical_reservation_event_reference
+            or commit_guard.runtime_session_id
+            != self.runtime_session.runtime_session_id
+        ):
+            raise ToolExecutionCommitContractError(
+                "MCP dispatch candidate/commit guard authority mismatch"
+            )
+        reservation = self.runtime_session.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=commit_guard.tool_call_id,
+        )
+        if (
+            reservation is None
+            or reservation.reservation_id != commit_guard.physical_operation_id
+            or reservation.reservation_fingerprint
+            != commit_guard.physical_reservation_fingerprint
+        ):
+            raise ToolExecutionCommitContractError(
+                "MCP dispatch active physical reservation changed before commit"
+            )
+        self.runtime_session.publisher.bind_running_loop()
+
+        def commit_dispatch() -> EventWriteResult:
+            return self.runtime_session._charge_physical_operation_attempt_from_thread(
+                (dispatch_candidate,),
+                reservation=reservation,
+                await_delivery=True,
+                transaction_companion=transaction_companion,
+            ).result
+
+        result = await _execute_runtime_event_write(
+            self.runtime_session,
+            commit_dispatch,
+            deadline_monotonic=deadline_monotonic,
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            operation_owner_id=commit_guard.tool_call_id,
+        )
+        if result.publication_errors or result.publication_status == "unavailable":
+            self.runtime_session.latch_publication_reconciliation_required()
+        return result
 
     async def commit_gate_and_denial(
         self,
@@ -1331,6 +1495,13 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 "tool gate batch spans multiple run identities"
             )
         run_id = next(iter(run_ids))
+        continuation_bounds = default_mcp_continuation_bounds()
+        companion_reserved_bytes = mcp_continuation_lifetime_reservation_bytes(
+            continuation_bounds
+        )
+        companion_charge_contract_fingerprint = (
+            mcp_continuation_charge_contract_fingerprint(continuation_bounds)
+        )
         dispatch_requests = tuple(
             PhysicalDispatchReservationRequest(
                 reservation_id=_tool_physical_reservation_id(
@@ -1340,6 +1511,10 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 owner_id=tool_call_id,
                 burst_contract=tool_contract,
                 business_event_ids=tuple(event.id for event in by_call[tool_call_id]),
+                companion_payload_reserved_bytes=companion_reserved_bytes,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
+                ),
             )
             for tool_call_id, decision in decisions.items()
             if decision == "allow"
@@ -1373,7 +1548,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     prepared,
                     dispatch_requests=dispatch_requests,
                     one_shot_request=one_shot_request,
-                                    )
+                )
             )
             return result
 
@@ -1390,6 +1565,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         reservation_id: str,
         expected_reservation_fingerprint: str,
         deadline_monotonic: float | None = None,
+        transaction_companion: McpContinuationTransactionIntent | None = None,
     ) -> EventWriteResult:
         reservation = self._active_reservation(
             reservation_id,
@@ -1444,7 +1620,8 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 reservation=physical_reservation,
                 suspension_id=suspension_id,
                 binding_identity_fingerprint=binding_fingerprint,
-                            )
+                transaction_companion=transaction_companion,
+            )
 
         return await _execute_runtime_event_write(
             self.runtime_session,
@@ -1461,6 +1638,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         terminal: ToolResultEndEvent | ToolResultEndCandidate,
         deadline_monotonic: float | None = None,
         publication_terminal_maintenance_lease: object | None = None,
+        transaction_companion: McpContinuationTransactionIntent | None = None,
     ) -> EventWriteResult:
         deadline = (
             deadline_monotonic
@@ -1469,7 +1647,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         )
         self.runtime_session._preflight_publication_terminal_maintenance(
             events=events,
-            transaction_companion=None,
+            transaction_companion=transaction_companion,
             deadline_monotonic=deadline,
             lease=publication_terminal_maintenance_lease,
         )
@@ -1482,7 +1660,7 @@ class RuntimeSessionToolExecutionEventCommitPort:
         maintenance_attempt = (
             self.runtime_session._admit_publication_terminal_maintenance(
                 events=prepared,
-                transaction_companion=None,
+                transaction_companion=transaction_companion,
                 deadline_monotonic=deadline,
                 lease=publication_terminal_maintenance_lease,
             )
@@ -1513,7 +1691,8 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 prepared,
                 reservation=physical_reservation,
                 terminal_outcome=terminal_outcome,
-                            )
+                transaction_companion=transaction_companion,
+            )
 
         try:
             result = await _execute_runtime_event_write(

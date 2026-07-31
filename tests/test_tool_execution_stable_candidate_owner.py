@@ -7,6 +7,7 @@ import pytest
 
 from tests.conftest import tool_result_end_contract_fields
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.mcp import prepare_test_mcp_input_required_suspension
 
 from pulsara_agent.event import (
     EventContext,
@@ -30,7 +31,6 @@ from pulsara_agent.primitives.long_horizon import (
 from pulsara_agent.primitives.mcp import McpBindingIdentityFact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredSuspensionFact,
-    prepare_mcp_input_required_suspension,
 )
 from pulsara_agent.runtime.session import EventBatchCommitOutcome, EventWriteResult
 from pulsara_agent.runtime.tool_execution import ToolExecutionCommitContractError
@@ -98,39 +98,31 @@ def _suspension(
         snapshot_id="snapshot:docs",
         discovery_generation=1,
     )
-    prepared = prepare_mcp_input_required_suspension(
+    prepared = prepare_test_mcp_input_required_suspension(
         interaction_id=interaction_id,
+        runtime_session_id="runtime:stable-candidate",
+        run_id=CTX.run_id,
+        turn_id=CTX.turn_id,
+        reply_id=CTX.reply_id,
         tool_call_id=tool_call_id,
         tool_name="mcp__docs__lookup",
         server_id="docs",
-        round_count=1,
         binding_identity=binding,
         pending_lease_reservation_id=f"lease:{interaction_id}",
-        protocol_version="2026-07-26",
-        input_requests=(),
-        original_request={
-            "source_method": "tools/call",
-            "tool_name": "lookup",
-            "arguments": {},
-        },
+        protocol_revision="2026-07-28",
         request_state=None,
-        deadline_monotonic=None,
     )
     suspension = build_frozen_fact(
         McpInputRequiredSuspensionFact,
-        schema_version="mcp_input_required_suspension.v1",
+        schema_version="mcp_input_required_suspension.v2",
         interaction=prepared.interaction,
         binding_identity=prepared.binding_identity,
         pending_lease_reservation=prepared.pending_lease_reservation,
         request_envelope=prepared.request_envelope,
+        durable_continuation=prepared.continuation.durable_fact,
         rollout_reservation_id=rollout_reservation.reservation_id,
         rollout_reservation_fingerprint=(rollout_reservation.semantic_fingerprint),
         source_mcp_installation_id="mcp_installation:test",
-        durable_deadline_utc=None,
-        deadline_policy_fingerprint=context_fingerprint(
-            "mcp-input-required-deadline-policy:v1",
-            "test",
-        ),
         predecessor_resolution_submitted_event_reference=None,
     )
     return ToolExecutionSuspendedEvent(

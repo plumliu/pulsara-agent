@@ -166,6 +166,11 @@ class RootRunToolGate(FrozenContract):
         return self
 
 
+class SubagentChildToolGate(FrozenContract):
+    expected_completed_children: int = Field(ge=1, le=8)
+    minimum_tool_calls_per_child: int = Field(ge=1, le=128)
+
+
 class CompactionMemoryExtractionEvidenceGate(FrozenContract):
     minimum_candidate_count: int = Field(ge=1, le=3)
     allowed_terminal_statuses: tuple[
@@ -198,6 +203,7 @@ class EvidenceGateContract(FrozenContract):
     event_count_minimums: tuple[EventCountMinimum, ...] = ()
     forbidden_event_types: tuple[str, ...] = ()
     root_run_tool_gate: RootRunToolGate | None = None
+    subagent_child_tools: SubagentChildToolGate | None = None
     compaction_memory_extraction: CompactionMemoryExtractionEvidenceGate | None = None
     require_positive_cached_input_tokens: bool = False
     max_provider_input_rollovers: int = Field(ge=0, le=32)

@@ -98,6 +98,7 @@ from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 from pulsara_agent.replay.message_reducer import MessageReducer
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
 from pulsara_agent.runtime.context_input.replay import (
@@ -2571,6 +2572,10 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "extractor_version",
         "context_id",
         "model_call_index",
+        "subagent_run_id",
+        "child_runtime_session_id",
+        "result_id",
+        "tool_call_count",
         "tools_estimated_tokens",
         "name",
     ):
@@ -5310,6 +5315,7 @@ def _max_sequence(events: Iterable[AgentEvent]) -> int | None:
 
 
 def _json_safe(value: Any) -> Any:
+    assert_not_mcp_secret(value, sink="Inspector")
     return json.loads(json.dumps(value, default=str, ensure_ascii=False))
 
 

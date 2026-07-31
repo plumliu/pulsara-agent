@@ -16,6 +16,7 @@ from pulsara_agent.memory.foundation.records import (
     ArtifactWriteResult,
 )
 from pulsara_agent.ports.artifact import ArtifactContentConflict
+from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 from pulsara_agent.primitives.model_call import canonical_json_bytes
 
 
@@ -49,6 +50,7 @@ class InMemoryArchiveStore:
         media_type: str = "text/plain",
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
+        assert_not_mcp_secret(metadata, sink="ArtifactStore")
         encoded = content.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         stored_at = f"archive://{blob_id}"
@@ -97,6 +99,7 @@ class InMemoryArchiveStore:
         media_type: str,
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
+        assert_not_mcp_secret(metadata, sink="ArtifactStore")
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         stored_at = f"archive://{blob_id}"
         blob = ArchiveBlob(
@@ -322,6 +325,7 @@ def _validate_identity(
 
 
 def canonical_artifact_semantic_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    assert_not_mcp_secret(value, sink="ArtifactStore")
     try:
         return json.loads(canonical_json_bytes(value))
     except (TypeError, ValueError) as exc:

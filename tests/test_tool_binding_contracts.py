@@ -60,7 +60,7 @@ def test_binding_factory_returns_the_closed_origin_union() -> None:
     assert mcp.original_tool_name == "lookup"
 
 
-def test_mcp_structural_identity_is_distinct_from_compatibility_fingerprint() -> None:
+def test_mcp_semantic_binding_includes_original_tool_and_occurrence_identity() -> None:
     common = dict(
         tool_name="mcp__docs__lookup",
         origin=ToolBindingOrigin.MCP,
@@ -73,7 +73,7 @@ def test_mcp_structural_identity_is_distinct_from_compatibility_fingerprint() ->
     renamed = build_tool_binding_contract(**common, original_tool_name="search")
     assert isinstance(lookup, McpToolBindingContract)
     assert isinstance(renamed, McpToolBindingContract)
-    assert lookup.binding_fingerprint == renamed.binding_fingerprint
+    assert lookup.binding_fingerprint != renamed.binding_fingerprint
     assert lookup.contract_fact_fingerprint != renamed.contract_fact_fingerprint
 
     advanced = build_tool_binding_contract(

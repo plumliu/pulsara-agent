@@ -43,6 +43,7 @@ from pulsara_agent.runtime.authority_materialization.account import (
     canonical_empty_generation,
     deterministic_ledger_charge,
     deterministic_bookkeeping_charge,
+    physical_reservation_event_id as physical_reservation_event_id,
 )
 from pulsara_agent.runtime.authority_materialization.transcript_tree import (
     PreparedContentAddressedArtifact,

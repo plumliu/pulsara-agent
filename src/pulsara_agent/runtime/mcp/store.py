@@ -117,6 +117,25 @@ def _write_raw(path: Path, raw: dict[str, dict[str, Any]]) -> None:
 
 
 def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig:
+    unowned_oauth_fields = tuple(
+        sorted(
+            {
+                "oauth",
+                "oauth_profile",
+                "issuer",
+                "client_id",
+                "client_id_metadata_document_uri",
+                "requested_scopes",
+                "credential_store_binding",
+            }.intersection(entry)
+        )
+    )
+    if unowned_oauth_fields:
+        raise ValueError(
+            "MCP OAuth is disabled until issuer, credential, scope, browser, and "
+            "Host interaction owners are installed; unsupported fields: "
+            + ", ".join(unowned_oauth_fields)
+        )
     legacy_timeout_field = "startup_" + "timeout_ms"
     if legacy_timeout_field in entry:
         raise ValueError(

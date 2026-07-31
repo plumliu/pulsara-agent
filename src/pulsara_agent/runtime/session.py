@@ -30,6 +30,7 @@ from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     EventContext,
     ExternalExecutionResultEvent,
+    McpContinuationDispatchReservedEvent,
     McpCapabilitySnapshotInstalledEvent,
     McpInputRequiredBindingChangedEvent,
     McpInputRequiredExpiredEvent,
@@ -147,6 +148,12 @@ from pulsara_agent.ports.event_write import (
     EventWriteCancelled,
     EventWriteResult,
     event_batch_commit_outcome_from_error as _base_event_batch_commit_outcome,
+)
+from pulsara_agent.ports.mcp import McpContinuationTransactionAuthority
+
+
+RuntimeTransactionCompanion = (
+    EventLogTransactionCompanion | McpContinuationTransactionAuthority
 )
 
 
@@ -752,6 +759,7 @@ class RuntimeSession:
                 EventType.RUN_END.value,
                 EventType.TOOL_EXECUTION_SUSPENDED.value,
                 EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED.value,
+                EventType.MCP_CONTINUATION_DISPATCH_RESERVED.value,
                 EventType.MCP_INPUT_REQUIRED_RESUME_FAILED.value,
                 EventType.MCP_INPUT_REQUIRED_EXPIRED.value,
                 EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED.value,
@@ -2060,7 +2068,7 @@ class RuntimeSession:
         *,
         owner_kind: PublicationTerminalMaintenanceOwnerKind,
         ordered_events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: RuntimeTransactionCompanion | None,
         deadline_budget: RuntimeEventOperationDeadlineBudget,
     ) -> PublicationTerminalMaintenanceLease:
         with self._publication_maintenance_lock:
@@ -2082,7 +2090,7 @@ class RuntimeSession:
         self,
         *,
         events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: RuntimeTransactionCompanion | None,
         deadline_monotonic: float,
         lease: object | None,
     ) -> PublicationTerminalMaintenanceAttempt | None:
@@ -2111,7 +2119,7 @@ class RuntimeSession:
         self,
         *,
         events: Sequence[AgentEvent],
-        transaction_companion: EventLogTransactionCompanion | None,
+        transaction_companion: RuntimeTransactionCompanion | None,
         deadline_monotonic: float,
         lease: object | None,
     ) -> None:
@@ -2528,7 +2536,7 @@ class RuntimeSession:
         events: Sequence[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> EventWriteResult:
         deadline = self.event_write_service.new_deadline_monotonic()
         return await self.write_events_with_deadline(
@@ -2544,7 +2552,7 @@ class RuntimeSession:
         *,
         deadline_monotonic: float,
         expected_last_sequence: int | None = None,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
         publication_terminal_maintenance_lease: object | None = None,
     ) -> EventWriteResult:
         if deadline_monotonic <= monotonic():
@@ -2588,8 +2596,14 @@ class RuntimeSession:
             and self.event_log.next_sequence() == 1
         )
         tool_reservation = self._active_tool_reservation_for_batch(prepared)
+        mcp_continuation_companion = (
+            transaction_companion
+            if isinstance(transaction_companion, McpContinuationTransactionAuthority)
+            else None
+        )
         if transaction_companion is not None and (
-            is_genesis or tool_reservation is not None
+            is_genesis
+            or (tool_reservation is not None and mcp_continuation_companion is None)
         ):
             raise ValueError(
                 "transaction companion requires an accounted one-shot event batch"
@@ -2626,6 +2640,7 @@ class RuntimeSession:
                         prepared,
                         reservation=tool_reservation,
                         await_delivery=True,
+                        transaction_companion=mcp_continuation_companion,
                     ),
                     deadline_monotonic=deadline,
                     **self._physical_operation_continuation_admission(tool_reservation),
@@ -2728,6 +2743,7 @@ class RuntimeSession:
         critical_types = (
             ToolExecutionSuspendedEvent,
             McpInputRequiredResolutionSubmittedEvent,
+            McpContinuationDispatchReservedEvent,
             McpInputRequiredExpiredEvent,
             McpInputRequiredBindingChangedEvent,
             McpInputRequiredResumeFailedEvent,
@@ -2761,7 +2777,7 @@ class RuntimeSession:
         *,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> EventWriteResult:
         self._require_tool_terminal_projection_ready(events)
         prepared = self._prepare_event_batch(events)
@@ -2823,9 +2839,36 @@ class RuntimeSession:
             ToolResultTextDeltaEvent,
             ToolResultDataDeltaEvent,
         )
-        if not events or not all(isinstance(event, tool_events) for event in events):
+        if not events:
             return None
-        tool_call_ids = {event.tool_call_id for event in events}
+        if all(isinstance(event, tool_events) for event in events):
+            tool_call_ids = {event.tool_call_id for event in events}
+        else:
+            resolutions = tuple(
+                event
+                for event in events
+                if isinstance(event, McpInputRequiredResolutionSubmittedEvent)
+            )
+            dispatches = tuple(
+                event
+                for event in events
+                if isinstance(event, McpContinuationDispatchReservedEvent)
+            )
+            if len(resolutions) == 1 and not dispatches:
+                tool_call_ids = {resolutions[0].source.interaction.tool_call_id}
+            elif len(dispatches) == 1 and len(events) == 1:
+                physical = dispatches[0].dispatch_reservation.physical_operation_id
+                matches = tuple(
+                    reservation
+                    for (kind, _), reservation in self._physical_reservation_facts.items()
+                    if kind is PhysicalOperationKind.TOOL_CALL
+                    and reservation.reservation_id == physical
+                )
+                if len(matches) != 1:
+                    return None
+                return matches[0]
+            else:
+                return None
         if len(tool_call_ids) != 1:
             raise ValueError(
                 "one tool-operation charge batch must have one tool call identity"
@@ -3067,6 +3110,7 @@ class RuntimeSession:
         *,
         reservation: PhysicalOperationReservationFact,
         await_delivery: bool,
+        transaction_companion: McpContinuationTransactionAuthority | None = None,
     ) -> _WriteAttempt:
         """Charge a batch while preserving its ordered publication waiters."""
 
@@ -3079,6 +3123,19 @@ class RuntimeSession:
             self._validate_run_lifecycle_batch(prepared)
             self.long_horizon_state_store.validate_next_batch(prepared)
             first = prepared[0]
+            burst_contract = self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                reservation.owner_kind
+            ).contract
+            retained_tail_events = (
+                burst_contract.minimum_terminal_tail_events
+                if isinstance(burst_contract, ToolDeltaBurstContractFact)
+                else reservation.terminal_tail_reserved_events
+            )
+            retained_tail_payload_bytes = (
+                burst_contract.minimum_terminal_tail_payload_bytes
+                if isinstance(burst_contract, ToolDeltaBurstContractFact)
+                else reservation.terminal_tail_reserved_payload_bytes
+            )
             try:
                 committed = self.materialization_coordinator.commit_reserved_charge(
                     context=EventContext(
@@ -3088,7 +3145,22 @@ class RuntimeSession:
                     ),
                     reservation=reservation,
                     business_events=prepared,
+                    companion_payload_charge_bytes=(
+                        transaction_companion.charged_payload_bytes
+                        if transaction_companion is not None
+                        else 0
+                    ),
+                    companion_charge_contract_fingerprint=(
+                        transaction_companion.charge_contract_fingerprint
+                        if transaction_companion is not None
+                        else None
+                    ),
+                    retained_terminal_tail_events=retained_tail_events,
+                    retained_terminal_tail_payload_bytes=(
+                        retained_tail_payload_bytes
+                    ),
                     deadline_monotonic=deadline,
+                    transaction_companion=transaction_companion,
                 )
             except BaseException as exc:
                 self._raise_materialization_commit_error(
@@ -3196,7 +3268,7 @@ class RuntimeSession:
         reservation: PhysicalOperationReservationFact,
         terminal_outcome: str,
         model_stream_measurement_fingerprint: str | None = None,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> EventWriteResult:
         """Commit a stable terminal batch and remove its exact reserve."""
 
@@ -3262,6 +3334,7 @@ class RuntimeSession:
         reservation: PhysicalOperationReservationFact,
         suspension_id: str,
         binding_identity_fingerprint: str,
+        transaction_companion: McpContinuationTransactionAuthority | None = None,
     ) -> EventWriteResult:
         """Commit a suspension batch and retain only its exact physical tail."""
 
@@ -3291,7 +3364,18 @@ class RuntimeSession:
                     business_events=prepared,
                     suspension_id=suspension_id,
                     binding_identity_fingerprint=binding_identity_fingerprint,
+                    companion_payload_charge_bytes=(
+                        transaction_companion.charged_payload_bytes
+                        if transaction_companion is not None
+                        else 0
+                    ),
+                    companion_charge_contract_fingerprint=(
+                        transaction_companion.charge_contract_fingerprint
+                        if transaction_companion is not None
+                        else None
+                    ),
                     deadline_monotonic=deadline,
+                    transaction_companion=transaction_companion,
                 )
             except BaseException as exc:
                 self._raise_materialization_commit_error(
@@ -4458,7 +4542,7 @@ class RuntimeSession:
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool = True,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
         publication_terminal_maintenance: bool = False,
     ) -> _WriteAttempt:
         if not events:
@@ -4698,7 +4782,7 @@ class RuntimeSession:
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool,
-        transaction_companion: EventLogTransactionCompanion | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> _WriteAttempt:
         """Commit an already-frozen finite ledger batch with typed accounting."""
 
@@ -5155,10 +5239,12 @@ class RuntimeSession:
         events: Iterable[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
+        transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> list[AgentEvent]:
         result = await self.write_events(
             tuple(events),
             expected_last_sequence=expected_last_sequence,
+            transaction_companion=transaction_companion,
         )
         if result.publication_errors or (
             result.publication_status == "unavailable"

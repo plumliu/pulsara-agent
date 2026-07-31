@@ -131,6 +131,9 @@ from pulsara_agent.runtime.permission import (
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
 from pulsara_agent.runtime.mcp.tool_execution_port import RuntimeMcpToolExecutionPort
+from pulsara_agent.runtime.mcp.continuation_store import (
+    PostgresMcpContinuationSecretStore,
+)
 from pulsara_agent.runtime.mcp.types import McpInstalledCapabilitySnapshot
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
@@ -183,6 +186,7 @@ class RuntimeWiring:
     mcp_installation: McpInstalledCapabilitySnapshot = field(
         default_factory=empty_mcp_installation
     )
+    mcp_continuation_repository: PostgresMcpContinuationSecretStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +312,9 @@ def build_durable_runtime_wiring(
     )
     archive = PostgresArtifactStore(connection_provider)
     tool_result_artifacts = PostgresToolResultArtifactIndex(connection_provider)
+    mcp_continuation_repository = PostgresMcpContinuationSecretStore(
+        connection_provider
+    )
     runtime_session = RuntimeSession(
         workspace_root,
         runtime_session_id=event_log.runtime_session_id,
@@ -502,6 +509,7 @@ def build_durable_runtime_wiring(
         governance_coordinator=governance_coordinator,
         governance_relatedness=governance_relatedness,
         mcp_installation=mcp_installation or empty_mcp_installation(),
+        mcp_continuation_repository=mcp_continuation_repository,
     )
 
 
@@ -583,7 +591,16 @@ def compose_agent_runtime_wiring(
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
     runtime_wiring.runtime_session.mcp_tool_execution_port = (
-        RuntimeMcpToolExecutionPort(mcp_supervisor)
+        RuntimeMcpToolExecutionPort(
+            mcp_supervisor,
+            continuation_codec=mcp_supervisor.continuation_codec,
+            continuation_repository=(
+                runtime_wiring.mcp_continuation_repository
+                if mcp_supervisor.continuation_codec is not None
+                else None
+            ),
+            external_browser_port=mcp_supervisor.external_browser_port,
+        )
         if mcp_supervisor is not None
         else None
     )

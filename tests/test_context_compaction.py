@@ -79,7 +79,10 @@ from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from tests.support.model_call import model_call_end_fields, model_call_start_fields
 from tests.support.host import component_test_host_core
-from tests.support.mcp import queue_ready_test_mcp_candidate
+from tests.support.mcp import (
+    queue_ready_test_mcp_candidate,
+    make_mcp_client_input_required,
+)
 from tests.support.settings import compatibility_storage_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.errors import (
@@ -168,10 +171,6 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
-    McpInputRequestDTO,
-    McpInputRequired,
-    McpOriginalRequest,
-    McpRequestSourceMethod,
     McpServerConfig,
     McpStdioConfig,
 )
@@ -3222,6 +3221,11 @@ def test_mcp_input_required_resume_does_not_auto_compact(
     monkeypatch.setattr(
         host_session, "load_mcp_server_configs", lambda **_kwargs: (config,)
     )
+    monkeypatch.setenv(
+        "PULSARA_MCP_CONTINUATION_MASTER_KEY",
+        "cHVsc2FyYS10ZXN0LW1jcC1jb250aW51YXRpb24ta2V5LTAxMjM0NTY=",
+    )
+    monkeypatch.setenv("PULSARA_MCP_CONTINUATION_KEY_ID", "test-key")
 
     worker_release = asyncio.Event()
     candidate_ready = asyncio.Event()
@@ -3229,27 +3233,16 @@ def test_mcp_input_required_resume_does_not_auto_compact(
 
     def input_required_then_complete(arguments):
         nonlocal handler_calls
+        del arguments
         handler_calls += 1
         if handler_calls > 2:
             return {"status": "resumed"}
-        return McpInputRequired(
+        return make_mcp_client_input_required(
             interaction_id="mcp_input_required:compaction-contract",
             server_id=config.server_id,
-            protocol_version="2026-07-28",
             request_state=f"state:compaction-contract:{handler_calls}",
-            input_requests=(
-                McpInputRequestDTO(
-                    key="choice",
-                    method="elicitation/create",
-                    params={"message": f"choose round {handler_calls}"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=arguments,
-            ),
-            round_count=handler_calls,
+            request_key="choice",
+            round_ordinal=handler_calls,
         )
 
     async def controlled_worker(self, runtime):

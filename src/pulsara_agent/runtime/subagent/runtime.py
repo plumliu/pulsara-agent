@@ -70,9 +70,6 @@ from pulsara_agent.replay.message_assembler import BlockAssembler
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.mcp.lifecycle import McpInputRequiredLifecycleStore
-from pulsara_agent.runtime.mcp.recovery import (
-    terminalize_reopened_mcp_input_required,
-)
 from pulsara_agent.runtime.session import (
     EventWriteConflict,
     RuntimeSession,
@@ -2612,6 +2609,13 @@ class SubagentRuntime:
             )
             active_child_mcp = child_mcp_lifecycle.active_for_run(start.run_id)
             if active_child_mcp:
+                mcp_execution_port = (
+                    self.parent_runtime_session.mcp_tool_execution_port
+                )
+                if mcp_execution_port is None:
+                    raise SubagentRuntimeError(
+                        "child MCP recovery requires its continuation execution port"
+                    )
                 child_session = RuntimeSession(
                     self.parent_runtime_session.workspace_root,
                     runtime_session_id=child_log.runtime_session_id,
@@ -2626,11 +2630,13 @@ class SubagentRuntime:
                     ),
                 )
                 try:
-                    recovered_mcp = await terminalize_reopened_mcp_input_required(
-                        child_session,
-                        run_id=start.run_id,
-                        closure_reason="child_pending_unsupported",
-                        deadline_monotonic=recovery_deadline,
+                    recovered_mcp = (
+                        await mcp_execution_port.terminalize_reopened_input_required(
+                            child_session,
+                            run_id=start.run_id,
+                            closure_reason="child_pending_unsupported",
+                            deadline_monotonic=recovery_deadline,
+                        )
                     )
                     child_events = tuple(
                         child_log.iter(deadline_monotonic=recovery_deadline)

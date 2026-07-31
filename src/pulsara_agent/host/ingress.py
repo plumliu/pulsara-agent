@@ -321,6 +321,45 @@ class HostIngressCoordinator:
                 self._waiting_resume_match_key = resume_match_key
                 self._state_generation += 1
 
+    async def adopt_recovered_active_run(self, *, run_start_event_id: str) -> None:
+        """Fence ordinary ingress while a restart-recovered activation runs."""
+
+        async with self._condition:
+            with self._state_lock:
+                if self._active is not None or self._lifecycle_state not in {
+                    "open_idle",
+                    "waiting_user",
+                }:
+                    raise HostIngressAdmissionStale(
+                        "recovered run cannot replace active Host ingress"
+                    )
+                self._waiting_resume_match_key = None
+                self._active_run_start_event_id = run_start_event_id
+                self._lifecycle_state = "active"
+                self._state_generation += 1
+
+    async def settle_recovered_active_run(
+        self,
+        *,
+        resume_match_key: str | None,
+    ) -> None:
+        """Project a recovered activation's closed outcome into Host ingress."""
+
+        async with self._condition:
+            with self._state_lock:
+                if self._active is not None:
+                    raise HostIngressAdmissionStale(
+                        "recovered activation settlement crossed live ingress"
+                    )
+                if self._lifecycle_state in {"closing", "closed", "latched"}:
+                    return
+                self._waiting_resume_match_key = resume_match_key
+                self._lifecycle_state = (
+                    "waiting_user" if resume_match_key is not None else "open_idle"
+                )
+                self._state_generation += 1
+            self._condition.notify_all()
+
     async def clear_waiting_user(self) -> None:
         """Return a terminalized suspended run to the idle selection state."""
 

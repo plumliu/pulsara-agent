@@ -23,6 +23,7 @@ from pulsara_agent.ports.tool_registry import (
     ToolBindingOrigin,
     build_tool_binding_contract,
 )
+from pulsara_agent.primitives._context_base import thaw_json
 from pulsara_agent.primitives.mcp import McpBindingIdentityFact
 from pulsara_agent.runtime.mcp.types import (
     McpInstalledCapabilitySnapshot,
@@ -155,8 +156,9 @@ def build_mcp_installation(
     installation_names = {item.tool.name for item in installations}
     if descriptor_names != installation_names:
         raise ValueError("MCP descriptor/execution installation names differ")
+    resolved_installation_id = installation_id or f"mcp_installation:{uuid4().hex}"
     return McpInstalledCapabilitySnapshot(
-        installation_id=installation_id or f"mcp_installation:{uuid4().hex}",
+        installation_id=resolved_installation_id,
         config_epoch=config_epoch,
         event_safe_config_set_fingerprint=event_safe_config_set_fingerprint,
         installed_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -246,7 +248,12 @@ def _descriptor_from_tool(
         id=f"mcp:{snapshot.server_id}:{tool.name}",
         name=model_name,
         description=tool.description,
-        input_schema=dict(tool.input_schema),
+        input_schema=(
+            thaw_json(tool.provider_projection.projected_schema)
+            if tool.provider_projection is not None
+            and tool.provider_projection.projected_schema is not None
+            else dict(tool.input_schema)
+        ),
         namespace=f"mcp:{snapshot.server_id}",
         provider_kind=CapabilityProviderKind.MCP,
         provider_id=snapshot.server_id,
@@ -275,6 +282,16 @@ def _descriptor_from_tool(
             "annotations": annotations.to_dict(),
             "snapshot_id": snapshot.snapshot_id,
             "discovery_generation": snapshot.discovery_generation,
+            "tool_semantic_fingerprint": (
+                tool.semantic.tool_semantic_fingerprint
+                if tool.semantic is not None
+                else None
+            ),
+            "provider_projection_fingerprint": (
+                tool.provider_projection.projection_fingerprint
+                if tool.provider_projection is not None
+                else None
+            ),
         },
     )
 

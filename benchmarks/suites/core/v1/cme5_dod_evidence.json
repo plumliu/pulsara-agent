@@ -153,5 +153,41 @@
       "workflow_execution_completed"
     ],
     "isolated_postgres_database_dropped": true
+  },
+  "latest_real_llm_revalidation": {
+    "revalidated_on": "2026-07-31",
+    "suite_id": "pulsara-core-dogfood-v1",
+    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+    "scenario_id": "manual-compaction-trail",
+    "scenario_contract_fingerprint": "284301db1904b4626a39c44c3774d9afd06e2a19d1c285ebdfa4ce538ec6aa2d",
+    "runner_build_fingerprint": "125a77233f85f85e776f3cee90dd1e6cc2ba8e6dc393c0858a638d3736921e8e",
+    "selected_run_summary_sha256": "b694489243a6f3fda43c33842c78adf3fbe7a605091a754acd96960f74fc8591",
+    "selected_run_results_jsonl_sha256": "e9711d2ca40b8e294698a66170e8d350a546140694cd924407d7d33227f490d7",
+    "result_record_sha256": "8eb6509f9ff962b797a0efc1a28b6b16a0db0a764f84f0707cde5d0c2e0e28a2",
+    "status": "passed",
+    "elapsed_seconds": 190.19981837505475,
+    "model_call_count": 12,
+    "tool_call_count": 7,
+    "total_tokens": 260115,
+    "cached_input_tokens": 153344,
+    "candidate_count": 2,
+    "terminal_status": "governed_write",
+    "required_assertions": [
+      "all_durable_runs_finished",
+      "compaction_summary_precedes_extraction_terminal",
+      "main_continuation_started_before_extraction_terminal",
+      "compaction_memory_input_is_canonical_human_only",
+      "compaction_memory_candidate_job_outbox_exact_join",
+      "workflow_execution_completed"
+    ],
+    "isolated_postgres_database_dropped": true
+  },
+  "latest_suite_contract_rebase": {
+    "rebased_on": "2026-07-31",
+    "reason": "additive optional subagent_child_tools gate and harder subagent fixture",
+    "suite_contract_fingerprint": "fcdf99b275ad4c491cda7515f0c71a5883691b08eff0a7a2d29ee956496c91d1",
+    "manual_compaction_scenario_contract_fingerprint": "090fefcd8b1be4050cad9afcdddcf240ea84a7f58651ac76549959f8866bbebf",
+    "previous_manual_compaction_scenario_contract_fingerprint": "284301db1904b4626a39c44c3774d9afd06e2a19d1c285ebdfa4ce538ec6aa2d",
+    "manual_compaction_behavior_changed": false
   }
 }

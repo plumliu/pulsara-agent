@@ -1,0 +1,2 @@
+VALUE=34
+NEXT=node-lantern.txt

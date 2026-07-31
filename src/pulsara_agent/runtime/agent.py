@@ -8,7 +8,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Literal
 from uuid import uuid4
 
@@ -49,6 +49,7 @@ from pulsara_agent.event import (
     EventType,
     ModelCallRejectedEvent,
     ModelCallStartEvent,
+    McpContinuationDispatchReservedEvent,
     McpInputRequiredBindingChangedEvent,
     McpInputRequiredExpiredEvent,
     McpInputRequiredInteractionClosedEvent,
@@ -122,8 +123,10 @@ from pulsara_agent.ports.mcp import (
     McpInvocationOwner,
     McpPendingTerminalReason,
     McpToolCompletedOutcome,
+    McpToolRejectCode,
     McpToolRejectedOutcome,
     McpToolSuspendedOutcome,
+    PreparedMcpInputRequiredResolution,
     build_mcp_tool_resume_request,
 )
 from pulsara_agent.ports.tool_registry import McpToolBindingContract
@@ -135,7 +138,6 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     ContextCompactionRequestFact,
     McpInputRequiredSuspensionFact,
     McpInputRequiredTerminalSourceFact,
-    PreparedMcpInputRequiredResolution,
     PublicationLatchedRunTerminationFact,
     RuntimeEventOperationDeadlineBudget,
     build_bounded_runtime_failure_diagnostic,
@@ -2511,14 +2513,15 @@ class AgentRuntime:
         )
         account_id = run_start.long_horizon.rollout_account_id
         rollout_state = self._run_long_horizon.store.rollout_state(account_id)
+        terminal_event = next(
+            event
+            for event in terminal_candidates
+            if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
+        )
         settlement = (
             self._tool_rollout_settlement_event(
                 state,
-                terminal_event=next(
-                    event
-                    for event in terminal_candidates
-                    if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
-                ),
+                terminal_event=terminal_event,
                 reservation=rollout_reservation,
             )
             if rollout_reservation is not None
@@ -2580,6 +2583,13 @@ class AgentRuntime:
                     pending_handle=mcp_pending_handle,
                     reason=McpPendingTerminalReason.PERMISSION_DENIED,
                     candidate_owner_identity=candidate_owner,
+                    terminal_event_id=terminal_event.id,
+                )
+                terminal_registry.bind_transaction_companion(
+                    owner_identity=candidate_owner,
+                    transaction_companion=(
+                        prepared_mcp_settlement.transaction_companion
+                    ),
                 )
         try:
             if rollout_reservation is not None:
@@ -2594,6 +2604,11 @@ class AgentRuntime:
                     deadline_monotonic=(
                         deadline_budget.ordinary_deadline_monotonic
                         if deadline_budget is not None
+                        else None
+                    ),
+                    transaction_companion=(
+                        prepared_mcp_settlement.transaction_companion
+                        if prepared_mcp_settlement is not None
                         else None
                     ),
                 )
@@ -4664,8 +4679,30 @@ class AgentRuntime:
             arguments=original_arguments,
         )
         current_binding = self.tool_executor.registry.binding_contract(tool_name)
+        recovery_rebind = getattr(
+            pending_handle,
+            "recovery_rebind_receipt",
+            None,
+        )
+        recovered_binding_matches = bool(
+            isinstance(current_binding, McpToolBindingContract)
+            and recovery_rebind is not None
+            and recovery_rebind.source_binding_identity
+            == suspension_fact.binding_identity
+            and recovery_rebind.effective_binding_identity
+            == current_binding.binding_identity
+            and recovery_rebind.source_suspension_event_reference
+            == resolution.source_suspension_event_reference
+            and recovery_rebind.source_suspension_fact_fingerprint
+            == suspension_fact.suspension_fact_fingerprint
+            and recovery_rebind.source_binding_contract_fingerprint
+            == suspension_fact.durable_continuation.binding_contract_fingerprint
+            and recovery_rebind.effective_binding_contract_fingerprint
+            == current_binding.contract_fact_fingerprint
+        )
         if isinstance(current_binding, McpToolBindingContract) and (
             current_binding.binding_identity != suspension_fact.binding_identity
+            and not recovered_binding_matches
         ):
             state.pending_interaction_kind = None
             state.pending_interaction_payload = {}
@@ -4797,24 +4834,158 @@ class AgentRuntime:
                         else 30_000
                     )
                     runtime_context = self._tool_runtime_context(state)
-                    outcome = await mcp_port.resume(
-                        build_mcp_tool_resume_request(
-                            owner=McpInvocationOwner(
-                                runtime_session_id=runtime_context.runtime_session_id,
-                                run_id=runtime_context.event_context.run_id,
-                                tool_call_id=tool_call_id,
-                                event_context=runtime_context.event_context,
-                            ),
-                            pending_handle=pending_handle,
-                            binding=current_binding,
-                            source_suspension_event_reference=(
-                                resolution.source_suspension_event_reference
-                            ),
-                            source_suspension=suspension_fact,
-                            prepared_resolution=resolution,
-                            timeout_ms=timeout_ms,
-                        )
+                    resolution_ref = (
+                        terminal_source.source_resolution_submitted_event_reference
                     )
+                    if resolution_ref is None:
+                        raise RuntimeError(
+                            "MCP resume lost its durable resolution reference"
+                        )
+                    commit_port = self._run_tools.event_commit_port()
+                    dispatch_receipt = None
+                    dispatch_generation = 0
+                    dispatch_backoff_seconds = 0.01
+                    dispatch_publication_failed = False
+                    while (
+                        dispatch_receipt is None
+                        and time.monotonic()
+                        < deadline_budget.ordinary_deadline_monotonic
+                    ):
+                        dispatch_generation += 1
+                        guard = commit_port.build_mcp_dispatch_commit_guard(
+                            interaction_id=resolution.interaction_id,
+                            tool_call_id=tool_call_id,
+                            guard_generation=dispatch_generation,
+                        )
+                        prepared_dispatch = mcp_port.prepare_dispatch(
+                            pending_handle=pending_handle,
+                            prepared_resolution=resolution,
+                            source_resolution_event_reference=resolution_ref,
+                            commit_guard=guard,
+                        )
+                        dispatch_event = McpContinuationDispatchReservedEvent(
+                            id=prepared_dispatch.dispatch_event_id,
+                            **self._event_context(state).event_fields(),
+                            dispatch_reservation=(
+                                prepared_dispatch.dispatch_reservation
+                            ),
+                        )
+                        try:
+                            dispatch_result = (
+                                await commit_port.commit_mcp_continuation_dispatch_reservation(
+                                    dispatch_candidate=dispatch_event,
+                                    commit_guard=guard,
+                                    transaction_companion=(
+                                        prepared_dispatch.transaction_companion
+                                    ),
+                                    deadline_monotonic=(
+                                        deadline_budget.ordinary_deadline_monotonic
+                                    ),
+                                )
+                            )
+                        except BaseException as dispatch_error:
+                            dispatch_outcome = self._run_ledger.resolved_write_outcome(
+                                dispatch_error
+                            )
+                            dispatch_receipt = mcp_port.confirm_dispatch_commit(
+                                pending_handle=pending_handle,
+                                prepared_dispatch=prepared_dispatch,
+                                outcome=dispatch_outcome.status,
+                            )
+                            if dispatch_outcome.status == "none":
+                                remaining = (
+                                    deadline_budget.ordinary_deadline_monotonic
+                                    - time.monotonic()
+                                )
+                                if remaining <= 0:
+                                    break
+                                await asyncio.sleep(
+                                    min(dispatch_backoff_seconds, remaining)
+                                )
+                                dispatch_backoff_seconds = min(
+                                    0.25, dispatch_backoff_seconds * 2
+                                )
+                                continue
+                            if dispatch_outcome.status != "full":
+                                raise
+                            dispatch_stored = next(
+                                event
+                                for event in dispatch_outcome.committed_events
+                                if event.id == dispatch_event.id
+                            )
+                        else:
+                            dispatch_receipt = mcp_port.confirm_dispatch_commit(
+                                pending_handle=pending_handle,
+                                prepared_dispatch=prepared_dispatch,
+                                outcome="full",
+                            )
+                            dispatch_stored = next(
+                                event
+                                for event in dispatch_result.committed_events
+                                if event.id == dispatch_event.id
+                            )
+                            dispatch_publication_failed = (
+                                bool(dispatch_result.publication_errors)
+                                or dispatch_result.publication_status == "unavailable"
+                            )
+                        if dispatch_receipt is not None:
+                            yield dispatch_stored
+                    if dispatch_receipt is None:
+                        rejection_payload = {
+                            "error_code": McpToolRejectCode.REQUEST_TIMEOUT.value,
+                            "sanitized_message": (
+                                "MCP continuation dispatch could not be durably reserved"
+                            ),
+                            "retryable_in_same_live_owner": False,
+                        }
+                        outcome = McpToolRejectedOutcome(
+                            outcome_kind="rejected",
+                            error_code=McpToolRejectCode.REQUEST_TIMEOUT,
+                            sanitized_message=rejection_payload["sanitized_message"],
+                            retryable_in_same_live_owner=False,
+                            outcome_fingerprint=context_fingerprint(
+                                "mcp-tool-rejected-outcome:v1", rejection_payload
+                            ),
+                        )
+                    elif dispatch_publication_failed:
+                        rejection_payload = {
+                            "error_code": McpToolRejectCode.PROTOCOL_ERROR.value,
+                            "sanitized_message": (
+                                "MCP continuation dispatch authority was not published"
+                            ),
+                            "retryable_in_same_live_owner": False,
+                        }
+                        outcome = McpToolRejectedOutcome(
+                            outcome_kind="rejected",
+                            error_code=McpToolRejectCode.PROTOCOL_ERROR,
+                            sanitized_message=rejection_payload["sanitized_message"],
+                            retryable_in_same_live_owner=False,
+                            outcome_fingerprint=context_fingerprint(
+                                "mcp-tool-rejected-outcome:v1", rejection_payload
+                            ),
+                        )
+                    else:
+                        outcome = await mcp_port.resume(
+                            build_mcp_tool_resume_request(
+                                owner=McpInvocationOwner(
+                                    runtime_session_id=(
+                                        runtime_context.runtime_session_id
+                                    ),
+                                    run_id=runtime_context.event_context.run_id,
+                                    tool_call_id=tool_call_id,
+                                    event_context=runtime_context.event_context,
+                                ),
+                                pending_handle=pending_handle,
+                                binding=current_binding,
+                                source_suspension_event_reference=(
+                                    resolution.source_suspension_event_reference
+                                ),
+                                source_suspension=suspension_fact,
+                                prepared_resolution=resolution,
+                                dispatch_receipt=dispatch_receipt,
+                                timeout_ms=timeout_ms,
+                            )
+                        )
                     if isinstance(outcome, McpToolRejectedOutcome) and (
                         outcome.retryable_in_same_live_owner
                     ):
@@ -7248,6 +7419,13 @@ class AgentRuntime:
                         )
                     ),
                     candidate_owner_identity=candidate_owner,
+                    terminal_event_id=terminal_event.id,
+                )
+                terminal_registry.bind_transaction_companion(
+                    owner_identity=candidate_owner,
+                    transaction_companion=(
+                        prepared_mcp_settlement.transaction_companion
+                    ),
                 )
         publication_maintenance_lease = None
         mcp_handoff_confirmed = False
@@ -7263,7 +7441,11 @@ class AgentRuntime:
                 self._run_ledger.issue_publication_terminal_maintenance_lease(
                     owner_kind="mcp_interaction_closure_bundle",
                     ordered_events=write_candidates,
-                    transaction_companion=None,
+                    transaction_companion=(
+                        prepared_mcp_settlement.transaction_companion
+                        if prepared_mcp_settlement is not None
+                        else None
+                    ),
                     deadline_budget=deadline_budget,
                 )
             )
@@ -8610,14 +8792,6 @@ class AgentRuntime:
             or interaction.tool_name != suspended.tool_name
         ):
             raise ValueError("prepared MCP suspension tool identity drifted")
-        deadline_utc = None
-        if view.deadline_monotonic is not None:
-            remaining = max(0.0, view.deadline_monotonic - time.monotonic())
-            deadline_utc = (
-                (datetime.now(timezone.utc) + timedelta(seconds=remaining))
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
         predecessor = (
             state.execution_resources.latest_mcp_input_required_resolution_reference
         )
@@ -8628,21 +8802,16 @@ class AgentRuntime:
             raise RuntimeError("MCP suspension requires committed run authority")
         suspension_fact = build_frozen_fact(
             McpInputRequiredSuspensionFact,
-            schema_version="mcp_input_required_suspension.v1",
+            schema_version="mcp_input_required_suspension.v2",
             interaction=interaction,
             binding_identity=view.binding_identity,
             pending_lease_reservation=view.pending_lease_reservation,
             request_envelope=view.request_envelope,
+            durable_continuation=view.durable_continuation,
             rollout_reservation_id=reservation.reservation_id,
             rollout_reservation_fingerprint=reservation.semantic_fingerprint,
             source_mcp_installation_id=(
                 working_set.frozen_execution_surface.identity.mcp_installation_id
-            ),
-            durable_deadline_utc=deadline_utc,
-            deadline_policy_fingerprint=context_fingerprint(
-                "mcp-input-required-deadline-policy:v1",
-                "live=monotonic;durable=canonical-utc;"
-                "restart=terminalize-lease-unavailable",
             ),
             predecessor_resolution_submitted_event_reference=predecessor,
         )
@@ -8683,13 +8852,7 @@ class AgentRuntime:
         state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
         suspension_event = ToolExecutionSuspendedEvent(
-            id=stable_runtime_event_id(
-                "mcp-input-required-suspension-event:v1",
-                reservation.reservation_id,
-                interaction.interaction_id,
-                interaction.round_count,
-                suspension_fact.suspension_fact_fingerprint,
-            ),
+            id=view.suspension_event_id,
             **self._event_context(state).event_fields(),
             interaction_kind="mcp_input_required",
             tool_call_id=suspended.tool_call_id,
@@ -8707,6 +8870,7 @@ class AgentRuntime:
             physical_owner_identity_fingerprint=(
                 pending_handle.identity.identity_fingerprint
             ),
+            transaction_companion=view.transaction_companion,
         )
         mcp_port.bind_suspension_candidate(
             pending_handle=pending_handle,
@@ -8720,6 +8884,7 @@ class AgentRuntime:
                 reservation_id=reservation.reservation_id,
                 expected_reservation_fingerprint=reservation.semantic_fingerprint,
                 deadline_monotonic=deadline_budget.ordinary_deadline_monotonic,
+                transaction_companion=view.transaction_companion,
             )
             stored = commit_result.committed_events[0]
             write_outcome = EventBatchCommitOutcome(

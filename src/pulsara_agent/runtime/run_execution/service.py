@@ -447,6 +447,16 @@ class RunActivationService:
             borrow_authority
         )
 
+    def install_recovered_mcp_continuation(self, **kwargs) -> None:
+        """Install one exact restart-rebound MCP run owner.
+
+        Recovery composition receives this closed operation instead of the
+        mutable registry. The registry remains the sole owner of lifecycle,
+        suspension, and pending-activation slot transitions.
+        """
+
+        self._registry.install_recovered_mcp_continuation(**kwargs)
+
     def pending_stop_request(self, run_id: str):
         return self._pending_working_state(run_id).stop_request
 

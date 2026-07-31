@@ -2493,7 +2493,7 @@ def _mcp_config_to_dict(config: McpServerConfig) -> dict[str, object]:
 
 
 def _mcp_snapshot_to_dict(snapshot) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "server_id": snapshot.server_id,
         "required": snapshot.required,
         "config_epoch": snapshot.config_epoch,
@@ -2545,6 +2545,48 @@ def _mcp_snapshot_to_dict(snapshot) -> dict[str, object]:
         ],
         "diagnostics": [dict(item) for item in snapshot.diagnostics],
     }
+    authority = snapshot.authority
+    if authority is not None:
+        discovery = authority.discovery_attribution
+        negotiation = discovery.negotiation
+        protocol = authority.surface_semantic.protocol_semantic
+        payload["protocol_authority"] = {
+            "exact_revision": protocol.protocol_revision,
+            "behavior_era": protocol.behavior_era.value,
+            "protocol_semantic_fingerprint": protocol.semantic_fingerprint,
+            "negotiation_source": negotiation.negotiation_source,
+            "wire_receipt_fingerprint": (
+                negotiation.negotiation_wire_receipt_fingerprint
+            ),
+            "sdk_version": negotiation.sdk_version,
+            "endpoint_attribution_fingerprint": (
+                discovery.endpoint.attribution_fingerprint
+            ),
+            "auth_kind": discovery.auth.auth_kind,
+            "auth_attribution_fingerprint": discovery.auth.attribution_fingerprint,
+        }
+        payload["cache_page_sets"] = [
+            {
+                "method": page_set.method.value,
+                "page_count": len(page_set.ordered_pages),
+                "started_from_cursor_none": page_set.started_from_cursor_none,
+                "complete_capture": page_set.complete_capture,
+                "resolved_cache_scope": page_set.common_resolved_cache_scope,
+                "pages": [
+                    {
+                        "ordinal": page.page_ordinal,
+                        "received_at_utc": page.received_at_utc,
+                        "resolved_ttl_ms": page.resolved_ttl_ms,
+                        "hint_disposition": page.hint_disposition,
+                        "receipt_fingerprint": page.page_receipt_fingerprint,
+                    }
+                    for page in page_set.ordered_pages
+                ],
+            }
+            for page_set in discovery.page_set_receipts
+        ]
+        payload["rejected_tool_count"] = len(discovery.ordered_tool_rejections)
+    return payload
 
 
 def _redact_url(url: str) -> str:

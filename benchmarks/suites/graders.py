@@ -261,6 +261,33 @@ def grade_durable_evidence(
                 f"actual={actual}, tools={selected_tools}",
             )
 
+    child_tool_gate = gate.subagent_child_tools
+    if child_tool_gate is not None:
+        child_completions = tuple(
+            event
+            for event in session_report.get("events") or ()
+            if event.get("type") == "SUBAGENT_RUN_COMPLETED"
+        )
+        child_tool_counts = tuple(
+            int(event.get("tool_call_count") or 0) for event in child_completions
+        )
+        check(
+            "subagent_completed_child_count",
+            len(child_completions) == child_tool_gate.expected_completed_children,
+            f"completed_children={len(child_completions)}, "
+            f"expected={child_tool_gate.expected_completed_children}",
+        )
+        check(
+            "subagent_child_tool_call_minimum",
+            len(child_tool_counts) == child_tool_gate.expected_completed_children
+            and all(
+                count >= child_tool_gate.minimum_tool_calls_per_child
+                for count in child_tool_counts
+            ),
+            f"child_tool_counts={child_tool_counts}, "
+            f"minimum={child_tool_gate.minimum_tool_calls_per_child}",
+        )
+
     extraction_gate = gate.compaction_memory_extraction
     if extraction_gate is not None:
         extraction_rows = tuple(

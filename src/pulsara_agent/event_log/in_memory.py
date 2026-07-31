@@ -9,6 +9,7 @@ from typing import Iterable
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
 from pulsara_agent.event_log.protocol import (
+    CandidateBoundEventLogTransactionCompanion,
     EventBatchConfirmation,
     EventIdConflict,
     EventLogReadSnapshot,
@@ -31,6 +32,7 @@ from pulsara_agent.event_log.protocol import (
     EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
+    rebind_stored_candidate_batch,
     same_event_payload,
     same_event_raw_payload,
 )
@@ -332,6 +334,17 @@ class InMemoryEventLog:
                 raw_events,
                 physical_charge_contract,
             )
+            if isinstance(
+                transaction_companion,
+                CandidateBoundEventLogTransactionCompanion,
+            ):
+                receipt = rebind_stored_candidate_batch(
+                    transaction_companion.prepared_candidate_batch_identity,
+                    stored_events,
+                )
+                transaction_companion.accept_stored_candidate_rebind_receipt(
+                    receipt
+                )
             if transaction_companion is not None:
                 transaction_companion.apply_in_memory(stored_events)
             self._raw_events.extend(raw_events)

@@ -817,8 +817,8 @@ def _tool_contract(
         "max_structural_tail_payload_bytes": 10 * 1024 * 1024,
         "max_terminal_recovery_events": 8,
         "max_terminal_recovery_payload_bytes": 256 * 1024,
-        "terminal_tail_reserved_events": 36,
-        "terminal_tail_reserved_payload_bytes": 6 * 1024 * 1024,
+        "terminal_tail_reserved_events": 64,
+        "terminal_tail_reserved_payload_bytes": 10 * 1024 * 1024,
         "max_total_reserved_events": 4_240,
         "max_total_reserved_payload_bytes": 36 * 1024 * 1024,
         "event_domain_registry_contract_fingerprint": event_domain_fingerprint,
@@ -831,8 +831,11 @@ def _tool_contract(
         "max_durable_events_per_delta_item": 1,
         "max_canonical_wrapper_payload_bytes_per_delta_item": 2_048,
         "maximum_successor_suspension_commits": 2,
-        "successor_suspension_reserved_events": 4,
-        "successor_suspension_reserved_payload_bytes": 4 * 1024 * 1024,
+        # This tail owns the bounded resume boundary, dispatch reservation,
+        # and at most two successor suspensions. The terminal floor below is
+        # never consumable by continuation work.
+        "successor_suspension_reserved_events": 32,
+        "successor_suspension_reserved_payload_bytes": 8 * 1024 * 1024,
         "minimum_terminal_tail_events": 32,
         "minimum_terminal_tail_payload_bytes": 2 * 1024 * 1024,
         "result_capture_contract_fingerprint": context_fingerprint(

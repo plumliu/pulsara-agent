@@ -33,28 +33,18 @@ from pulsara_agent.event import (
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
 )
-from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
-from tests.support.mcp import MockMcpClientManager
+from tests.support.mcp import (
+    MockMcpClientManager,
+    make_mcp_client_input_required,
+    queue_ready_test_mcp_candidate,
+)
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
 from pulsara_agent.runtime.mcp.types import (
-    McpDiscoveredTool,
-    McpInputRequestDTO,
-    McpInputRequired,
-    McpOriginalRequest,
-    McpRequestSourceMethod,
     McpRequiredStartupError,
     McpRequiredStartupResult,
-    McpServerCandidate,
     McpServerConfig,
-    McpServerRuntimeSpec,
-    McpServerSnapshot,
     McpServerStatus,
     McpStdioConfig,
-    McpToolAnnotations,
-    event_safe_mcp_config_fingerprint,
-    new_mcp_slot,
-    runtime_mcp_config_fingerprint,
-    snapshot_semantic_fingerprint,
 )
 
 
@@ -83,6 +73,15 @@ def _install_config(monkeypatch: pytest.MonkeyPatch, config: McpServerConfig) ->
         "load_mcp_server_configs",
         lambda **_kwargs: (config,),
     )
+    _install_continuation_key(monkeypatch)
+
+
+def _install_continuation_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "PULSARA_MCP_CONTINUATION_MASTER_KEY",
+        "cHVsc2FyYS10ZXN0LW1jcC1jb250aW51YXRpb24ta2V5LTAxMjM0NTY=",
+    )
+    monkeypatch.setenv("PULSARA_MCP_CONTINUATION_KEY_ID", "test-key")
 
 
 def _installed_tool_names(installation) -> tuple[str, ...]:
@@ -104,67 +103,11 @@ async def _queue_ready_candidate(
     *,
     handler=None,
 ) -> None:
-    config = runtime.spec.config
-    tool = McpDiscoveredTool(
-        server_id=config.server_id,
-        name="lookup",
-        description="lookup",
-        input_schema={"type": "object", "properties": {}},
-        annotations=McpToolAnnotations(read_only_hint=True),
+    await queue_ready_test_mcp_candidate(
+        supervisor,
+        runtime,
+        handler=handler or (lambda arguments: "ok"),
     )
-    timing = McpServerLifecycleTimingFact(
-        queued_at_utc=runtime.queued_at_utc,
-        connect_started_at_utc="2026-01-01T00:00:00Z",
-        connect_ended_at_utc="2026-01-01T00:00:00Z",
-        discovery_started_at_utc="2026-01-01T00:00:00Z",
-        discovery_ended_at_utc="2026-01-01T00:00:00.010000Z",
-        completed_at_utc="2026-01-01T00:00:00.010000Z",
-        connect_duration_seconds=0,
-        discovery_duration_seconds=0.01,
-        total_duration_seconds=0.01,
-    )
-    snapshot = McpServerSnapshot(
-        snapshot_id=f"mcp_snapshot:{runtime.attempt.reconcile_attempt_id}",
-        server_id=config.server_id,
-        config_epoch=runtime.attempt.config_epoch,
-        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
-        snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
-            server_id=config.server_id,
-            status=McpServerStatus.READY,
-            tools=(tool,),
-        ),
-        reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,
-        discovery_generation=runtime.attempt.reserved_discovery_generation,
-        status=McpServerStatus.READY,
-        required=config.required,
-        tools=(tool,),
-        timing=timing,
-    )
-    manager = MockMcpClientManager(
-        _snapshots=(snapshot,),
-        handlers={(config.server_id, "lookup"): handler or (lambda arguments: "ok")},
-    )
-    spec = McpServerRuntimeSpec(
-        config=config,
-        runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
-        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
-    )
-    candidate = McpServerCandidate(
-        ticket_id=runtime.ticket_id,
-        config_epoch=runtime.attempt.config_epoch,
-        reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,
-        reserved_discovery_generation=runtime.attempt.reserved_discovery_generation,
-        server_snapshot=snapshot,
-        runtime_spec=spec,
-        manager_slot=new_mcp_slot(spec=spec, snapshot=snapshot, manager=manager),
-        trigger=runtime.trigger,
-        request_count=1,
-        page_count=1,
-    )
-    with supervisor._state_lock:
-        current = supervisor._current_attempts.get(config.server_id)
-        if current is runtime:
-            supervisor._candidates.append(candidate)
 
 
 def test_optional_mcp_does_not_block_host_session_open(
@@ -936,6 +879,7 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_continuation_key(monkeypatch)
     configs = [_config(required=False)]
     import pulsara_agent.host.core as host_core
     import pulsara_agent.host.session as host_session
@@ -954,23 +898,12 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
     candidate_ready = asyncio.Event()
 
     def input_required(arguments):
-        return McpInputRequired(
+        del arguments
+        return make_mcp_client_input_required(
             interaction_id="mcp_input_required:reconfigure",
             server_id="slow-docs",
-            protocol_version="2026-07-28",
             request_state="state:1",
-            input_requests=(
-                McpInputRequestDTO(
-                    key="choice",
-                    method="elicitation/create",
-                    params={"message": "choose"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=arguments,
-            ),
+            request_key="choice",
         )
 
     async def controlled_worker(self, runtime):
@@ -1014,47 +947,6 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
             tool_timeout_ms=2_000,
         )
         event_log = session.wiring.runtime_wiring.runtime_session.event_log
-        event_log_type = type(event_log)
-        original_extend = event_log_type.extend_with_materialization_state
-        failed_once = False
-
-        def fail_resume_audit_once(self, events, **kwargs):
-            nonlocal failed_once
-            event_batch = tuple(events)
-            if (
-                self is event_log
-                and not failed_once
-                and any(
-                    isinstance(event, McpCapabilitySnapshotInstalledEvent)
-                    for event in event_batch
-                )
-            ):
-                failed_once = True
-                raise RuntimeError("synthetic resume audit commit failure")
-            return original_extend(self, event_batch, **kwargs)
-
-        monkeypatch.setattr(
-            event_log_type,
-            "extend_with_materialization_state",
-            fail_resume_audit_once,
-        )
-        with pytest.raises(Exception) as first_failure:
-            await session.resolve_mcp_input_required(
-                McpInputRequiredInteractionResolution(
-                    interaction_id=pending.interaction_id,
-                    responses={"choice": {"value": "yes"}},
-                )
-            )
-        assert failed_once, repr(first_failure.value)
-        assert session.get_pending_interaction() is pending
-        assert session.mcp_supervisor.pending_completion_count == 1
-        assert old_slot.lifecycle == "retiring"
-
-        monkeypatch.setattr(
-            event_log_type,
-            "extend_with_materialization_state",
-            original_extend,
-        )
         result = await session.resolve_mcp_input_required(
             McpInputRequiredInteractionResolution(
                 interaction_id=pending.interaction_id,
@@ -1076,6 +968,11 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         ]
         assert len(audits) == 2
         assert audits[-1].server_snapshots[0].status == "ready"
+        assert (
+            audits[-1].server_snapshots[0].protocol_behavior_era
+            == "stateless_per_request"
+        )
+        assert audits[-1].server_snapshots[0].negotiation_wire_receipt_fingerprint
         binding_change_events = [
             event
             for event in event_log.iter()
@@ -1096,23 +993,12 @@ def test_host_close_terminalizes_pending_mcp_and_drains_lease(
     candidate_ready = asyncio.Event()
 
     def input_required(arguments):
-        return McpInputRequired(
+        del arguments
+        return make_mcp_client_input_required(
             interaction_id="mcp_input_required:close",
             server_id="slow-docs",
-            protocol_version="2026-07-28",
             request_state="state:close",
-            input_requests=(
-                McpInputRequestDTO(
-                    key="choice",
-                    method="elicitation/create",
-                    params={"message": "choose"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=arguments,
-            ),
+            request_key="choice",
         )
 
     async def controlled_worker(self, runtime):

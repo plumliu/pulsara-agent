@@ -110,6 +110,10 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileAttemptSummaryFact,
     McpReconcileTriggerValue,
 )
+from pulsara_agent.primitives.mcp_continuation import (
+    McpContinuationDispatchReservationFact,
+    McpContinuationResolutionCarrierFact,
+)
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     BoundedRuntimeFailureDiagnosticFact,
     ContextCompactionRequestFact,
@@ -372,6 +376,7 @@ class EventType(StrEnum):
     )
     TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
     MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED = "MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED"
+    MCP_CONTINUATION_DISPATCH_RESERVED = "MCP_CONTINUATION_DISPATCH_RESERVED"
     MCP_INPUT_REQUIRED_EXPIRED = "MCP_INPUT_REQUIRED_EXPIRED"
     MCP_INPUT_REQUIRED_BINDING_CHANGED = "MCP_INPUT_REQUIRED_BINDING_CHANGED"
     MCP_INPUT_REQUIRED_RESUME_FAILED = "MCP_INPUT_REQUIRED_RESUME_FAILED"
@@ -2457,6 +2462,7 @@ class McpInputRequiredResolutionSubmittedEvent(EventBase):
     )
     source: McpInputRequiredSourceAuthorityFact
     resolution: McpInputRequiredResolutionSemanticFact
+    continuation: McpContinuationResolutionCarrierFact
     attempt: McpInputRequiredResolutionAttemptFact
     resume_boundary_event_identity: StableEventIdentityFact
 
@@ -2466,8 +2472,55 @@ class McpInputRequiredResolutionSubmittedEvent(EventBase):
             self.source.interaction.round_count != self.attempt.round_count
             or self.resume_boundary_event_identity.event_type
             != EventType.RUN_INTERACTION_RESUME_BOUNDARY.value
+            or self.continuation.resolution_event_id != self.id
+            or self.continuation.source_suspension_event_reference
+            != self.source.source_suspension_event_reference
+            or self.continuation.source_continuation_carrier_id
+            != self.source.continuation_carrier_id
+            or self.continuation.request_set_fingerprint
+            != self.source.request_set_fingerprint
+            or self.resolution.request_set_fingerprint
+            != self.continuation.request_set_fingerprint
+            or self.resolution.ordered_response_keys
+            != self.continuation.ordered_response_keys
+            or self.resolution.keyed_current_round_responses_commitment
+            != self.continuation.keyed_current_round_responses_commitment
+            or self.resolution.response_attribution_fingerprint
+            != self.continuation.response_attribution_fingerprint
+            or self.continuation.operation_expires_at_utc
+            != self.source.operation_expires_at_utc
+            or self.continuation.expiry_fingerprint
+            != self.source.expiry_fingerprint
         ):
             raise ValueError("MCP resolution submission authority mismatch")
+        return self
+
+
+class McpContinuationDispatchReservedEvent(EventBase):
+    """Durable authorization for exactly one stateless continuation dispatch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_CONTINUATION_DISPATCH_RESERVED] = (
+        EventType.MCP_CONTINUATION_DISPATCH_RESERVED
+    )
+    dispatch_reservation: McpContinuationDispatchReservationFact
+
+    @model_validator(mode="after")
+    def _dispatch_context(self) -> "McpContinuationDispatchReservedEvent":
+        fact = self.dispatch_reservation
+        if (
+            not self.id
+            or fact.source_resolution_event_reference.event_type
+            != EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED.value
+            or fact.source_physical_operation_reservation_event_reference.event_type
+            != EventType.PHYSICAL_OPERATION_RESERVATION_CREATED.value
+            or fact.source_resolution_event_reference.runtime_session_id
+            != fact.runtime_session_id
+            or fact.source_physical_operation_reservation_event_reference.runtime_session_id
+            != fact.runtime_session_id
+        ):
+            raise ValueError("MCP dispatch reservation authority mismatch")
         return self
 
 
@@ -4909,6 +4962,7 @@ AgentEvent: TypeAlias = (
     | ToolResultEndEvent
     | ToolExecutionSuspendedEvent
     | McpInputRequiredResolutionSubmittedEvent
+    | McpContinuationDispatchReservedEvent
     | McpInputRequiredExpiredEvent
     | McpInputRequiredBindingChangedEvent
     | McpInputRequiredResumeFailedEvent

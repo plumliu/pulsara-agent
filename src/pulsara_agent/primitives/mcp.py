@@ -32,6 +32,10 @@ McpServerStatusValue = Literal[
     "closing",
     "closed",
 ]
+McpProtocolBehaviorEraValue = Literal[
+    "stateless_per_request",
+    "handshake_sessionful",
+]
 McpReconcileTriggerValue = Literal[
     "initial",
     "config_change",
@@ -373,6 +377,8 @@ class McpInstalledServerSnapshotFact(McpFact):
     event_safe_config_fingerprint: str
     snapshot_semantic_fingerprint: str
     protocol_version: str | None = None
+    protocol_behavior_era: McpProtocolBehaviorEraValue | None = None
+    negotiation_wire_receipt_fingerprint: str | None = None
     tool_count: int = 0
     resource_count: int = 0
     resource_template_count: int = 0
@@ -398,6 +404,17 @@ class McpInstalledServerSnapshotFact(McpFact):
             raise ValueError("MCP installed snapshot counts must be non-negative")
         if len(self.diagnostics) > MAX_MCP_DIAGNOSTICS_PER_FACT:
             raise ValueError("MCP installed snapshot diagnostics exceed bounded cap")
+        protocol_authority = (
+            self.protocol_version,
+            self.protocol_behavior_era,
+            self.negotiation_wire_receipt_fingerprint,
+        )
+        if self.status == "ready" and any(value is None for value in protocol_authority):
+            raise ValueError("ready MCP installed snapshot requires exact protocol authority")
+        if self.status != "ready" and 0 < sum(
+            value is not None for value in protocol_authority
+        ) < len(protocol_authority):
+            raise ValueError("MCP installed snapshot protocol authority is partial")
         if self.status not in {"starting", "closing"} and (
             self.lifecycle_timing.completed_at_utc is None
             or self.lifecycle_timing.total_duration_seconds is None

@@ -16,6 +16,7 @@ from pulsara_agent.host.identity import (
     ResolvedWorkspace,
     resolve_workspace,
 )
+from pulsara_agent.host.mcp_elicitation import HostSessionMcpFormInteractionPort
 from pulsara_agent.host.composition_contract import (
     HostProcessResourceLease,
     HostRuntimeComposition,
@@ -56,6 +57,18 @@ from pulsara_agent.runtime.terminal import (
 )
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.browser import (
+    SystemMcpExternalBrowserPort,
+)
+from pulsara_agent.ports.mcp_elicitation import (
+    McpElicitationCapabilityDisabled,
+    build_full_mcp_elicitation_capability,
+)
+from pulsara_agent.runtime.mcp.continuation_store import (
+    McpContinuationKeyProvider,
+    McpContinuationSecretCodec,
+)
+from pulsara_agent.runtime.mcp.protocol import McpClientInputRuntimeBinding
 from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
 from pulsara_agent.runtime.mcp.types import McpReconcileTicket
 from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
@@ -425,6 +438,7 @@ class HostCore:
         mcp_ticket: McpReconcileTicket | None = None
         manifest_runtime_session_id: str | None = None
         close_manifest_if_publish_fails = runtime_session_id is None
+        reopen_repair_result: DanglingRunRepairResult | None = None
         try:
             if repair_dangling_on_resume:
                 if runtime_session_id is None:
@@ -434,11 +448,12 @@ class HostCore:
                 reopen_deadline_monotonic = (
                     monotonic() + _HOST_OPEN_RECOVERY_TIMEOUT_SECONDS
                 )
-                await repair_dangling_runs_for_resume(
+                reopen_repair_result = await repair_dangling_runs_for_resume(
                     connection_provider=postgres_access_lease.connection_provider,
                     runtime_session_id=runtime_session_id,
                     workspace_root=str(workspace.workspace_root),
                     deadline_monotonic=reopen_deadline_monotonic,
+                    defer_recoverable_stateless_mcp=True,
                 )
             lease = await self._attach_supervisor(
                 workspace, host_session_id, conversation_id
@@ -521,6 +536,28 @@ class HostCore:
             wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
             if mcp_ticket is not None:
                 await session.initialize_mcp(mcp_ticket)
+            if reopen_repair_result is not None:
+                try:
+                    await session.recover_deferred_mcp_runs(
+                        reopen_repair_result.deferred_mcp_run_ids,
+                        deadline_monotonic=runtime_open_deadline_monotonic,
+                    )
+                except BaseException:
+                    # A stateless rebind is optional only until it fails its
+                    # exact protocol/endpoint/auth/secret joins. Once rejected,
+                    # close the durable interaction under the same reopen
+                    # deadline rather than leaving a permanently deferred run.
+                    if reopen_repair_result.deferred_mcp_run_ids:
+                        await repair_dangling_runs_for_resume(
+                            connection_provider=(
+                                postgres_access_lease.connection_provider
+                            ),
+                            runtime_session_id=runtime_session_id,
+                            workspace_root=str(workspace.workspace_root),
+                            deadline_monotonic=runtime_open_deadline_monotonic,
+                            defer_recoverable_stateless_mcp=False,
+                        )
+                    raise
             manifest_runtime_session_id = session.runtime_session_id
             self._manifest_store().upsert_open_manifest(
                 runtime_session_id=manifest_runtime_session_id,
@@ -1022,7 +1059,32 @@ class HostCore:
         self, workspace: ResolvedWorkspace
     ) -> tuple[McpServerSupervisor, McpReconcileTicket]:
         configs = load_mcp_server_configs(workspace_root=workspace.workspace_root)
-        supervisor = McpServerSupervisor()
+        key_provider = McpContinuationKeyProvider.optional_from_environment()
+        continuation_codec = (
+            McpContinuationSecretCodec(key_provider)
+            if key_provider is not None
+            else None
+        )
+        if continuation_codec is None:
+            supervisor = McpServerSupervisor(
+                elicitation_capability=McpElicitationCapabilityDisabled()
+            )
+        else:
+            form_port = HostSessionMcpFormInteractionPort()
+            browser_port = SystemMcpExternalBrowserPort()
+            elicitation_capability = build_full_mcp_elicitation_capability(
+                form_interaction_port=form_port,
+                external_browser_port=browser_port,
+            )
+            supervisor = McpServerSupervisor(
+                client_input_binding=McpClientInputRuntimeBinding(
+                    commitment_key_id=continuation_codec.key_id,
+                    elicitation_capability=elicitation_capability,
+                    _keyed_commitment=continuation_codec.keyed_commitment,
+                ),
+                elicitation_capability=elicitation_capability,
+                continuation_codec=continuation_codec,
+            )
         ticket = supervisor.prepare(configs, trigger="initial")
         return supervisor, ticket
 

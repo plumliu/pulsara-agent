@@ -38,6 +38,7 @@ from pulsara_agent.ports.interaction_transition import (
     InteractionTransitionNone,
     InteractionTransitionUntrusted,
 )
+from pulsara_agent.ports.mcp import PreparedMcpInputRequiredResolution
 from pulsara_agent.ports.run_authority import AwaitingInitialRevision
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.context import freeze_json
@@ -288,7 +289,11 @@ class RuntimeInteractionTransitionService:
         if isinstance(owner.authority_head, AwaitingInitialRevision):
             raise RuntimeError("interaction resume lacks installed run authority")
 
-        resolution_copy = deepcopy(resolution)
+        resolution_copy = (
+            resolution
+            if isinstance(resolution, PreparedMcpInputRequiredResolution)
+            else deepcopy(resolution)
+        )
         resolution_fingerprint = _resolution_fingerprint(
             resolution_kind=resolution_kind,
             resolution=resolution_copy,
@@ -860,7 +865,17 @@ def _resolution_kind_matches_authority(
 
 
 def _resolution_fingerprint(*, resolution_kind: str, resolution: object) -> str:
-    if is_dataclass(resolution):
+    if isinstance(resolution, PreparedMcpInputRequiredResolution):
+        payload = {
+            "prepared_resolution_fingerprint": (
+                resolution.prepared_resolution_fingerprint
+            ),
+            "interaction_id": resolution.interaction_id,
+            "source_suspension_event_id": (
+                resolution.source_suspension_event_reference.event_id
+            ),
+        }
+    elif is_dataclass(resolution):
         payload = asdict(resolution)
     elif hasattr(resolution, "model_dump"):
         payload = resolution.model_dump(mode="json")

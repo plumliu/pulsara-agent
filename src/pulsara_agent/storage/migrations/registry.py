@@ -100,6 +100,7 @@ _RESOURCE_CHECKSUMS = (
     "c99c0e898899162f433235301cc23d247668ef1740ebe78e233beb823580516a",
     "47f261bfedb330ce47f00a78139666fc8beb306c868ebd467d2b4f1d6fcb8814",
     "f1c8d3fb3c62e10216b4ac659e4c2e87de1d789d316ca9211d37c56bba486229",
+    "f193cffe490390b2e9d87a70c0ed2711f3f1faf558db898549cec26ded2dab9c",
 )
 _NAMES = (
     "schema_migration_ledger",
@@ -112,6 +113,7 @@ _NAMES = (
     "run_timeline_projection_activation",
     "tool_result_evidence_projection_activation",
     "compaction_memory_extraction_projection_activation",
+    "mcp_continuation_secret_store",
 )
 _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
     (),
@@ -161,6 +163,7 @@ _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
             "4b25ed93abb3bf1cacc43ae0b2c397b03dd3b4a5b9138097a921ad82bbf34b0b",
         ),
     ),
+    (),
 )
 
 

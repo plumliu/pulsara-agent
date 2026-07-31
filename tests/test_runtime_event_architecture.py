@@ -367,7 +367,7 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
 
 
 def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
-    assert AGENT_EVENT_SCHEMA_VERSION == 7
+    assert AGENT_EVENT_SCHEMA_VERSION == 8
     assert "CUSTOM" not in EventType.__members__
     assert all(
         getattr(event_type, "__name__", "") != "CustomEvent"
@@ -402,6 +402,7 @@ def test_typed_runtime_audit_events_are_explicit_non_transcript() -> None:
         EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED.value,
         EventType.MCP_INPUT_REQUIRED_RESUME_FAILED.value,
         EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED.value,
+        EventType.MCP_CONTINUATION_DISPATCH_RESERVED.value,
         EventType.CONTEXT_COMPACTION_REQUESTED.value,
         EventType.MID_TURN_CONTEXT_COMPACTION_SKIPPED.value,
         EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED.value,

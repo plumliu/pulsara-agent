@@ -14,6 +14,11 @@ from pulsara_agent.event import (
     PlanQuestionOption,
 )
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact, thaw_json
+from pulsara_agent.primitives.mcp_continuation import (
+    McpElicitationRequestFact,
+    McpFormElicitationRequestFact,
+    McpUrlElicitationRequestFact,
+)
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredSuspensionFact,
 )
@@ -311,7 +316,9 @@ class PendingMcpInputRequired:
             "suspension_fact_fingerprint": (
                 self.suspension_fact.suspension_fact_fingerprint
             ),
-            "protocol_version": self.suspension_fact.request_envelope.protocol_version,
+            "protocol_revision": (
+                self.suspension_fact.request_envelope.protocol_revision
+            ),
             "input_requests": [dict(item) for item in self.input_requests],
             "round_count": self.round_count,
             "created_at": self.created_at,
@@ -439,16 +446,54 @@ def pending_mcp_input_required_from_state(
         source_suspension_event_reference=source_reference,
         suspension_fact=suspension,
         input_requests=tuple(
-            {
-                "key": item.key,
-                "method": item.method,
-                "params": thaw_json(item.user_visible_params),
-            }
+            _public_mcp_elicitation_request(
+                item.request,
+                exact_url=(
+                    pending_handle.elicitation_batch_owner.exact_url_for_display(
+                        request_key=item.key
+                    )
+                    if isinstance(item.request, McpUrlElicitationRequestFact)
+                    else None
+                ),
+            )
             for item in view.request_envelope.ordered_user_visible_input_requests
         ),
         round_count=view.interaction.round_count,
         deadline_monotonic=view.deadline_monotonic,
     )
+
+
+def _public_mcp_elicitation_request(
+    request: McpElicitationRequestFact,
+    *,
+    exact_url: str | None,
+) -> dict[str, Any]:
+    if isinstance(request, McpFormElicitationRequestFact):
+        if exact_url is not None:
+            raise ValueError("MCP form request cannot carry a URL projection")
+        return {
+            "key": request.key,
+            "method": request.method.value,
+            "mode": request.mode,
+            "message": request.message,
+            "requested_schema": thaw_json(request.requested_schema),
+        }
+    if isinstance(request, McpUrlElicitationRequestFact):
+        if exact_url is None:
+            raise ValueError("MCP URL request requires an exact display URL")
+        return {
+            "key": request.key,
+            "method": request.method.value,
+            "mode": request.mode,
+            "message": request.message,
+            "display_origin": request.display_origin,
+            "ascii_host": request.ascii_host,
+            "unicode_host": request.unicode_host,
+            "explicit_port": request.explicit_port,
+            "punycode_warning_required": request.punycode_warning_required,
+            "url": exact_url,
+        }
+    raise TypeError("unsupported MCP elicitation request fact")
 
 
 def reduce_plan_workflow_state(events: Iterable[AgentEvent]) -> PlanWorkflowState:

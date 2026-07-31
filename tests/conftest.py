@@ -120,6 +120,7 @@ _POSTGRES_TEST_MODULES = frozenset(
         "test_memory_supersede.py",
         "test_memory_vector_index_sync.py",
         "test_memory_vector_schema.py",
+        "test_mcp_continuation_postgres.py",
         "test_oxigraph_graph_store.py",
         "test_oxigraph_materializer.py",
         "test_postgres_driver.py",

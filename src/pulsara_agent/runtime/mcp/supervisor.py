@@ -17,6 +17,12 @@ from pulsara_agent.primitives.mcp import (
     McpDiagnosticFact,
     McpServerLifecycleTimingFact,
 )
+from pulsara_agent.ports.mcp_elicitation import (
+    McpElicitationCapabilityComposition,
+    McpElicitationCapabilityDisabled,
+    McpElicitationCapabilityFull,
+    McpExternalBrowserPort,
+)
 from pulsara_agent.runtime.mcp.sdk import (
     SdkMcpConnectCancelled,
     SdkMcpConnectError,
@@ -24,6 +30,9 @@ from pulsara_agent.runtime.mcp.sdk import (
     SdkMcpConnection,
     discover_mcp_server,
 )
+from pulsara_agent.runtime.mcp.protocol import McpClientInputRuntimeBinding
+from pulsara_agent.runtime.mcp.continuation_store import McpContinuationSecretCodec
+from pulsara_agent.runtime.mcp.subscriptions import McpServerDirtySignal
 from pulsara_agent.runtime.mcp.types import (
     McpBindingIdentity,
     McpCandidateBatch,
@@ -74,6 +83,19 @@ class McpServerSupervisor:
 
     retry_base_seconds: float = 1.0
     retry_max_seconds: float = 30.0
+    subscription_retry_base_seconds: float = 0.1
+    client_input_binding: McpClientInputRuntimeBinding | None = field(
+        default=None,
+        repr=False,
+    )
+    elicitation_capability: McpElicitationCapabilityComposition = field(
+        default_factory=McpElicitationCapabilityDisabled,
+        repr=False,
+    )
+    continuation_codec: McpContinuationSecretCodec | None = field(
+        default=None,
+        repr=False,
+    )
     _epoch: int = 0
     _runtime_identity: McpRuntimeConfigIdentity | None = None
     _event_safe_config_set_fingerprint: str = "sha256:empty"
@@ -98,11 +120,37 @@ class McpServerSupervisor:
     _pending_leases: dict[str, McpPendingLeaseOwner] = field(default_factory=dict)
     _retry_attempts: dict[str, int] = field(default_factory=dict)
     _next_retry_monotonic: dict[str, float] = field(default_factory=dict)
+    _subscription_retry_servers: set[str] = field(default_factory=set)
     _refresh_due_monotonic: dict[str, float] = field(default_factory=dict)
     _stale_discard_count: dict[str, int] = field(default_factory=dict)
     _lifecycle: str = "open"
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _close_attempt: _CloseAttempt | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        capability = self.elicitation_capability
+        binding = self.client_input_binding
+        if isinstance(capability, McpElicitationCapabilityDisabled):
+            if binding is not None:
+                raise ValueError(
+                    "disabled MCP elicitation cannot install a client binding"
+                )
+            return
+        if (
+            binding is None
+            or binding.elicitation_capability is not capability
+            or self.continuation_codec is None
+        ):
+            raise ValueError(
+                "full MCP elicitation requires exact ports, key, and binding"
+            )
+
+    @property
+    def external_browser_port(self) -> McpExternalBrowserPort | None:
+        capability = self.elicitation_capability
+        if isinstance(capability, McpElicitationCapabilityFull):
+            return capability.external_browser_port
+        return None
 
     @property
     def config_epoch(self) -> int:
@@ -564,6 +612,7 @@ class McpServerSupervisor:
     ) -> None:
         """Synchronous slot lifecycle transition used by HostSession's commit block."""
 
+        subscription_managers: list[Any] = []
         with self._state_lock:
             if self._lifecycle != "open":
                 raise RuntimeError("MCP supervisor is not open")
@@ -584,9 +633,12 @@ class McpServerSupervisor:
                 slot.lifecycle = "installed"
                 self._slots[slot.slot_id] = slot
                 self._installed_slot_by_server[server_id] = slot.slot_id
+                subscription_managers.append(slot.manager)
                 self._refresh_due_monotonic[server_id] = (
                     time.monotonic() + candidate.runtime_spec.config.refresh_ttl_ms / 1000
                 )
+        for manager in subscription_managers:
+            manager.activate_subscription()
 
     def restore_retiring_slots(self, slot_ids: tuple[str, ...]) -> None:
         """Rollback a pre-linearization optional installation failure."""
@@ -673,6 +725,54 @@ class McpServerSupervisor:
                 raise RuntimeError("MCP lease slot is unavailable")
             return slot.manager
 
+    def recovery_authority(
+        self,
+        identity: McpBindingIdentity,
+    ) -> tuple[str, str, str, str, str]:
+        """Read exact READY protocol/endpoint/auth authority for one binding."""
+
+        with self._state_lock:
+            slot = self._slots.get(identity.slot_id)
+            if (
+                slot is None
+                or slot.lifecycle != "installed"
+                or slot.binding_identity != identity
+            ):
+                raise RuntimeError("mcp_recovery_binding_generation_unavailable")
+            manager = slot.manager
+        read = getattr(manager, "recovery_authority", None)
+        if not callable(read):
+            raise RuntimeError("MCP manager lacks stable recovery authority")
+        authority = read(identity.server_id)
+        if not isinstance(authority, tuple) or len(authority) != 5:
+            raise RuntimeError("MCP manager returned malformed recovery authority")
+        return authority
+
+    def recovery_rebind_authority(
+        self,
+        identity: McpBindingIdentity,
+    ) -> tuple[str, str, str, str, str, str]:
+        """Read semantic authority while allowing a fresh physical slot."""
+
+        with self._state_lock:
+            slot = self._slots.get(identity.slot_id)
+            if (
+                slot is None
+                or slot.lifecycle != "installed"
+                or slot.binding_identity != identity
+                or self._installed_slot_by_server.get(identity.server_id)
+                != identity.slot_id
+            ):
+                raise RuntimeError("mcp_recovery_binding_generation_unavailable")
+            manager = slot.manager
+        read = getattr(manager, "recovery_rebind_authority", None)
+        if not callable(read):
+            raise RuntimeError("MCP manager lacks stateless recovery authority")
+        authority = read(identity.server_id, identity.snapshot_id)
+        if not isinstance(authority, tuple) or len(authority) != 6:
+            raise RuntimeError("MCP manager returned malformed rebind authority")
+        return authority
+
     def release_lease(self, lease: McpManagerLease) -> None:
         cleanup_slot: McpManagerSlot | None = None
         with self._state_lock:
@@ -725,6 +825,72 @@ class McpServerSupervisor:
             if owner is None or owner.reservation_id != reservation_id:
                 raise RuntimeError("MCP pending lease reservation mismatch")
             owner.confirmed = True
+
+    def recover_confirmed_pending_lease(
+        self,
+        *,
+        interaction_id: str,
+        reservation_id: str,
+        binding_identity: McpBindingIdentity,
+    ) -> McpPendingLeaseReservation:
+        """Rebind one stateless continuation to the exact installed target.
+
+        The persisted reservation ID remains the durable authority. Recovery
+        binds it to the current slot only after a semantic rebind receipt has
+        proven the snapshot/protocol/endpoint/auth target unchanged.
+        """
+
+        with self._state_lock:
+            if self._lifecycle != "open":
+                raise RuntimeError("MCP supervisor is closing")
+            if interaction_id in self._pending_leases:
+                owner = self._pending_leases[interaction_id]
+                if (
+                    owner.reservation_id == reservation_id
+                    and owner.lease.binding_identity == binding_identity
+                    and owner.confirmed
+                ):
+                    return McpPendingLeaseReservation(
+                        reservation_id=reservation_id,
+                        interaction_id=interaction_id,
+                        binding_identity=binding_identity,
+                    )
+                raise RuntimeError("MCP recovered pending lease conflicts")
+            slot = self._slots.get(binding_identity.slot_id)
+            if (
+                slot is None
+                or slot.lifecycle != "installed"
+                or slot.binding_identity != binding_identity
+                or self._installed_slot_by_server.get(binding_identity.server_id)
+                != binding_identity.slot_id
+            ):
+                raise RuntimeError("mcp_recovery_binding_generation_unavailable")
+            desired = self._desired_specs.get(binding_identity.server_id)
+            if (
+                desired is None
+                or not desired.config.enabled
+                or desired.runtime_config_fingerprint
+                != slot.runtime_config_fingerprint
+            ):
+                raise RuntimeError("mcp_recovery_binding_generation_unavailable")
+            slot.borrower_count += 1
+            lease = McpManagerLease(
+                lease_id=f"mcp_recovered_lease:{uuid4().hex}",
+                slot_id=slot.slot_id,
+                binding_identity=binding_identity,
+            )
+            self._leases[lease.lease_id] = lease
+            self._pending_leases[interaction_id] = McpPendingLeaseOwner(
+                interaction_id=interaction_id,
+                lease=lease,
+                reservation_id=reservation_id,
+                confirmed=True,
+            )
+        return McpPendingLeaseReservation(
+            reservation_id=reservation_id,
+            interaction_id=interaction_id,
+            binding_identity=binding_identity,
+        )
 
     def abort_pending_lease(self, interaction_id: str, reservation_id: str) -> None:
         with self._state_lock:
@@ -1090,6 +1256,7 @@ class McpServerSupervisor:
                         config.connect_timeout_ms / 1000,
                         remaining,
                     ),
+                    client_input_binding=self.client_input_binding,
                 )
             except (SdkMcpConnectError, SdkMcpConnectCancelled) as exc:
                 connection = exc.connection
@@ -1120,6 +1287,7 @@ class McpServerSupervisor:
             manager = SdkMcpClientManager.from_connected_server(
                 connection=connection,
                 snapshot=snapshot,
+                dirty_callback=self._on_subscription_dirty,
             )
             connection = None
             slot = new_mcp_slot(spec=spec, snapshot=snapshot, manager=manager)
@@ -1169,6 +1337,7 @@ class McpServerSupervisor:
                 if candidate.server_snapshot.status is McpServerStatus.READY:
                     self._retry_attempts.pop(config.server_id, None)
                     self._next_retry_monotonic.pop(config.server_id, None)
+                    self._subscription_retry_servers.discard(config.server_id)
                 else:
                     self._schedule_retry(config.server_id)
             else:
@@ -1344,7 +1513,12 @@ class McpServerSupervisor:
             self._retry_attempts[server_id] = attempt
             delay = min(
                 self.retry_max_seconds,
-                self.retry_base_seconds * (2 ** (attempt - 1)),
+                (
+                    self.subscription_retry_base_seconds
+                    if server_id in self._subscription_retry_servers
+                    else self.retry_base_seconds
+                )
+                * (2 ** (attempt - 1)),
             )
             deadline = time.monotonic() + delay
             self._next_retry_monotonic[server_id] = deadline
@@ -1389,12 +1563,46 @@ class McpServerSupervisor:
             timer.add_done_callback(self._retry_timer_tasks.discard)
             self._own_background_task(timer)
 
+    def _on_subscription_dirty(self, signal: McpServerDirtySignal) -> None:
+        """Coalesce a subscription signal into the normal safe-point pipeline."""
+
+        with self._state_lock:
+            server_id = signal.server_id
+            if self._lifecycle != "open" or server_id not in self._desired_specs:
+                return
+            slot = self._installed_slot_for_server(server_id)
+            if (
+                slot is None
+                or slot.lifecycle != "installed"
+                or slot.config_epoch != signal.config_epoch
+                or slot.snapshot_id != signal.snapshot_id
+                or slot.discovery_generation != signal.discovery_generation
+            ):
+                return
+            snapshots = tuple(slot.manager.snapshots)
+            if len(snapshots) != 1 or snapshots[0].snapshot_id != signal.snapshot_id:
+                return
+            authority = snapshots[0].authority
+            if (
+                authority is None
+                or authority.discovery_attribution.transport_generation
+                != signal.transport_generation
+            ):
+                return
+            configs = tuple(
+                spec.config
+                for _, spec in sorted(self._desired_specs.items())
+            )
+            self._subscription_retry_servers.add(server_id)
+        self.prepare(configs, trigger="manual_refresh")
+
     def _reset_retry_state(self, server_id: str) -> None:
         timer = self._retry_tasks.pop(server_id, None)
         if timer is not None and timer is not asyncio.current_task():
             timer.cancel()
         self._retry_attempts.pop(server_id, None)
         self._next_retry_monotonic.pop(server_id, None)
+        self._subscription_retry_servers.discard(server_id)
 
 
 def _starting_snapshot(runtime: _AttemptRuntime) -> McpServerSnapshot:

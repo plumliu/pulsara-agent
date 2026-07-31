@@ -1725,6 +1725,7 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
             *,
             expected_last_sequence=None,
             state=None,
+            transaction_companion=None,
         ):
             nonlocal injected
             should_cancel = not injected and any(
@@ -1747,6 +1748,7 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
                 self,
                 events,
                 expected_last_sequence=expected_last_sequence,
+                transaction_companion=transaction_companion,
             )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
@@ -1804,6 +1806,7 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
             *,
             expected_last_sequence=None,
             state=None,
+            transaction_companion=None,
         ):
             nonlocal injected
             should_cancel = not injected and any(
@@ -1826,6 +1829,7 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
                 self,
                 events,
                 expected_last_sequence=expected_last_sequence,
+                transaction_companion=transaction_companion,
             )
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pulsara_agent.event import RunInteractionResumeBoundaryEvent, RunStartEvent
+from pulsara_agent.event import AgentEvent, RunInteractionResumeBoundaryEvent, RunStartEvent
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.ports.run_authority import (
     HostRunGenesisEntry,
@@ -42,10 +42,29 @@ def materialize_activation_identity(
         ),
     )
 
-    if owner.latest_activation_owner_kind == "host_resume_boundary":
-        source_event = event_log.get_by_id(owner.latest_activation_owner_id)
+    return materialize_activation_identity_from_fact(
+        owner=owner,
+        durable_activation=durable,
+        event_log=event_log,
+    )
+
+
+def materialize_activation_identity_from_fact(
+    *,
+    owner: RunOwner,
+    durable_activation: RunExecutionActivationFact,
+    event_log: EventLog,
+    stored_source_event: AgentEvent | None = None,
+) -> RunActivationIdentity:
+    """Rebind an already committed segment attribution during process reopen."""
+
+    if durable_activation.activation_owner_kind == "host_resume_boundary":
+        source_event = stored_source_event or event_log.get_by_id(
+            durable_activation.activation_owner_id
+        )
         if (
             not isinstance(source_event, RunInteractionResumeBoundaryEvent)
+            or source_event.id != durable_activation.activation_owner_id
             or source_event.sequence is None
             or source_event.run_id != owner.identity.run_id
         ):
@@ -62,9 +81,12 @@ def materialize_activation_identity(
             source_resume_boundary=source_event.boundary,
         )
     else:
-        source_event = event_log.get_by_id(owner.identity.run_start_event_id)
+        source_event = stored_source_event or event_log.get_by_id(
+            owner.identity.run_start_event_id
+        )
         if (
             not isinstance(source_event, RunStartEvent)
+            or source_event.id != owner.identity.run_start_event_id
             or source_event.sequence != owner.identity.run_start_sequence
         ):
             raise RuntimeError("initial activation lacks exact durable RunStart")
@@ -72,7 +94,7 @@ def materialize_activation_identity(
             source_event,
             runtime_session_id=owner.identity.runtime_session_id,
         )
-        if owner.latest_activation_owner_kind == "host_run_boundary":
+        if durable_activation.activation_owner_kind == "host_run_boundary":
             if not isinstance(owner.genesis.entry, HostRunGenesisEntry):
                 raise RuntimeError("Host activation has non-Host genesis")
             source = _runtime_fact(
@@ -83,7 +105,7 @@ def materialize_activation_identity(
                 source_run_start_event_reference=source_reference,
                 source_boundary=owner.genesis.entry.new_run_boundary,
             )
-        else:
+        elif durable_activation.activation_owner_kind == "subagent_run_start":
             if not isinstance(owner.genesis.entry, SubagentRunGenesisEntry):
                 raise RuntimeError("child activation has non-child genesis")
             source = _runtime_fact(
@@ -94,11 +116,13 @@ def materialize_activation_identity(
                 source_run_start_event_reference=source_reference,
                 source_entry=owner.genesis.entry.subagent_run_entry,
             )
+        else:
+            raise RuntimeError("unsupported recovered activation owner kind")
 
     payload = {
         "schema_version": 1,
         "owner_identity": owner.identity,
-        "durable_activation": durable,
+        "durable_activation": durable_activation,
         "source": source,
     }
     provisional = RunActivationIdentity.model_construct(
@@ -130,4 +154,7 @@ def _runtime_fact(fact_type, *, domain: str, fingerprint_field: str, **payload):
     )
 
 
-__all__ = ["materialize_activation_identity"]
+__all__ = [
+    "materialize_activation_identity",
+    "materialize_activation_identity_from_fact",
+]

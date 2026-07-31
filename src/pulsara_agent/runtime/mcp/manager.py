@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from pulsara_agent.runtime.mcp.types import (
-    McpInputRequiredResolution,
-    McpOriginalRequest,
-    McpServerSnapshot,
-)
+from pulsara_agent.ports.mcp import McpConfirmedContinuationDispatchReceipt
+from pulsara_agent.ports.mcp_secret import McpReplayReadyCarrierPlaintext
+from pulsara_agent.runtime.mcp.types import McpManagerLease, McpServerSnapshot
 
 
 class McpClientManager(Protocol):
@@ -18,7 +16,7 @@ class McpClientManager(Protocol):
 
     async def call_tool(
         self,
-        server_id: str,
+        binding_lease: McpManagerLease,
         tool_name: str,
         arguments: dict[str, Any],
         *,
@@ -32,13 +30,15 @@ class McpClientManager(Protocol):
     def cancel_active(self) -> None:
         """Best-effort cancellation signal for active MCP calls."""
 
+    def activate_subscription(self) -> None:
+        """Start invalidation listening after this manager slot is installed."""
+
     async def resume_suspended_request(
         self,
         *,
-        server_id: str,
-        original_request: McpOriginalRequest,
-        request_state: str | None,
-        resolution: McpInputRequiredResolution,
+        binding_lease: McpManagerLease,
+        replay_plaintext: McpReplayReadyCarrierPlaintext,
+        dispatch_receipt: McpConfirmedContinuationDispatchReceipt,
         timeout_ms: int,
     ) -> Any:
         """Resume a modern MCP InputRequiredResult through Pulsara-owned DTOs."""

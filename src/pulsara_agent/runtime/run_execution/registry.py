@@ -25,7 +25,9 @@ from pulsara_agent.ports.run_execution import (
     RunReconciliationRequired,
     RunSegmentInstallBlocked,
     RunTerminationIntent,
+    RunActivationIdentity,
 )
+from pulsara_agent.primitives.context import ContextEventReferenceFact
 from pulsara_agent.ports.run_terminalization import TerminalRunReceipt
 from pulsara_agent.ports.interaction_transition import (
     build_interaction_resume_link_receipt,
@@ -263,6 +265,104 @@ class RunExecutionRegistry:
         handles.borrow_tracker.on_change = lambda: self._sweep_retired_owner(
             run_id, owner
         )
+
+    def install_recovered_mcp_continuation(
+        self,
+        *,
+        owner: RunOwner,
+        execution_handles: RunExecutionHandleSet,
+        authority: PendingInteractionAuthority,
+        resources: RunSuspensionResources,
+        previous_activation_identity: RunActivationIdentity,
+        suspended_authority_revision_fingerprint: str,
+        replay_ready: bool,
+        resume_boundary_event_reference: ContextEventReferenceFact | None,
+    ) -> None:
+        """Install one restart-rebound MCP owner without reviving an old task."""
+
+        if (
+            execution_handles.owner != owner.identity
+            or execution_handles.state != "run_owned"
+        ):
+            raise ValueError("recovered MCP handles are not owned by the run")
+        if authority.identity.owner_identity != owner.identity:
+            raise ValueError("recovered MCP interaction belongs to another run")
+        if (
+            resources.pending_interaction_fingerprint
+            != authority.identity.interaction_fingerprint
+            or resources.resource_kind != "mcp_input_required"
+        ):
+            raise ValueError("recovered MCP suspension resource authority mismatch")
+        if previous_activation_identity.owner_identity != owner.identity:
+            raise ValueError("recovered MCP activation belongs to another run")
+        if not suspended_authority_revision_fingerprint:
+            raise ValueError("recovered MCP suspension authority is required")
+        generation = previous_activation_identity.durable_activation.segment_generation
+        if resources.resource_generation != generation:
+            raise ValueError("recovered MCP resource generation drifted")
+        if replay_ready != (resume_boundary_event_reference is not None):
+            raise ValueError("recovered MCP replay boundary matrix mismatch")
+        if replay_ready and not isinstance(
+            owner.authority_head, InstalledRunAuthorityRevision
+        ):
+            raise ValueError("recovered MCP replay lacks installed authority")
+
+        owner.resource_slot = BoundRunResources(handle_set=execution_handles)
+        owner.next_segment_generation = max(owner.next_segment_generation, generation)
+        suspended_outcome = RunSuspendedOutcome(
+            owner_identity=owner.identity,
+            activation_identity=previous_activation_identity,
+            authority_revision_fingerprint=(suspended_authority_revision_fingerprint),
+            source_interaction_event_reference=(
+                authority.identity.source_interaction_event_reference
+            ),
+            pending_interaction=authority,
+            progress=build_progress_snapshot(owner),
+        )
+        owner.activation_completion_history[generation] = (
+            RunActivationCoordinatorResult(
+                segment_id=(
+                    "recovered_activation:"
+                    + previous_activation_identity.activation_fingerprint.removeprefix(
+                        "sha256:"
+                    )
+                ),
+                segment_generation=generation,
+                disposition="waiting_user",
+                outcome=suspended_outcome,
+            )
+        )
+
+        if replay_ready:
+            assert resume_boundary_event_reference is not None
+            pending_token = (
+                f"run-pending:{owner.identity.owner_fingerprint}:"
+                f"recovered-continuation:{owner.authority_head.revision.revision}"
+            )
+            resources.state_carrier.transfer(
+                expected_owner_token=resources.state_owner_token,
+                new_owner_token=pending_token,
+            )
+            owner.pending_activation_state = resources.state_carrier
+            owner.pending_activation_owner_token = pending_token
+            owner.pending_interaction_resume_link = PendingInteractionResumeLink(
+                previous_activation_identity=previous_activation_identity,
+                pending_interaction_identity=authority.identity,
+                resume_boundary_event_reference=resume_boundary_event_reference,
+                installed_authority_revision_fingerprint=(
+                    owner.authority_head.revision.authority_fingerprint
+                ),
+            )
+            owner.suspension_slot = NoActiveSuspension()
+            owner.lifecycle = "initializing"
+        else:
+            owner.suspension_slot = ActiveRunSuspension(
+                authority=authority,
+                resources=resources,
+            )
+            owner.lifecycle = "suspended"
+        owner.progress.progress_generation += 1
+        self.register_recovered(owner)
 
     def install_initial_authority_full(
         self,

@@ -69,11 +69,10 @@ from pulsara_agent.primitives.mcp import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredResolutionAttemptFact,
     McpInputRequiredSourceAuthorityFact,
-    PreparedMcpInputRequiredResolution,
     build_runtime_event_deadline_budget,
-    prepare_mcp_input_required_resolution,
-    stable_runtime_event_id,
 )
+from pulsara_agent.ports.mcp import PreparedMcpInputRequiredResolution
+from pulsara_agent.ports.mcp_secret import McpElicitationAction
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
@@ -470,6 +469,17 @@ def _mcp_pending_audit(
         timing = snapshot.timing
         if timing is None:
             raise ValueError("MCP installed snapshot requires lifecycle timing")
+        authority = snapshot.authority
+        protocol_semantic = (
+            authority.surface_semantic.protocol_semantic
+            if authority is not None
+            else None
+        )
+        negotiation = (
+            authority.discovery_attribution.negotiation
+            if authority is not None
+            else None
+        )
         server_facts.append(
             McpInstalledServerSnapshotFact(
                 server_id=snapshot.server_id,
@@ -482,6 +492,16 @@ def _mcp_pending_audit(
                 event_safe_config_fingerprint=snapshot.event_safe_config_fingerprint,
                 snapshot_semantic_fingerprint=snapshot.snapshot_semantic_fingerprint,
                 protocol_version=snapshot.protocol_version,
+                protocol_behavior_era=(
+                    protocol_semantic.behavior_era.value
+                    if protocol_semantic is not None
+                    else None
+                ),
+                negotiation_wire_receipt_fingerprint=(
+                    negotiation.negotiation_wire_receipt_fingerprint
+                    if negotiation is not None
+                    else None
+                ),
                 tool_count=len(snapshot.tools),
                 resource_count=len(snapshot.resources),
                 resource_template_count=len(snapshot.resource_templates),
@@ -1160,7 +1180,6 @@ class HostSession:
             supervisor.reject_candidates(tuple(latest_candidates.values()))
             return
 
-        installation_id = f"mcp_installation:{uuid4().hex}"
         stale_discard_counts = supervisor.stale_discard_counts()
         runtime_session = self.wiring.runtime_wiring.runtime_session
         execution_port = runtime_session.mcp_tool_execution_port
@@ -1175,7 +1194,7 @@ class HostSession:
                 snapshots=new_snapshots,
                 configs_by_server=configs_by_server,
                 slots_by_server=slots_by_server,
-                installation_id=installation_id,
+                installation_id=None,
                 previous_installation=old_installation,
             )
             new_capability_runtime = _replace_mcp_capability_provider(
@@ -1302,6 +1321,63 @@ class HostSession:
             await self._apply_mcp_safe_point(
                 trigger="initial",
                 prepared_ticket=ticket,
+            )
+
+    async def recover_deferred_mcp_runs(
+        self,
+        run_ids: tuple[str, ...],
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Rebind restart-safe stateless MCP continuations after discovery."""
+
+        if not run_ids:
+            return
+        if len(run_ids) != 1:
+            raise RuntimeError("Host reopen cannot own multiple deferred MCP runs")
+        from pulsara_agent.host.mcp_recovery import recover_host_mcp_run
+
+        recovered = await recover_host_mcp_run(
+            self,
+            run_id=run_ids[0],
+            deadline_monotonic=deadline_monotonic,
+        )
+        if recovered.recovery_state == "awaiting_client_input":
+            await self._sync_ingress_waiting_state()
+            return
+        if not isinstance(
+            recovered.prepared_resolution,
+            PreparedMcpInputRequiredResolution,
+        ):
+            raise RuntimeError("replay-ready MCP recovery lost its resolution")
+        await self._ingress_coordinator.adopt_recovered_active_run(
+            run_start_event_id=recovered.run_start_event_id
+        )
+
+        async def on_settled(outcome: RunActivationOutcome) -> None:
+            self._on_activation_settled(outcome)
+            pending = self.pending_interaction
+            await self._ingress_coordinator.settle_recovered_active_run(
+                resume_match_key=(
+                    _pending_interaction_match_key(pending)
+                    if pending is not None
+                    else None
+                )
+            )
+
+        dispatch = self._run_activation_service.start_resume_result_activation(
+            run_id=recovered.run_id,
+            host_session_id=self.host_session_id,
+            interaction_kind="mcp_input_required",
+            resolution=recovered.prepared_resolution,
+            on_activation_settled=on_settled,
+        )
+        if isinstance(dispatch, RunSegmentInstallBlocked):
+            await self._ingress_coordinator.settle_recovered_active_run(
+                resume_match_key=None
+            )
+            raise RuntimeError(
+                f"recovered MCP continuation activation was blocked: {dispatch.reason}"
             )
 
     def _new_run_boundary_identity(
@@ -3680,16 +3756,83 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_mcp_input_required(resolution.interaction_id)
         self._raise_if_active_run()
-        prepared_resolution = prepare_mcp_input_required_resolution(
-            source_suspension_event_reference=(
-                pending.source_suspension_event_reference
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        mcp_port = runtime_session.mcp_tool_execution_port
+        if mcp_port is None:
+            raise RuntimeError("MCP resolution requires its execution port")
+        pending_handle = mcp_port.handle_for_interaction(resolution.interaction_id)
+        if pending_handle is None:
+            raise RuntimeError("MCP resolution lost its process-local pending owner")
+        batch_owner = pending_handle.elicitation_batch_owner
+        expected_keys = tuple(slot.request.key for slot in batch_owner.item_slots)
+        supplied_keys = tuple(sorted(resolution.responses))
+        if not resolution.cancelled and supplied_keys != expected_keys:
+            raise ValueError("MCP resolution response key set is not exact")
+        if resolution.cancelled and resolution.responses:
+            raise ValueError("cancelled MCP resolution cannot carry responses")
+        for slot in batch_owner.item_slots:
+            request_key = slot.request.key
+            response = resolution.responses.get(request_key, {})
+            if resolution.cancelled:
+                action = McpElicitationAction.CANCEL
+            else:
+                try:
+                    action = McpElicitationAction(response.get("action", "accept"))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid MCP elicitation action for {request_key!r}"
+                    ) from exc
+            if slot.request.mode == "form":
+                legacy_content = {
+                    key: value for key, value in response.items() if key != "action"
+                }
+                explicit_content = response.get("content")
+                if explicit_content is not None and not isinstance(
+                    explicit_content, dict
+                ):
+                    raise TypeError("MCP form response content must be an object")
+                content = (
+                    explicit_content
+                    if isinstance(explicit_content, dict)
+                    else legacy_content
+                )
+                batch_owner.submit_form(
+                    request_key=request_key,
+                    action=action,
+                    content_present=action is McpElicitationAction.ACCEPT,
+                    content=(
+                        content if action is McpElicitationAction.ACCEPT else None
+                    ),
+                )
+            elif action is McpElicitationAction.ACCEPT:
+                batch_owner.confirm_url_retry(request_key=request_key)
+            else:
+                batch_owner.decline_or_cancel_url(
+                    request_key=request_key,
+                    action=action,
+                )
+        lifecycle = runtime_session.mcp_input_required_lifecycle_store.record(
+            resolution.interaction_id
+        )
+        if lifecycle is None:
+            raise RuntimeError("MCP resolution lacks its durable lifecycle")
+        attempt_ordinal = 1
+        if lifecycle.latest_resume_failed_event_reference is not None:
+            previous_reference = lifecycle.latest_resolution_submitted_event_reference
+            if previous_reference is None:
+                raise RuntimeError("MCP retry lifecycle lost its prior resolution")
+            previous = runtime_session.event_log.get_by_id(previous_reference.event_id)
+            if not isinstance(previous, McpInputRequiredResolutionSubmittedEvent):
+                raise RuntimeError("MCP prior resolution authority is not exact")
+            attempt_ordinal = previous.attempt.attempt_ordinal + 1
+        prepared_resolution = mcp_port.prepare_resolution(
+            pending_handle=pending_handle,
+            source_suspension_event_reference=pending.source_suspension_event_reference,
+            source_suspension=pending.suspension_fact,
+            attempt_ordinal=attempt_ordinal,
+            submitted_at_utc=(
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             ),
-            source_suspension_fact_fingerprint=(
-                pending.suspension_fact.suspension_fact_fingerprint
-            ),
-            interaction_id=resolution.interaction_id,
-            responses=resolution.responses,
-            cancelled=resolution.cancelled,
         )
         prepared = self._prepare_interaction_resume_attempt(
             pending=pending,
@@ -3706,6 +3849,33 @@ class HostSession:
                 prepared=prepared,
                 recover_pending_on_publication_failure=True,
             ),
+        )
+
+    async def launch_mcp_elicitation_url(
+        self,
+        *,
+        interaction_id: str,
+        request_key: str,
+        consent_receipt_fingerprint: str,
+    ):
+        """Launch the exact private URL owned by one pending MCP request."""
+
+        self._raise_if_not_open("launching an MCP elicitation URL")
+        pending = self._require_pending_mcp_input_required(interaction_id)
+        if request_key not in {
+            item.key
+            for item in pending.suspension_fact.request_envelope.ordered_user_visible_input_requests
+        }:
+            raise KeyError("unknown MCP elicitation request key")
+        mcp_port = self.wiring.runtime_wiring.runtime_session.mcp_tool_execution_port
+        if mcp_port is None:
+            raise RuntimeError("MCP URL launch requires its execution port")
+        handle = mcp_port.handle_for_interaction(interaction_id)
+        if handle is None:
+            raise RuntimeError("MCP URL launch lost its pending owner")
+        return await handle.elicitation_batch_owner.launch_url(
+            request_key=request_key,
+            consent_receipt_fingerprint=consent_receipt_fingerprint,
         )
 
     async def exit_plan_workflow(
@@ -5563,22 +5733,32 @@ class HostSession:
             ):
                 raise RuntimeError("prepared MCP resolution source authority drifted")
             source_fact = pending.suspension_fact
+            durable_continuation = source_fact.durable_continuation
             source_authority = build_frozen_fact(
                 McpInputRequiredSourceAuthorityFact,
-                schema_version="mcp_input_required_source_authority.v1",
+                schema_version="mcp_input_required_source_authority.v2",
                 interaction=source_fact.interaction,
                 binding_identity=source_fact.binding_identity,
                 pending_lease_reservation=source_fact.pending_lease_reservation,
                 request_envelope_semantic_fingerprint=(
                     source_fact.request_envelope.request_envelope_semantic_fingerprint
                 ),
+                request_set_fingerprint=(
+                    source_fact.request_envelope.request_set_fingerprint
+                ),
+                continuation_carrier_id=(durable_continuation.continuation_carrier_id),
+                continuation_fact_fingerprint=(
+                    durable_continuation.continuation_fact_fingerprint
+                ),
+                operation_expires_at_utc=(
+                    durable_continuation.expiry.operation_expires_at_utc
+                ),
+                expiry_fingerprint=durable_continuation.expiry.expiry_fingerprint,
                 rollout_reservation_id=source_fact.rollout_reservation_id,
                 rollout_reservation_fingerprint=(
                     source_fact.rollout_reservation_fingerprint
                 ),
                 source_mcp_installation_id=(source_fact.source_mcp_installation_id),
-                durable_deadline_utc=source_fact.durable_deadline_utc,
-                deadline_policy_fingerprint=(source_fact.deadline_policy_fingerprint),
                 predecessor_resolution_submitted_event_reference=(
                     source_fact.predecessor_resolution_submitted_event_reference
                 ),
@@ -5642,19 +5822,11 @@ class HostSession:
                 )
             prepared_mcp_resolution = resolution
             mcp_resolution_event = McpInputRequiredResolutionSubmittedEvent(
-                id=(
-                    "mcp_resolution:"
-                    + stable_runtime_event_id(
-                        "mcp-input-required-resolution-submitted-event:v1",
-                        identity.boundary_id,
-                        source_fact.interaction.round_count,
-                        attempt.attempt_ordinal,
-                        resolution.prepared_resolution_fingerprint,
-                    )
-                ),
+                id=resolution.resolution_carrier.resolution_event_id,
                 **event_context.event_fields(),
                 source=source_authority,
                 resolution=resolution.resolution_semantic,
+                continuation=resolution.resolution_carrier,
                 attempt=attempt,
                 resume_boundary_event_identity=stable_event_identity(
                     boundary_event,
@@ -5710,8 +5882,32 @@ class HostSession:
         self._set_boundary_candidates(candidates)
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
+        mcp_resolution_confirmed = False
+
+        def confirm_mcp_resolution(outcome: str) -> None:
+            nonlocal mcp_resolution_confirmed
+            if prepared_mcp_resolution is None or mcp_resolution_confirmed:
+                return
+            execution_port = runtime_session.mcp_tool_execution_port
+            if execution_port is None:
+                raise RuntimeError("MCP resolution lost its execution port")
+            execution_port.confirm_resolution_commit(
+                prepared_resolution=prepared_mcp_resolution,
+                outcome=outcome,
+            )
+            mcp_resolution_confirmed = True
+
         try:
-            stored = tuple(await runtime_session.emit_many(candidates))
+            stored = tuple(
+                await runtime_session.emit_many(
+                    candidates,
+                    transaction_companion=(
+                        prepared_mcp_resolution.transaction_companion
+                        if prepared_mcp_resolution is not None
+                        else None
+                    ),
+                )
+            )
         except BaseException as exc:
             if isinstance(
                 exc,
@@ -5721,6 +5917,7 @@ class HostSession:
                     BoundaryBatchCommitStatus.NONE,
                 )
                 self._set_boundary_commit_state("not_started")
+                confirm_mcp_resolution("none")
                 if isinstance(exc, HostIngressAdmissionStale):
                     raise
                 raise HostIngressAdmissionStale(
@@ -5733,6 +5930,7 @@ class HostSession:
                     BoundaryBatchCommitStatus.FULL,
                     committed_events=committed_events,
                 )
+                confirm_mcp_resolution("full")
             else:
                 outcome = runtime_session.resolved_event_write_outcome(exc)
                 if outcome.status != "full":
@@ -5746,6 +5944,9 @@ class HostSession:
                         if outcome.status == "unknown"
                         else "not_started"
                     )
+                    confirm_mcp_resolution(
+                        "unknown" if outcome.status == "unknown" else "none"
+                    )
                     raise
                 self._set_boundary_commit_state("committed")
                 committed_events = tuple(outcome.committed_events)
@@ -5753,6 +5954,7 @@ class HostSession:
                     BoundaryBatchCommitStatus.FULL,
                     committed_events=committed_events,
                 )
+                confirm_mcp_resolution("full")
             runtime_session.acknowledge_committed_mcp_installation_audits(
                 committed_events
             )
@@ -5817,6 +6019,7 @@ class HostSession:
                     ),
                 )
             raise exc
+        confirm_mcp_resolution("full")
         self._set_boundary_commit_confirmation(
             BoundaryBatchCommitStatus.FULL,
             committed_events=stored,

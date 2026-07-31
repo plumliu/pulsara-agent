@@ -18,11 +18,12 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.primitives.long_horizon import EventSchemaDomainContractFact
 from pulsara_agent.primitives.frozen import StableEventIdentityFact, build_frozen_fact
 from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
+from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 
 
 # This is a catalog migration version only.  Per-row decoder identity is the
 # event type/version/schema/domain tuple below.
-AGENT_EVENT_SCHEMA_VERSION = 7
+AGENT_EVENT_SCHEMA_VERSION = 8
 
 
 class EventSchemaRegistryConflict(RuntimeError):
@@ -303,6 +304,7 @@ def freeze_event_write_candidate(
 
     if event.sequence is not None:
         raise ValueError("event write candidate requires sequence=None")
+    assert_not_mcp_secret(event, sink="EventLog")
     binding = registry.resolve_for_event(event)
     contract = binding.schema_contract
     payload = canonical_event_payload_bytes(event)
@@ -373,6 +375,7 @@ def decode_event_write_candidate(
 
 
 def dump_agent_event(event: AgentEvent) -> dict[str, Any]:
+    assert_not_mcp_secret(event, sink="EventLog")
     return event.model_dump(mode="json")
 
 

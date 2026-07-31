@@ -31,6 +31,9 @@ from pulsara_agent.memory.governance.preparation import (
 from pulsara_agent.memory.reflection.engine import MemoryReflectionOptions
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.runtime.mcp.installation import empty_mcp_installation
+from pulsara_agent.runtime.mcp.continuation_store import (
+    InMemoryMcpContinuationSecretStore,
+)
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import McpInstalledCapabilitySnapshot
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
@@ -151,6 +154,7 @@ def build_component_runtime_wiring(
         memory_domain=memory_domain,
         working_context_store=None,
         mcp_installation=installation,
+        mcp_continuation_repository=InMemoryMcpContinuationSecretStore(),
     )
 
 

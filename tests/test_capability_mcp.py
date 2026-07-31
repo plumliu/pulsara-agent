@@ -26,16 +26,15 @@ from pulsara_agent.primitives.mcp import (
     McpServerLifecycleTimingFact,
     McpServerSnapshotFact,
 )
-from tests.support.mcp import MockMcpClientManager
+from tests.support.mcp import (
+    MockMcpClientManager,
+    make_mcp_client_input_required,
+)
 from tests.support.capability import tool_runtime_context
 from pulsara_agent.runtime.mcp.store import McpConfigStore
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
     McpDrainError,
-    McpInputRequestDTO,
-    McpInputRequired,
-    McpOriginalRequest,
-    McpRequestSourceMethod,
     McpServerCandidate,
     McpServerConfig,
     McpServerRuntimeSpec,
@@ -50,6 +49,7 @@ from pulsara_agent.runtime.mcp.types import (
     new_mcp_slot,
     runtime_mcp_config_fingerprint,
     snapshot_semantic_fingerprint,
+    _runtime_config_payload,
 )
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 from pulsara_agent.ports.tool_execution import (
@@ -64,6 +64,11 @@ from pulsara_agent.ports.tool_execution import (
 )
 from pulsara_agent.event import EventContext
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.runtime.mcp.continuation_store import (
+    InMemoryMcpContinuationSecretStore,
+    McpContinuationKeyProvider,
+    McpContinuationSecretCodec,
+)
 
 
 _TEST_EXECUTION_PORTS: dict[int, RuntimeMcpToolExecutionPort] = {}
@@ -71,7 +76,17 @@ _TEST_EXECUTION_PORTS: dict[int, RuntimeMcpToolExecutionPort] = {}
 
 def build_mcp_installation(*, supervisor: McpServerSupervisor, **kwargs):
     execution_port = _TEST_EXECUTION_PORTS.setdefault(
-        id(supervisor), RuntimeMcpToolExecutionPort(supervisor)
+        id(supervisor),
+        RuntimeMcpToolExecutionPort(
+            supervisor,
+            continuation_codec=McpContinuationSecretCodec(
+                McpContinuationKeyProvider.from_master_key(
+                    key_id="test-capability-mcp-key",
+                    master_key=b"test-capability-mcp-master-key" * 2,
+                )
+            ),
+            continuation_repository=InMemoryMcpContinuationSecretStore(),
+        ),
     )
     return _build_mcp_installation(
         execution_port=execution_port,
@@ -291,6 +306,28 @@ def test_mcp_config_store_rejects_removed_startup_timeout(tmp_path: Path) -> Non
         McpConfigStore(path).load()
 
 
+def test_mcp_config_store_rejects_unowned_oauth_profile(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.yaml"
+    path.write_text(
+        "servers:\n"
+        "  docs:\n"
+        "    transport: streamable_http\n"
+        "    url: https://example.test/mcp\n"
+        "    issuer: https://issuer.example.test\n"
+    )
+    with pytest.raises(ValueError, match="MCP OAuth is disabled"):
+        McpConfigStore(path).load()
+
+
+def test_mcp_http_redirects_fail_closed_before_auth_can_leak() -> None:
+    with pytest.raises(ValueError, match="redirects require an owned same-origin policy"):
+        McpStreamableHttpConfig(
+            url="https://example.test/mcp",
+            bearer_token_env_var="PULSARA_TEST_MCP_TOKEN",
+            follow_redirects=True,
+        )
+
+
 def test_runtime_fingerprint_detects_secret_rotation_but_event_safe_does_not() -> None:
     left = McpServerConfig(
         server_id="docs",
@@ -310,6 +347,9 @@ def test_runtime_fingerprint_detects_secret_rotation_but_event_safe_does_not() -
     assert event_safe_mcp_config_fingerprint(left) == event_safe_mcp_config_fingerprint(
         right
     )
+    runtime_payload = repr(_runtime_config_payload(left))
+    assert "Bearer one" not in runtime_payload
+    assert "token=one" not in runtime_payload
 
 
 def test_runtime_fingerprint_detects_environment_secret_rotation(
@@ -641,23 +681,12 @@ def test_tool_call_uses_and_releases_slot_lease() -> None:
 
 def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
     def handler(arguments):
-        return McpInputRequired(
+        del arguments
+        return make_mcp_client_input_required(
             interaction_id="mcp_input_required:1",
             server_id="docs",
-            protocol_version="2026-07-28",
             request_state=None,
-            input_requests=(
-                McpInputRequestDTO(
-                    key="token",
-                    method="elicitation/create",
-                    params={"message": "token"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=arguments,
-            ),
+            request_key="token",
         )
 
     supervisor, installation, _manager, slot = _installed_surface(handler=handler)
@@ -690,23 +719,12 @@ def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
 
 def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
     def handler(arguments):
-        return McpInputRequired(
+        del arguments
+        return make_mcp_client_input_required(
             interaction_id="mcp_input_required:duplicate",
             server_id="docs",
-            protocol_version="2026-07-28",
             request_state=None,
-            input_requests=(
-                McpInputRequestDTO(
-                    key="token",
-                    method="elicitation/create",
-                    params={"message": "token"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=arguments,
-            ),
+            request_key="token",
         )
 
     supervisor, installation, _manager, slot = _installed_surface(handler=handler)
@@ -916,8 +934,8 @@ def test_close_during_discovery_retries_connection_cleanup(
 
     connection = FailOnceConnection()
 
-    async def fake_connect(cls, config, *, timeout_seconds):
-        del cls, config, timeout_seconds
+    async def fake_connect(cls, config, *, timeout_seconds, client_input_binding=None):
+        del cls, config, timeout_seconds, client_input_binding
         return connection
 
     async def blocked_discovery(_connection, **_kwargs):
