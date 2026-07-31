@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from time import monotonic
 from typing import Protocol
 
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionFailureKind,
     DurableProjectionSettlementOutcome,
@@ -44,10 +44,7 @@ class DurableProjectionWorkerAttempt:
         physical = leased_job.delivery_policy.physical_policy
         lease_remaining = max(
             0.0,
-            (
-                leased_job.lease_expires_at
-                - datetime.now(timezone.utc)
-            ).total_seconds(),
+            (leased_job.lease_expires_at - datetime.now(timezone.utc)).total_seconds(),
         )
         attempt_deadline = monotonic() + min(
             lease_remaining,
@@ -79,9 +76,7 @@ class DurableProjectionWorkerAttempt:
         except ValueError as error:
             return self.repository.settle_failure(
                 lease=leased_job,
-                failure_kind=(
-                    DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT
-                ),
+                failure_kind=(DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT),
                 error=error,
                 deadline_monotonic=(
                     monotonic() + physical.result_commit_timeout_seconds
@@ -101,9 +96,7 @@ class DurableProjectionWorkerAttempt:
         outcome = self.repository.settle_success(
             lease=leased_job,
             prepared=prepared,
-            deadline_monotonic=(
-                monotonic() + physical.result_commit_timeout_seconds
-            ),
+            deadline_monotonic=(monotonic() + physical.result_commit_timeout_seconds),
         )
         if outcome.confirmation is DurableProjectionCommitConfirmation.UNRESOLVED:
             # The durable lease remains the recovery owner. Do not manufacture

@@ -27,16 +27,16 @@ from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
-from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.context_input.io_service import ContextInputIoService
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     message_semantic_fingerprint,
     tool_semantic_fingerprint,
 )
 from pulsara_agent.runtime.provider_input.vector import load_provider_input_vector
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
+from tests.support.artifacts import FakeToolResultArtifactIndex
 from tests.support import run_agent_task, test_llm_config, test_model_limits
+from tests.support.runtime_owner import build_test_agent_runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +130,7 @@ async def run_provider_input_prefix_benchmark(
         workspace_root,
         event_log=InMemoryEventLog(),
         archive=archive,
-        tool_result_artifacts=InMemoryToolResultArtifactIndex(),
+        tool_result_artifacts=FakeToolResultArtifactIndex(),
         runtime_session_id="runtime:provider-input-prefix-benchmark",
     )
     transport = DeterministicProviderInputTransport(model_calls=model_calls)
@@ -152,17 +152,17 @@ async def run_provider_input_prefix_benchmark(
         flash_limits=benchmark_limits,
     )
     llm_runtime = LLMRuntime(config=config, registry=registry)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=llm_runtime,
     )
 
-    import pulsara_agent.runtime.agent as agent_module
+    import pulsara_agent.runtime.session_run_capabilities as capabilities_module
 
     prepare_seconds: list[float] = []
     io_seconds: list[float] = []
-    original_prepare = agent_module.prepare_live_context_snapshot
+    original_prepare = capabilities_module.prepare_live_context_snapshot
     original_io_execute = ContextInputIoService.execute
 
     async def timed_prepare(*args, **kwargs):
@@ -179,7 +179,7 @@ async def run_provider_input_prefix_benchmark(
         finally:
             io_seconds.append(perf_counter() - started)
 
-    agent_module.prepare_live_context_snapshot = timed_prepare
+    capabilities_module.prepare_live_context_snapshot = timed_prepare
     ContextInputIoService.execute = timed_io_execute
     started = perf_counter()
     try:
@@ -188,7 +188,7 @@ async def run_provider_input_prefix_benchmark(
             "Exercise a deterministic multi-call provider-prefix trajectory.",
         )
     finally:
-        agent_module.prepare_live_context_snapshot = original_prepare
+        capabilities_module.prepare_live_context_snapshot = original_prepare
         ContextInputIoService.execute = original_io_execute
     wall_seconds = perf_counter() - started
     if result.final_text != "PULSARA_PROVIDER_PREFIX_BENCHMARK_OK":

@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     InvalidAttemptPayload,
     MemoryCandidate,
     ValidCandidatePayload,
@@ -44,6 +44,9 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelCallFact,
     ResolvedModelTargetFact,
     sha256_fingerprint,
+)
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionModelInputAttributionFact,
 )
 from pulsara_agent.primitives.transcript_projection import (
     RunTranscriptSeedReferenceFact,
@@ -106,6 +109,10 @@ from pulsara_agent.primitives.mcp import (
     McpInstalledServerSnapshotFact,
     McpReconcileAttemptSummaryFact,
     McpReconcileTriggerValue,
+)
+from pulsara_agent.primitives.mcp_continuation import (
+    McpContinuationDispatchReservationFact,
+    McpContinuationResolutionCarrierFact,
 )
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     BoundedRuntimeFailureDiagnosticFact,
@@ -189,12 +196,23 @@ from pulsara_agent.primitives.host_ingress import (
 )
 from pulsara_agent.primitives.frozen import StableEventIdentityFact
 from pulsara_agent.primitives.governance_evidence import (
-    CompactionCandidateAttributionFact,
-    CompactionMemoryCandidateExtractorContractFact,
     GovernanceBatchInputReferenceFact,
     GovernanceModelInputAttributionFact,
     MemoryCandidateEvidenceRejectedRecord,
     ReflectionCandidateAttributionFact,
+)
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionCandidateAttributionFact,
+    CompactionMemoryExtractionContractFact,
+    CompactionMemoryExtractionPolicyFact,
+    CompactionPostCompletionExtensionDispositionFact,
+    CompactionPostCompletionExtensionLinkFact,
+    CompactionPostCompletionExtensionRequestedFact,
+    CompactionHumanEvidenceManifestReferenceFact,
+)
+from pulsara_agent.projection_jobs.compaction_memory import (
+    CompactionMemoryExtractionOccurrenceAttributionFact,
+    CompactionMemoryExtractionResultSemanticFact,
 )
 from pulsara_agent.primitives.provider_input import (
     CommittedProviderInputGenerationCoreStateFact,
@@ -357,9 +375,8 @@ class EventType(StrEnum):
         "TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED"
     )
     TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
-    MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED = (
-        "MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED"
-    )
+    MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED = "MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED"
+    MCP_CONTINUATION_DISPATCH_RESERVED = "MCP_CONTINUATION_DISPATCH_RESERVED"
     MCP_INPUT_REQUIRED_EXPIRED = "MCP_INPUT_REQUIRED_EXPIRED"
     MCP_INPUT_REQUIRED_BINDING_CHANGED = "MCP_INPUT_REQUIRED_BINDING_CHANGED"
     MCP_INPUT_REQUIRED_RESUME_FAILED = "MCP_INPUT_REQUIRED_RESUME_FAILED"
@@ -422,11 +439,12 @@ class EventType(StrEnum):
     CONTEXT_COMPACTION_COMPLETED = "CONTEXT_COMPACTION_COMPLETED"
     CONTEXT_COMPACTION_REQUESTED = "CONTEXT_COMPACTION_REQUESTED"
     MID_TURN_CONTEXT_COMPACTION_SKIPPED = "MID_TURN_CONTEXT_COMPACTION_SKIPPED"
-    TOOL_RESULT_EVIDENCE_PROJECTION_FAILED = (
-        "TOOL_RESULT_EVIDENCE_PROJECTION_FAILED"
+    TOOL_RESULT_EVIDENCE_PROJECTION_FAILED = "TOOL_RESULT_EVIDENCE_PROJECTION_FAILED"
+    CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED = (
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED"
     )
-    CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED = (
-        "CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED"
+    CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED = (
+        "CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED"
     )
     CONTEXT_COMPACTION_FAILED = "CONTEXT_COMPACTION_FAILED"
 
@@ -463,7 +481,6 @@ class EventType(StrEnum):
     ROLLOUT_BUDGET_RESERVATION_SETTLED = "ROLLOUT_BUDGET_RESERVATION_SETTLED"
     ROLLOUT_PHASE_TRANSITIONED = "ROLLOUT_PHASE_TRANSITIONED"
     SUBAGENT_ROLLOUT_BUDGET_RESOLVED = "SUBAGENT_ROLLOUT_BUDGET_RESOLVED"
-
 
 
 def utc_now() -> str:
@@ -609,6 +626,7 @@ class RunStartEvent(EventBase):
             raise ValueError("child RunStart requires only subagent_run_entry")
         else:
             entry = self.subagent_run_entry
+            basis = entry.capability_basis
             inherited = self.long_horizon.inherited_rollout_reservation
             if self.child_rollout_subaccount is None or inherited is None:
                 raise ValueError("child RunStart requires child rollout subaccount")
@@ -632,6 +650,15 @@ class RunStartEvent(EventBase):
                 != self.mcp_installation_owner_runtime_session_id
             ):
                 raise ValueError("child RunStart contract identity mismatch")
+            if (
+                basis.owner.owner_id != self.id
+                or basis.owner.run_id != self.run_id
+                or basis.permission_snapshot_id != self.permission_snapshot_id
+                or basis.mcp_installation_id != self.mcp_installation_id
+                or basis.execution_surface_identity.mcp_installation_id
+                != self.mcp_installation_id
+            ):
+                raise ValueError("child RunStart capability basis attribution mismatch")
         return self
 
 
@@ -738,12 +765,8 @@ class RunEndEvent(EventBase):
     terminalization_kind: RunTerminalizationKind
     abort_kind: Literal["user_stop", "host_teardown"] | None = None
     error_message: str | None = None
-    mcp_input_required_closure_event_reference: ContextEventReferenceFact | None = (
-        None
-    )
-    publication_latched_termination: PublicationLatchedRunTerminationFact | None = (
-        None
-    )
+    mcp_input_required_closure_event_reference: ContextEventReferenceFact | None = None
+    publication_latched_termination: PublicationLatchedRunTerminationFact | None = None
 
     @model_validator(mode="after")
     def _validate_terminal_matrix(self) -> "RunEndEvent":
@@ -796,7 +819,9 @@ class RunEndEvent(EventBase):
                 publication.reason == "compaction_publication_unavailable"
                 and closure is not None
             ):
-                raise ValueError("compaction publication RunEnd cannot cite MCP closure")
+                raise ValueError(
+                    "compaction publication RunEnd cannot cite MCP closure"
+                )
         return self
 
 
@@ -1178,6 +1203,9 @@ class ModelCallStartEvent(EventBase):
     recovery_plan: ModelStreamRecoveryPlanFact
     provider_input_reference: CommittedProviderInputReferenceFact
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None
+    compaction_memory_extraction_input_attribution: (
+        CompactionMemoryExtractionModelInputAttributionFact | None
+    ) = None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None
 
     @model_validator(mode="after")
@@ -1218,6 +1246,24 @@ class ModelCallStartEvent(EventBase):
                 != self.resolved_call.target.target_fingerprint
             ):
                 raise ValueError("governance model Start attribution drifted")
+        is_extraction = (
+            self.resolved_call.purpose
+            is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
+        )
+        extraction = self.compaction_memory_extraction_input_attribution
+        if is_extraction != (extraction is not None):
+            raise ValueError(
+                "compaction memory extraction Start requires exact input attribution"
+            )
+        if extraction is not None and (
+            self.resolved_call.context_mode != "direct"
+            or self.model_call_index is not None
+            or extraction.background_budget_reservation.model_call_reservation_quote.resolved_model_call_id
+            != self.resolved_call.resolved_model_call_id
+            or extraction.background_budget_reservation.dispatch_attempt_ordinal
+            != extraction.dispatch_attempt_ordinal
+        ):
+            raise ValueError("compaction memory extraction Start attribution drifted")
         if self.active_run_monitor_delivery is not None and (
             self.resolved_call.context_mode != "compiled"
             or self.model_call_index is None
@@ -2282,9 +2328,7 @@ class ToolResultEndEvent(EventBase):
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
-    mcp_input_required_terminal_source: (
-        McpInputRequiredTerminalSourceFact | None
-    ) = None
+    mcp_input_required_terminal_source: McpInputRequiredTerminalSourceFact | None = None
     terminal_projection: ToolResultTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
@@ -2320,7 +2364,9 @@ class ToolResultEndEvent(EventBase):
             None,
         )
         if (registration is None) != (semantic_registration is None):
-            raise ValueError("ToolResultEnd terminal monitor registration matrix mismatch")
+            raise ValueError(
+                "ToolResultEnd terminal monitor registration matrix mismatch"
+            )
         if registration is not None and (
             registration.registration_semantic_fingerprint != semantic_registration
         ):
@@ -2332,7 +2378,9 @@ class ToolResultEndEvent(EventBase):
             None,
         )
         if (cancellation is None) != (semantic_cancellation is None):
-            raise ValueError("ToolResultEnd terminal monitor cancellation matrix mismatch")
+            raise ValueError(
+                "ToolResultEnd terminal monitor cancellation matrix mismatch"
+            )
         if cancellation is not None and (
             cancellation.cancellation_semantic_fingerprint != semantic_cancellation
             or cancellation.cancel_intent.origin_cancel_tool_call_id
@@ -2414,6 +2462,7 @@ class McpInputRequiredResolutionSubmittedEvent(EventBase):
     )
     source: McpInputRequiredSourceAuthorityFact
     resolution: McpInputRequiredResolutionSemanticFact
+    continuation: McpContinuationResolutionCarrierFact
     attempt: McpInputRequiredResolutionAttemptFact
     resume_boundary_event_identity: StableEventIdentityFact
 
@@ -2423,8 +2472,55 @@ class McpInputRequiredResolutionSubmittedEvent(EventBase):
             self.source.interaction.round_count != self.attempt.round_count
             or self.resume_boundary_event_identity.event_type
             != EventType.RUN_INTERACTION_RESUME_BOUNDARY.value
+            or self.continuation.resolution_event_id != self.id
+            or self.continuation.source_suspension_event_reference
+            != self.source.source_suspension_event_reference
+            or self.continuation.source_continuation_carrier_id
+            != self.source.continuation_carrier_id
+            or self.continuation.request_set_fingerprint
+            != self.source.request_set_fingerprint
+            or self.resolution.request_set_fingerprint
+            != self.continuation.request_set_fingerprint
+            or self.resolution.ordered_response_keys
+            != self.continuation.ordered_response_keys
+            or self.resolution.keyed_current_round_responses_commitment
+            != self.continuation.keyed_current_round_responses_commitment
+            or self.resolution.response_attribution_fingerprint
+            != self.continuation.response_attribution_fingerprint
+            or self.continuation.operation_expires_at_utc
+            != self.source.operation_expires_at_utc
+            or self.continuation.expiry_fingerprint
+            != self.source.expiry_fingerprint
         ):
             raise ValueError("MCP resolution submission authority mismatch")
+        return self
+
+
+class McpContinuationDispatchReservedEvent(EventBase):
+    """Durable authorization for exactly one stateless continuation dispatch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[EventType.MCP_CONTINUATION_DISPATCH_RESERVED] = (
+        EventType.MCP_CONTINUATION_DISPATCH_RESERVED
+    )
+    dispatch_reservation: McpContinuationDispatchReservationFact
+
+    @model_validator(mode="after")
+    def _dispatch_context(self) -> "McpContinuationDispatchReservedEvent":
+        fact = self.dispatch_reservation
+        if (
+            not self.id
+            or fact.source_resolution_event_reference.event_type
+            != EventType.MCP_INPUT_REQUIRED_RESOLUTION_SUBMITTED.value
+            or fact.source_physical_operation_reservation_event_reference.event_type
+            != EventType.PHYSICAL_OPERATION_RESERVATION_CREATED.value
+            or fact.source_resolution_event_reference.runtime_session_id
+            != fact.runtime_session_id
+            or fact.source_physical_operation_reservation_event_reference.runtime_session_id
+            != fact.runtime_session_id
+        ):
+            raise ValueError("MCP dispatch reservation authority mismatch")
         return self
 
 
@@ -2495,7 +2591,9 @@ class McpInputRequiredInteractionClosedEvent(EventBase):
         failure = self.source_resume_failed_event_reference
         if self.closure_reason == "suspension_publication_unavailable":
             if resolution is not None or failure is not None:
-                raise ValueError("suspension publication closure cannot cite resolution")
+                raise ValueError(
+                    "suspension publication closure cannot cite resolution"
+                )
         elif self.closure_reason == "resume_boundary_publication_unavailable":
             if resolution is None or failure is not None:
                 raise ValueError("resume-boundary closure reference mismatch")
@@ -2603,13 +2701,18 @@ class TerminalProcessCompletedEvent(EventBase):
         stream = self.completion_semantic.terminal_output_cursor.stream_identity
         if self.output_recovery_reference.spool_writer_state.stream_identity != stream:
             raise ValueError("terminal completion output stream identity mismatch")
-        if self.owner_host_session_id is not None and self.origin_run_entry_kind != "host_main_run":
+        if (
+            self.owner_host_session_id is not None
+            and self.origin_run_entry_kind != "host_main_run"
+        ):
             raise ValueError("host-owned terminal completion requires Host main origin")
         return self
 
     @property
     def process_id(self) -> str:
-        return self.completion_semantic.terminal_output_cursor.stream_identity.process_id
+        return (
+            self.completion_semantic.terminal_output_cursor.stream_identity.process_id
+        )
 
     @property
     def output_stream_identity(self) -> TerminalOutputStreamIdentityFact:
@@ -2669,9 +2772,9 @@ class TerminalProcessMonitorObservationCommittedEvent(EventBase):
     type: Literal[EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED] = (
         EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED
     )
-    schema_version: Literal[
+    schema_version: Literal["terminal_process_monitor_observation_committed.v1"] = (
         "terminal_process_monitor_observation_committed.v1"
-    ] = "terminal_process_monitor_observation_committed.v1"
+    )
     registration_event_reference: ContextEventReferenceFact
     observation: TerminalProcessMonitorObservationSemanticFact
     monitor_state_transition: TerminalProcessMonitorStateTransitionFact
@@ -2681,9 +2784,7 @@ class TerminalProcessMonitorObservationCommittedEvent(EventBase):
     wake_chain_id: str = Field(min_length=1)
     observed_at_utc: str
     physical_reservation_id: str = Field(min_length=1)
-    physical_reservation_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    physical_reservation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     @field_validator("observed_at_utc")
     @classmethod
@@ -2740,7 +2841,9 @@ class TerminalProcessMonitorTerminatedEvent(EventBase):
         if not identities or identities != tuple(sorted(set(identities))):
             raise ValueError("terminal monitor termination causes are invalid")
         if self.monitor_state_transition.observation_ordinal is not None:
-            raise ValueError("terminal monitor termination cannot advance observation ordinal")
+            raise ValueError(
+                "terminal monitor termination cannot advance observation ordinal"
+            )
         return self
 
 
@@ -2763,7 +2866,9 @@ class TerminalProcessMonitorReceiptAppliedEvent(EventBase):
     @model_validator(mode="after")
     def _receipt_transition(self) -> "TerminalProcessMonitorReceiptAppliedEvent":
         if self.monitor_state_transition.observation_ordinal is not None:
-            raise ValueError("terminal receipt cannot advance monitor observation ordinal")
+            raise ValueError(
+                "terminal receipt cannot advance monitor observation ordinal"
+            )
         if (
             self.registration_event_reference.runtime_session_id
             != self.tool_result_end_event_identity.runtime_session_id
@@ -2774,7 +2879,9 @@ class TerminalProcessMonitorReceiptAppliedEvent(EventBase):
             and self.pending_observation_event_reference.runtime_session_id
             != self.registration_event_reference.runtime_session_id
         ):
-            raise ValueError("terminal receipt pending observation crosses runtime ledgers")
+            raise ValueError(
+                "terminal receipt pending observation crosses runtime ledgers"
+            )
         return self
 
 
@@ -2782,9 +2889,9 @@ class TerminalProcessObservationDeliveryDispositionEvent(EventBase):
     type: Literal[EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION] = (
         EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION
     )
-    schema_version: Literal[
+    schema_version: Literal["terminal_process_observation_delivery_disposition.v1"] = (
         "terminal_process_observation_delivery_disposition.v1"
-    ] = "terminal_process_observation_delivery_disposition.v1"
+    )
     observation_source_references: tuple[ContextEventReferenceFact, ...]
     outcome: Literal[
         "autonomous_dispatched",
@@ -2837,9 +2944,7 @@ class TerminalProcessObservationDeliveryDispositionEvent(EventBase):
         if (self.outcome == "active_run_safe_point") != (
             self.autonomy_delivery is not None
         ):
-            raise ValueError(
-                "active-run disposition autonomy delivery matrix mismatch"
-            )
+            raise ValueError("active-run disposition autonomy delivery matrix mismatch")
         return self
 
 
@@ -2847,9 +2952,9 @@ class TerminalProcessObservationDeliveryDeferredEvent(EventBase):
     type: Literal[EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED] = (
         EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED
     )
-    schema_version: Literal[
+    schema_version: Literal["terminal_process_observation_delivery_deferred.v1"] = (
         "terminal_process_observation_delivery_deferred.v1"
-    ] = "terminal_process_observation_delivery_deferred.v1"
+    )
     observation_source_references: tuple[ContextEventReferenceFact, ...]
     reason: Literal[
         "wake_budget_exhausted",
@@ -3497,6 +3602,9 @@ class ContextCompactionCompletedEvent(EventBase):
     started_event_id: str = Field(min_length=1)
     host_boundary_id: str | None = None
     host_boundary_kind: Literal["pre_run"] | None = None
+    post_completion_extension_dispositions: tuple[
+        CompactionPostCompletionExtensionDispositionFact, ...
+    ] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def _validate_compaction_contract(self) -> "ContextCompactionCompletedEvent":
@@ -3552,54 +3660,77 @@ class ContextCompactionCompletedEvent(EventBase):
             raise ValueError(
                 "summarizer terminal estimate does not match started estimate"
             )
+        requested_ids = tuple(
+            item.extension_link.extension_link_id
+            for item in self.post_completion_extension_dispositions
+            if isinstance(item, CompactionPostCompletionExtensionRequestedFact)
+        )
+        if len(requested_ids) != len(set(requested_ids)):
+            raise ValueError("compaction extension dispositions contain duplicates")
         return self
 
 
-class CompactionCandidateDiagnosticEvent(BaseModel):
+class ContextCompactionMemoryExtractionRequestedEvent(EventBase):
     model_config = ConfigDict(extra="forbid")
 
-    code: str
-    field: str | None = None
-    message: str = ""
-    redacted: bool = False
-
-
-class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
-    type: Literal[EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED] = (
-        EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED
-    )
-    compaction_id: str
-    source_event_id: str
-    source_event_sequence: int
-    summary_artifact_id: str
-    candidate_entry_ids: list[str] = Field(default_factory=list)
-    attempted_count: int = 0
-    proposed_count: int
-    skipped_count: int = 0
-    duplicate_count: int = 0
-    error_count: int = 0
-    extractor_version: str = "compaction-memory-candidates:v1"
-    diagnostics: list[CompactionCandidateDiagnosticEvent] = Field(default_factory=list)
-    summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    summary_content_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
-    extractor_contract: CompactionMemoryCandidateExtractorContractFact
-    ordered_candidate_attributions: tuple[CompactionCandidateAttributionFact, ...] = (
-        Field(max_length=256)
-    )
-    completed_compaction_event_identity: StableEventIdentityFact
+    type: Literal[
+        EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
+    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
+    extension_link: CompactionPostCompletionExtensionLinkFact
+    human_evidence_manifest_reference: CompactionHumanEvidenceManifestReferenceFact
+    memory_domain_id: str = Field(min_length=1)
+    resolved_scope: str = Field(min_length=1)
+    extraction_contract: CompactionMemoryExtractionContractFact
+    extraction_policy: CompactionMemoryExtractionPolicyFact
+    business_occurrence_fingerprint: str = Field(min_length=1)
+    event_semantic_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _candidate_attribution_join(
-        self,
-    ) -> "ContextCompactionMemoryCandidatesProposedEvent":
-        if self.proposed_count != len(self.ordered_candidate_attributions):
-            raise ValueError("compaction proposed count/attribution mismatch")
-        if tuple(self.candidate_entry_ids) != tuple(
-            item.candidate_entry_id for item in self.ordered_candidate_attributions
+    def _request(self) -> "ContextCompactionMemoryExtractionRequestedEvent":
+        if self.extension_link.request_event_id != self.id:
+            raise ValueError("extraction request event/link identity mismatch")
+        return self
+
+
+class ContextCompactionMemoryExtractionCompletedEvent(EventBase):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
+    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
+    result_semantic: CompactionMemoryExtractionResultSemanticFact
+    occurrence_attribution: CompactionMemoryExtractionOccurrenceAttributionFact
+    ordered_candidate_attributions: tuple[
+        CompactionMemoryExtractionCandidateAttributionFact, ...
+    ] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def _result_matrix(self) -> "ContextCompactionMemoryExtractionCompletedEvent":
+        outcome = self.result_semantic.outcome_kind
+        if self.occurrence_attribution.outcome_attribution.outcome_kind != outcome:
+            raise ValueError("extraction result semantic/attribution branch mismatch")
+        candidates = self.ordered_candidate_attributions
+        if outcome == "valid_candidates":
+            if not candidates:
+                raise ValueError("valid candidate result requires candidates")
+            semantic_fingerprints = tuple(
+                sorted(
+                    item.candidate_payload.candidate_semantic_fingerprint
+                    for item in candidates
+                )
+            )
+            if (
+                semantic_fingerprints
+                != self.result_semantic.ordered_candidate_semantic_fingerprints
+            ):
+                raise ValueError("extraction result candidate semantic join failed")
+        elif candidates:
+            raise ValueError("non-candidate extraction result cannot carry candidates")
+        if (
+            self.occurrence_attribution.extension_link.request_event_id
+            != self.occurrence_attribution.request_event_reference.stable_identity.event_id
         ):
-            raise ValueError("compaction candidate IDs/attributions mismatch")
-        if self.extractor_version != self.extractor_contract.extractor_version:
-            raise ValueError("compaction extractor version drifted")
+            raise ValueError("extraction result request occurrence mismatch")
         return self
 
 
@@ -3777,19 +3908,22 @@ class ContextCompactionFailedEvent(EventBase):
                 raise ValueError(
                     "started-publication failure requires Started and target estimate"
                 )
-            if any(
-                value is not None
-                for value in (
-                    self.summarizer_target,
-                    self.summarizer_call,
-                    self.summarizer_context_id,
-                    self.summarizer_input_estimated_tokens,
-                    self.summarizer_input_budget_tokens,
-                    self.summarizer_usage,
-                    self.summarizer_estimated_input_tokens,
-                    self.summarizer_reported_model_id,
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.summarizer_target,
+                        self.summarizer_call,
+                        self.summarizer_context_id,
+                        self.summarizer_input_estimated_tokens,
+                        self.summarizer_input_budget_tokens,
+                        self.summarizer_usage,
+                        self.summarizer_estimated_input_tokens,
+                        self.summarizer_reported_model_id,
+                    )
                 )
-            ) or self.summarizer_usage_status != "missing":
+                or self.summarizer_usage_status != "missing"
+            ):
                 raise ValueError(
                     "started-publication failure cannot duplicate summarizer attribution"
                 )
@@ -4828,6 +4962,7 @@ AgentEvent: TypeAlias = (
     | ToolResultEndEvent
     | ToolExecutionSuspendedEvent
     | McpInputRequiredResolutionSubmittedEvent
+    | McpContinuationDispatchReservedEvent
     | McpInputRequiredExpiredEvent
     | McpInputRequiredBindingChangedEvent
     | McpInputRequiredResumeFailedEvent
@@ -4875,7 +5010,8 @@ AgentEvent: TypeAlias = (
     | ContextCompactionRequestedEvent
     | MidTurnContextCompactionSkippedEvent
     | ToolResultEvidenceProjectionFailedEvent
-    | ContextCompactionMemoryCandidatesProposedEvent
+    | ContextCompactionMemoryExtractionRequestedEvent
+    | ContextCompactionMemoryExtractionCompletedEvent
     | ContextCompactionFailedEvent
     | SubagentRunStartedEvent
     | SubagentMessageSentEvent

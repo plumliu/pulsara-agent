@@ -9,6 +9,7 @@ from enum import StrEnum
 from threading import RLock, Thread
 from time import monotonic
 from typing import Callable, ContextManager, Iterator, Protocol
+from uuid import uuid4
 
 from psycopg import Connection, IsolationLevel
 from psycopg_pool import ConnectionPool
@@ -41,6 +42,14 @@ from pulsara_agent.storage.runtime_write_admission import (
     acquire_normal_runtime_write_guard,
     read_runtime_write_epoch,
 )
+from pulsara_agent.ports.projection_jobs import (
+    MemoryUowPhysicalTransactionCapability,
+    MemoryUowPhysicalTransactionRequest,
+    MemoryUowScopeFactoryAuthority,
+    PostgresCanonicalMutationTransactionDriverPort,
+    build_canonical_mutation_transaction_identity,
+)
+from pulsara_agent.primitives.context import context_fingerprint
 
 
 class PostgresConnectionLane(StrEnum):
@@ -309,6 +318,14 @@ class VerifiedPostgresConnectionProviderProtocol(Protocol):
 
     def close_pool(self, lane: PostgresConnectionLane) -> None: ...
 
+    def memory_uow_physical_transaction(
+        self,
+        *,
+        request: MemoryUowPhysicalTransactionRequest,
+        scope_factory_authority: MemoryUowScopeFactoryAuthority,
+        mutation_driver: PostgresCanonicalMutationTransactionDriverPort,
+    ) -> ContextManager[MemoryUowPhysicalTransactionCapability]: ...
+
 
 class VerifiedPostgresPoolLease:
     def __init__(
@@ -359,6 +376,7 @@ class BorrowedVerifiedPostgresConnectionProvider:
         self._provider = provider
         self._lock = RLock()
         self._released = False
+        self._borrower_id = f"postgres-borrower:{uuid4().hex}"
         provider._retain_borrower()
 
     @property
@@ -404,6 +422,57 @@ class BorrowedVerifiedPostgresConnectionProvider:
     def close_pool(self, lane: PostgresConnectionLane) -> None:
         self._require_active()
         self._provider.close_pool(lane)
+
+    @contextmanager
+    def memory_uow_physical_transaction(
+        self,
+        *,
+        request: MemoryUowPhysicalTransactionRequest,
+        scope_factory_authority: MemoryUowScopeFactoryAuthority,
+        mutation_driver: PostgresCanonicalMutationTransactionDriverPort,
+    ) -> Iterator[MemoryUowPhysicalTransactionCapability]:
+        self._require_active()
+        with self.connection(
+            lane=PostgresConnectionLane.MEMORY_UOW,
+            deadline_monotonic=request.deadline_monotonic,
+        ) as connection:
+            epoch = read_runtime_write_epoch(connection)
+            transaction_owner_id = (
+                f"postgres:{connection.info.backend_pid}:{epoch.epoch_fingerprint}"
+            )
+            if transaction_owner_id == "" or request.transaction_owner_id == "":
+                raise ValueError("memory UOW transaction owner is required")
+            guard_fingerprint = context_fingerprint(
+                "runtime-write-admission-guard-lock-identity:v1",
+                {
+                    "epoch_fingerprint": epoch.epoch_fingerprint,
+                    "transaction_owner_id": transaction_owner_id,
+                },
+            )
+            identity = build_canonical_mutation_transaction_identity(
+                schema_binding_fingerprint=self.schema_binding.binding_fingerprint,
+                connection_provider_borrower_id=self._borrower_id,
+                transaction_owner_id=request.transaction_owner_id,
+                transaction_generation=request.transaction_generation,
+                backend_pid=connection.info.backend_pid,
+                admission_epoch_fingerprint=epoch.epoch_fingerprint,
+                admission_guard_lock_identity_fingerprint=guard_fingerprint,
+            )
+            from pulsara_agent.storage.postgres_transaction_capability import (
+                PostgresMemoryUowPhysicalTransactionCapability,
+            )
+
+            capability = PostgresMemoryUowPhysicalTransactionCapability(
+                connection=connection,
+                request=request,
+                transaction_identity=identity,
+                scope_authority=scope_factory_authority,
+                driver=mutation_driver,
+            )
+            try:
+                yield capability
+            finally:
+                capability.close()
 
     def release(self) -> None:
         with self._lock:

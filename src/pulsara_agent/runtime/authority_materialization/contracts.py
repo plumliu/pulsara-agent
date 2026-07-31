@@ -807,18 +807,18 @@ def _tool_contract(
     *, event_domain_fingerprint: str, charge_fingerprint: str
 ) -> ToolDeltaBurstContractFact:
     payload = {
-        "schema_version": "tool_delta_burst_contract.v1",
+        "schema_version": "tool_delta_burst_contract.v2",
         "burst_shape": "tool_delta",
         "contract_id": "pulsara.tool_result.default",
-        "contract_version": "1",
+        "contract_version": "2",
         "operation_kind": PhysicalOperationKind.TOOL_CALL,
         "max_commit_batches": 64,
         "max_structural_tail_events": 136,
         "max_structural_tail_payload_bytes": 10 * 1024 * 1024,
         "max_terminal_recovery_events": 8,
         "max_terminal_recovery_payload_bytes": 256 * 1024,
-        "terminal_tail_reserved_events": 32,
-        "terminal_tail_reserved_payload_bytes": 2 * 1024 * 1024,
+        "terminal_tail_reserved_events": 64,
+        "terminal_tail_reserved_payload_bytes": 10 * 1024 * 1024,
         "max_total_reserved_events": 4_240,
         "max_total_reserved_payload_bytes": 36 * 1024 * 1024,
         "event_domain_registry_contract_fingerprint": event_domain_fingerprint,
@@ -830,6 +830,14 @@ def _tool_contract(
         "max_result_delta_payload_bytes": 16 * 1024 * 1024,
         "max_durable_events_per_delta_item": 1,
         "max_canonical_wrapper_payload_bytes_per_delta_item": 2_048,
+        "maximum_successor_suspension_commits": 2,
+        # This tail owns the bounded resume boundary, dispatch reservation,
+        # and at most two successor suspensions. The terminal floor below is
+        # never consumable by continuation work.
+        "successor_suspension_reserved_events": 32,
+        "successor_suspension_reserved_payload_bytes": 8 * 1024 * 1024,
+        "minimum_terminal_tail_events": 32,
+        "minimum_terminal_tail_payload_bytes": 2 * 1024 * 1024,
         "result_capture_contract_fingerprint": context_fingerprint(
             "tool-result-capture-contract:v1", "typed-tool-result-capture"
         ),
@@ -840,7 +848,7 @@ def _tool_contract(
     return ToolDeltaBurstContractFact(
         **payload,
         contract_fingerprint=_own_fingerprint(
-            "tool-delta-burst-contract:v1", payload
+            "tool-delta-burst-contract:v2", payload
         ),
     )
 

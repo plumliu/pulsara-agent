@@ -1,19 +1,19 @@
 {
   "schema_version": "pulsara.core-dogfood-scenario.v1",
   "scenario_id": "subagent-delegation",
-  "description": "Require one child task to inspect three files, return an explicit result, and let the parent write the verified sum.",
+  "description": "Require one child task to discover and traverse an eight-file linked trail, persist and verify a structured audit, return an explicit result, and let the parent write the verified checksum.",
   "model_role": "flash",
   "reasoning_effort": null,
   "timeout_seconds": 720,
   "memory_reflection": false,
-  "system_prompt": "You are running Pulsara's frozen subagent dogfood. Obey delegation constraints literally. The parent may use only create_agent_tasks, wait_agent_tasks, and write_file; it must not inspect the workspace or delegated source files itself. Wait for an explicit child result before using it. Never inspect .env or credentials.",
+  "system_prompt": "You are running Pulsara's frozen subagent dogfood. Obey delegation constraints literally. The parent may use only create_agent_tasks, wait_agent_tasks, and write_file; it must not inspect the workspace, delegated source files, or child_trace.json itself. Delegate the complete child procedure exactly, wait for an explicit child result, and only then write the parent result. Never inspect .env or credentials.",
   "fixture": {
     "fixture_kind": "directory_copy",
     "workdir": "workdir"
   },
   "workflow": {
     "workflow_kind": "subagent_delegation",
-    "prompt": "The data directory contains alpha.txt, beta.txt, and gamma.txt. Call create_agent_tasks exactly once to create one child task that reads all three files and explicitly reports their three integer values. As the parent, do not call read_file, search_files, or terminal to inspect data. Wait for the child result, then add the values and write only the integer total to result.txt."
+    "prompt": "The data directory contains an unordered eight-file linked trail whose first file contains START_NODE. Call create_agent_tasks exactly once to create exactly one child task. Delegate these requirements verbatim: the child must use search_files exactly once to locate START_NODE; call read_file separately for every trail file while following each NEXT reference until END; never use terminal, terminal_process, shell commands, or bulk-read shortcuts; collect the ordered workspace-relative data/... paths and integer VALUE fields; compute both the plain sum and the one-based weighted checksum sum(index * value); write child_trace.json with exactly the keys chain, values, sum, weighted_checksum, and terminal_marker; read child_trace.json back once to verify it; then call report_agent_result with the sum and weighted checksum. As the parent, do not inspect data or child_trace.json and do not calculate from source files. Wait for the explicit child result, then write only SUM:WEIGHTED_CHECKSUM to result.txt."
   },
   "verifier": {
     "path": "verify.py",
@@ -48,6 +48,10 @@
         {"tool_name": "create_agent_tasks", "exact_count": 1}
       ],
       "forbidden_tool_names": ["read_file", "search_files", "terminal", "terminal_process"]
+    },
+    "subagent_child_tools": {
+      "expected_completed_children": 1,
+      "minimum_tool_calls_per_child": 10
     },
     "require_positive_cached_input_tokens": false,
     "max_provider_input_rollovers": 2

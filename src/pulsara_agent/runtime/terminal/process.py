@@ -39,7 +39,10 @@ from pulsara_agent.runtime.terminal.models import (
     TerminalStatus,
 )
 from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal
-from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_terminal_shell
+from pulsara_agent.runtime.terminal.shell import (
+    TerminalShellConfig,
+    detect_terminal_shell,
+)
 
 
 _TIMEOUT_EXIT_CODE = 124
@@ -127,7 +130,9 @@ class TerminalProcessState:
     completion_notification_reservation_required: bool = False
     completion_notification_reservation_confirmed: bool = False
     completion_reason: TerminalKillReason | None = None
-    record_event: Callable[[AgentEvent], AgentEvent] | None = field(default=None, repr=False)
+    record_event: Callable[[AgentEvent], AgentEvent] | None = field(
+        default=None, repr=False
+    )
     reader_thread: Thread | None = None
     lifetime_watchdog: Thread | None = None
     lock: RLock = field(default_factory=RLock, repr=False)
@@ -145,7 +150,9 @@ class TerminalProcessState:
     @property
     def completion_event_recorded(self) -> bool:
         with self.lock:
-            return self.completion_record_state is TerminalCompletionRecordState.RECORDED
+            return (
+                self.completion_record_state is TerminalCompletionRecordState.RECORDED
+            )
 
 
 @dataclass(slots=True)
@@ -154,7 +161,9 @@ class ProcessRegistry:
     max_finished_processes: int = 32
     max_pending_completion_records: int = 8
     finished_ttl_seconds: float = 3600.0
-    _processes: dict[str, TerminalProcessState] = field(default_factory=dict, init=False, repr=False)
+    _processes: dict[str, TerminalProcessState] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _released_owners: set[str] = field(default_factory=set, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
@@ -217,7 +226,9 @@ class ProcessRegistry:
             ),
         )
         if max_lifetime_seconds is not None:
-            state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
+            state.lifetime_watchdog = _arm_lifetime_watchdog(
+                state, max_lifetime_seconds
+            )
         finished = wait_for_process(
             state,
             timeout_seconds=max(yield_time_ms, 0) / 1000,
@@ -248,13 +259,17 @@ class ProcessRegistry:
             kill_process(state, reason=TerminalKillReason.TEARDOWN)
             _cleanup_cwd_file(state)
             if released:
-                raise ProcessLimitError("terminal owner was released while command was running")
+                raise ProcessLimitError(
+                    "terminal owner was released while command was running"
+                )
             if pending_completion_over_limit:
                 raise ProcessLimitError(
                     "max pending terminal completion records reached: "
                     f"{self.max_pending_completion_records}"
                 )
-            raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
+            raise ProcessLimitError(
+                f"max live terminal processes reached: {self.max_live_processes}"
+            )
         _maybe_record_completion_event(state)
         return state, True
 
@@ -284,13 +299,9 @@ class ProcessRegistry:
         )
         with state.lock:
             if state.origin_run_entry_kind != "host_main_run":
-                raise ValueError(
-                    "terminal_monitor_child_origin_process_unsupported"
-                )
+                raise ValueError("terminal_monitor_child_origin_process_unsupported")
             if state.origin_runtime_session_id != origin_runtime_session_id:
-                raise ValueError(
-                    "terminal_monitor_cross_ledger_process_unsupported"
-                )
+                raise ValueError("terminal_monitor_cross_ledger_process_unsupported")
             if not state.yielded:
                 raise ValueError("terminal_monitor_process_was_not_yielded")
         return state
@@ -323,6 +334,35 @@ class ProcessRegistry:
         # recording owner under state.lock and only marks success after commit.
         _maybe_record_completion_event(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
+
+    def abort_unreserved_yielded_process(
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str | None,
+    ) -> None:
+        """Retire a yielded process whose durable completion slot was denied."""
+
+        state = self._get(
+            process_id,
+            owner_host_session_id=owner_host_session_id,
+        )
+        with state.lock:
+            if not state.yielded:
+                raise ValueError("only a yielded terminal process can be abandoned")
+            if not state.completion_notification_reservation_required:
+                raise ValueError("terminal process does not require a completion slot")
+            if state.completion_notification_reservation_confirmed:
+                raise ValueError(
+                    "confirmed terminal completion owner cannot be abandoned"
+                )
+            state.output_callback = None
+        kill_process(state, reason=TerminalKillReason.TEARDOWN)
+        _join_reader(state)
+        _cleanup_cwd_file(state)
+        with self._lock:
+            if self._processes.get(process_id) is state:
+                self._processes.pop(process_id, None)
 
     def write(
         self,
@@ -440,10 +480,7 @@ class ProcessRegistry:
                 for state in self._processes.values()
                 if state.owner_host_session_id == owner_host_session_id
             ]
-        return [
-            snapshot_process(state)
-            for state in states
-        ]
+        return [snapshot_process(state) for state in states]
 
     def list_processes(
         self,
@@ -462,8 +499,14 @@ class ProcessRegistry:
             process_info(state)
             for state in states
             if state.yielded
-            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
-            and ((include_running and state.is_running) or (include_finished and state.is_finished))
+            and (
+                owner_host_session_id is None
+                or state.owner_host_session_id == owner_host_session_id
+            )
+            and (
+                (include_running and state.is_running)
+                or (include_finished and state.is_finished)
+            )
         ]
         return sorted(
             processes,
@@ -482,7 +525,9 @@ class ProcessRegistry:
     ) -> TerminalProcessLog:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         _maybe_record_completion_event(state)
-        return process_log(state, max_output_chars=max_output_chars or state.max_output_chars)
+        return process_log(
+            state, max_output_chars=max_output_chars or state.max_output_chars
+        )
 
     def live_count(self, *, owner_host_session_id: str | None = None) -> int:
         with self._lock:
@@ -492,7 +537,10 @@ class ProcessRegistry:
             for state in states
             if state.yielded
             and state.is_running
-            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
+            and (
+                owner_host_session_id is None
+                or state.owner_host_session_id == owner_host_session_id
+            )
         )
 
     def finished_count(self, *, owner_host_session_id: str | None = None) -> int:
@@ -503,7 +551,10 @@ class ProcessRegistry:
             for state in states
             if state.yielded
             and state.is_finished
-            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
+            and (
+                owner_host_session_id is None
+                or state.owner_host_session_id == owner_host_session_id
+            )
         )
 
     def pending_completion_count(
@@ -534,13 +585,24 @@ class ProcessRegistry:
             try:
                 state = self._processes[process_id]
             except KeyError as exc:
-                raise KeyError(f"terminal process not found or expired: {process_id}") from exc
-        if owner_host_session_id is not None and state.owner_host_session_id != owner_host_session_id:
-            raise KeyError(f"terminal process not found or not owned by this session: {process_id}")
+                raise KeyError(
+                    f"terminal process not found or expired: {process_id}"
+                ) from exc
+        if (
+            owner_host_session_id is not None
+            and state.owner_host_session_id != owner_host_session_id
+        ):
+            raise KeyError(
+                f"terminal process not found or not owned by this session: {process_id}"
+            )
         return state
 
     def _live_count_locked(self) -> int:
-        return sum(1 for state in self._processes.values() if state.yielded and state.is_running)
+        return sum(
+            1
+            for state in self._processes.values()
+            if state.yielded and state.is_running
+        )
 
     def _pending_completion_count_locked(self) -> int:
         return sum(
@@ -551,14 +613,20 @@ class ProcessRegistry:
 
     def _is_accepting_locked(self, owner_host_session_id: str | None) -> bool:
         return not self._closed and (
-            owner_host_session_id is None or owner_host_session_id not in self._released_owners
+            owner_host_session_id is None
+            or owner_host_session_id not in self._released_owners
         )
 
     def _require_accepting_locked(self, owner_host_session_id: str | None) -> None:
         if self._closed:
             raise ProcessLimitError("terminal process registry is closed")
-        if owner_host_session_id is not None and owner_host_session_id in self._released_owners:
-            raise ProcessLimitError(f"terminal owner has been released: {owner_host_session_id}")
+        if (
+            owner_host_session_id is not None
+            and owner_host_session_id in self._released_owners
+        ):
+            raise ProcessLimitError(
+                f"terminal owner has been released: {owner_host_session_id}"
+            )
 
     def _cleanup_finished(self) -> None:
         with self._lock:
@@ -618,7 +686,9 @@ def spawn_local_process(
     shell = shell or detect_terminal_shell()
     subprocess_env = dict(env) if env is not None else build_default_subprocess_env()
     cwd_file = _new_cwd_file() if capture_cwd else None
-    wrapped = _wrap_command(command, cwd=cwd, cwd_file=cwd_file) if capture_cwd else command
+    wrapped = (
+        _wrap_command(command, cwd=cwd, cwd_file=cwd_file) if capture_cwd else command
+    )
     pty_master_fd: int | None = None
     if io_mode is TerminalIOMode.PTY:
         pty_master_fd, pty_slave_fd = pty.openpty()
@@ -662,9 +732,15 @@ def spawn_local_process(
         shell=shell,
         owner_host_session_id=owner_host_session_id,
         owner_conversation_id=owner_conversation_id,
-        origin_run_id=origin_event_context.run_id if origin_event_context is not None else None,
-        origin_turn_id=origin_event_context.turn_id if origin_event_context is not None else None,
-        origin_reply_id=origin_event_context.reply_id if origin_event_context is not None else None,
+        origin_run_id=origin_event_context.run_id
+        if origin_event_context is not None
+        else None,
+        origin_turn_id=origin_event_context.turn_id
+        if origin_event_context is not None
+        else None,
+        origin_reply_id=origin_event_context.reply_id
+        if origin_event_context is not None
+        else None,
         origin_tool_call_id=origin_tool_call_id,
         origin_runtime_session_id=origin_runtime_session_id,
         origin_run_entry_kind=origin_run_entry_kind,
@@ -674,7 +750,12 @@ def spawn_local_process(
         ),
         output=SanitizedOutputJournal(process_id=process_id),
     )
-    reader = Thread(target=_reader_loop, args=(state,), daemon=True, name=f"pulsara-terminal-{state.process_id}")
+    reader = Thread(
+        target=_reader_loop,
+        args=(state,),
+        daemon=True,
+        name=f"pulsara-terminal-{state.process_id}",
+    )
     state.reader_thread = reader
     reader.start()
     return state
@@ -753,7 +834,9 @@ def write_process_input(
 def close_process_stdin(state: TerminalProcessState) -> None:
     with state.lock:
         if state.status is not TerminalStatus.RUNNING:
-            raise ProcessInputError("cannot close stdin for a finished terminal process")
+            raise ProcessInputError(
+                "cannot close stdin for a finished terminal process"
+            )
         if state.stdin_closed:
             raise ProcessInputError("terminal process stdin is already closed")
         stdin = state.process.stdin
@@ -890,7 +973,9 @@ def process_info(state: TerminalProcessState) -> TerminalProcessInfo:
         )
 
 
-def process_log(state: TerminalProcessState, *, max_output_chars: int) -> TerminalProcessLog:
+def process_log(
+    state: TerminalProcessState, *, max_output_chars: int
+) -> TerminalProcessLog:
     info = process_info(state)
     processed = state.output.snapshot(max_chars=max_output_chars)
     return TerminalProcessLog(
@@ -1044,7 +1129,9 @@ def _reader_loop(state: TerminalProcessState) -> None:
             exit_code = state.process.returncode
         with state.lock:
             if state.status is TerminalStatus.RUNNING:
-                state.status = TerminalStatus.SUCCESS if exit_code == 0 else TerminalStatus.ERROR
+                state.status = (
+                    TerminalStatus.SUCCESS if exit_code == 0 else TerminalStatus.ERROR
+                )
                 state.exit_code = exit_code if exit_code is not None else -1
                 state.ended_at = time.monotonic()
             elif state.exit_code is None and exit_code is not None:
@@ -1085,7 +1172,9 @@ def _emit_output_delta(state: TerminalProcessState, delta: str) -> None:
 
 
 def _mark_timed_out(state: TerminalProcessState) -> None:
-    _mark_status(state, TerminalStatus.TIMEOUT, exit_code=_TIMEOUT_EXIT_CODE, timed_out=True)
+    _mark_status(
+        state, TerminalStatus.TIMEOUT, exit_code=_TIMEOUT_EXIT_CODE, timed_out=True
+    )
 
 
 def _mark_status(
@@ -1207,11 +1296,14 @@ def _record_claimed_completion_event(
 
 def _claim_completion_event_recording(
     state: TerminalProcessState,
-) -> tuple[
-    Callable[[AgentEvent], AgentEvent],
-    dict[str, object],
-    TerminalProcessCompletedEvent | None,
-] | None:
+) -> (
+    tuple[
+        Callable[[AgentEvent], AgentEvent],
+        dict[str, object],
+        TerminalProcessCompletedEvent | None,
+    ]
+    | None
+):
     with state.lock:
         if not state.yielded:
             return None

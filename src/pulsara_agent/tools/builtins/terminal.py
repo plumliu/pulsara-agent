@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.capability.result_semantics import (
+from pulsara_agent.ports.tool_result_semantics import (
     FrozenToolResultSemanticsRuntimeInput,
     build_terminal_payload_timing,
     unbounded_error_preview,
@@ -24,19 +24,20 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
-from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
-from pulsara_agent.runtime.terminal import (
-    TerminalRequest,
-    TerminalSessionManager,
-    TerminalStatus,
-)
-from pulsara_agent.runtime.tool_artifacts import (
+from pulsara_agent.ports.artifact import (
     ToolResultArtifactOptions,
     build_adaptive_preview,
     effective_terminal_output_cap,
 )
-from pulsara_agent.terminal_public_api import TERMINAL_TOOL_DESCRIPTION
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.terminal import (
+    TerminalCommandCompletedOutcome,
+    TerminalCommandPort,
+    TerminalCommandRejectedOutcome,
+    TerminalStatus,
+    build_terminal_command_request,
+    build_terminal_port_invocation_owner,
+)
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
     ToolResultArtifactCandidate,
@@ -48,70 +49,16 @@ from pulsara_agent.tools.builtins.schemas import (
     bounded_int_arg,
     bool_arg,
     int_arg,
-    object_schema,
     required_str_arg,
     str_arg,
 )
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.terminal.notification import (
-        TerminalNotificationAccountCoordinator,
-    )
-
 
 @dataclass(slots=True)
 class TerminalTool(WorkspaceTool):
-    terminal_sessions: TerminalSessionManager | None = None
-    owner_host_session_id: str | None = None
-    owner_conversation_id: str | None = None
-    permission_state: PermissionState | None = None
-    terminal_notification_account: "TerminalNotificationAccountCoordinator | None" = (
-        None
-    )
+    command_port: TerminalCommandPort
     name: str = "terminal"
-    description: str = TERMINAL_TOOL_DESCRIPTION
-    parameters: dict[str, Any] = field(
-        default_factory=lambda: object_schema(
-            properties={
-                "command": {"type": "string", "description": "Shell command to run."},
-                "workdir": {
-                    "type": "string",
-                    "description": "Optional working directory inside workspace_root. Relative paths resolve from workspace_root.",
-                },
-                "terminal_session_id": {
-                    "type": "string",
-                    "default": "default",
-                    "description": "Terminal session id. Use short names like default, frontend, or tests.",
-                },
-                "yield_time_ms": {
-                    "type": "integer",
-                    "default": 10_000,
-                    "description": (
-                        "Wait up to this many milliseconds for the command to finish. "
-                        "If it is still running after this window, return process_id; the command is not killed."
-                    ),
-                },
-                "tty": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Allocate a POSIX PTY for interactive commands.",
-                },
-                "max_output_chars": {
-                    "type": "integer",
-                    "default": DEFAULT_MAX_OUTPUT_CHARS,
-                },
-            },
-            required=["command"],
-        )
-    )
-    is_read_only: bool = False
-    is_concurrency_safe: bool = False
-
-    def __post_init__(self) -> None:
-        WorkspaceTool.__post_init__(self)
-        if self.terminal_sessions is None:
-            self.terminal_sessions = TerminalSessionManager(self.workspace_root)
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         return self._execute(call)
@@ -185,17 +132,14 @@ class TerminalTool(WorkspaceTool):
         command = required_str_arg(call.arguments, "command")
         workdir = str_arg(call.arguments, "workdir")
         session_id = str_arg(call.arguments, "terminal_session_id") or "default"
-        if _terminal_access_off(
-            runtime_context=runtime_context, permission_state=self.permission_state
-        ):
+        if runtime_context is None:
             return self._blocked_result(
                 call,
                 command=command,
                 session_id=session_id,
-                error="terminal is disabled by permission policy",
-                policy_code="terminal_access_off",
-                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_DENIED,
-                failure_stage="permission_denied",
+                error="terminal requires typed runtime invocation authority",
+                policy_code="terminal_owner_unavailable",
+                failure_stage="adapter_initialization",
             )
         if "max_lifetime_seconds" in call.arguments:
             return self._blocked_result(
@@ -228,50 +172,55 @@ class TerminalTool(WorkspaceTool):
         yield_time_ms = int_arg(call.arguments, "yield_time_ms", 10_000)
         max_output = _max_output_chars_arg(call.arguments)
         tty = bool_arg(call.arguments, "tty", False)
-        try:
-            terminal_session = self.terminal_sessions.get_or_create(
-                session_id,
-                owner_host_session_id=self.owner_host_session_id,
-                owner_conversation_id=self.owner_conversation_id,
-            )
-        except ValueError as exc:
+        request = build_terminal_command_request(
+            command=command,
+            workdir=workdir,
+            terminal_session_id=session_id,
+            yield_time_ms=yield_time_ms,
+            max_output_chars=max_output,
+            tty=tty,
+        )
+        owner = build_terminal_port_invocation_owner(
+            runtime_session_id=runtime_context.runtime_session_id,
+            tool_call_id=call.id,
+            tool_name="terminal",
+            event_context=runtime_context.event_context,
+            owner_kind=runtime_context.owner_kind,
+            permission=runtime_context.permission,
+        )
+        outcome = self.command_port.execute(
+            request=request,
+            owner=owner,
+            output_sink=(
+                _CallableOutputSink(output_callback)
+                if output_callback is not None
+                else None
+            ),
+        )
+        if isinstance(outcome, TerminalCommandRejectedOutcome):
             return self._blocked_result(
                 call,
                 command=command,
                 session_id=session_id,
-                error=str(exc),
-                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_ADAPTER_ERROR,
-                failure_stage="adapter_initialization",
+                error=outcome.sanitized_message,
+                policy_code=outcome.reject_code.value,
+                variant_code=(
+                    ToolResultRenderVariantCode.TERMINAL_COMMAND_DENIED
+                    if outcome.failure_stage == "permission"
+                    else ToolResultRenderVariantCode.TERMINAL_COMMAND_ADAPTER_ERROR
+                ),
+                failure_stage=(
+                    "permission_denied"
+                    if outcome.failure_stage == "permission"
+                    else outcome.failure_stage
+                ),
             )
-
-        metadata: dict[str, Any] = {}
-        if output_callback is not None:
-            metadata["output_callback"] = output_callback
-        if event_context is not None and record_event is not None:
-            metadata["origin_event_context"] = event_context
-            metadata["tool_call_id"] = call.id
-            metadata["record_event"] = record_event
-        if runtime_context is not None:
-            metadata["runtime_session_id"] = runtime_context.runtime_session_id
-            metadata["run_entry_kind"] = runtime_context.run_entry_kind
-            metadata["require_completion_notification_reservation"] = bool(
-                self.terminal_notification_account is not None
-                and self.owner_host_session_id is not None
-                and runtime_context.run_entry_kind == "host_main_run"
-            )
-
-        result = terminal_session.execute(
-            TerminalRequest(
-                command=command,
-                workdir=workdir,
-                yield_time_ms=yield_time_ms,
-                max_output_chars=max_output,
-                tty=tty,
-                metadata=metadata,
-            )
-        )
+        if not isinstance(outcome, TerminalCommandCompletedOutcome):
+            raise AssertionError(type(outcome))
+        result = outcome.result
+        result_metadata = terminal_result_metadata(result)
         timing = terminal_timing_payload(
-            duration_seconds=_float_or_none(result.metadata.get("duration_seconds")),
+            duration_seconds=_float_or_none(result_metadata.get("duration_seconds")),
             freshness=(
                 "background_process_observation"
                 if result.status is TerminalStatus.RUNNING
@@ -281,33 +230,10 @@ class TerminalTool(WorkspaceTool):
         )
         payload = terminal_result_payload(
             result,
-            terminal_session_id=terminal_session.session_id,
-            backend_type=terminal_session.state.backend_type.value,
+            terminal_session_id=outcome.terminal_session_id,
+            backend_type=outcome.backend_type.value,
             timing=timing,
         )
-        prepared_completion_reservation = None
-        if (
-            result.status is TerminalStatus.RUNNING
-            and result.process_id is not None
-            and self.terminal_notification_account is not None
-            and self.owner_host_session_id is not None
-            and runtime_context is not None
-            and runtime_context.run_entry_kind == "host_main_run"
-        ):
-            process = self.terminal_sessions.monitorable_process(
-                result.process_id,
-                owner_host_session_id=self.owner_host_session_id,
-                origin_runtime_session_id=runtime_context.runtime_session_id,
-            )
-            prepared_completion_reservation = (
-                self.terminal_notification_account.prepare_completion_reservation(
-                    process=process,
-                    tool_result_end_event_id=(
-                        f"tool_result_end:{runtime_context.event_context.run_id}:"
-                        f"{call.id}"
-                    ),
-                )
-            )
         return self._result(
             call,
             status=_tool_result_state(result.status),
@@ -319,10 +245,10 @@ class TerminalTool(WorkspaceTool):
                 "timed_out": result.timed_out,
                 "truncated": result.truncated,
                 "process_id": result.process_id,
-                "terminal_session_id": terminal_session.session_id,
-                "backend_type": terminal_session.state.backend_type.value,
-                "shell": result.metadata.get("shell"),
-                "env": result.metadata.get("env"),
+                "terminal_session_id": outcome.terminal_session_id,
+                "backend_type": outcome.backend_type.value,
+                "shell": result_metadata.get("shell"),
+                "env": result_metadata.get("env"),
                 "timing": timing,
             },
             artifact_candidates=terminal_artifact_candidates(result, timing=timing),
@@ -344,31 +270,31 @@ class TerminalTool(WorkspaceTool):
                         result.status is TerminalStatus.RUNNING
                         and result.process_id is not None
                     ),
-                    terminal_session_id=terminal_session.session_id,
-                    backend_type=terminal_session.state.backend_type.value,
+                    terminal_session_id=outcome.terminal_session_id,
+                    backend_type=outcome.backend_type.value,
                     io_mode=(
-                        str(result.metadata["io_mode"])
-                        if result.metadata.get("io_mode") is not None
+                        str(result_metadata["io_mode"])
+                        if result_metadata.get("io_mode") is not None
                         else None
                     ),
                     stdin_closed=(
-                        result.metadata.get("stdin_closed")
-                        if isinstance(result.metadata.get("stdin_closed"), bool)
+                        result_metadata.get("stdin_closed")
+                        if isinstance(result_metadata.get("stdin_closed"), bool)
                         else None
                     ),
                     policy_code=(
-                        str(result.metadata["policy_code"])
-                        if result.metadata.get("policy_code") is not None
+                        str(result_metadata["policy_code"])
+                        if result_metadata.get("policy_code") is not None
                         else None
                     ),
                     duration_seconds=_float_or_none(
-                        result.metadata.get("duration_seconds")
+                        result_metadata.get("duration_seconds")
                     ),
                 ),
             ),
             terminal_payload_timing=terminal_payload_timing_fact(timing),
             prepared_terminal_notification_reservation=(
-                prepared_completion_reservation
+                outcome.prepared_completion_reservation
             ),
         )
 
@@ -513,7 +439,8 @@ def terminal_result_payload(
     backend_type: str,
     timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    result_timing = timing or _metadata_timing(getattr(result, "metadata", {}))
+    metadata = terminal_result_metadata(result)
+    result_timing = timing or _metadata_timing(metadata)
     payload = {
         "status": result.status.value,
         "output": result.output,
@@ -527,25 +454,37 @@ def terminal_result_payload(
         and result.process_id is not None,
         "terminal_session_id": terminal_session_id,
         "backend_type": backend_type,
-        "io_mode": result.metadata.get("io_mode"),
+        "io_mode": metadata.get("io_mode"),
     }
     if result_timing is not None:
         payload["timing"] = dict(result_timing)
-    if "command" in result.metadata:
-        payload["command"] = result.metadata.get("command")
-    if "duration_seconds" in result.metadata:
-        payload["duration_seconds"] = result.metadata.get("duration_seconds")
-    if "stdin_closed" in result.metadata:
-        payload["stdin_closed"] = result.metadata.get("stdin_closed")
-    if "policy_code" in result.metadata:
-        payload["policy_code"] = result.metadata.get("policy_code")
-    if "suggested_args" in result.metadata:
-        payload["suggested_args"] = result.metadata.get("suggested_args") or {}
-    if "shell" in result.metadata:
-        payload["shell"] = result.metadata.get("shell")
-    if "env" in result.metadata:
-        payload["env"] = result.metadata.get("env") or {}
+    if "command" in metadata:
+        payload["command"] = metadata.get("command")
+    if "duration_seconds" in metadata:
+        payload["duration_seconds"] = metadata.get("duration_seconds")
+    if "stdin_closed" in metadata:
+        payload["stdin_closed"] = metadata.get("stdin_closed")
+    if "policy_code" in metadata:
+        payload["policy_code"] = metadata.get("policy_code")
+    if "suggested_args" in metadata:
+        payload["suggested_args"] = metadata.get("suggested_args") or {}
+    if "shell" in metadata:
+        payload["shell"] = metadata.get("shell")
+    if "env" in metadata:
+        payload["env"] = metadata.get("env") or {}
     return payload
+
+
+def terminal_result_metadata(result: object) -> dict[str, Any]:
+    metadata = getattr(result, "metadata", {})
+    if isinstance(metadata, FrozenJsonObjectFact):
+        thawed = thaw_json(metadata)
+        if not isinstance(thawed, dict):
+            raise TypeError("terminal result metadata must thaw to an object")
+        return thawed
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    return {}
 
 
 def terminal_artifact_candidates(
@@ -556,7 +495,7 @@ def terminal_artifact_candidates(
     text = getattr(result, "full_output_text", None)
     if text is None:
         return ()
-    result_timing = timing or _metadata_timing(getattr(result, "metadata", {}))
+    result_timing = timing or _metadata_timing(terminal_result_metadata(result))
     metadata: dict[str, Any] = {
         "terminal_status": result.status.value,
         "process_id": result.process_id,
@@ -574,24 +513,6 @@ def terminal_artifact_candidates(
             stored_complete=True,
             metadata=metadata,
         ),
-    )
-
-
-def _terminal_access_off(
-    *,
-    runtime_context: ToolRuntimeContext | None,
-    permission_state: PermissionState | None,
-) -> bool:
-    if runtime_context is not None and isinstance(
-        runtime_context.permission_policy, dict
-    ):
-        return (
-            runtime_context.permission_policy.get("terminal_access")
-            == TerminalAccess.OFF.value
-        )
-    return (
-        permission_state is not None
-        and permission_state.policy.terminal is TerminalAccess.OFF
     )
 
 
@@ -632,6 +553,14 @@ def _metadata_timing(metadata: object) -> dict[str, Any] | None:
         return None
     timing = metadata.get("timing")
     return dict(timing) if isinstance(timing, dict) else None
+
+
+@dataclass(frozen=True, slots=True)
+class _CallableOutputSink:
+    callback: Callable[[str], None]
+
+    def emit(self, text_delta: str) -> None:
+        self.callback(text_delta)
 
 
 class _StreamingTerminalJsonBuilder:

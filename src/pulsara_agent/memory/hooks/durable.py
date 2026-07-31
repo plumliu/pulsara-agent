@@ -16,7 +16,7 @@ from datetime import timedelta
 from time import monotonic
 
 from pulsara_agent.event import AgentEvent, EventType, RunEndEvent
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.memory.candidates.pool import (
@@ -48,9 +48,12 @@ from pulsara_agent.memory.working_context import (
     working_context_projection,
 )
 from pulsara_agent.message import Msg, TextBlock, ToolResultBlock
-from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.memory.hooks.run_owner import (
+    MemoryHookRunOwner,
+    MemoryHookRunOwnerRegistry,
+)
+from pulsara_agent.ports.memory_hooks import MemoryHookRunView, NoopMemoryHooks
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
     CandidateQuotedEvidenceLocatorFact,
@@ -78,100 +81,103 @@ class DurableMemoryHooks(NoopMemoryHooks):
         Callable[[str, Callable[[], object], float], Awaitable[object]] | None
     ) = None
     working_context_refresh_timeout_seconds: float = 2.0
+    run_owner_registry: MemoryHookRunOwnerRegistry = field(
+        default_factory=MemoryHookRunOwnerRegistry
+    )
 
     @property
     def memory_proposal_sink(self) -> MemoryProposalSink | None:
         return self.sink
 
     def baseline_projection(
-        self, state: LoopState, *, token_budget: int
+        self, view: MemoryHookRunView, *, token_budget: int
     ) -> dict | None:
         # Recent working context remains operational state.  It is deliberately
         # not projected into provider input until it has its own typed authority.
         return None
 
-    async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
-        await self._refresh_working_context_once(state)
+    async def project(self, view: MemoryHookRunView, *, token_budget: int) -> dict | None:
+        owner = self._owner(view)
+        await self._refresh_working_context_once(view, owner)
         if self.recall is None:
             return None
-        latest_user_text = _latest_user_quote(state)
+        latest_user_text = _latest_user_quote(view)
         if latest_user_text is None or _should_skip_recall(latest_user_text):
             return None
-        cache_key = "durable_memory_recall_projection_cache"
-        cached = state.scratchpad.get(cache_key)
-        if isinstance(cached, dict) and cached.get("query_text") == latest_user_text:
-            cached_projection = cached.get("projection")
-            return cached_projection if isinstance(cached_projection, dict) else None
+        cached = owner.recall_projection_cache
+        if cached.query_text == latest_user_text:
+            return cached.projection
         query = RecallQuery(
             text=latest_user_text,
             scopes=_recall_scopes(self.read_scopes),
             limit=5,
             trigger=RecallTrigger.CHEAP_AUTO,
-            session_id=state.session_id,
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
+            session_id=view.session_id,
+            run_id=view.run_id,
+            turn_id=view.turn_id,
+            reply_id=view.reply_id,
         )
         result = await self.recall.recall(query, graph_id=self.graph_id)
         if result.status is not RecallStatus.OK or not result.items:
-            state.scratchpad[cache_key] = {
-                "query_text": latest_user_text,
-                "projection": None,
-            }
+            cached.generation += 1
+            cached.query_text = latest_user_text
+            cached.projection = None
             return None
-        self.projection_ledger.record(state, result.items)
+        self.projection_ledger.record(owner.projection_ledger, result.items)
         recalled = self.projector.build(result, token_budget=token_budget)
-        state.scratchpad[cache_key] = {
-            "query_text": latest_user_text,
-            "projection": recalled,
-        }
+        cached.generation += 1
+        cached.query_text = latest_user_text
+        cached.projection = recalled
         return recalled
 
     async def after_model_reply(
-        self, state: LoopState, assistant: Msg
+        self, view: MemoryHookRunView, assistant: Msg
     ) -> list[AgentEvent]:
-        self._drain_to_pool(state)
+        self._drain_to_pool(view)
         return []
 
     async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
+        self, view: MemoryHookRunView, results: list[ToolResultBlock]
     ) -> list[AgentEvent]:
-        self._drain_to_pool(state)
+        self._drain_to_pool(view)
         return []
 
-    async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
-        self._drain_to_pool(state)
-        self._finalize_invalid_to_pool(state)
-        self._update_working_context(state)
-        return []
+    async def on_session_end(self, view: MemoryHookRunView) -> list[AgentEvent]:
+        try:
+            self._drain_to_pool(view)
+            self._finalize_invalid_to_pool(view)
+            self._update_working_context(view)
+            return []
+        finally:
+            self._retire_owner(view)
 
-    def _drain_to_pool(self, state: LoopState) -> list[PooledMemoryCandidate]:
+    def _drain_to_pool(self, view: MemoryHookRunView) -> list[PooledMemoryCandidate]:
         proposals = self.sink.drain_valid()
-        return self._append_to_pool(state, proposals)
+        return self._append_to_pool(view, proposals)
 
     def _finalize_invalid_to_pool(
-        self, state: LoopState
+        self, view: MemoryHookRunView
     ) -> list[PooledMemoryCandidate]:
         proposals = self.sink.finalize_invalid_attempts()
-        return self._append_to_pool(state, proposals)
+        return self._append_to_pool(view, proposals)
 
     def _append_to_pool(
         self,
-        state: LoopState,
+        view: MemoryHookRunView,
         proposals: list[CandidatePoolProposal],
     ) -> list[PooledMemoryCandidate]:
         pooled: list[PooledMemoryCandidate] = []
         for proposal in proposals:
-            if self._is_projection_echo(proposal, state):
+            if self._is_projection_echo(proposal, view):
                 continue
             candidate = proposal.to_pooled(
-                source_session_id=state.session_id,
-                source_run_id=state.run_id,
-                source_turn_id=state.turn_id,
-                source_reply_id=state.reply_id,
+                source_session_id=view.session_id,
+                source_run_id=view.run_id,
+                source_turn_id=view.turn_id,
+                source_reply_id=view.reply_id,
             )
             if candidate.user_quote is None:
-                quote = _latest_user_quote_with_locator(state)
+                quote = _latest_user_quote_with_locator(view)
                 if quote is not None:
                     text, message_id, start_char, end_char = quote
                     candidate = candidate.model_copy(
@@ -197,12 +203,15 @@ class DurableMemoryHooks(NoopMemoryHooks):
         return pooled
 
     def _is_projection_echo(
-        self, proposal: CandidatePoolProposal, state: LoopState
+        self, proposal: CandidatePoolProposal, view: MemoryHookRunView
     ) -> bool:
         payload = proposal.payload
         if not isinstance(payload, ValidCandidatePayload):
             return False
-        return self.projection_ledger.is_echo(payload.candidate.statement, state)
+        owner = self._owner(view)
+        return self.projection_ledger.is_echo(
+            payload.candidate.statement, owner.projection_ledger
+        )
 
     def memory_context_prompt(self) -> str | None:
         if not self.read_scopes:
@@ -227,33 +236,28 @@ class DurableMemoryHooks(NoopMemoryHooks):
             return None
         return working_context_projection(summary, token_budget=token_budget)
 
-    def _update_working_context(self, state: LoopState) -> WorkingContextSummary | None:
+    def _update_working_context(self, view: MemoryHookRunView) -> WorkingContextSummary | None:
         return self._update_working_context_for_run(
-            runtime_session_id=state.session_id,
-            run_id=state.run_id,
+            runtime_session_id=view.session_id,
+            run_id=view.run_id,
         )
 
     async def _refresh_working_context_once(
         self,
-        state: LoopState,
+        view: MemoryHookRunView,
+        owner: MemoryHookRunOwner,
     ) -> WorkingContextSummary | None:
-        model_step_key = state.scratchpad.get(
-            "working_context_refresh_model_step_key"
-        )
-        if not isinstance(model_step_key, str) or not model_step_key:
-            model_step_key = (
-                f"{state.run_id}:"
-                f"{state.scratchpad.get('model_call_index', 0)}"
-            )
-        receipt_key = "working_context_refresh_attempted_model_step_key"
-        if state.scratchpad.get(receipt_key) == model_step_key:
+        model_step_key = view.model_step_key
+        if owner.working_context_refresh_attempted_model_step_key == model_step_key:
             return None
-        state.scratchpad[receipt_key] = model_step_key
+        owner.working_context_refresh_attempted_model_step_key = model_step_key
+
         def operation() -> WorkingContextSummary | None:
             return self._refresh_working_context_from_durable_timeline(
-                runtime_session_id=state.session_id,
-                current_run_id=state.run_id,
+                runtime_session_id=view.session_id,
+                current_run_id=view.run_id,
             )
+
         port = self.working_context_async_operation_port
         if port is None:
             return operation()
@@ -263,6 +267,18 @@ class DurableMemoryHooks(NoopMemoryHooks):
             monotonic() + self.working_context_refresh_timeout_seconds,
         )
         return result if isinstance(result, WorkingContextSummary) else None
+
+    def _owner(self, view: MemoryHookRunView) -> MemoryHookRunOwner:
+        return self.run_owner_registry.acquire(
+            runtime_session_id=view.runtime_session_id,
+            run_id=view.run_id,
+        )
+
+    def _retire_owner(self, view: MemoryHookRunView) -> None:
+        self.run_owner_registry.retire(
+            runtime_session_id=view.runtime_session_id,
+            run_id=view.run_id,
+        )
 
     def _refresh_working_context_from_durable_timeline(
         self,
@@ -289,10 +305,7 @@ class DurableMemoryHooks(NoopMemoryHooks):
                 raise ValueError("RunEnd sparse read decoded another event type")
             if decoded.run_id == current_run_id:
                 continue
-            if (
-                existing is not None
-                and decoded.run_id == existing.source_run_id
-            ):
+            if existing is not None and decoded.run_id == existing.source_run_id:
                 return None
             refreshed = self._update_working_context_for_run(
                 runtime_session_id=runtime_session_id,
@@ -370,107 +383,108 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
     _last_token_total_by_run: dict[str, int] = field(default_factory=dict)
     _memory_attempts_by_run: set[str] = field(default_factory=set)
 
-    async def on_session_start(self, state: LoopState, user_input: str) -> None:
+    async def on_session_start(self, view: MemoryHookRunView, user_input: str) -> None:
         self.turns_since_last_reflection += 1
         hints = cheap_memory_hints(user_input)
         if hints:
-            self._cheap_hints_by_run.setdefault(state.run_id, []).extend(hints)
+            self._cheap_hints_by_run.setdefault(view.run_id, []).extend(hints)
         return None
 
     async def after_model_reply(
-        self, state: LoopState, assistant: Msg
+        self, view: MemoryHookRunView, assistant: Msg
     ) -> list[AgentEvent]:
-        self._update_token_delta(state)
-        self._remember_attempts(state, self._drain_to_pool(state))
+        self._update_token_delta(view)
+        self._remember_attempts(view, self._drain_to_pool(view))
         return []
 
     async def after_tool_results(
-        self, state: LoopState, results: list[ToolResultBlock]
+        self, view: MemoryHookRunView, results: list[ToolResultBlock]
     ) -> list[AgentEvent]:
-        drained_candidates = self._drain_to_pool(state)
-        self._remember_attempts(state, drained_candidates)
+        drained_candidates = self._drain_to_pool(view)
+        self._remember_attempts(view, drained_candidates)
         self.tool_calls_since_last_reflection += len(results)
-        self._update_token_delta(state)
+        self._update_token_delta(view)
         return []
 
-    async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
-        drained_candidates = self._drain_to_pool(state)
-        finalized_invalid = self._finalize_invalid_to_pool(state)
-        self._remember_attempts(state, [*drained_candidates, *finalized_invalid])
-        self._update_token_delta(state)
+    async def on_session_end(self, view: MemoryHookRunView) -> list[AgentEvent]:
+        drained_candidates = self._drain_to_pool(view)
+        finalized_invalid = self._finalize_invalid_to_pool(view)
+        self._remember_attempts(view, [*drained_candidates, *finalized_invalid])
+        self._update_token_delta(view)
         try:
             events = await self._maybe_reflect(
-                state,
+                view,
                 safe_point="on_session_end",
             )
-            self._update_working_context(state)
+            self._update_working_context(view)
             return events
         finally:
-            self._cheap_hints_by_run.pop(state.run_id, None)
-            self._last_token_total_by_run.pop(state.run_id, None)
-            self._memory_attempts_by_run.discard(state.run_id)
+            self._cheap_hints_by_run.pop(view.run_id, None)
+            self._last_token_total_by_run.pop(view.run_id, None)
+            self._memory_attempts_by_run.discard(view.run_id)
+            self._retire_owner(view)
 
     async def _maybe_reflect(
         self,
-        state: LoopState,
+        view: MemoryHookRunView,
         *,
         safe_point: str,
     ) -> list[AgentEvent]:
-        if state.status in {LoopStatus.ABORTED, LoopStatus.FAILED}:
+        if view.status in {"aborted", "failed"}:
             return []
-        trigger_reasons = self._trigger_reasons(state, safe_point=safe_point)
+        trigger_reasons = self._trigger_reasons(view, safe_point=safe_point)
         if not trigger_reasons:
             return []
-        cheap_hints = list(self._cheap_hints_by_run.get(state.run_id, []))
+        cheap_hints = list(self._cheap_hints_by_run.get(view.run_id, []))
         reflection_events = await self.reflection.reflect(
-            state=state,
+            view=view,
             event_store=self.event_store,
             trigger_reasons=trigger_reasons,
             cheap_hints=cheap_hints,
             safe_point=safe_point,
         )
-        self._mark_reflected(state)
+        self._mark_reflected(view)
         return reflection_events
 
     def _trigger_reasons(
         self,
-        state: LoopState,
+        view: MemoryHookRunView,
         *,
         safe_point: str,
     ) -> list[str]:
         reasons: list[str] = []
-        has_memory_attempt = state.run_id in self._memory_attempts_by_run
+        has_memory_attempt = view.run_id in self._memory_attempts_by_run
         if (
             safe_point == "on_session_end"
-            and self._cheap_hints_by_run.get(state.run_id)
+            and self._cheap_hints_by_run.get(view.run_id)
             and not has_memory_attempt
         ):
             reasons.append("cheap_memory_hint")
-        if self.last_reflection_run_id == state.run_id:
+        if self.last_reflection_run_id == view.run_id:
             return []
         return _unique(reasons)
 
-    def _update_token_delta(self, state: LoopState) -> None:
-        current = state.token_usage.total_tokens
-        previous = self._last_token_total_by_run.get(state.run_id, 0)
+    def _update_token_delta(self, view: MemoryHookRunView) -> None:
+        current = view.token_usage.total_tokens
+        previous = self._last_token_total_by_run.get(view.run_id, 0)
         if current > previous:
             self.token_delta_since_last_reflection += current - previous
-        self._last_token_total_by_run[state.run_id] = current
+        self._last_token_total_by_run[view.run_id] = current
 
-    def _mark_reflected(self, state: LoopState) -> None:
-        self.last_reflection_run_id = state.run_id
+    def _mark_reflected(self, view: MemoryHookRunView) -> None:
+        self.last_reflection_run_id = view.run_id
         self.turns_since_last_reflection = 0
         self.tool_calls_since_last_reflection = 0
         self.token_delta_since_last_reflection = 0
 
     def _remember_attempts(
-        self, state: LoopState, candidates: list[PooledMemoryCandidate]
+        self, view: MemoryHookRunView, candidates: list[PooledMemoryCandidate]
     ) -> None:
         if any(
             candidate.origin is CandidateOrigin.MAIN_AGENT_TOOL
             for candidate in candidates
         ):
-            self._memory_attempts_by_run.add(state.run_id)
+            self._memory_attempts_by_run.add(view.run_id)
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -484,16 +498,16 @@ def _unique(values: list[str]) -> list[str]:
     return unique
 
 
-def _latest_user_quote(state: LoopState, max_chars: int = 2_000) -> str | None:
-    quote = _latest_user_quote_with_locator(state, max_chars=max_chars)
+def _latest_user_quote(view: MemoryHookRunView, max_chars: int = 2_000) -> str | None:
+    quote = _latest_user_quote_with_locator(view, max_chars=max_chars)
     return quote[0] if quote is not None else None
 
 
 def _latest_user_quote_with_locator(
-    state: LoopState,
+    view: MemoryHookRunView,
     max_chars: int = 2_000,
 ) -> tuple[str, str, int, int] | None:
-    for message in reversed(state.messages):
+    for message in reversed(view.messages):
         if message.role != "user":
             continue
         text = "\n".join(

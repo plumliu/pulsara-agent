@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
-
-import psycopg
 
 from pulsara_agent.entities.memory import ActionBoundary, Decision, Observation
 from pulsara_agent.event import ToolCallStartEvent, ToolResultTextDeltaEvent
@@ -21,6 +20,10 @@ from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSy
 from pulsara_agent.memory.scope import workspace_scope
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +58,6 @@ async def run_memory_recall_dogfood(
 ) -> MemoryRecallDogfoodReport:
     """Run a five-turn conversation plus a cross-dialogue recall turn."""
 
-    dsn = settings.storage.postgres_dsn
     root_a = workspace_root / "memory-dogfood-a"
     root_b = workspace_root / "memory-dogfood-b"
     hidden_root = workspace_root / "memory-dogfood-hidden"
@@ -80,21 +82,22 @@ async def run_memory_recall_dogfood(
     if resources is None or resources.embedding is None or resources.rerank is None:
         await core.shutdown()
         raise RuntimeError("Dogfood requires configured embedding and rerank providers")
+    connection_provider = session_a.wiring.runtime_wiring.archive.connection_provider
 
     target_ids = _seed_memories(
         session_a,
         graph_id=graph_id,
         hidden_scope=workspace_scope(str(hidden_root)),
     )
-    search_sync = MemorySearchIndexSync(dsn=dsn)
+    search_sync = MemorySearchIndexSync(connection_provider=connection_provider)
     search_sync.rebuild(graph_id=graph_id)
     vector_sync = MemoryVectorIndexSync(
-        dsn=dsn,
+        connection_provider=connection_provider,
         provider=resources.embedding,
         provider_name=settings.retrieval.embedding.provider,
     )
     await vector_sync.rebuild(graph_id=graph_id)
-    vector_row_count = _vector_row_count(dsn, graph_id)
+    vector_row_count = _vector_row_count(connection_provider, graph_id)
 
     turns: list[DogfoodTurn] = []
     session_b = None
@@ -158,12 +161,22 @@ async def run_memory_recall_dogfood(
             )
         )
 
-        traces = _load_traces(dsn, graph_id, {turn.run_id for turn in turns})
-        usage_count = _usage_count(dsn, graph_id, {turn.run_id for turn in turns})
+        traces = _load_traces(
+            connection_provider, graph_id, {turn.run_id for turn in turns}
+        )
+        usage_count = _usage_count(
+            connection_provider, graph_id, {turn.run_id for turn in turns}
+        )
     finally:
-        await core.shutdown()
+        try:
+            _cleanup(
+                connection_provider,
+                graph_id=graph_id,
+                runtime_session_ids=runtime_session_ids,
+            )
+        finally:
+            await core.shutdown()
         resources_closed = resources.closed
-        _cleanup(dsn, graph_id=graph_id, runtime_session_ids=runtime_session_ids)
 
     return MemoryRecallDogfoodReport(
         graph_id=graph_id,
@@ -273,8 +286,11 @@ def _seed_memories(session, *, graph_id: str, hidden_scope: str) -> dict[str, st
     return ids
 
 
-def _vector_row_count(dsn: str, graph_id: str) -> int:
-    with psycopg.connect(dsn) as connection:
+def _vector_row_count(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    graph_id: str,
+) -> int:
+    with _connection(connection_provider) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM memory_vector_index WHERE graph_id = %s",
@@ -284,9 +300,11 @@ def _vector_row_count(dsn: str, graph_id: str) -> int:
 
 
 def _load_traces(
-    dsn: str, graph_id: str, run_ids: set[str]
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    graph_id: str,
+    run_ids: set[str],
 ) -> tuple[dict[str, Any], ...]:
-    with psycopg.connect(dsn) as connection:
+    with _connection(connection_provider) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -311,8 +329,12 @@ def _load_traces(
             )
 
 
-def _usage_count(dsn: str, graph_id: str, run_ids: set[str]) -> int:
-    with psycopg.connect(dsn) as connection:
+def _usage_count(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    graph_id: str,
+    run_ids: set[str],
+) -> int:
+    with _connection(connection_provider) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -326,8 +348,13 @@ def _usage_count(dsn: str, graph_id: str, run_ids: set[str]) -> int:
             return int(cursor.fetchone()[0])
 
 
-def _cleanup(dsn: str, *, graph_id: str, runtime_session_ids: list[str]) -> None:
-    with psycopg.connect(dsn) as connection:
+def _cleanup(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+    *,
+    graph_id: str,
+    runtime_session_ids: list[str],
+) -> None:
+    with _connection(connection_provider) as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM recall_traces WHERE graph_id = %s", (graph_id,))
             cursor.execute(
@@ -347,6 +374,15 @@ def _cleanup(dsn: str, *, graph_id: str, runtime_session_ids: list[str]) -> None
             cursor.execute(
                 "DELETE FROM sessions WHERE id = ANY(%s)", (runtime_session_ids,)
             )
+
+
+def _connection(
+    connection_provider: VerifiedPostgresConnectionProviderProtocol,
+):
+    return connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30.0,
+    )
 
 
 _DOGFOOD_SYSTEM_PROMPT = """

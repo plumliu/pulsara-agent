@@ -95,11 +95,25 @@ def test_agent_accepts_only_committed_run_entries() -> None:
 
 
 def test_run_turn_waiter_is_detach_only_not_implicit_stop() -> None:
-    source = (SRC / "host" / "session.py").read_text(encoding="utf-8")
-    function = source[source.index("    async def _run_owned(") :]
-    function = function[: function.index("    async def _stream_events_in_boundary_driver(")]
-    assert "return await asyncio.shield(task)" in function
-    assert "await task" not in function
+    source = (
+        SRC / "runtime" / "run_execution" / "service.py"
+    ).read_text(encoding="utf-8")
+    assert "wait_public_result" not in source
+    assert "public_completion" not in source
+    handle_source = (
+        SRC / "runtime" / "run_execution" / "handle.py"
+    ).read_text(encoding="utf-8")
+    function = handle_source[handle_source.index("    async def wait_activation(") :]
+    function = function[: function.index("    async def wait_run_completion(")]
+    assert "await asyncio.shield(active.completion)" in function
+    host_source = (SRC / "host" / "session.py").read_text(encoding="utf-8")
+    initial = host_source[host_source.index("    async def _run_initial_owned(") :]
+    initial = initial[: initial.index("    async def _stream_initial_owned(")]
+    resume = host_source[host_source.index("    async def _run_resume_owned(") :]
+    resume = resume[: resume.index("    async def _stream_resume_owned(")]
+    assert "asyncio.create_task" not in initial
+    assert "asyncio.create_task" not in resume
+    assert "wait_public_result" not in host_source
 
 
 def test_continuation_projection_intersection_uses_owned_identity_and_content() -> None:
@@ -112,7 +126,9 @@ def test_continuation_projection_intersection_uses_owned_identity_and_content() 
 
 
 def test_segment_registry_owns_task_creation_after_owner_install() -> None:
-    source = (SRC / "host" / "run_boundary.py").read_text(encoding="utf-8")
+    source = (
+        SRC / "runtime" / "run_execution" / "registry.py"
+    ).read_text(encoding="utf-8")
     function = source[source.index("    def install_segment(") :]
     function = function[: function.index("    def complete_segment(")]
     assert "driver_factory" in function
@@ -228,8 +244,8 @@ def test_boundary_attempt_is_installed_before_activation_gate_opens() -> None:
 def test_boundary_facades_use_immutable_ingress_carriers() -> None:
     source = (SRC / "host" / "session.py").read_text(encoding="utf-8")
     assert "boundary_input = NewRunBoundaryInput(" in source
-    assert "boundary_input = self._new_interaction_boundary_input(" in source
-    assert "InteractionResumeBoundaryInput(" in source
+    assert "prepared = self._prepare_interaction_resume_attempt(" in source
+    assert "PreparedInteractionResumeAttempt" in source
 
 
 def test_run_draft_builder_consumes_explicit_prepared_facts_not_scratchpad() -> None:
@@ -254,14 +270,27 @@ def test_run_draft_builder_consumes_explicit_prepared_facts_not_scratchpad() -> 
 def test_committed_run_uses_frozen_surface_and_child_borrow_path() -> None:
     agent = (SRC / "runtime" / "agent.py").read_text(encoding="utf-8")
     host = (SRC / "host" / "session.py").read_text(encoding="utf-8")
+    child_activation = (
+        SRC / "runtime" / "subagent" / "activation.py"
+    ).read_text(encoding="utf-8")
+    child_execution = (
+        SRC / "runtime" / "subagent" / "execution.py"
+    ).read_text(encoding="utf-8")
     assert "frozen_surface = draft.frozen_execution_surface" in agent
     assert 'state.scratchpad.get("frozen_capability_execution_surface")' not in agent
     assert "attempt.execution_handles = self._new_execution_handles(" in host
     assert "handles = attempt.execution_handles" in host
     assert "borrow_authority.borrow_child_tool_call()" in agent
-    assert "child_execution_handles = BoundaryExecutionHandles(" in agent
-    assert "subagent_runtime.attach_child_execution_handles(" in agent
-    assert 'child_state.scratchpad["capability_execution_borrow_kind"] = "child"' in agent
+    assert (
+        'child_resources.capability_execution_borrow_kind = "child"'
+        in child_activation
+    )
+    assert "RunActivationFactory" in child_activation
+    assert "RunExecutionHandleSet(" in child_activation
+    assert "runtime.agent import" not in child_activation
+    assert "ChildAdmissionSessionRegistry" in child_execution
+    assert "ChildExecutionRegistry" not in child_execution
+    assert "attach_child_execution_handles" not in agent
 
 
 def test_execution_handle_tracker_does_not_own_mcp_pending_interactions() -> None:
@@ -287,12 +316,16 @@ def test_execution_handle_tracker_does_not_own_mcp_pending_interactions() -> Non
 
 def test_production_child_driver_consumes_prepared_subagent_entry() -> None:
     agent = (SRC / "runtime" / "agent.py").read_text(encoding="utf-8")
+    activation = (SRC / "runtime" / "subagent" / "activation.py").read_text(
+        encoding="utf-8"
+    )
     driver = (SRC / "runtime" / "subagent" / "run_entry.py").read_text(
         encoding="utf-8"
     )
-    assert "prepared_child_entry = PreparedSubagentRunEntry(" in agent
-    assert "prepared=prepared_child_entry" in agent
+    assert "prepared_child_entry = PreparedSubagentRunEntry(" in activation
+    assert "prepared=prepared_child_entry" in activation
     assert "prepared: PreparedSubagentRunEntry" in driver
+    assert "prepared_child_entry = PreparedSubagentRunEntry(" not in agent
 
 
 def test_boundary_confirmation_retains_payload_not_only_ids() -> None:

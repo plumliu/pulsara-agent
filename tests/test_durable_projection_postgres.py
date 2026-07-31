@@ -31,7 +31,7 @@ from pulsara_agent.memory.foundation.run_timeline_query import (
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 from pulsara_agent.ontology import runtime as runtime_ontology
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMemoryMutationOperationKind,
     CanonicalMutationSurface,
     DurableProjectionDeliveryPolicyFact,
@@ -132,9 +132,7 @@ def _read_production_authority(
             (event_log.runtime_session_id, kind.value),
         ).fetchone()
         assert stored_cutover is not None
-        cutover = DurableProjectionSessionCutoverFact.model_validate(
-            stored_cutover[0]
-        )
+        cutover = DurableProjectionSessionCutoverFact.model_validate(stored_cutover[0])
         assert stored_cutover[1] == cutover.cutover_fingerprint
     return activation, cutover
 
@@ -147,9 +145,7 @@ def _prepared_result(job) -> PreparedDurableProjectionResultFact:
             schema_version="projection_job_result_owner.v1",
             owner_kind="durable_projection_job",
             job_id=job.job_semantic.job_id,
-            job_semantic_fingerprint=(
-                job.job_semantic.job_semantic_fingerprint
-            ),
+            job_semantic_fingerprint=(job.job_semantic.job_semantic_fingerprint),
             job_candidate_fingerprint=job.candidate_fingerprint,
             source_event_reference_fingerprint=(
                 job.job_semantic.source_event_reference.reference_fingerprint
@@ -162,9 +158,7 @@ def _prepared_result(job) -> PreparedDurableProjectionResultFact:
             DurableProjectionResultSemanticFact,
             schema_version="durable_projection_result_semantic.v1",
             projection_kind=job.job_semantic.projection_kind,
-            source_projection_fingerprint=(
-                job.job_semantic.job_semantic_fingerprint
-            ),
+            source_projection_fingerprint=(job.job_semantic.job_semantic_fingerprint),
             ordered_document_semantic_fingerprints=(),
             ordered_canonical_mutation_semantic_fingerprints=(),
         ),
@@ -185,9 +179,7 @@ def _prepared_result(job) -> PreparedDurableProjectionResultFact:
 def test_postgres_seed_commit_is_atomic_and_exact_confirmed(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-seed",
@@ -232,9 +224,7 @@ def test_postgres_seed_commit_is_atomic_and_exact_confirmed(
         candidate=candidate,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert first.confirmation is DurableProjectionCommitConfirmation.FULL, (
-        first.failure
-    )
+    assert first.confirmation is DurableProjectionCommitConfirmation.FULL, first.failure
     assert first.committed_job_ids == (job.job_semantic.job_id,)
     second = repository.commit(
         candidate=candidate,
@@ -256,9 +246,7 @@ def test_postgres_seed_commit_is_atomic_and_exact_confirmed(
 def test_session_bootstrap_rejects_same_kind_with_different_cutover_fact(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     port = PostgresRuntimeSessionOwnerBootstrapPort(provider)
     candidate = port.candidate(
         runtime_session_id="runtime:bootstrap-exact-cutover",
@@ -316,9 +304,7 @@ def test_session_bootstrap_rejects_same_kind_with_different_cutover_fact(
                     original.migration_registry_prefix_fingerprint
                 ),
                 activation_fingerprint=original.activation_fingerprint,
-                seed_contract_fingerprint=(
-                    original.seed_contract_fingerprint
-                ),
+                seed_contract_fingerprint=(original.seed_contract_fingerprint),
                 cutover_policy_id=original.cutover_policy_id,
             ),
         )
@@ -347,9 +333,7 @@ def test_session_bootstrap_rejects_same_kind_with_different_cutover_fact(
 def test_postgres_job_claim_and_settlement_are_exact(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-settlement",
@@ -410,9 +394,7 @@ def test_postgres_job_claim_and_settlement_are_exact(
     assert record is not None
     assert record.state.status is DurableProjectionJobStatus.SUCCEEDED
     assert record.state.result_receipt_reference is not None
-    receipt = repository.read_receipt(
-        record.state.result_receipt_reference.receipt_id
-    )
+    receipt = repository.read_receipt(record.state.result_receipt_reference.receipt_id)
     assert (
         receipt.receipt_fingerprint
         == record.state.result_receipt_reference.receipt_fingerprint
@@ -428,17 +410,13 @@ def test_postgres_job_claim_and_settlement_are_exact(
         snapshot["result_receipts"][0]["receipt_id"]
         == record.state.result_receipt_reference.receipt_id
     )
-    assert snapshot["target_heads"][0]["target_key"] == (
-        job.job_semantic.target_key
-    )
+    assert snapshot["target_heads"][0]["target_key"] == (job.job_semantic.target_key)
 
 
 def test_claim_due_does_not_starve_other_target_behind_hot_leased_target(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-claim-fairness",
@@ -503,18 +481,13 @@ def test_claim_due_does_not_starve_other_target_behind_hot_leased_target(
         limit=1,
     )
     assert len(independent) == 1
-    assert (
-        independent[0].job.source_event_reference.run_id
-        == "run:independent-target"
-    )
+    assert independent[0].job.source_event_reference.run_id == "run:independent-target"
 
 
 def test_seed_page_uses_longest_nonempty_byte_bounded_prefix(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-byte-pages",
@@ -561,9 +534,7 @@ def test_seed_page_uses_longest_nonempty_byte_bounded_prefix(
 def test_seed_failure_latch_requires_typed_repair_and_atomic_resolution(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-seed-repair",
@@ -604,10 +575,7 @@ def test_seed_failure_latch_requires_typed_repair_and_atomic_resolution(
         candidate=failure_candidate,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert (
-        failure_outcome.confirmation
-        is DurableProjectionCommitConfirmation.FULL
-    )
+    assert failure_outcome.confirmation is DurableProjectionCommitConfirmation.FULL
     assert (
         repository.commit(
             candidate=stale,
@@ -640,14 +608,8 @@ def test_seed_failure_latch_requires_typed_repair_and_atomic_resolution(
         candidate=repaired,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert (
-        repaired_outcome.confirmation
-        is DurableProjectionCommitConfirmation.FULL
-    )
-    assert (
-        repaired_outcome.committed_seed_failure_resolution_fingerprint
-        is not None
-    )
+    assert repaired_outcome.confirmation is DurableProjectionCommitConfirmation.FULL
+    assert repaired_outcome.committed_seed_failure_resolution_fingerprint is not None
     assert (
         repository.read_active_seed_failure(
             event_log.runtime_session_id,
@@ -660,9 +622,7 @@ def test_seed_failure_latch_requires_typed_repair_and_atomic_resolution(
 def test_full_replacement_claim_terminalizes_older_job_as_superseded(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-claim-supersession",
@@ -765,9 +725,7 @@ def test_full_replacement_claim_terminalizes_older_job_as_superseded(
 def test_dead_letter_repair_is_an_exact_typed_cas_action(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:projection-repair",
@@ -818,9 +776,7 @@ def test_dead_letter_repair_is_an_exact_typed_cas_action(
     assert len(leases) == 1
     repository.settle_failure(
         lease=leases[0],
-        failure_kind=(
-            DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT
-        ),
+        failure_kind=(DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT),
         error=ValueError("synthetic permanent projection failure"),
     )
     dead_letter = repository.read_job(job.job_semantic.job_id)
@@ -843,10 +799,7 @@ def test_dead_letter_repair_is_an_exact_typed_cas_action(
     repaired = repository.read_job(job.job_semantic.job_id)
     assert repaired is not None
     assert repaired.state.status is DurableProjectionJobStatus.PENDING
-    assert (
-        repaired.state.repair_generation
-        == action.resulting_repair_generation
-    )
+    assert repaired.state.repair_generation == action.resulting_repair_generation
     with pytest.raises(ValueError, match="requires a dead-letter"):
         repository.repair_dead_letter(
             job_id=job.job_semantic.job_id,
@@ -870,9 +823,7 @@ def test_dead_letter_repair_is_an_exact_typed_cas_action(
 def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     plan = build_surface_plan(
         (
             CanonicalMutationSurface.SEARCH_INDEX,
@@ -891,9 +842,7 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
         },
         graph_id=graph_id,
         operation_id="surface-gap:node:one",
-        operation_kind=(
-            CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT
-        ),
+        operation_kind=(CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT),
         requested_surfaces=(CanonicalMutationSurface.SEARCH_INDEX,),
     )
     writer.append_canonical_memory_write_mutation(
@@ -903,9 +852,7 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
         },
         graph_id=graph_id,
         operation_id="surface-gap:node:two",
-        operation_kind=(
-            CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT
-        ),
+        operation_kind=(CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT),
         requested_surfaces=(CanonicalMutationSurface.VECTOR_INDEX,),
     )
     second_search = writer.append_canonical_memory_write_mutation(
@@ -915,9 +862,7 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
         },
         graph_id=graph_id,
         operation_id="surface-gap:node:three",
-        operation_kind=(
-            CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT
-        ),
+        operation_kind=(CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT),
         requested_surfaces=(CanonicalMutationSurface.SEARCH_INDEX,),
     )
     repository = PostgresCanonicalMutationSurfaceRepository(provider)
@@ -934,8 +879,9 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
         delivery=first[0],
         target_semantic_identity="search-target:first",
         applied_document_semantic_fingerprint=(
-            first[0].mutation.candidate.mutation_semantic
-            .graph_document_semantic_fingerprint
+            first[
+                0
+            ].mutation.candidate.mutation_semantic.graph_document_semantic_fingerprint
         ),
         deadline_monotonic=monotonic() + 20.0,
     )
@@ -949,16 +895,14 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
         second_search,
     )
     assert second[0].mutation.ordering.sequence_number == 3
-    assert (
-        second[0].lease.delivery_identity.predecessor_surface_sequence_number
-        == 1
-    )
+    assert second[0].lease.delivery_identity.predecessor_surface_sequence_number == 1
     repository.settle_applied(
         delivery=second[0],
         target_semantic_identity="search-target:second",
         applied_document_semantic_fingerprint=(
-            second[0].mutation.candidate.mutation_semantic
-            .graph_document_semantic_fingerprint
+            second[
+                0
+            ].mutation.candidate.mutation_semantic.graph_document_semantic_fingerprint
         ),
         deadline_monotonic=monotonic() + 20.0,
     )
@@ -967,9 +911,7 @@ def test_surface_predecessor_uses_surface_sequence_not_global_mutation_gap(
 def test_surface_dead_letter_retry_and_decommission_unblock_successor(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     default_policy = default_projection_delivery_policy()
     retry = cast(
         DurableProjectionRetryPolicyFact,
@@ -1006,9 +948,7 @@ def test_surface_dead_letter_retry_and_decommission_unblock_successor(
         },
         graph_id="graph:surface-repair",
         operation_id="surface-repair:one",
-        operation_kind=(
-            CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT
-        ),
+        operation_kind=(CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT),
         requested_surfaces=(CanonicalMutationSurface.SEARCH_INDEX,),
     )
     second_id = writer.append_canonical_memory_write_mutation(
@@ -1018,9 +958,7 @@ def test_surface_dead_letter_retry_and_decommission_unblock_successor(
         },
         graph_id="graph:surface-repair",
         operation_id="surface-repair:two",
-        operation_kind=(
-            CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT
-        ),
+        operation_kind=(CanonicalMemoryMutationOperationKind.RUNTIME_SEMANTIC_DOCUMENT),
         requested_surfaces=(CanonicalMutationSurface.SEARCH_INDEX,),
     )
     repository = PostgresCanonicalMutationSurfaceRepository(provider)
@@ -1030,23 +968,27 @@ def test_surface_dead_letter_retry_and_decommission_unblock_successor(
         limit=4,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert tuple(item.mutation.candidate.mutation_id for item in first) == (
-        first_id,
+    assert tuple(item.mutation.candidate.mutation_id for item in first) == (first_id,)
+    assert (
+        repository.settle_failure(
+            delivery=first[0],
+            failure_kind=(
+                DurableProjectionFailureKind.TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE
+            ),
+            error=RuntimeError("temporary surface outage"),
+            deadline_monotonic=monotonic() + 20.0,
+        ).status
+        == "dead_letter"
     )
-    assert repository.settle_failure(
-        delivery=first[0],
-        failure_kind=(
-            DurableProjectionFailureKind.TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE
-        ),
-        error=RuntimeError("temporary surface outage"),
-        deadline_monotonic=monotonic() + 20.0,
-    ).status == "dead_letter"
-    assert repository.claim_due(
-        surface=CanonicalMutationSurface.SEARCH_INDEX,
-        owner_id="surface-repair:blocked",
-        limit=4,
-        deadline_monotonic=monotonic() + 20.0,
-    ) == ()
+    assert (
+        repository.claim_due(
+            surface=CanonicalMutationSurface.SEARCH_INDEX,
+            owner_id="surface-repair:blocked",
+            limit=4,
+            deadline_monotonic=monotonic() + 20.0,
+        )
+        == ()
+    )
     with pytest.raises(
         ValueError,
         match="rebuild receipt is not durable FULL",
@@ -1067,30 +1009,34 @@ def test_surface_dead_letter_retry_and_decommission_unblock_successor(
         operator_authority_id="operator:surface-retry",
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert repository.repair_dead_letter(
-        mutation_id=first_id,
-        surface=CanonicalMutationSurface.SEARCH_INDEX,
-        action="retry_same_contract",
-        operator_authority_id="operator:surface-retry",
-        deadline_monotonic=monotonic() + 20.0,
-    ) == retry_action
+    assert (
+        repository.repair_dead_letter(
+            mutation_id=first_id,
+            surface=CanonicalMutationSurface.SEARCH_INDEX,
+            action="retry_same_contract",
+            operator_authority_id="operator:surface-retry",
+            deadline_monotonic=monotonic() + 20.0,
+        )
+        == retry_action
+    )
     retried = repository.claim_due(
         surface=CanonicalMutationSurface.SEARCH_INDEX,
         owner_id="surface-repair:retry",
         limit=4,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert tuple(item.mutation.candidate.mutation_id for item in retried) == (
-        first_id,
+    assert tuple(item.mutation.candidate.mutation_id for item in retried) == (first_id,)
+    assert (
+        repository.settle_failure(
+            delivery=retried[0],
+            failure_kind=(
+                DurableProjectionFailureKind.TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE
+            ),
+            error=RuntimeError("persistent surface outage"),
+            deadline_monotonic=monotonic() + 20.0,
+        ).status
+        == "dead_letter"
     )
-    assert repository.settle_failure(
-        delivery=retried[0],
-        failure_kind=(
-            DurableProjectionFailureKind.TRANSIENT_EXTERNAL_SURFACE_UNAVAILABLE
-        ),
-        error=RuntimeError("persistent surface outage"),
-        deadline_monotonic=monotonic() + 20.0,
-    ).status == "dead_letter"
     repository.repair_dead_letter(
         mutation_id=first_id,
         surface=CanonicalMutationSurface.SEARCH_INDEX,
@@ -1112,9 +1058,7 @@ def test_surface_dead_letter_retry_and_decommission_unblock_successor(
 def test_search_surface_worker_applies_v2_delivery_without_legacy_outbox(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     graph_id = "graph:surface-worker"
     memory_id = "preference:surface-worker"
     now = utc_now()
@@ -1134,9 +1078,7 @@ def test_search_surface_worker_applies_v2_delivery_without_legacy_outbox(
         graph_id=graph_id,
     )
     writer = CanonicalMutationV2Writer(
-        surface_plan=build_surface_plan(
-            (CanonicalMutationSurface.SEARCH_INDEX,)
-        ),
+        surface_plan=build_surface_plan((CanonicalMutationSurface.SEARCH_INDEX,)),
         connection_provider=provider,
     )
     mutation_id = writer.append_canonical_memory_write_mutation(
@@ -1156,10 +1098,13 @@ def test_search_surface_worker_applies_v2_delivery_without_legacy_outbox(
         owner_id="surface-worker:search",
     )
 
-    assert worker.run_once(
-        limit=4,
-        deadline_monotonic=monotonic() + 20.0,
-    ) == 1
+    assert (
+        worker.run_once(
+            limit=4,
+            deadline_monotonic=monotonic() + 20.0,
+        )
+        == 1
+    )
     with provider.connection(
         lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
         deadline_monotonic=monotonic() + 20.0,
@@ -1185,9 +1130,7 @@ def test_search_surface_worker_applies_v2_delivery_without_legacy_outbox(
 def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     event_log = PostgresEventLog(
         connection_provider=provider,
         runtime_session_id="runtime:timeline-handler",
@@ -1251,10 +1194,7 @@ def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
         prepared=first_prepared,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert (
-        first_outcome.confirmation
-        is DurableProjectionCommitConfirmation.FULL
-    )
+    assert first_outcome.confirmation is DurableProjectionCommitConfirmation.FULL
     assert first_outcome.resulting_status is DurableProjectionJobStatus.SUCCEEDED, (
         first_outcome.failure
     )
@@ -1276,26 +1216,20 @@ def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
     second_reply_id = "reply:timeline-handler:second"
     event_log.append(
         ReplyStartEvent(
-            **EventContext(
-                run_id, turn_id, second_reply_id
-            ).event_fields(),
+            **EventContext(run_id, turn_id, second_reply_id).event_fields(),
             name="assistant",
         )
     )
     event_log.append(
         make_text_block_segment_event(
-            **EventContext(
-                run_id, turn_id, second_reply_id
-            ).event_fields(),
+            **EventContext(run_id, turn_id, second_reply_id).event_fields(),
             block_id="text:timeline:second",
             delta="second projected reply",
         )
     )
     second = event_log.append(
         ReplyEndEvent(
-            **EventContext(
-                run_id, turn_id, second_reply_id
-            ).event_fields(),
+            **EventContext(run_id, turn_id, second_reply_id).event_fields(),
             model_terminal_outcome="completed",
         )
     )
@@ -1325,10 +1259,7 @@ def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
         prepared=second_prepared,
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert (
-        second_outcome.confirmation
-        is DurableProjectionCommitConfirmation.FULL
-    )
+    assert second_outcome.confirmation is DurableProjectionCommitConfirmation.FULL
     assert second_outcome.resulting_status is DurableProjectionJobStatus.SUCCEEDED, (
         second_outcome.failure
     )
@@ -1350,9 +1281,7 @@ def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
             FROM graph_documents
             WHERE graph_id = 'graph:default' AND id = %s
             """,
-            (
-                f"run-timeline:{event_log.runtime_session_id}:{run_id}",
-            ),
+            (f"run-timeline:{event_log.runtime_session_id}:{run_id}",),
         ).fetchone()
         mutation_count = connection.execute(
             """
@@ -1406,9 +1335,9 @@ def test_run_timeline_job_incrementally_commits_receipt_head_and_outputs(
         "reply",
         "assistant_text",
     )
-    assert tuple(
-        item.summary for item in prior_page.items if item.summary
-    ) == ("first projected reply",)
+    assert tuple(item.summary for item in prior_page.items if item.summary) == (
+        "first projected reply",
+    )
     assert prior_page.next_cursor is None
     with pytest.raises(RunTimelineExportLimitExceeded):
         load_run_timeline(
@@ -1437,9 +1366,7 @@ def test_tool_evidence_job_joins_terminal_artifact_and_immutable_relation(
     tmp_path,
     migrated_postgres_database: MigratedPostgresTestDatabase,
 ) -> None:
-    provider = verified_postgres_provider(
-        migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(migrated_postgres_database.runtime_dsn)
     runtime_session_id = "runtime:evidence-handler"
     event_log = PostgresEventLog(
         connection_provider=provider,
@@ -1522,17 +1449,13 @@ def test_tool_evidence_job_joins_terminal_artifact_and_immutable_relation(
             metadata=blob.metadata,
         )
     committed = event_log.extend(prepared_terminal)
-    terminal = next(
-        item for item in committed if isinstance(item, ToolResultEndEvent)
-    )
+    terminal = next(item for item in committed if isinstance(item, ToolResultEndEvent))
     source = exact_stored_event(event_log=event_log, event_id=terminal.id)
     assert source.source_reference.sequence == terminal.sequence
 
     seed = repository.prepare_next_seed_candidate(
         runtime_session_id=runtime_session_id,
-        projection_kind=(
-            DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
-        ),
+        projection_kind=(DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE),
     )
     assert seed is not None
     assert (
@@ -1568,9 +1491,7 @@ def test_tool_evidence_job_joins_terminal_artifact_and_immutable_relation(
     assert outcome.result_receipt_reference is not None
 
     target_key = projection_target_key(
-        projection_kind=(
-            DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
-        ),
+        projection_kind=(DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE),
         runtime_session_id=runtime_session_id,
         run_id=run_id,
         tool_call_id=tool_call_id,
@@ -1580,9 +1501,7 @@ def test_tool_evidence_job_joins_terminal_artifact_and_immutable_relation(
         target_key,
     )
     assert head is not None
-    receipt = repository.read_receipt(
-        head.applied_result_receipt_reference.receipt_id
-    )
+    receipt = repository.read_receipt(head.applied_result_receipt_reference.receipt_id)
     assert receipt.result_semantic.projection_kind is (
         DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
     )
@@ -1598,9 +1517,7 @@ def test_tool_evidence_job_joins_terminal_artifact_and_immutable_relation(
             source_documents[0].artifact_reference.artifact_semantic_id
         )
     )
-    assert source_payload["tool_call_arguments"]["raw_arguments_json"] == (
-        '{"path":'
-    )
+    assert source_payload["tool_call_arguments"]["raw_arguments_json"] == ('{"path":')
     assert source_payload["tool_call_arguments"]["parse_disposition"] == (
         "invalid_json"
     )

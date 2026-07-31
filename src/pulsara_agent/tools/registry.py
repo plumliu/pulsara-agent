@@ -3,48 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
-from pulsara_agent.tools.base import AsyncTool, Tool
-from pulsara_agent.llm.input import ToolSpec
-from pulsara_agent.primitives.model_call import sha256_fingerprint
-
-
-@dataclass(frozen=True, slots=True)
-class ToolBindingContract:
-    tool_name: str
-    origin: Literal["builtin", "mcp", "custom", "workflow", "subagent_system"]
-    contract_id: str
-    contract_version: str
-    binding_fingerprint: str
-
-
-def build_tool_binding_contract(
-    *,
-    tool_name: str,
-    origin: Literal["builtin", "mcp", "custom", "workflow", "subagent_system"],
-    contract_id: str,
-    contract_version: str,
-    binding_attributes: object | None = None,
-) -> ToolBindingContract:
-    if not contract_id or not contract_version:
-        raise ValueError("tool binding contract id/version are required")
-    return ToolBindingContract(
-        tool_name=tool_name,
-        origin=origin,
-        contract_id=contract_id,
-        contract_version=contract_version,
-        binding_fingerprint=sha256_fingerprint(
-            "tool-binding-contract:v1",
-            [
-                tool_name,
-                origin,
-                contract_id,
-                contract_version,
-                binding_attributes,
-            ],
-        ),
-    )
+from pulsara_agent.ports.tool_execution import AsyncTool, Tool
+from pulsara_agent.ports.tool_registry import (
+    McpToolBindingContract,
+    ToolBindingContract,
+    build_tool_binding_contract,
+)
 
 
 @dataclass(slots=True)
@@ -72,11 +37,11 @@ class ToolRegistry:
         except KeyError as exc:
             raise KeyError(f"Unknown tool: {name}") from exc
 
-    def names(self) -> list[str]:
-        return sorted(self._tools)
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._tools))
 
-    def all(self) -> list[Tool | AsyncTool]:
-        return [self._tools[name] for name in self.names()]
+    def all(self) -> tuple[Tool | AsyncTool, ...]:
+        return tuple(self._tools[name] for name in self.names())
 
     def binding_contract(self, name: str) -> ToolBindingContract | None:
         return self._binding_contracts.get(name)
@@ -88,12 +53,21 @@ class ToolRegistry:
             raise KeyError(f"Unknown tool: {contract.tool_name}")
         existing = self._binding_contracts.get(contract.tool_name)
         if existing is not None and existing != contract:
-            raise ValueError(f"Tool binding contract already frozen: {contract.tool_name}")
+            raise ValueError(
+                f"Tool binding contract already frozen: {contract.tool_name}"
+            )
         self._binding_contracts[contract.tool_name] = contract
 
     def binding_contracts(self) -> tuple[ToolBindingContract, ...]:
         return tuple(
             self._binding_contracts[name] for name in sorted(self._binding_contracts)
+        )
+
+    def mcp_bindings(self) -> tuple[McpToolBindingContract, ...]:
+        return tuple(
+            contract
+            for contract in self.binding_contracts()
+            if isinstance(contract, McpToolBindingContract)
         )
 
     def restricted_to(self, allowed_names: frozenset[str]) -> ToolRegistry:
@@ -113,12 +87,5 @@ class ToolRegistry:
             )
         return restricted
 
-    def tool_specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(
-            ToolSpec(
-                name=tool.name,
-                description=tool.description,
-                parameters=tool.parameters,
-            )
-            for tool in self.all()
-        )
+
+__all__ = ["ToolRegistry", "build_tool_binding_contract"]

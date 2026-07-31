@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from hashlib import sha256
 from time import monotonic
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -32,7 +32,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log.serialization import (
     canonical_event_payload_bytes,
-    freeze_event_write_candidate,
+    stable_event_identity,
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.primitives import context_fingerprint, freeze_json
@@ -72,9 +72,7 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalProjectionDocumentFact,
     TerminalProjectionReferenceFact,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.ports.model_lifecycle import ModelLifecycleRuntimeGateway
 
 
 TERMINAL_PROJECTION_MEDIA_TYPE = (
@@ -778,24 +776,6 @@ def _join_projection_parts(value: dict[str, object]) -> str:
     return "".join(parts)
 
 
-def stable_event_identity(
-    event: AgentEvent,
-    *,
-    runtime_session_id: str,
-) -> StableEventIdentityFact:
-    candidate = freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
-    return build_frozen_fact(
-        StableEventIdentityFact,
-        schema_version="stable_event_identity.v2",
-        runtime_session_id=runtime_session_id,
-        event_id=candidate.event_id,
-        event_type=candidate.event_type,
-        event_schema_version=candidate.event_schema_version,
-        event_schema_fingerprint=candidate.event_schema_fingerprint,
-        payload_fingerprint=candidate.payload_fingerprint,
-    )
-
-
 def build_model_stream_semantic_commit_measurement(
     *,
     runtime_session_id: str,
@@ -920,7 +900,7 @@ def rebuild_model_stream_semantic_commit_measurements(
 
 
 def bind_model_terminal_projection_to_session(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     prepared: PreparedModelTerminalProjection,
 ) -> PreparedModelTerminalProjection:
     """Bind same-batch identity to the session's exact metadata overlay."""
@@ -947,7 +927,7 @@ def bind_model_terminal_projection_to_session(
 
 
 async def persist_model_terminal_projection(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     prepared: PreparedModelTerminalProjection,
     *,
     run_id: str,
@@ -997,7 +977,7 @@ async def persist_model_terminal_projection(
 
 
 async def hydrate_terminal_projection(
-    runtime_session: RuntimeSession,
+    runtime_session: ModelLifecycleRuntimeGateway,
     reference: TerminalProjectionReferenceFact,
     *,
     deadline_monotonic: float | None = None,

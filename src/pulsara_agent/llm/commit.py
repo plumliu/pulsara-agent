@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import json
 
@@ -45,8 +45,12 @@ from pulsara_agent.primitives.host_ingress import (
 from pulsara_agent.llm.terminal_projection import (
     MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
 )
-from pulsara_agent.runtime.long_horizon.store import (
-    LongHorizonReducerApplyError,
+from pulsara_agent.primitives.long_horizon import LongHorizonReducerApplyError
+from pulsara_agent.ports.event_write import (
+    EventCommitError,
+    EventWriteResult,
+    PendingRuntimeEventWriteError,
+    RuntimeEventWriteCancelled,
 )
 
 if TYPE_CHECKING:
@@ -56,10 +60,11 @@ if TYPE_CHECKING:
         ModelLifecycleKind,
         RolloutAccountingMode,
     )
-    from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
     from pulsara_agent.primitives.authority_materialization import (
         PhysicalOperationReservationFact,
+    )
+    from pulsara_agent.ports.model_lifecycle import (
+        ModelLifecycleTransactionCompanion,
     )
 
 
@@ -233,20 +238,21 @@ class RuntimeSessionModelStreamEventCommitPort:
     def __init__(
         self,
         *,
-        runtime_session: RuntimeSession,
-        state: LoopState | None,
+        runtime_session: Any,
+        start_transaction_companion: ModelLifecycleTransactionCompanion | None = None,
+        terminal_transaction_companion: (
+            ModelLifecycleTransactionCompanion | None
+        ) = None,
     ) -> None:
         self._runtime_session = runtime_session
-        self._state = state
         self._physical_reservation: PhysicalOperationReservationFact | None = None
+        self._start_transaction_companion = start_transaction_companion
+        self._terminal_transaction_companion = terminal_transaction_companion
+        self._model_call_purpose = None
 
     @property
-    def runtime_session(self) -> RuntimeSession:
+    def runtime_session(self) -> Any:
         return self._runtime_session
-
-    @property
-    def state(self) -> LoopState | None:
-        return self._state
 
     async def ensure_physical_headroom(self) -> None:
         from pulsara_agent.primitives.authority_materialization import (
@@ -299,6 +305,14 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model start batch does not match its frozen commit guard"
             )
+        self._validate_transaction_companion(
+            self._start_transaction_companion,
+            phase="start",
+            purpose=start.resolved_call.purpose,
+            resolved_model_call_id=guard.resolved_model_call_id,
+            stable_primary_event_id=start.id,
+        )
+        self._model_call_purpose = start.resolved_call.purpose
         safe_point_guard = guard.active_run_monitor_safe_point_guard
         if (safe_point_guard is None) != (
             start.active_run_monitor_delivery is None
@@ -394,7 +408,6 @@ class RuntimeSessionModelStreamEventCommitPort:
                     start_event=start,
                     candidate_events=events,
                     guard=safe_point_guard,
-                    state=self._state,
                 ),
                 self._runtime_session.write_coordinator.lock,
             ):
@@ -407,7 +420,6 @@ class RuntimeSessionModelStreamEventCommitPort:
                         start_event=start,
                         candidate_events=events,
                         guard=safe_point_guard,
-                        state=self._state,
                     )
                 if reservation is not None:
                     self._require_expected_rollout_state(
@@ -424,7 +436,11 @@ class RuntimeSessionModelStreamEventCommitPort:
                     is None
                     and self._runtime_session.allow_unbootstrapped_test_events
                 ):
-                    return self._commit_in_writer(candidates, events=events)
+                    return self._commit_in_writer(
+                        candidates,
+                        events=events,
+                        transaction_companion=self._start_transaction_companion,
+                    )
                 from pulsara_agent.primitives.authority_materialization import (
                     PhysicalOperationKind,
                 )
@@ -439,7 +455,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                         operation_kind=PhysicalOperationKind.MODEL_CALL,
                         reservation_id=physical_reservation_id,
                         owner_id=guard.resolved_model_call_id,
-                        state=self._state,
+                        transaction_companion=self._start_transaction_companion,
                     )
                 )
                 self._physical_reservation = physical_reservation
@@ -552,7 +568,6 @@ class RuntimeSessionModelStreamEventCommitPort:
                             self._runtime_session.charge_physical_operation_from_thread(
                                 events,
                                 reservation=physical_reservation,
-                                state=self._state,
                             )
                         )
                         confirmed = self._confirmed_batch(candidates, result=result)
@@ -620,6 +635,13 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "model terminal end does not match its frozen commit guard"
             )
+        self._validate_transaction_companion(
+            self._terminal_transaction_companion,
+            phase="terminal",
+            purpose=self._model_call_purpose,
+            resolved_model_call_id=guard.resolved_model_call_id,
+            stable_primary_event_id=model_end.id,
+        )
         end_projection = model_end.terminal_projection
         if (
             projection.resolved_model_call_id != guard.resolved_model_call_id
@@ -747,7 +769,13 @@ class RuntimeSessionModelStreamEventCommitPort:
                         is None
                         and self._runtime_session.allow_unbootstrapped_test_events
                     ):
-                        result = self._commit_in_writer(candidates, events=events)
+                        result = self._commit_in_writer(
+                            candidates,
+                            events=events,
+                            transaction_companion=(
+                                self._terminal_transaction_companion
+                            ),
+                        )
                     else:
                         physical_reservation = self._require_physical_reservation(
                             resolved_model_call_id=guard.resolved_model_call_id
@@ -760,7 +788,9 @@ class RuntimeSessionModelStreamEventCommitPort:
                                 model_stream_measurement_fingerprint=(
                                     guard.model_stream_measurement_fingerprint
                                 ),
-                                state=self._state,
+                                transaction_companion=(
+                                    self._terminal_transaction_companion
+                                ),
                             )
                         )
                         result = self._confirmed_batch(candidates, result=write_result)
@@ -773,8 +803,6 @@ class RuntimeSessionModelStreamEventCommitPort:
                     self._physical_reservation = None
                     return result
                 except BaseException as exc:
-                    from pulsara_agent.runtime.session import EventCommitError
-
                     if isinstance(exc, EventCommitError):
                         self._raise_retryable_none(exc, phase="terminal")
                     raise
@@ -788,12 +816,6 @@ class RuntimeSessionModelStreamEventCommitPort:
             LedgerWriteAdmissionClass,
             PhysicalOperationKind,
         )
-        from pulsara_agent.runtime.event_write_service import (
-            PendingRuntimeEventWriteError,
-            RuntimeEventWriteCancelled,
-        )
-        from pulsara_agent.runtime.session import EventCommitError
-
         admission_kwargs = {}
         if self._physical_reservation is not None:
             admission_kwargs = {
@@ -851,8 +873,6 @@ class RuntimeSessionModelStreamEventCommitPort:
 
     @staticmethod
     def _raise_retryable_none(exc: BaseException, *, phase: str) -> None:
-        from pulsara_agent.runtime.session import EventCommitError
-
         if isinstance(exc, EventCommitError) and exc.commit_outcome == "none":
             raise ModelStreamCommitNotCommitted(
                 f"stable model-stream {phase} batch was not committed"
@@ -863,6 +883,7 @@ class RuntimeSessionModelStreamEventCommitPort:
         candidates: tuple[FrozenEventWriteCandidate, ...],
         *,
         events: tuple[AgentEvent, ...],
+        transaction_companion: ModelLifecycleTransactionCompanion | None = None,
     ) -> ConfirmedCommittedBatch:
         """Commit/reduce/enqueue without awaiting an observer callback.
 
@@ -875,22 +896,41 @@ class RuntimeSessionModelStreamEventCommitPort:
         try:
             result = self._runtime_session.write_events_from_thread(
                 events,
-                state=self._state,
+                transaction_companion=transaction_companion,
             )
         except BaseException as original:
             try:
                 result = self._runtime_session.confirm_and_handoff_event_batch(
                     events,
-                    state=self._state,
                 )
             except Exception as confirmation_error:
-                from pulsara_agent.runtime.session import EventCommitError
-
                 if isinstance(confirmation_error, EventCommitError):
                     raise confirmation_error from original
                 self._runtime_session.latch_event_commit_outcome_unknown()
                 raise
         return self._confirmed_batch(candidates, result=result)
+
+    @staticmethod
+    def _validate_transaction_companion(
+        companion: ModelLifecycleTransactionCompanion | None,
+        *,
+        phase: str,
+        purpose: object,
+        resolved_model_call_id: str,
+        stable_primary_event_id: str,
+    ) -> None:
+        if companion is None:
+            return
+        identity = companion.identity
+        if (
+            identity.phase != phase
+            or identity.purpose != purpose
+            or identity.resolved_model_call_id != resolved_model_call_id
+            or identity.stable_primary_event_id != stable_primary_event_id
+        ):
+            raise ModelStreamCommitContractError(
+                "model lifecycle transaction companion identity drifted"
+            )
 
     @staticmethod
     def _decode_candidates(
@@ -1062,10 +1102,6 @@ class RuntimeSessionModelStreamEventCommitPort:
         *,
         run_id: str,
     ) -> None:
-        from pulsara_agent.runtime.long_horizon.accounting import (
-            resolve_run_rollout_binding,
-        )
-
         if guard.rollout_accounting_mode == "root_account":
             matching_states = tuple(
                 state
@@ -1081,9 +1117,8 @@ class RuntimeSessionModelStreamEventCommitPort:
                 )
             active = matching_states[0].active_reservations
         elif guard.rollout_accounting_mode == "child_subaccount":
-            binding = resolve_run_rollout_binding(
-                self._runtime_session,
-                run_id=run_id,
+            binding = self._runtime_session.resolve_run_rollout_binding(
+                run_id=run_id
             )
             if binding.child_state is None:
                 raise ModelStreamCommitContractError(

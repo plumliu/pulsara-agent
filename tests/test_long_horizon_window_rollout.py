@@ -96,14 +96,14 @@ from pulsara_agent.primitives.model_call import (
     sha256_fingerprint,
 )
 from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
-from pulsara_agent.llm.recovery import ModelStreamRecoveryService
+from pulsara_agent.runtime.model_stream_recovery import ModelStreamRecoveryService
 from pulsara_agent.llm.segment import ModelStreamSegmentAccumulator
 from pulsara_agent.llm.terminal_projection import (
     ModelTerminalProjectionReducer,
     build_default_terminal_projection_contract_bundle,
 )
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.llm.control_recovery import (
+from pulsara_agent.runtime.model_control_recovery import (
     ModelCallControlDispositionRecoveryService,
     ModelCallControlRecoveryStructuralError,
 )
@@ -141,7 +141,7 @@ from pulsara_agent.runtime.context_input.event_slice import (
     event_reference_from_stored,
 )
 from pulsara_agent.runtime.context_input.live import _read_live_primary_event_slice
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     ToolActionClassifierRegistry,
     default_tool_action_classifier_registry,
     fixed_tool_action_policy,
@@ -149,7 +149,7 @@ from pulsara_agent.runtime.tool_action import (
 from pulsara_agent.runtime.tool_execution import ToolExecutionTerminalDrainBlocked
 from pulsara_agent.primitives.long_horizon import LongHorizonActionClass
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from tests.conftest import tool_result_end_contract_fields
 from pulsara_agent.runtime.long_horizon.projection_reducer import (
     ContextProjectionReducerError,
@@ -179,7 +179,7 @@ from pulsara_agent.runtime.context_input.render import (
 )
 from pulsara_agent.runtime.context_input.compiler import lower_transcript_for_context
 from pulsara_agent.runtime.state import LoopBudget
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.capability.result_semantics import build_unknown_result_semantics
 from pulsara_agent.runtime.long_horizon.context_budget import (
     measure_long_horizon_context_budget,
@@ -2862,10 +2862,10 @@ def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
         event_log=log,
         business_events=(
             RunEndEvent(
-            **CTX.event_fields(),
-            status="finished",
-            stop_reason=RunStopReason.FINAL,
-            terminalization_kind=RunTerminalizationKind.NORMAL,
+                **CTX.event_fields(),
+                status="finished",
+                stop_reason=RunStopReason.FINAL,
+                terminalization_kind=RunTerminalizationKind.NORMAL,
             ),
         ),
         owner_scope="test-control-recovery-run-end",
@@ -3108,7 +3108,7 @@ async def _service_window_compaction_fixture(
     runtime_session.window_compaction_service = service
     request = WindowCompactionRequest(
         event_context=CTX,
-        state=LoopState(
+        state=RunActivationWorkingState(
             session_id=runtime_session.runtime_session_id,
             run_id=CTX.run_id,
         ),
@@ -3518,7 +3518,7 @@ async def _window_compaction_restart_repairs_started_without_terminal(tmp_path) 
             llm_runtime=service.llm_runtime,
         )
         recovered = await recovery_service.recover_interrupted(
-            state=LoopState(
+            state=RunActivationWorkingState(
                 session_id=recovery_session.runtime_session_id,
                 run_id=CTX.run_id,
             )

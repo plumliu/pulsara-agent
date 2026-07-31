@@ -4,19 +4,45 @@ import asyncio
 import threading
 from collections.abc import Callable, Coroutine
 from functools import wraps
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from pulsara_agent.host.run_boundary import (
-    BoundaryExecutionHandles,
+from pulsara_agent.runtime.execution_handles import (
+    RunExecutionHandleSet,
     CapabilityExecutionBorrowUnavailable,
     CapabilityExecutionBorrowTracker,
-    CommittedRunExecutionOwner,
-    RunExecutionOwnerRegistry,
-    RunExecutionSegmentResult,
+)
+from pulsara_agent.runtime.run_execution.owner import (
+    ActiveRunSuspension,
+    BoundRunResources,
+    NoActiveActivation,
+    NoActiveSuspension,
+    RunFinalizationOwner,
+    RunFinalizationSlot,
+    RunObserverRegistry,
+    RunOwner,
+    RunProgressState,
+    RunRetiringResourceSet,
+    RunActivationCoordinatorResult,
+)
+from pulsara_agent.ports.run_execution import (
+    PendingInteractionIdentity,
+    RunTerminalizationPending,
     RunSegmentInstallBlocked,
     RunTerminationIntent,
+)
+from pulsara_agent.primitives.context import ContextEventReferenceFact
+from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.ports.run_authority import InstalledRunAuthorityRevision
+from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
+from pulsara_agent.runtime.run_execution.prepared import RunActivationStateCarrier
+from pulsara_agent.runtime.state import RunActivationWorkingState
+from pulsara_agent.ports.run_execution import (
+    RunSuspendedOutcome,
+    build_prepared_run_owner_reservation_key,
+    build_run_owner_identity,
 )
 from pulsara_agent.runtime.agent import _await_sync_tool_thread
 
@@ -33,38 +59,161 @@ def _async_test(
 
 def _handles(
     handle_id: str = "handles:1", *, state: str = "run_owned"
-) -> BoundaryExecutionHandles:
-    return BoundaryExecutionHandles(
+) -> RunExecutionHandleSet:
+    reservation = build_prepared_run_owner_reservation_key(
+        runtime_session_id="runtime:1",
+        run_id="run:1",
+        run_start_event_id="run_start:1",
+    )
+    handles = RunExecutionHandleSet(
         handle_id=handle_id,
         handle_generation=1,
-        owner_id="run:1" if state == "run_owned" else "boundary:resume",
-        state=cast(Any, state),
+        owner=reservation,
+        state="boundary_owned",
         mcp_installation=object(),
         capability_runtime=object(),
         tool_registry=object(),
         frozen_execution_surface=cast(Any, object()),
     )
+    if state == "run_owned":
+        handles.transfer_to_run(
+            build_run_owner_identity(
+                reservation_key=reservation,
+                run_start_sequence=1,
+            )
+        )
+    return handles
 
 
-def _registry() -> tuple[RunExecutionOwnerRegistry, CommittedRunExecutionOwner]:
-    registry = RunExecutionOwnerRegistry()
-    owner = CommittedRunExecutionOwner(
+def _registry() -> tuple[RunExecutionRegistry, RunOwner]:
+    registry = RunExecutionRegistry()
+    handles = _handles()
+    identity = cast(Any, handles.owner)
+    owner = RunOwner(
+        identity=identity,
+        genesis=cast(Any, object()),
+        authority_head=cast(Any, object()),
+        progress=RunProgressState(owner_identity=identity),
+        lifecycle="open",
+        resource_slot=BoundRunResources(handle_set=handles),
+        retiring_resources=RunRetiringResourceSet(owner_identity=identity),
+        activation_slot=NoActiveActivation(),
+        suspension_slot=NoActiveSuspension(),
+        finalization_slot=RunFinalizationSlot(
+            owner=RunFinalizationOwner(
+                owner_identity=identity,
+                terminal_event_id="event:run-end",
+            )
+        ),
+        observer_registry=RunObserverRegistry(),
+        activation_completion_history={},
         entry=cast(Any, object()),
-        execution_handles=_handles(),
-        retiring_execution_handles={},
-        terminal_event_id="event:run-end",
-        terminal_candidate=None,
-        terminal_state="open",
-        terminalization_task=None,
         termination_intent=None,
         run_completion=asyncio.get_running_loop().create_future(),
         next_segment_generation=0,
-        active_segment=None,
         latest_activation_owner_kind="host_run_boundary",
         latest_activation_owner_id="boundary:initial",
     )
-    registry.register("run:1", owner)
+    _install_pending_state(owner, token="run-pending:test:initial")
+    registry.register_recovered(owner)
     return registry, owner
+
+
+def _install_pending_state(owner: RunOwner, *, token: str) -> None:
+    state = RunActivationWorkingState(
+        session_id="runtime:1",
+        run_id="run:1",
+        turn_id="turn:1",
+        reply_id="reply:1",
+    )
+    owner.pending_activation_state = RunActivationStateCarrier(
+        run_id="run:1",
+        generation=1,
+        owner_token=token,
+        _working_state=state,
+    )
+    owner.pending_activation_owner_token = token
+
+
+def _install_suspended_state(owner: RunOwner) -> None:
+    token = "suspension:test:1"
+    state = RunActivationWorkingState(
+        session_id="runtime:1",
+        run_id="run:1",
+        turn_id="turn:1",
+        reply_id="reply:1",
+    )
+    carrier = RunActivationStateCarrier(
+        run_id="run:1",
+        generation=1,
+        owner_token=token,
+        _working_state=state,
+    )
+    owner.pending_activation_state = None
+    owner.pending_activation_owner_token = None
+    owner.suspension_slot = ActiveRunSuspension(
+        authority=SimpleNamespace(
+            identity=SimpleNamespace(interaction_fingerprint="interaction:1")
+        ),
+        resources=SimpleNamespace(
+            state_carrier=carrier,
+            state_owner_token=token,
+        ),
+    )
+
+
+def _install_fake_suspended_receipt(owner: RunOwner) -> None:
+    activation = SimpleNamespace(
+        durable_activation=SimpleNamespace(segment_generation=1)
+    )
+    pending = SimpleNamespace(
+        identity=SimpleNamespace(interaction_fingerprint="interaction:1")
+    )
+    outcome = RunSuspendedOutcome.model_construct(
+        outcome_kind="suspended",
+        owner_identity=owner.identity,
+        activation_identity=activation,
+        authority_revision_fingerprint="authority:1",
+        source_interaction_event_reference=cast(Any, object()),
+        pending_interaction=pending,
+        progress=cast(Any, object()),
+    )
+    owner.activation_completion_history[1] = RunActivationCoordinatorResult(
+        segment_id="segment:1",
+        segment_generation=1,
+        disposition="waiting_user",
+        outcome=outcome,
+    )
+
+
+def test_pending_interaction_identity_rejects_wrong_exact_source_type() -> None:
+    async def scenario() -> None:
+        _registry_value, owner = _registry()
+        source = ContextEventReferenceFact(
+            runtime_session_id=owner.identity.runtime_session_id,
+            event_id="confirm:wrong-occurrence",
+            sequence=2,
+            event_type="PLAN_QUESTION_ASKED",
+            payload_fingerprint=context_fingerprint(
+                "test-pending-source:v1", "confirm:wrong-occurrence"
+            ),
+        )
+        payload = {
+            "schema_version": 1,
+            "owner_identity": owner.identity,
+            "interaction_kind": "approval",
+            "interaction_id": "confirm:expected-occurrence",
+            "source_interaction_event_reference": source,
+        }
+        with pytest.raises(ValueError, match="source event type mismatch"):
+            PendingInteractionIdentity(
+                **payload,
+                interaction_fingerprint=context_fingerprint(
+                    "pending-interaction:v1", payload
+                ),
+            )
+
+    asyncio.run(scenario())
 
 
 @_async_test
@@ -135,9 +284,34 @@ async def test_termination_intent_blocks_segment_without_calling_factory() -> No
 
 
 @_async_test
-async def test_suspended_stop_intent_blocks_post_commit_resume_segment_install() -> None:
+async def test_suspended_stop_intent_blocks_post_commit_resume_segment_install(
+    monkeypatch,
+) -> None:
     registry, owner = _registry()
-    incoming = _handles("handles:incoming", state="attempt_owned")
+    predecessor = SimpleNamespace(authority_fingerprint="authority:1")
+    installed = InstalledRunAuthorityRevision.model_construct(
+        head_kind="installed_revision",
+        revision=predecessor,
+        head_fingerprint="head:1",
+    )
+    owner.authority_head = installed
+    _install_suspended_state(owner)
+    _install_fake_suspended_receipt(owner)
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.materialize_continuation_revision",
+        lambda **_kwargs: SimpleNamespace(
+            authority_fingerprint="authority:2", revision=2
+        ),
+    )
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.installed_authority_head",
+        lambda _revision: installed,
+    )
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.event_reference_from_stored",
+        lambda *_args, **_kwargs: cast(Any, object()),
+    )
+    incoming = _handles("handles:incoming", state="boundary_owned")
     intent = RunTerminationIntent(
         intent_id="intent:stop",
         kind="host_teardown",
@@ -147,15 +321,22 @@ async def test_suspended_stop_intent_blocks_post_commit_resume_segment_install()
         target_segment_generation=None,
     )
     registry.install_termination_intent("run:1", intent)
-    swapped = registry.swap_execution_handles_after_continuation_commit(
-        "run:1",
+    committed = registry.commit_continuation_activation_full(
+        run_id="run:1",
+        stored_boundary=SimpleNamespace(id="boundary:resume"),
+        stored_exposure=cast(Any, object()),
+        effective_model_target=cast(Any, object()),
+        effective_permission=cast(Any, object()),
+        expected_predecessor_fingerprint="authority:1",
+        expected_termination_revision=owner.termination_revision,
         expected_current_handle_id="handles:1",
         incoming=incoming,
-        committed_continuation_event_id="boundary:resume",
+        reuse_current_handles=False,
+        expected_interaction_fingerprint="interaction:1",
     )
-    assert swapped.status == "swap_skipped_terminating"
+    assert committed.resource_disposition == "activation_blocked"
     assert owner.execution_handles.handle_id == "handles:1"
-    assert incoming.state == "attempt_owned"
+    assert incoming.state == "closed"
 
     async def must_not_run() -> None:
         raise AssertionError("driver must not start after termination intent")
@@ -172,17 +353,49 @@ async def test_suspended_stop_intent_blocks_post_commit_resume_segment_install()
 
 
 @_async_test
-async def test_handle_swap_retires_old_without_releasing_live_borrow() -> None:
+async def test_handle_swap_retires_old_without_releasing_live_borrow(
+    monkeypatch,
+) -> None:
     registry, owner = _registry()
+    predecessor = SimpleNamespace(authority_fingerprint="authority:1")
+    installed = InstalledRunAuthorityRevision.model_construct(
+        head_kind="installed_revision",
+        revision=predecessor,
+        head_fingerprint="head:1",
+    )
+    owner.authority_head = installed
+    _install_suspended_state(owner)
+    _install_fake_suspended_receipt(owner)
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.materialize_continuation_revision",
+        lambda **_kwargs: SimpleNamespace(
+            authority_fingerprint="authority:2", revision=2
+        ),
+    )
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.installed_authority_head",
+        lambda _revision: installed,
+    )
+    monkeypatch.setattr(
+        "pulsara_agent.runtime.run_execution.registry.event_reference_from_stored",
+        lambda *_args, **_kwargs: cast(Any, object()),
+    )
     owner.execution_handles.borrow_tracker.borrow_child_tool_call()
-    incoming = _handles("handles:incoming", state="attempt_owned")
-    result = registry.swap_execution_handles_after_continuation_commit(
-        "run:1",
+    incoming = _handles("handles:incoming", state="boundary_owned")
+    result = registry.commit_continuation_activation_full(
+        run_id="run:1",
+        stored_boundary=SimpleNamespace(id="boundary:resume"),
+        stored_exposure=cast(Any, object()),
+        effective_model_target=cast(Any, object()),
+        effective_permission=cast(Any, object()),
+        expected_predecessor_fingerprint="authority:1",
+        expected_termination_revision=owner.termination_revision,
         expected_current_handle_id="handles:1",
         incoming=incoming,
-        committed_continuation_event_id="boundary:resume",
+        reuse_current_handles=False,
+        expected_interaction_fingerprint="interaction:1",
     )
-    assert result.status == "swapped"
+    assert result.resource_disposition == "swapped"
     old = owner.retiring_execution_handles["handles:1"]
     assert old.state == "retiring"
     assert old.borrow_tracker.can_retire() is False
@@ -198,7 +411,8 @@ async def test_deferred_borrow_release_removes_confirmed_run_owner() -> None:
     registry, owner = _registry()
     handles = owner.execution_handles
     handles.borrow_tracker.borrow_parent_tool_call()
-    owner.terminal_state = "confirmed"
+    owner.finalization_owner.commit_state = "confirmed"
+    owner.finalization_slot.state = "completed"
 
     assert registry.retire_confirmed("run:1") is False
     assert handles.state == "retiring"
@@ -255,7 +469,8 @@ async def test_cancelled_sync_tool_keeps_borrow_until_worker_thread_finishes() -
     assert task.done() is False
     assert handles.borrow_tracker.active_parent_tool_call_borrows == 1
     assert worker_finished.is_set() is False
-    owner.terminal_state = "confirmed"
+    owner.finalization_owner.commit_state = "confirmed"
+    owner.finalization_slot.state = "completed"
     assert registry.retire_confirmed("run:1") is False
     with pytest.raises(TimeoutError):
         await registry.wait_until_retired("run:1", timeout_seconds=0.01)
@@ -287,18 +502,33 @@ async def test_stale_segment_completion_cannot_clear_new_segment() -> None:
     )
     assert not isinstance(first, RunSegmentInstallBlocked)
     await cast(asyncio.Task[object], first.driver_task)
-    first_result = RunExecutionSegmentResult(
+    first_result = RunActivationCoordinatorResult(
         segment_id=first.segment_id,
         segment_generation=first.segment_generation,
-        disposition="run_terminal",
-        run_result=cast(Any, object()),
+        disposition="waiting_user",
+        outcome=cast(Any, object()),
     )
-    assert registry.complete_segment(
-        "run:1",
-        segment_id=first.segment_id,
-        segment_generation=first.segment_generation,
-        result=first_result,
-    ) == "completed"
+    first_carrier = first.state_carrier
+    first_token = first.state_owner_token
+    assert first_carrier is not None and first_token is not None
+    pending_token = "run-pending:test:second"
+    first_carrier.transfer(
+        expected_owner_token=first_token,
+        new_owner_token=pending_token,
+    )
+    first.state_carrier = None
+    first.state_owner_token = None
+    owner.pending_activation_state = first_carrier
+    owner.pending_activation_owner_token = pending_token
+    assert (
+        registry.complete_segment(
+            "run:1",
+            segment_id=first.segment_id,
+            segment_generation=first.segment_generation,
+            result=first_result,
+        )
+        == "completed"
+    )
 
     second = registry.install_segment(
         "run:1",
@@ -333,21 +563,28 @@ def test_borrow_tracker_contains_only_in_flight_tool_call_borrows() -> None:
 
 
 def test_stream_turn_registers_owner_before_first_pull(tmp_path, monkeypatch) -> None:
-    from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
+    from tests.test_host_lifecycle_contract import (
+        ScriptedTransport,
+        _core,
+        _open,
+    )
 
     async def scenario() -> None:
         core = _core(monkeypatch, ScriptedTransport([{"text": "done"}], delay=0.05))
         session = await _open(core, tmp_path, host_session_id="host:stream-ingress")
         stream = session.stream_turn("hello")
-        assert session._boundary_task is not None
-        assert session._boundary_task.done() is False
+        boundary_task = session._current_boundary_task()
+        assert boundary_task is not None
+        assert boundary_task.done() is False
         assert session._boundary_attempt is not None
-        assert session._boundary_attempt.owner_task is session._boundary_task
+        assert session._boundary_attempt.owner_task is boundary_task
         assert session._boundary_attempt.phase.value == "ingress"
-        assert session._boundary_attempt.draft_run_id == session._preparing_state.run_id
+        prepared = session._boundary_attempt.prepared_activation
+        assert prepared is not None
+        assert session._boundary_attempt.draft_run_id == prepared.run_id
         await stream.aclose()
         # Observer close is detach-only; Host close remains the cancellation owner.
-        assert session._boundary_task is not None
+        assert session._current_boundary_task() is not None
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -356,31 +593,35 @@ def test_stream_turn_registers_owner_before_first_pull(tmp_path, monkeypatch) ->
 def test_run_turn_waiter_cancellation_detaches_without_stopping_run(
     tmp_path, monkeypatch
 ) -> None:
-    from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
+    from tests.test_host_lifecycle_contract import (
+        ScriptedTransport,
+        _core,
+        _open,
+    )
     from pulsara_agent.event import RunEndEvent
 
     async def scenario() -> None:
         core = _core(monkeypatch, ScriptedTransport([{"text": "done"}], delay=0.1))
         session = await _open(core, tmp_path, host_session_id="host:waiter-detach")
+        service = session.wiring.run_activation_service
+        assert service is not None
         waiter = asyncio.create_task(session.run_turn("hello"))
         for _ in range(100):
-            if session._active_task is not None:
+            if service.active_host_run_view() is not None:
                 break
             await asyncio.sleep(0.005)
-        segment_task = session._active_task
-        assert segment_task is not None
+        view = service.active_host_run_view()
+        assert view is not None and view.active_driver_running
         assert session._boundary_attempt is None
         assert session.summary()["boundary"]["state"] == "committed"
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        assert segment_task.cancelled() is False
-        await segment_task
-        assert any(
-            isinstance(event, RunEndEvent) for event in session.replay_events()
-        )
-        assert session._active_state is None
-        assert session._run_execution_owners.owner_count == 0
+        assert service.active_host_run_view() is not None
+        await service.wait_active_driver(view.run_id, timeout_seconds=10.0)
+        assert any(isinstance(event, RunEndEvent) for event in session.replay_events())
+        assert not hasattr(session, "_active_state")
+        assert service.resident_owner_count() == 0
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -453,7 +694,76 @@ def test_committed_run_start_owner_install_failure_writes_run_end(
         events = session.replay_events()
         assert len([event for event in events if isinstance(event, RunStartEvent)]) == 1
         assert len([event for event in events if isinstance(event, RunEndEvent)]) == 1
-        assert session._run_execution_owners.owner_count == 0
+        service = session.wiring.run_activation_service
+        assert service is not None and service.resident_owner_count() == 0
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_activation_settlement_failure_cannot_leave_an_active_run_owner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import json
+
+    from tests.test_host_lifecycle_contract import (
+        ScriptedTransport,
+        _core,
+        _open,
+        _trusted_terminal_ask_policy,
+    )
+    from pulsara_agent.event import RunEndEvent
+
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:activation-settlement-failure",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "pwd"}),
+                    }
+                ]
+            }
+        ]
+    )
+
+    async def scenario() -> None:
+        core = _core(monkeypatch, transport)
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:activation-settlement-failure",
+            policy=_trusted_terminal_ask_policy(),
+        )
+
+        def fail_suspension_install(*_args, **_kwargs) -> None:
+            raise RuntimeError("synthetic suspension owner install failure")
+
+        monkeypatch.setattr(
+            type(session._interaction_transition_port),
+            "install_suspension",
+            fail_suspension_install,
+        )
+        await session.run_turn("run pwd after approval")
+
+        [run_end] = [
+            event
+            for event in session.replay_events()
+            if isinstance(event, RunEndEvent)
+        ]
+        service = session.wiring.run_activation_service
+        assert service is not None
+        view = service.run_view(run_end.run_id)
+        if view is not None:
+            assert view.active_segment_id is None
+            assert view.active_driver_running is False
+            assert view.lifecycle in {
+                "terminalizing",
+                "terminal",
+                "reconciliation_required",
+            }
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -480,23 +790,31 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
             return await original_emit_many(self, events, **kwargs)
 
         monkeypatch.setattr(RuntimeSession, "emit_many", fail_run_end)
-        with pytest.raises(RuntimeError, match="RunEnd store outage"):
-            await session.run_turn("hello")
+        pending = await session.run_turn("hello")
+        assert isinstance(pending, RunTerminalizationPending)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while failures < 2 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
         assert failures >= 2
         assert not any(
             isinstance(event, RunEndEvent) for event in session.replay_events()
         )
-        assert session.active_run_id is not None
-        owner = session._run_execution_owners.require(session.active_run_id)
-        assert owner.terminal_state != "confirmed"
-        assert owner.run_completion.done() is False
+        assert session.stopping_run_id is not None
+        service = session.wiring.run_activation_service
+        assert service is not None
+        view = service.run_view(session.stopping_run_id)
+        assert view is not None and view.terminal_state != "confirmed"
+        assert view.run_completion_done is False
 
+        completion = asyncio.create_task(
+            service.wait_run_completion(pending.owner_identity.run_id)
+        )
+        await asyncio.sleep(0)
         monkeypatch.setattr(RuntimeSession, "emit_many", original_emit_many)
-        result = await session.stop_current_turn()
-        assert result is not None
-        assert result.state.finalized is True
+        terminal = await asyncio.wait_for(completion, timeout=10)
+        assert terminal.output.status == "finished"
         assert any(isinstance(event, RunEndEvent) for event in session.replay_events())
-        assert session._run_execution_owners.owner_count == 0
+        assert service.resident_owner_count() == 0
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -526,8 +844,10 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
         stream = session.stream_turn("hello")
         await entered.wait()
         attempt = session._boundary_attempt
-        state = session._preparing_state
-        assert attempt is not None and state is not None
+        assert attempt is not None and attempt.prepared_activation is not None
+        state = attempt.prepared_activation.peek_for_registry(
+            boundary_id=attempt.boundary_id
+        )
         candidate = typed_non_transcript_event(
             id="boundary-candidate:conflict",
             run_id=state.run_id,
@@ -538,9 +858,7 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
         )
         session._set_boundary_candidates((candidate,))
         session._set_boundary_commit_state("commit_outcome_unknown")
-        session._set_boundary_commit_confirmation(
-            BoundaryBatchCommitStatus.UNKNOWN
-        )
+        session._set_boundary_commit_confirmation(BoundaryBatchCommitStatus.UNKNOWN)
         session.wiring.runtime_wiring.event_log.append(
             typed_non_transcript_event(
                 id=candidate.id,
@@ -556,7 +874,7 @@ def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
         assert confirmation.status is BoundaryBatchCommitStatus.UNKNOWN
         assert confirmation.committed_event_ids == ()
         release.set()
-        await asyncio.gather(session._boundary_task, return_exceptions=True)
+        await asyncio.gather(attempt.owner_task, return_exceptions=True)
         await stream.aclose()
         await core.shutdown()
 
@@ -586,7 +904,8 @@ def test_run_start_publication_failure_is_audited_as_publication_failure(
         assert len([event for event in events if isinstance(event, RunStartEvent)]) == 1
         [ended] = [event for event in events if isinstance(event, RunEndEvent)]
         assert ended.stop_reason == "runtime_publication_failure"
-        assert session._run_execution_owners.owner_count == 0
+        service = session.wiring.run_activation_service
+        assert service is not None and service.resident_owner_count() == 0
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -634,7 +953,9 @@ def test_committed_resume_fold_failure_terminalizes_original_run(
             raise RuntimeError("synthetic committed resume fold failure")
 
         monkeypatch.setattr(
-            type(session), "_fold_committed_resume_boundary", fail_fold
+            type(session._interaction_transition_port),
+            "fold_committed_resume_boundary",
+            fail_fold,
         )
         with pytest.raises(RuntimeError, match="resume fold failure"):
             await session.resolve_approval(
@@ -650,16 +971,17 @@ def test_committed_resume_fold_failure_terminalizes_original_run(
             )
         events = session.replay_events()
         assert any(
-            isinstance(event, RunInteractionResumeBoundaryEvent)
-            for event in events
+            isinstance(event, RunInteractionResumeBoundaryEvent) for event in events
         )
         [ended] = [
             event
             for event in events
-            if isinstance(event, RunEndEvent) and event.run_id == first.state.run_id
+            if isinstance(event, RunEndEvent)
+            and event.run_id == first.owner_identity.run_id
         ]
         assert ended.stop_reason == "runtime_execution_error"
-        assert session._run_execution_owners.owner_count == 0
+        service = session.wiring.run_activation_service
+        assert service is not None and service.resident_owner_count() == 0
         await core.shutdown()
 
     asyncio.run(scenario())

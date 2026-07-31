@@ -42,7 +42,7 @@ from pulsara_agent.message import (
     ToolResultBlock,
     ToolResultState,
 )
-from pulsara_agent.message.reducer import MessageReducer
+from pulsara_agent.replay.message_reducer import MessageReducer
 from tests.support import model_call_end_fields
 from tests.conftest import (
     external_terminal_projection_references,
@@ -131,9 +131,13 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="hello "
             ),
-            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="world"),
+            make_text_block_segment_event(
+                **CTX.event_fields(), block_id="text:1", delta="world"
+            ),
             make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
-            make_thinking_block_start_event(**CTX.event_fields(), block_id="thinking:1"),
+            make_thinking_block_start_event(
+                **CTX.event_fields(), block_id="thinking:1"
+            ),
             make_thinking_block_segment_event(
                 **CTX.event_fields(), block_id="thinking:1", delta="plan"
             ),
@@ -178,14 +182,14 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                 },
             ),
             _external_result_event(
-                    external_tool_result_ingress_fact(
-                        ToolResultBlock(
-                            id="call:external",
-                            name="external_lookup",
-                            output=[TextBlock(text="external result")],
-                            state=ToolResultState.SUCCESS,
-                        )
+                external_tool_result_ingress_fact(
+                    ToolResultBlock(
+                        id="call:external",
+                        name="external_lookup",
+                        output=[TextBlock(text="external result")],
+                        state=ToolResultState.SUCCESS,
                     )
+                )
             ),
             ModelCallEndEvent(
                 **CTX.event_fields(),
@@ -385,16 +389,16 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
                 external_tool_calls=(requirement,),
             ),
             _external_result_event(
-                    external_tool_result_ingress_fact(
-                        ToolResultBlock(
-                            id=tool_call.id,
-                            name=tool_call.name,
-                            output=[TextBlock(text="external result")],
-                            state=ToolResultState.SUCCESS,
-                        ),
-                        requirement=requirement,
-                        require_event_id=require_event_id,
-                    )
+                external_tool_result_ingress_fact(
+                    ToolResultBlock(
+                        id=tool_call.id,
+                        name=tool_call.name,
+                        output=[TextBlock(text="external result")],
+                        state=ToolResultState.SUCCESS,
+                    ),
+                    requirement=requirement,
+                    require_event_id=require_event_id,
+                )
             ),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]

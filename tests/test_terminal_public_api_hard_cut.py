@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.capability import tool_runtime_context
 from pydantic import ValidationError
 
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
@@ -30,13 +31,14 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultRenderVariantCode,
 )
 from pulsara_agent.runtime.context_input.render import _essential_envelope
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     builtin_tool_action_policy,
     default_tool_action_classifier_registry,
 )
 from pulsara_agent.runtime.terminal.notification import (
     TerminalNotificationCapacityError,
 )
+from pulsara_agent.runtime.terminal.tool_port import RuntimeTerminalMonitorPort
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
@@ -46,8 +48,8 @@ from pulsara_agent.runtime.permission import (
     PolicyPermissionGate,
     TerminalAccess,
 )
-from pulsara_agent.runtime.tool_taxonomy import TERMINAL_TOOL_NAMES
-from pulsara_agent.terminal_public_api import (
+from pulsara_agent.capability.builtin_catalog import TERMINAL_TOOL_NAMES
+from pulsara_agent.ports.terminal import (
     TERMINAL_MONITOR_TOOL_DESCRIPTION,
     TERMINAL_PROCESS_TOOL_DESCRIPTION,
     TERMINAL_TOOL_DESCRIPTION,
@@ -57,44 +59,43 @@ from pulsara_agent.terminal_public_api import (
     parse_terminal_process_input,
     resolve_terminal_monitor_public_policy,
 )
-from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
-from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.ports.tool_execution import ToolCall, thaw_tool_json_object
 from pulsara_agent.tools.builtins.terminal_monitor import TerminalMonitorTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 
 
-def test_terminal_input_binding_is_shared_by_descriptor_and_tool(tmp_path) -> None:
-    descriptors = {item.name: item for item in builtin_tool_descriptors()}
-    tools = {
-        "terminal_process": TerminalProcessTool(tmp_path),
-        "terminal_monitor": TerminalMonitorTool(tmp_path),
-    }
+class _UnexpectedTerminalProcessPort:
+    def execute(self, **_kwargs):
+        raise AssertionError(
+            "malformed terminal_process input reached the runtime port"
+        )
 
-    for name, tool in tools.items():
+
+def test_terminal_input_binding_is_shared_by_descriptor_and_tool(tmp_path) -> None:
+    del tmp_path
+    descriptors = {item.name: item for item in builtin_tool_descriptors()}
+    for name in ("terminal_process", "terminal_monitor"):
         binding = builtin_tool_input_contract_binding(name)  # type: ignore[arg-type]
-        descriptor_schema = descriptors[name].input_schema
-        assert descriptor_schema is not None
-        assert descriptor_schema == tool.parameters == binding.input_schema
+        frozen_descriptor_schema = descriptors[name].input_schema
+        assert frozen_descriptor_schema is not None
+        descriptor_schema = thaw_tool_json_object(frozen_descriptor_schema)
+        assert descriptor_schema == binding.input_schema
         assert len(descriptor_schema["oneOf"]) == (
             8 if name == "terminal_process" else 3
         )
 
 
 def test_terminal_descriptions_have_one_public_contract_owner(tmp_path) -> None:
+    del tmp_path
     descriptors = {item.name: item for item in builtin_tool_descriptors()}
-    tools = {
-        "terminal": TerminalTool(tmp_path),
-        "terminal_process": TerminalProcessTool(tmp_path),
-        "terminal_monitor": TerminalMonitorTool(tmp_path),
-    }
     expected = {
         "terminal": TERMINAL_TOOL_DESCRIPTION,
         "terminal_process": TERMINAL_PROCESS_TOOL_DESCRIPTION,
         "terminal_monitor": TERMINAL_MONITOR_TOOL_DESCRIPTION,
     }
 
-    for name, tool in tools.items():
-        assert descriptors[name].description == tool.description == expected[name]
+    for name, description in expected.items():
+        assert descriptors[name].description == description
 
     assert all(
         status in TERMINAL_TOOL_DESCRIPTION
@@ -199,7 +200,7 @@ def test_terminal_process_removed_actions_return_typed_malformed_result(
     tmp_path,
     arguments,
 ) -> None:
-    result = TerminalProcessTool(tmp_path).execute(
+    result = TerminalProcessTool(tmp_path, _UnexpectedTerminalProcessPort()).execute(
         ToolCall(id="call:legacy", name="terminal_process", arguments=arguments)
     )
 
@@ -416,15 +417,16 @@ def test_terminal_monitor_list_is_observation_but_register_and_cancel_schedule()
 
 
 @pytest.mark.parametrize(
-    "reason_code",
+    ("reason_code", "expected_policy_code"),
     [
-        "terminal_notification_capacity_exhausted",
-        "terminal_monitor_already_active_for_process",
+        ("terminal_notification_capacity_exhausted", "monitor_capacity_exhausted"),
+        ("terminal_monitor_already_active_for_process", "monitor_duplicate"),
     ],
 )
 def test_terminal_monitor_expected_registration_rejection_is_typed(
     tmp_path,
     reason_code,
+    expected_policy_code,
 ) -> None:
     class RejectingCoordinator:
         def prepare_registration(self, **_kwargs):
@@ -435,8 +437,10 @@ def test_terminal_monitor_expected_registration_rejection_is_typed(
 
     tool = TerminalMonitorTool(
         tmp_path,
-        owner_host_session_id="host:test",
-        terminal_monitor_coordinator=RejectingCoordinator(),
+        RuntimeTerminalMonitorPort(
+            workspace_root=tmp_path,
+            terminal_monitor_coordinator=RejectingCoordinator(),  # type: ignore[arg-type]
+        ),
     )
     result = tool.execute(
         ToolCall(
@@ -444,21 +448,20 @@ def test_terminal_monitor_expected_registration_rejection_is_typed(
             name="terminal_monitor",
             arguments={"action": "register", "process_id": "process:test"},
         ),
-        runtime_context=ToolRuntimeContext(
+        runtime_context=tool_runtime_context(
             runtime_session_id="runtime:test",
             event_context=EventContext(
                 run_id="run:test",
                 turn_id="turn:test",
                 reply_id="reply:test",
             ),
-            run_entry_kind="host_main_run",
         ),
     )
 
     payload = json.loads(result.output)
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
-    assert payload["policy_code"] == reason_code
+    assert payload["policy_code"] == expected_policy_code
     assert result.semantics_input is not None
     assert (
         result.semantics_input.semantics_input_kind

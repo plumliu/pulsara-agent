@@ -1,3 +1,8 @@
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
@@ -6,10 +11,6 @@ from typing import AsyncIterator
 
 import pytest
 
-from tests.conftest import (
-    persist_test_run_transcript_seed,
-    run_start_permission_fields,
-)
 from tests.support.runtime_session import in_memory_runtime_session
 
 from tests.support.raw_provider import (
@@ -28,12 +29,16 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.capability.descriptor import (
     CapabilityAdvertisePolicy,
-    CapabilityArtifactMode,
     CapabilityAvailability,
     CapabilityDescriptor,
     CapabilityProviderKind,
 )
+from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
+from pulsara_agent.capability.builtin_catalog import (
+    builtin_tool_catalog,
+    builtin_tool_catalog_entry,
+)
 from pulsara_agent.capability.exposure import build_exposure_plan
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
@@ -42,7 +47,6 @@ from pulsara_agent.capability.provider import (
 from pulsara_agent.capability.render import render_active_skill_prompt
 from pulsara_agent.capability.result_contracts import (
     result_render_contract_for_tool,
-    terminal_process_result_render_contract,
 )
 from pulsara_agent.capability.result_semantics import (
     FrozenToolResultSemanticsRuntimeInput,
@@ -50,7 +54,6 @@ from pulsara_agent.capability.result_semantics import (
 )
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityExecutionSurfaceSnapshotContext,
@@ -60,43 +63,23 @@ from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
-    ContextWindowOpenedEvent,
     EventContext,
-    ModelCallControlDispositionResolvedEvent,
     PlanModeEnteredEvent,
-    RolloutBudgetAccountOpenedEvent,
-    RunStartEvent,
     ToolResultEndEvent,
 )
 from pulsara_agent.llm import LLMRuntime
-from pulsara_agent.llm.control import RunModelCallControlOwner
 from tests.support import (
-    bind_test_context,
-    bind_test_provider_input_context,
-    make_test_run_execution_activation,
+    resume_test_agent_after_approval,
     run_agent_task,
     test_llm_config,
-    test_llm_context,
 )
-from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
-from pulsara_agent.llm.input import LLMMessage
-from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.primitives.model_call import (
-    ModelCallControlDisposition,
-    ModelCallPurpose,
-    sha256_fingerprint,
-)
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
-from pulsara_agent.runtime import (
-    AgentRuntime,
-    ApprovalResolution,
-    LoopState,
-    LoopStatus,
-    ToolApprovalDecision,
-)
+from pulsara_agent.message import ToolResultState
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.state import LoopStatus
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
@@ -109,9 +92,7 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.permission import preset_permission_policy_fact
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
-from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
 from pulsara_agent.primitives.tool_result import (
     TerminalCommandDomainSubmissionFact,
@@ -122,23 +103,14 @@ from pulsara_agent.host.run_boundary import (
     CapabilityResolveBasis,
     derive_continuation_basis,
 )
-from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
-from pulsara_agent.runtime.tool_action import (
-    builtin_tool_action_policy,
-    terminal_process_tool_action_policy,
-)
-from pulsara_agent.runtime.run_entry import RunWorkingSet
-from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
+from pulsara_agent.capability.tool_action import builtin_tool_action_policy
 from pulsara_agent.runtime.tool_artifacts import (
-    InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactService,
+    artifact_processing_policy_for_descriptor,
 )
-from pulsara_agent.runtime.long_horizon.run_contract import (
-    empty_projection_state_fingerprint,
-    prepare_root_long_horizon_run,
-)
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from tests.support.artifacts import FakeToolResultArtifactIndex
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
 
 
@@ -248,7 +220,7 @@ class CountingPermissionGate:
 def _gate_decisions(agent: AgentRuntime) -> list[CapabilityGateDecisionEvent]:
     return [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, CapabilityGateDecisionEvent)
     ]
 
@@ -264,8 +236,23 @@ def _descriptor(
     *,
     advertise_policy: CapabilityAdvertisePolicy = CapabilityAdvertisePolicy.DIRECT,
     availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE,
-    permission_category: str = "general",
+    permission_category: str | None = None,
 ) -> CapabilityDescriptor:
+    try:
+        descriptor = builtin_tool_catalog_entry(name).descriptor
+    except KeyError:
+        descriptor = None
+    if descriptor is not None:
+        if advertise_policy is not CapabilityAdvertisePolicy.DIRECT:
+            raise ValueError("built-in advertise policy must come from the catalog")
+        if availability is not CapabilityAvailability.AVAILABLE:
+            raise ValueError("built-in availability must come from the catalog")
+        if (
+            permission_category is not None
+            and permission_category != descriptor.permission_category
+        ):
+            raise ValueError("built-in permission category must come from the catalog")
+        return descriptor
     return CapabilityDescriptor(
         id=f"builtin:{name}",
         name=name,
@@ -279,7 +266,7 @@ def _descriptor(
         is_concurrency_safe=True,
         result_render_contract=result_render_contract_for_tool(name),
         long_horizon_policy=builtin_tool_action_policy(name),
-        permission_category=permission_category,
+        permission_category=permission_category or "general",
         advertise_policy=advertise_policy,
         availability=availability,
     )
@@ -307,6 +294,34 @@ def _runtime_for_provider(provider: StaticCapabilityProvider) -> CapabilityRunti
     return CapabilityRuntime(providers=(provider,))
 
 
+def _install_test_registry(agent: AgentRuntime, registry: ToolRegistry) -> None:
+    descriptors_by_name = {
+        entry.name: entry.descriptor
+        for entry in builtin_tool_catalog()
+        if entry.name in registry.names()
+    }
+    descriptors_by_name.update(
+        {
+            descriptor.name: descriptor
+            for provider in agent.capability_runtime.providers
+            for descriptor in getattr(provider, "descriptors", ())
+            if descriptor.name in registry.names()
+        }
+    )
+    agent.tool_executor.registry = registry
+    agent.tool_executor.artifact_policies = {
+        descriptor.name: artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=ToolCall(
+                id=f"call:artifact-policy:{descriptor.name}",
+                name=descriptor.name,
+            ),
+            options=runtime_session_for_test(agent).artifact_service.options,
+        )
+        for descriptor in descriptors_by_name.values()
+    }
+
+
 def _firecrawl_active_injection(tmp_path: Path) -> ActiveSkillInjection:
     skill_path = tmp_path / ".agents/skills/firecrawl-search/SKILL.md"
     return ActiveSkillInjection(
@@ -330,7 +345,9 @@ def test_child_profile_filter_preserves_split_provider_protocol_shapes() -> None
     from types import SimpleNamespace
 
     from pulsara_agent.capability.runtime import CapabilityRuntime
-    from pulsara_agent.runtime.agent import _profile_filtered_capability_runtime
+    from pulsara_agent.capability.profile_runtime import (
+        profile_filtered_capability_runtime,
+    )
 
     class ExecutionOnly:
         provider_id = "execution-only"
@@ -345,7 +362,7 @@ def test_child_profile_filter_preserves_split_provider_protocol_shapes() -> None
             del execution_surface
             return CapabilityProjectionOutput()
 
-    child = _profile_filtered_capability_runtime(
+    child = profile_filtered_capability_runtime(
         CapabilityRuntime(providers=(ExecutionOnly(), ProjectionOnly())),
         SimpleNamespace(
             allowed_tool_names=("report_agent_result",),
@@ -587,7 +604,7 @@ def test_builtin_provider_uses_explicit_descriptor_truth_for_bound_core_tools() 
     )
     descriptors = {descriptor.name: descriptor for descriptor in output.descriptors}
 
-    assert descriptors["artifact_read"].artifact_mode is CapabilityArtifactMode.NEVER
+    assert descriptors["artifact_read"].artifact_mode is ToolArtifactMode.NEVER
     assert descriptors["artifact_read"].permission_category == "artifact_read"
     assert descriptors["terminal_process"].permission_category == "terminal"
     assert descriptors["terminal_process"].is_open_world is True
@@ -605,7 +622,7 @@ def test_cli_route_has_no_provider_kind_or_typed_cli_tool() -> None:
 
 def test_agent_runtime_requires_explicit_capability_runtime(tmp_path) -> None:
     with pytest.raises(ValueError, match="requires an explicit CapabilityRuntime"):
-        AgentRuntime(  # type: ignore[arg-type]
+        build_test_agent_runtime(  # type: ignore[arg-type]
             runtime_session=in_memory_runtime_session(tmp_path),
             llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
             capability_runtime=None,
@@ -707,22 +724,7 @@ def test_capability_gate_denies_hidden_unavailable_and_not_callable_calls() -> N
 def test_capability_gate_preserves_terminal_process_observe_contract_and_terminal_off() -> (
     None
 ):
-    terminal_process = CapabilityDescriptor(
-        id="builtin:terminal_process",
-        name="terminal_process",
-        description="process",
-        input_schema={"type": "object", "properties": {}},
-        namespace=None,
-        provider_kind=CapabilityProviderKind.BUILTIN,
-        provider_id="builtin",
-        is_model_callable=True,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        result_render_contract=terminal_process_result_render_contract(),
-        long_horizon_policy=terminal_process_tool_action_policy(),
-        is_open_world=True,
-        permission_category="terminal",
-    )
+    terminal_process = builtin_tool_catalog_entry("terminal_process").descriptor
     exposure = _exposure_for_descriptors(terminal_process)
     observe = ToolCall(
         id="call:observe", name="terminal_process", arguments={"action": "list"}
@@ -760,6 +762,10 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
 def test_terminal_process_observe_gate_event_records_effective_category(
     tmp_path,
 ) -> None:
+    descriptor = _descriptor(
+        "terminal_process",
+        permission_category="terminal",
+    )
     transport = _ScriptedTransport(
         [
             {
@@ -774,19 +780,28 @@ def test_terminal_process_observe_gate_event_records_effective_category(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=_runtime_for_descriptors(
-            _descriptor("terminal_process", permission_category="terminal")
-        ),
+        capability_runtime=_runtime_for_descriptors(descriptor),
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(
         DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
+    agent.tool_executor.artifact_policies = {
+        "terminal_process": artifact_processing_policy_for_descriptor(
+            descriptor=descriptor,
+            tool_call=ToolCall(
+                id="call:observe",
+                name="terminal_process",
+                arguments={"action": "list"},
+            ),
+            options=runtime_session_for_test(agent).artifact_service.options,
+        )
+    }
 
     result = asyncio.run(run_agent_task(agent, "list processes"))
 
@@ -809,7 +824,7 @@ def test_wait_for_user_batch_suspension_reason_code(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -825,7 +840,7 @@ def test_wait_for_user_batch_suspension_reason_code(tmp_path) -> None:
     registry.register(
         DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "read and terminal"))
 
@@ -854,7 +869,7 @@ def test_multiple_independent_wait_calls_keep_own_reason_code(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -870,7 +885,7 @@ def test_multiple_independent_wait_calls_keep_own_reason_code(tmp_path) -> None:
     registry.register(
         DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "write and terminal"))
 
@@ -900,7 +915,7 @@ def test_permission_prepass_does_not_invoke_inner_gate_per_call(tmp_path) -> Non
         ]
     )
     inner_gate = CountingPermissionGate()
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(_descriptor("a"), _descriptor("b")),
@@ -909,7 +924,7 @@ def test_permission_prepass_does_not_invoke_inner_gate_per_call(tmp_path) -> Non
     registry = ToolRegistry()
     registry.register(DummyTool("a", is_read_only=True, is_concurrency_safe=True))
     registry.register(DummyTool("b", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call two tools"))
 
@@ -931,7 +946,7 @@ def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_si
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -944,7 +959,7 @@ def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_si
         DummyTool("enter_plan", is_read_only=False, is_concurrency_safe=True)
     )
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "enter plan and noop"))
 
@@ -984,7 +999,7 @@ def test_hardline_terminal_reason_codes_are_stable_and_specific(tmp_path) -> Non
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -999,7 +1014,7 @@ def test_hardline_terminal_reason_codes_are_stable_and_specific(tmp_path) -> Non
     registry.register(
         DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "dangerous terminal calls"))
 
@@ -1028,7 +1043,7 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -1039,7 +1054,7 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
     registry.register(
         DummyTool("degraded", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call degraded"))
 
@@ -1051,7 +1066,7 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
 
 def test_artifact_policy_uses_descriptor_mode() -> None:
     archive = InMemoryArchiveStore()
-    index = InMemoryToolResultArtifactIndex()
+    index = FakeToolResultArtifactIndex()
     service = ToolResultArtifactService(
         archive=archive,
         index=index,
@@ -1065,10 +1080,11 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
         run_id="run:test", turn_id="turn:test", reply_id="reply:test"
     )
     artifact_read = _descriptor("artifact_read")
-    artifact_read = replace(artifact_read, artifact_mode=CapabilityArtifactMode.NEVER)
+    artifact_read = replace(artifact_read, artifact_mode=ToolArtifactMode.NEVER)
     always = _descriptor("small_json")
-    always = replace(always, artifact_mode=CapabilityArtifactMode.ALWAYS)
+    always = replace(always, artifact_mode=ToolArtifactMode.ALWAYS)
 
+    read_call = ToolCall(id="call:read", name="artifact_read")
     read_result, read_refs = service.process_result(
         ToolExecutionResult(
             call_id="call:read",
@@ -1077,9 +1093,14 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
             output="small",
         ),
         event_context=context,
-        tool_call=ToolCall(id="call:read", name="artifact_read"),
-        descriptor=artifact_read,
+        tool_call=read_call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=artifact_read,
+            tool_call=read_call,
+            options=service.options,
+        ),
     )
+    small_call = ToolCall(id="call:small", name="small_json")
     small_result, small_refs = service.process_result(
         ToolExecutionResult(
             call_id="call:small",
@@ -1088,8 +1109,12 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
             output="small",
         ),
         event_context=context,
-        tool_call=ToolCall(id="call:small", name="small_json"),
-        descriptor=always,
+        tool_call=small_call,
+        policy=artifact_processing_policy_for_descriptor(
+            descriptor=always,
+            tool_call=small_call,
+            options=service.options,
+        ),
     )
 
     assert read_result.output == "small"
@@ -1168,14 +1193,14 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(_descriptor("noop")),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "use noop"))
 
@@ -1185,7 +1210,7 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
     ] == [["noop"], ["noop"]]
     exposure_events = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, CapabilityExposureResolvedEvent)
     ]
     assert len(exposure_events) == 1
@@ -1233,7 +1258,7 @@ def test_terminal_gate_decision_records_active_skill_capability_context(
         descriptors=(_descriptor("terminal", permission_category="terminal"),),
         active_injections=(_firecrawl_active_injection(tmp_path),),
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_provider(provider),
@@ -1242,7 +1267,7 @@ def test_terminal_gate_decision_records_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1275,7 +1300,7 @@ def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(
@@ -1286,7 +1311,7 @@ def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "run terminal"))
 
@@ -1316,7 +1341,7 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
         descriptors=(_descriptor("terminal", permission_category="terminal"),),
         active_injections=(_firecrawl_active_injection(tmp_path),),
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_provider(provider),
@@ -1326,7 +1351,7 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1356,7 +1381,7 @@ def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(
         descriptors=(_descriptor("terminal", permission_category="terminal"),),
         active_injections=(_firecrawl_active_injection(tmp_path),),
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_provider(provider),
@@ -1366,7 +1391,7 @@ def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
@@ -1415,7 +1440,7 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
             which=lambda binary: "/usr/bin/git" if binary == "git" else None
         ),
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(provider),
@@ -1424,7 +1449,7 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     registry.register(
         DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
     )
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(
         run_agent_task(agent, "$huggingface-local-models list local model caches")
@@ -1441,7 +1466,7 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     assert "Skill CLI hints are guidance only" in context_text
     exposure_event = next(
         event.exposure
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, CapabilityExposureResolvedEvent)
     )
     assert "skill_required_binary_missing" in [
@@ -1470,7 +1495,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(_descriptor("ok")),
@@ -1478,7 +1503,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
     registry = ToolRegistry()
     ok_tool = DummyTool("ok", is_read_only=True, is_concurrency_safe=True)
     registry.register(ok_tool)
-    agent.tool_executor.registry = registry
+    _install_test_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "call missing and ok"))
 
@@ -1486,7 +1511,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
     assert ok_tool.calls == ["call:ok"]
     result_ends = {
         event.tool_call_id: event.state
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ToolResultEndEvent)
     }
     assert result_ends["call:missing"] is ToolResultState.ERROR
@@ -1502,7 +1527,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
     assert gate_decisions["call:ok"].result_state is None
 
 
-def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
+def test_approval_resume_uses_committed_descriptor_after_provider_removal(
     tmp_path,
 ) -> None:
     transport = _ScriptedTransport(
@@ -1515,7 +1540,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                         "arguments": json.dumps(
                             {
                                 "path": "review_tmp.txt",
-                                "content": "should not be written",
+                                "content": "committed authority wins",
                             }
                         ),
                     }
@@ -1524,313 +1549,56 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime(providers=()),
-    )
-    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
-    state.run_model_target = agent.resolve_run_model_target()
-    state.permission_snapshot = snapshot_from_mode(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
-        run_id=state.run_id,
-        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        permission_snapshot_source="session_default",
-    )
-    state.status = LoopStatus.WAITING_USER
-    state.stop_reason = "waiting_user"
-    state.pending_tool_calls = [
-        ToolCallBlock(
-            id="call:write",
-            name="write_file",
-            input=json.dumps(
-                {"path": "review_tmp.txt", "content": "should not be written"}
-            ),
-            state=ToolCallState.ASKING,
-        )
-    ]
-    run_start_fields = run_start_permission_fields(
-        state.run_id,
-        user_input="original request",
-        turn_id=state.turn_id,
-        reply_id=state.reply_id,
-        mcp_installation_owner_runtime_session_id=(
-            agent.runtime_session.runtime_session_id
+        capability_runtime=_runtime_for_descriptors(
+            _descriptor("write_file", permission_category="filesystem_write")
         ),
-        model_target=state.run_model_target.fact,
+        permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
-    run_start_event_id = "run_start:test:approval-missing-descriptor"
-    prepared_long_horizon = prepare_root_long_horizon_run(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
-        run_id=state.run_id,
-        run_start_event_id=run_start_event_id,
-        primary_target=state.run_model_target.fact,
-        summarizer_target=state.run_model_target.fact,
-        graph_reducer_contract=run_start_fields["subagent_graph_reducer_contract"],
-        source_through_sequence_at_open=0,
-        initial_projection_unit_count=0,
-        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    tool = DummyTool(
+        "write_file",
+        is_read_only=False,
+        is_concurrency_safe=True,
     )
-    run_start_fields["long_horizon"] = prepared_long_horizon.contract
-    prepared_seed = persist_test_run_transcript_seed(
-        agent.runtime_session,
-        run_id=state.run_id,
-    )
-    run_start_fields.update(
-        run_transcript_seed_semantic=prepared_seed.seed_semantic,
-        run_transcript_seed_reference=prepared_seed.seed_reference,
-    )
-    state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
-        "terminal_run_end_event_id"
-    ]
-    exposure = build_exposure_plan(
-        CapabilityRegistry().snapshot(),
-        provider_output=CapabilityProjectionOutput(),
-        bound_tool_names=frozenset(agent.tool_executor.registry.names()),
-    )
+    registry = ToolRegistry()
+    registry.register(tool)
+    _install_test_registry(agent, registry)
 
-    async def resume():
-        opening_context = EventContext(
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
-        )
-        root_account = prepared_long_horizon.root_account
-        assert root_account is not None
-        opening_events = await agent.runtime_session.emit_many(
-            (
-                RunStartEvent(
-                    id=run_start_event_id,
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    **run_start_fields,
-                    user_input_chars=len("original request"),
-                ),
-                ContextWindowOpenedEvent(
-                    id=prepared_long_horizon.contract.initial_window_open_event_id,
-                    **opening_context.event_fields(),
-                    window=prepared_long_horizon.initial_window,
-                    opening_batch_id=prepared_long_horizon.opening_batch_id,
-                ),
-                RolloutBudgetAccountOpenedEvent(
-                    id=f"rollout_budget_account_opened:{root_account.account_id}",
-                    **opening_context.event_fields(),
-                    account=root_account,
-                ),
-            ),
-            state=state,
-        )
-        stored_start = opening_events[0]
-        assert isinstance(stored_start, RunStartEvent)
-        assert stored_start.sequence is not None
-        boundary = stored_start.new_run_boundary
-        assert boundary is not None
-        agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
-            stored_start
-        )
-        event_context = EventContext(
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
-        )
-        activation = make_test_run_execution_activation()
-        call = agent.llm_runtime.resolve_call(
-            target=state.run_model_target,
-            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-        )
-        context = bind_test_context(
-            call,
-            test_llm_context(
-                messages=(LLMMessage.user("original request"),),
-                context_id="context:test:approval-missing-descriptor",
-                model_call_index=1,
-            ),
-        )
-        provider_input = await agent.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
-            call=call,
-            context=context,
-            event_context=event_context,
-            operation_kind="direct_model_call",
-            operation_id=call.fact.resolved_model_call_id,
-        )
-        context = bind_test_provider_input_context(call, provider_input, context)
-        start_bundle = prepare_model_lifecycle_start_bundle(
-            call=call,
-            context=context,
-            event_context=event_context,
-            runtime_session=agent.runtime_session,
-            lifecycle_kind="main_assistant_reply",
-            run_execution_activation=activation,
-            provider_input_start_bundle=provider_input,
-        )
-        model_result = await agent.llm_runtime.start_stream(
-            call=call,
-            context=context,
-            event_context=event_context,
-            start_bundle=start_bundle,
-            commit_port=RuntimeSessionModelStreamEventCommitPort(
-                runtime_session=agent.runtime_session,
-                state=state,
-            ),
-            execution_registry=(agent.runtime_session.model_stream_execution_registry),
-        ).wait_result()
-        disposition_fields = {
-            "id": (
-                "model_call_control_disposition:"
-                f"{state.run_id}:{model_result.resolved_model_call_id}:1"
-            ),
-            **event_context.event_fields(),
-            "resolved_model_call_id": model_result.resolved_model_call_id,
-            "model_call_start_event_id": model_result.model_call_start_event_id,
-            "model_call_end_event_id": model_result.model_call_end_event_id,
-            "model_call_index": 1,
-            "source_result_fingerprint": model_result.result_fingerprint,
-            "run_execution_activation": activation,
-            "disposition": ModelCallControlDisposition.ACCEPTED,
-            "termination_intent": None,
-            "recovery_reason_code": None,
-        }
-        provisional_disposition = (
-            ModelCallControlDispositionResolvedEvent.model_construct(
-                **disposition_fields,
-                event_fingerprint="pending",
-            )
-        )
-        disposition_payload = provisional_disposition.model_dump(
-            mode="json", exclude={"event_fingerprint", "sequence"}
-        )
-        disposition = ModelCallControlDispositionResolvedEvent(
-            **disposition_payload,
-            event_fingerprint=sha256_fingerprint(
-                "model-call-control-disposition-event:v1", disposition_payload
-            ),
-        )
-        await agent.runtime_session.emit(
-            disposition,
-            state=state,
-        )
-        state.run_working_set = RunWorkingSet(
-            run_start_event_id=stored_start.id,
-            run_start_sequence=stored_start.sequence,
-            run_model_target=state.run_model_target,
-            long_horizon_contract=stored_start.long_horizon,
-            run_transcript_seed_semantic=(stored_start.run_transcript_seed_semantic),
-            run_transcript_seed_reference=(stored_start.run_transcript_seed_reference),
-            permission_snapshot=state.permission_snapshot,
-            plan_snapshot=PlanWorkflowStateFact(
-                workflow_id=None,
-                active=False,
-                pending_entry_audit=False,
-                revision=0,
-                entered_event_id=None,
-                entered_event_sequence=None,
-                entry_run_id=None,
-                entry_turn_id=None,
-                entry_reply_id=None,
-                stored_default_permission=preset_permission_policy_fact(
-                    PermissionMode.BYPASS_PERMISSIONS
-                ),
-                accepted_plan_artifact_id=None,
-            ),
-            capability_resolve_basis=CapabilityResolveBasis(
-                fact=boundary.capability_basis,
-                user_input="original request",
-                prior_messages=(),
-                active_skill_names=frozenset(),
-                workspace_root=tmp_path,
-                memory_domain_id=boundary.capability_basis.memory_domain_id,
-            ),
-            frozen_execution_surface=FrozenCapabilityExecutionSurface(
-                identity=boundary.capability_basis.execution_surface_identity,
-                descriptors=(),
-                diagnostics=(),
-            ),
-            original_exposure_plan=exposure,
-            original_exposure_fact=None,
-            original_exposure_event_ref=None,
-            effective_exposure_plan=exposure,
-            effective_exposure_fact=None,
-            effective_exposure_event_ref=None,
-            latest_committed_resume_boundary=None,
-            latest_committed_resume_boundary_ref=None,
-        )
-        state.run_working_set.run_execution_activation = activation
-        state.run_working_set.process_segment_id = "run_segment:test:approval-resume"
-        state.run_working_set.model_call_control_owner = RunModelCallControlOwner(
-            run_id=state.run_id,
-            activation=activation,
-            segment_id=state.run_working_set.process_segment_id,
-            segment_generation=activation.segment_generation,
-        )
-        resolved_exposure = agent.capability_runtime.resolve_exposure_projection(
-            CapabilityProjectionResolveContext(
-                workspace_root=tmp_path,
-                workspace_kind="project",
-                memory_domain=None,
-                user_input="original request",
-                active_skill_names=frozenset(),
-            ),
-            frozen_surface=state.run_working_set.frozen_execution_surface,
-            archive=agent.runtime_session.archive,
-            runtime_session_id=agent.runtime_session.runtime_session_id,
-            owner=boundary.capability_basis.owner,
-            resolve_basis=boundary.capability_basis,
-            exposure_id="capability-exposure:test-missing-descriptor",
-        )
-        stored_exposure = await agent.runtime_session.emit(
-            CapabilityExposureResolvedEvent(
-                run_id=state.run_id,
-                turn_id=state.turn_id,
-                reply_id=state.reply_id,
-                exposure=resolved_exposure.fact,
-                exposure_revision=1,
-            ),
-            state=state,
-        )
-        assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
-        state.run_working_set.install_initial_exposure(
-            plan=resolved_exposure.plan,
-            fact=resolved_exposure.fact,
-            event_ref=event_reference_from_stored(
-                stored_exposure,
-                runtime_session_id=agent.runtime_session.runtime_session_id,
-            ),
-        )
-        try:
-            return await agent.resume_after_approval(
-                state,
-                ApprovalResolution(
-                    approval_id="approval:test",
-                    decisions=(
-                        ToolApprovalDecision(tool_call_id="call:write", confirmed=True),
+    first = asyncio.run(run_agent_task(agent, "write the requested file"))
+    assert first.status is LoopStatus.WAITING_USER
+
+    # The committed run revision owns the descriptor. Removing the current
+    # provider catalog cannot retroactively change an approved continuation.
+    agent.capability_runtime = CapabilityRuntime(providers=())
+    result = asyncio.run(
+        resume_test_agent_after_approval(
+            agent,
+            first.run_id,
+            ApprovalResolution(
+                approval_id="host-minted",
+                decisions=(
+                    ToolApprovalDecision(
+                        tool_call_id="call:write",
+                        confirmed=True,
                     ),
                 ),
-            )
-        finally:
-            await state.run_working_set.model_call_control_owner.retire()
-            state.run_working_set.model_call_control_owner = None
-
-    result = asyncio.run(resume())
+            ),
+        )
+    )
 
     assert result.status is LoopStatus.FINISHED
-    assert not (tmp_path / "review_tmp.txt").exists()
-    gate_decision = _gate_decisions(agent)[0]
-    assert gate_decision.tool_call_id == "call:write"
-    assert gate_decision.tool_name == "write_file"
-    assert gate_decision.descriptor_id is None
-    assert gate_decision.decision == "deny"
-    assert gate_decision.reason_code == "capability_descriptor_missing"
-    assert (
-        gate_decision.reason_message
-        == "Unknown tool: write_file (capability_descriptor_missing)"
-    )
-    assert gate_decision.policy_mode == "bypass-permissions"
-    assert gate_decision.permission_policy
-    assert gate_decision.exposure_generation == 0
-    assert gate_decision.result_state is ToolResultState.ERROR
-
-
+    assert tool.calls == ["call:write"]
+    decisions = [
+        event
+        for event in runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:write"
+    ]
+    assert [event.decision for event in decisions] == ["wait_for_user", "allow"]
+    assert decisions[-1].descriptor_id is not None
+    assert decisions[-1].reason_code is None
 def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
     tmp_path,
 ) -> None:
@@ -1844,7 +1612,7 @@ def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=CapabilityRuntime(providers=()),
@@ -1857,6 +1625,6 @@ def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
 
     assert not any(
         isinstance(event, PlanModeEnteredEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert not _gate_decisions(agent)

@@ -5,20 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 from uuid import uuid4
 
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
-from pulsara_agent.storage.postgres_connection_provider import (
-    PostgresConnectionLane,
+from pulsara_agent.ports.projection_jobs import CanonicalMutationWriterPort
+from pulsara_agent.projection_jobs.canonical_mutation import (
+    build_canonical_mutation_bundle,
+    subset_surface_plan,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.projection_jobs.mutation_writer import (
-        CanonicalMutationV2Writer,
-    )
+from pulsara_agent.projection_jobs.contracts import (
+    CanonicalMutationKind,
+    CanonicalMutationSurface,
+    CanonicalMutationSurfacePlanFact,
+    GraphMaintenanceMutationOwnerFact,
+    build_projection_fact,
+)
 
 
 @dataclass(slots=True)
@@ -26,7 +30,8 @@ class DurableGraphFacade:
     """Use PostgreSQL as truth and emit external projections in the same UOW."""
 
     postgres: PostgresGraphStore
-    mutation_writer: "CanonicalMutationV2Writer | None" = None
+    mutation_writer: CanonicalMutationWriterPort | None = None
+    mutation_surface_plan: CanonicalMutationSurfacePlanFact | None = None
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
         self.postgres.put_jsonld(document, graph_id=graph_id)
@@ -63,29 +68,43 @@ class DurableGraphFacade:
         )
 
     def delete_graph(self, graph_id: str) -> None:
-        from pulsara_agent.runtime.projection_jobs.contracts import (
-            CanonicalMutationSurface,
-        )
-        from pulsara_agent.runtime.projection_jobs.mutation_writer import (
-            CanonicalMutationV2Writer,
-        )
-
         writer = self.mutation_writer
-        provider = self.postgres.connection_provider
-        if writer is None or provider is None:
-            self.postgres.delete_graph(graph_id)
+        surface_plan = self.mutation_surface_plan
+        self.postgres.delete_graph(graph_id)
+        if writer is None or surface_plan is None:
             return
-        with provider.connection(
-            lane=PostgresConnectionLane.MEMORY_UOW,
-            deadline_monotonic=monotonic() + 30.0,
-        ) as connection:
-            PostgresGraphStore(connection=connection).delete_graph(graph_id)
-            CanonicalMutationV2Writer(
-                connection=connection,
-                surface_plan=writer.surface_plan,
-            ).append_graph_maintenance_mutation(
-                graph_id=graph_id,
-                maintenance_operation_id=f"graph-delete:{uuid4().hex}",
+        operation_id = f"graph-delete:{uuid4().hex}"
+        owner = cast(
+            GraphMaintenanceMutationOwnerFact,
+            build_projection_fact(
+                GraphMaintenanceMutationOwnerFact,
+                schema_version="graph_maintenance_mutation_owner.v1",
+                owner_kind="graph_maintenance",
+                maintenance_operation_id=operation_id,
                 maintenance_kind="graph_delete",
-                requested_surfaces=(CanonicalMutationSurface.OXIGRAPH,),
-            )
+                graph_id=graph_id,
+                ordered_authority_fingerprints=(),
+            ),
+        )
+        plan = subset_surface_plan(
+            surface_plan,
+            (CanonicalMutationSurface.OXIGRAPH,),
+        )
+        bundle = build_canonical_mutation_bundle(
+            source_owner=owner,
+            mutation_kind=CanonicalMutationKind.GRAPH_DELETE,
+            graph_id=graph_id,
+            payloads=(
+                {
+                    "schema_version": "canonical-graph-maintenance-payload.v2",
+                    "graph_reset": True,
+                    "graph_id": graph_id,
+                    "maintenance_kind": "graph_delete",
+                },
+            ),
+            surface_plan=plan,
+        )
+        writer.append_bundle(
+            bundle=bundle,
+            deadline_monotonic=monotonic() + 30.0,
+        )

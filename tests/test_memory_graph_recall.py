@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 import pytest
 
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryRelationEdge
-from pulsara_agent.memory.recall.graph import GraphCandidateService, RecallPath, RecallPathStep
+from pulsara_agent.memory.recall.graph import (
+    GraphCandidateService,
+    RecallPath,
+    RecallPathStep,
+)
 from pulsara_agent.memory.recall.service import (
     LexicalMemoryRecallService,
     RecallItem,
@@ -18,7 +22,7 @@ from pulsara_agent.memory.recall.service import (
     RecallTrigger,
 )
 from pulsara_agent.ontology import memory
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
 
 
@@ -44,7 +48,9 @@ def test_graph_candidates_find_one_hop_and_preserve_reverse_edge_direction() -> 
         graph_id="graph:test",
     )
 
-    assert [candidate.memory_id for candidate in outcome.batch.candidates] == ["preference:new"]
+    assert [candidate.memory_id for candidate in outcome.batch.candidates] == [
+        "preference:new"
+    ]
     step = outcome.paths_by_id["preference:new"][0].steps[0]
     assert step.traversal == "reverse"
     assert step.from_id == "preference:old"
@@ -74,19 +80,32 @@ def test_graph_candidates_find_two_hop_shared_evidence_only_at_depth_two() -> No
     )
 
     assert one_hop.batch.candidates == ()
-    assert [candidate.memory_id for candidate in two_hop.batch.candidates] == ["claim:b"]
+    assert [candidate.memory_id for candidate in two_hop.batch.candidates] == [
+        "claim:b"
+    ]
     path = two_hop.paths_by_id["claim:b"][0]
-    assert [step.predicate for step in path.steps] == [memory.SUPPORTS.name, memory.SUPPORTS.name]
+    assert [step.predicate for step in path.steps] == [
+        memory.SUPPORTS.name,
+        memory.SUPPORTS.name,
+    ]
     assert [step.traversal for step in path.steps] == ["reverse", "forward"]
-    assert query.relation_calls == 3  # one call for depth 1, then two batched levels for depth 2
+    assert (
+        query.relation_calls == 3
+    )  # one call for depth 1, then two batched levels for depth 2
 
 
-def test_graph_candidates_allow_shared_basis_and_supersede_lineage_but_not_mixed_walks() -> None:
+def test_graph_candidates_allow_shared_basis_and_supersede_lineage_but_not_mixed_walks() -> (
+    None
+):
     query = _MemoryQuery(
         views={
-            "decision:a": _view("decision:a", "decision a", memory_type=memory.DECISION.name),
+            "decision:a": _view(
+                "decision:a", "decision a", memory_type=memory.DECISION.name
+            ),
             "claim:basis": _view("claim:basis", "basis", memory_type=memory.CLAIM.name),
-            "decision:b": _view("decision:b", "decision b", memory_type=memory.DECISION.name),
+            "decision:b": _view(
+                "decision:b", "decision b", memory_type=memory.DECISION.name
+            ),
             "preference:new": _view("preference:new", "new"),
             "preference:middle": _view("preference:middle", "middle"),
             "preference:old": _view("preference:old", "old"),
@@ -96,34 +115,58 @@ def test_graph_candidates_allow_shared_basis_and_supersede_lineage_but_not_mixed
             MemoryRelationEdge("decision:a", memory.BASED_ON.name, "claim:basis"),
             MemoryRelationEdge("decision:b", memory.BASED_ON.name, "claim:basis"),
             MemoryRelationEdge("claim:basis", memory.CONTRADICTS.name, "claim:mixed"),
-            MemoryRelationEdge("preference:new", memory.SUPERSEDES.name, "preference:middle"),
-            MemoryRelationEdge("preference:middle", memory.SUPERSEDES.name, "preference:old"),
+            MemoryRelationEdge(
+                "preference:new", memory.SUPERSEDES.name, "preference:middle"
+            ),
+            MemoryRelationEdge(
+                "preference:middle", memory.SUPERSEDES.name, "preference:old"
+            ),
         ],
     )
     service = GraphCandidateService(query)
 
     shared_basis = service.collect(
-        seed_ids=["decision:a"], scopes=["ctx:user"], types=[], max_hops=2, graph_id=None
+        seed_ids=["decision:a"],
+        scopes=["ctx:user"],
+        types=[],
+        max_hops=2,
+        graph_id=None,
     )
     lineage = service.collect(
-        seed_ids=["preference:new"], scopes=["ctx:user"], types=[], max_hops=2, graph_id=None
+        seed_ids=["preference:new"],
+        scopes=["ctx:user"],
+        types=[],
+        max_hops=2,
+        graph_id=None,
     )
 
-    assert "decision:b" in {candidate.memory_id for candidate in shared_basis.batch.candidates}
-    assert "claim:mixed" not in {candidate.memory_id for candidate in shared_basis.batch.candidates}
-    assert "preference:old" in {candidate.memory_id for candidate in lineage.batch.candidates}
+    assert "decision:b" in {
+        candidate.memory_id for candidate in shared_basis.batch.candidates
+    }
+    assert "claim:mixed" not in {
+        candidate.memory_id for candidate in shared_basis.batch.candidates
+    }
+    assert "preference:old" in {
+        candidate.memory_id for candidate in lineage.batch.candidates
+    }
 
 
 def test_graph_candidates_do_not_traverse_hidden_canonical_intermediate() -> None:
     query = _MemoryQuery(
         views={
             "preference:a": _view("preference:a", "a"),
-            "preference:hidden": _view("preference:hidden", "hidden", scope="ctx:workspace/hidden"),
+            "preference:hidden": _view(
+                "preference:hidden", "hidden", scope="ctx:workspace/hidden"
+            ),
             "preference:c": _view("preference:c", "c"),
         },
         edges=[
-            MemoryRelationEdge("preference:a", memory.SUPERSEDES.name, "preference:hidden"),
-            MemoryRelationEdge("preference:hidden", memory.SUPERSEDES.name, "preference:c"),
+            MemoryRelationEdge(
+                "preference:a", memory.SUPERSEDES.name, "preference:hidden"
+            ),
+            MemoryRelationEdge(
+                "preference:hidden", memory.SUPERSEDES.name, "preference:c"
+            ),
         ],
     )
     outcome = GraphCandidateService(query).collect(
@@ -212,7 +255,9 @@ def test_graph_candidates_pass_fanout_bound_to_relation_query() -> None:
             "preference:a": _view("preference:a", "a"),
         },
         edges=[
-            MemoryRelationEdge("preference:seed", memory.SUPERSEDES.name, "preference:a"),
+            MemoryRelationEdge(
+                "preference:seed", memory.SUPERSEDES.name, "preference:a"
+            ),
         ],
     )
     GraphCandidateService(query, fanout_per_node=7, max_examined_edges=42).collect(
@@ -232,8 +277,12 @@ def test_graph_candidates_pass_fanout_bound_to_relation_query() -> None:
         },
         edges=[
             MemoryRelationEdge("preference:seed", "provides", "capability:noise"),
-            MemoryRelationEdge("preference:seed", memory.SUPERSEDES.name, "preference:a"),
-            MemoryRelationEdge("preference:seed", memory.SUPERSEDES.name, "preference:b"),
+            MemoryRelationEdge(
+                "preference:seed", memory.SUPERSEDES.name, "preference:a"
+            ),
+            MemoryRelationEdge(
+                "preference:seed", memory.SUPERSEDES.name, "preference:b"
+            ),
         ],
     )
     outcome = GraphCandidateService(query, fanout_per_node=1).collect(
@@ -274,7 +323,9 @@ def test_graph_failure_degrades_to_direct_lexical_results() -> None:
 
     assert result.status is RecallStatus.OK
     assert [item.memory_id for item in result.items] == ["preference:seed"]
-    assert any(warning.startswith("graph_expand_degraded:") for warning in result.warnings)
+    assert any(
+        warning.startswith("graph_expand_degraded:") for warning in result.warnings
+    )
 
 
 def test_zero_hop_surfaces_active_contradiction_companion() -> None:
@@ -296,7 +347,9 @@ def test_zero_hop_surfaces_active_contradiction_companion() -> None:
         },
         lexical_ids=["preference:tabs"],
     )
-    service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+    service = LexicalMemoryRecallService(
+        query, graph_candidates=GraphCandidateService(query)
+    )
 
     result = asyncio.run(
         service.recall(
@@ -338,7 +391,9 @@ def test_zero_hop_contradiction_companion_respects_scope_isolation() -> None:
         },
         lexical_ids=["preference:tabs"],
     )
-    service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+    service = LexicalMemoryRecallService(
+        query, graph_candidates=GraphCandidateService(query)
+    )
 
     result = asyncio.run(
         service.recall(
@@ -372,7 +427,9 @@ def test_zero_hop_contradiction_companion_excludes_inactive_partner() -> None:
         },
         lexical_ids=["preference:tabs"],
     )
-    service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+    service = LexicalMemoryRecallService(
+        query, graph_candidates=GraphCandidateService(query)
+    )
 
     result = asyncio.run(
         service.recall(
@@ -434,7 +491,9 @@ def test_automatic_recall_forces_zero_hop_even_when_query_requests_two() -> None
         views={"preference:seed": _view("preference:seed", "concise summaries")},
         lexical_ids=["preference:seed"],
     )
-    service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+    service = LexicalMemoryRecallService(
+        query, graph_candidates=GraphCandidateService(query)
+    )
 
     asyncio.run(
         service.recall(
@@ -490,7 +549,9 @@ def test_memory_search_protocol_defaults_to_zero_and_serializes_paths() -> None:
 
     payload = json.loads(
         tool.execute(
-            ToolCall(id="call:search", name="memory_search", arguments={"query": "target"})
+            ToolCall(
+                id="call:search", name="memory_search", arguments={"query": "target"}
+            )
         ).output
     )
 
@@ -561,7 +622,9 @@ def test_memory_search_relaxes_visible_scope_when_it_would_empty_recall() -> Non
 
 @pytest.mark.parametrize("max_hops", [-1, 3])
 def test_memory_search_rejects_out_of_range_hops(max_hops: int) -> None:
-    tool = MemorySearchTool(recall=_RecallService(RecallResult(status=RecallStatus.EMPTY)))
+    tool = MemorySearchTool(
+        recall=_RecallService(RecallResult(status=RecallStatus.EMPTY))
+    )
     with pytest.raises(ValueError):
         tool.execute(
             ToolCall(
@@ -577,7 +640,9 @@ class _RecallService:
     result: RecallResult
     query: RecallQuery | None = None
 
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult:
         self.query = query
         return self.result
 
@@ -586,7 +651,9 @@ class _RecallService:
 class _KindSensitiveRecallService:
     queries: list[RecallQuery] = field(default_factory=list)
 
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult:
         self.queries.append(query)
         if query.types:
             return RecallResult(status=RecallStatus.EMPTY, guidance=("no match",))
@@ -611,7 +678,9 @@ class _KindSensitiveRecallService:
 class _ScopeSensitiveRecallService:
     queries: list[RecallQuery] = field(default_factory=list)
 
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult:
         self.queries.append(query)
         if query.scopes == ("ctx:workspace/current",):
             return RecallResult(status=RecallStatus.EMPTY, guidance=("no match",))
@@ -650,7 +719,9 @@ class _MemoryQuery:
             raise RuntimeError("graph unavailable")
         selected = set(node_ids)
         matched = [
-            edge for edge in self.edges if edge.source_id in selected or edge.target_id in selected
+            edge
+            for edge in self.edges
+            if edge.source_id in selected or edge.target_id in selected
         ]
         if max_per_source is not None and max_per_source > 0:
             self.last_max_per_source = max_per_source
@@ -676,7 +747,9 @@ class _MemoryQuery:
     def exact_candidates(self, *, statement, scope, memory_type, graph_id=None):
         return []
 
-    def missing_vector_ids(self, *, embedding_fingerprint, scopes, types, limit, graph_id=None):
+    def missing_vector_ids(
+        self, *, embedding_fingerprint, scopes, types, limit, graph_id=None
+    ):
         return []
 
 

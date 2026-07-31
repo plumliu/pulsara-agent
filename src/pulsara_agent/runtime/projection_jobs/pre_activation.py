@@ -2,7 +2,7 @@
 
 The schema migrator deliberately does not manufacture its own prerequisites.
 This module owns the two durable preparation families used by migrations
-0006-0008: legacy surface binding plans and pre-activation coverage receipts.
+0006-0009: legacy surface binding plans, pre-activation coverage, and activation.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pulsara_agent.primitives._context_base import (
     canonical_json_bytes,
     context_fingerprint,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationPlannedSurfaceFact,
     CanonicalMutationSurface,
     DurableProjectionKind,
@@ -48,7 +48,7 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     RuntimeWriteMaintenanceAuthorityFact,
     build_projection_fact,
 )
-from pulsara_agent.runtime.projection_jobs.mutation_writer import (
+from pulsara_agent.projection_jobs.canonical_mutation import (
     build_surface_handler_contract,
 )
 from pulsara_agent.runtime.projection_jobs.registry import (
@@ -78,10 +78,17 @@ from pulsara_agent.storage.runtime_write_admission import (
 
 _LEGACY_PLAN_RESOURCE = "0006_legacy_surface_binding_plan_contract_v1.json"
 _PRE_ACTIVATION_RESOURCE = "0006_pre_activation_projection_contracts_v1.json"
+DURABLE_PROJECTION_V6_PRE_ACTIVATION_KINDS = (
+    DurableProjectionKind.RUN_TIMELINE,
+    DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+)
 _ACTIVATION_RESOURCE_BY_KIND = {
     DurableProjectionKind.RUN_TIMELINE: "0007_run_timeline_activation_v1.json",
     DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE: (
         "0008_tool_result_evidence_activation_v1.json"
+    ),
+    DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION: (
+        "0009_compaction_memory_extraction_activation_v1.json"
     ),
 }
 _TARGET_VERSION_BY_KIND = {
@@ -109,15 +116,16 @@ class ProjectionMigrationReadiness:
     evidence_coverage_ready: bool
 
 
-def load_pre_activation_contract_semantics(
-) -> tuple[PreActivationProjectionHookContractSemanticFact, ...]:
+def load_pre_activation_contract_semantics() -> tuple[
+    PreActivationProjectionHookContractSemanticFact, ...
+]:
     payload = _resource_json(_PRE_ACTIVATION_RESOURCE)
     semantics = tuple(
         PreActivationProjectionHookContractSemanticFact.model_validate(item)
         for item in payload["ordered_contract_semantics"]
     )
-    if tuple(item.projection_kind for item in semantics) != tuple(
-        DurableProjectionKind
+    if tuple(item.projection_kind for item in semantics) != (
+        DURABLE_PROJECTION_V6_PRE_ACTIVATION_KINDS
     ):
         raise ValueError("packaged pre-activation contract registry is incomplete")
     return semantics
@@ -148,50 +156,41 @@ def projection_migration_readiness(
     epoch = read_runtime_write_epoch(connection, privileged=True)
     if epoch.database_target_fingerprint != database_target_fingerprint:
         raise ValueError("runtime write epoch/database target mismatch")
-    legacy_ready = (
-        current_head_version >= 6
-        or (
-            current_head_version == 5
-            and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
-            and epoch.target_migration_version == 6
-            and _exact_legacy_binding_plan(
-                connection,
-                epoch_fingerprint=epoch.epoch_fingerprint,
-                maintenance_operation_id=epoch.maintenance_operation_id,
-                database_target_fingerprint=database_target_fingerprint,
-                expected_v5_prefix=POSTGRES_MIGRATION_REGISTRY.definition(
-                    5
-                ).registry_prefix_fingerprint,
-            )
-            is not None
+    legacy_ready = current_head_version >= 6 or (
+        current_head_version == 5
+        and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
+        and epoch.target_migration_version == 6
+        and _exact_legacy_binding_plan(
+            connection,
+            epoch_fingerprint=epoch.epoch_fingerprint,
+            maintenance_operation_id=epoch.maintenance_operation_id,
+            database_target_fingerprint=database_target_fingerprint,
+            expected_v5_prefix=POSTGRES_MIGRATION_REGISTRY.definition(
+                5
+            ).registry_prefix_fingerprint,
+        )
+        is not None
+    )
+    timeline_ready = current_head_version >= 7 or (
+        current_head_version == 6
+        and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
+        and epoch.target_migration_version == 7
+        and _coverage_set_is_complete(
+            connection,
+            kind=DurableProjectionKind.RUN_TIMELINE,
+            maintenance_operation_id=epoch.maintenance_operation_id,
+            maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
         )
     )
-    timeline_ready = (
-        current_head_version >= 7
-        or (
-            current_head_version == 6
-            and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
-            and epoch.target_migration_version == 7
-            and _coverage_set_is_complete(
-                connection,
-                kind=DurableProjectionKind.RUN_TIMELINE,
-                maintenance_operation_id=epoch.maintenance_operation_id,
-                maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
-            )
-        )
-    )
-    evidence_ready = (
-        current_head_version >= 8
-        or (
-            current_head_version == 7
-            and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
-            and epoch.target_migration_version == 8
-            and _coverage_set_is_complete(
-                connection,
-                kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
-                maintenance_operation_id=epoch.maintenance_operation_id,
-                maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
-            )
+    evidence_ready = current_head_version >= 8 or (
+        current_head_version == 7
+        and epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
+        and epoch.target_migration_version == 8
+        and _coverage_set_is_complete(
+            connection,
+            kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
+            maintenance_operation_id=epoch.maintenance_operation_id,
+            maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
         )
     )
     return ProjectionMigrationReadiness(
@@ -243,8 +242,7 @@ class PostgresProjectionMigrationPreparationCoordinator:
                     connection,
                     expected_epoch=epoch,
                     transaction_owner_id=(
-                        "legacy-surface-binding-plan:"
-                        + epoch.maintenance_operation_id
+                        "legacy-surface-binding-plan:" + epoch.maintenance_operation_id
                     ),
                 )
                 plan = _exact_legacy_binding_plan(
@@ -267,9 +265,7 @@ class PostgresProjectionMigrationPreparationCoordinator:
                         expected_v5_prefix=self._registry.definition(
                             5
                         ).registry_prefix_fingerprint,
-                        maintenance_operation_id=(
-                            epoch.maintenance_operation_id
-                        ),
+                        maintenance_operation_id=(epoch.maintenance_operation_id),
                         maintenance_authority_fingerprint=(
                             guard.maintenance_authority_fingerprint
                         ),
@@ -277,9 +273,7 @@ class PostgresProjectionMigrationPreparationCoordinator:
             return ProjectionMigrationPreparationReport(
                 preparation_kind="legacy_surface_binding_plan.v1",
                 target_migration_version=6,
-                maintenance_operation_id=cast(
-                    str, epoch.maintenance_operation_id
-                ),
+                maintenance_operation_id=cast(str, epoch.maintenance_operation_id),
                 maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
                 durable_authority_fingerprint=plan.plan_fingerprint,
                 item_count=plan.binding_entry_count,
@@ -324,9 +318,7 @@ class PostgresProjectionMigrationPreparationCoordinator:
                     else "tool_result_evidence_pre_activation_coverage.v1"
                 ),
                 target_migration_version=target_version,
-                maintenance_operation_id=cast(
-                    str, epoch.maintenance_operation_id
-                ),
+                maintenance_operation_id=cast(str, epoch.maintenance_operation_id),
                 maintenance_epoch_fingerprint=epoch.epoch_fingerprint,
                 durable_authority_fingerprint=accumulator,
                 item_count=len(receipts),
@@ -350,14 +342,10 @@ class PostgresProjectionMigrationPreparationCoordinator:
             autocommit=True,
         )
         try:
-            runtime_identity = _read_identity_from_connection(
-                runtime_connection
-            )
+            runtime_identity = _read_identity_from_connection(runtime_connection)
         finally:
             runtime_connection.close()
-        connection = self._admin_factory.connect(
-            deadline_monotonic=deadline_monotonic
-        )
+        connection = self._admin_factory.connect(deadline_monotonic=deadline_monotonic)
         try:
             admin_identity = _read_identity_from_connection(connection)
             _validate_transaction_domain(admin_identity, runtime_identity)
@@ -505,9 +493,7 @@ def build_pre_activation_cutover(
             cutover_ledger_continuity_accumulator=(
                 horizon.ledger_continuity_accumulator
             ),
-            cutover_ledger_payload_prefix_bytes=(
-                horizon.ledger_payload_prefix_bytes
-            ),
+            cutover_ledger_payload_prefix_bytes=(horizon.ledger_payload_prefix_bytes),
             cutover_transcript_semantic_prefix_count=(
                 horizon.transcript_semantic_prefix_count
             ),
@@ -534,7 +520,8 @@ def _write_legacy_binding_plan(
         raise ValueError("legacy binding plan requires maintenance authority")
     _validate_legacy_plan_resource()
     rows = tuple(
-        connection.cursor(row_factory=dict_row).execute(
+        connection.cursor(row_factory=dict_row)
+        .execute(
             """
             SELECT outbox_id, graph_id, governance_batch_id, decision_id,
                    mutation_lane, sequence_key, target_entry_key,
@@ -543,7 +530,8 @@ def _write_legacy_binding_plan(
             FROM public.memory_write_outbox
             ORDER BY sequence_key, created_at, outbox_id
             """
-        ).fetchall()
+        )
+        .fetchall()
     )
     row_fingerprints = tuple(_legacy_row_fingerprint(row) for row in rows)
     legacy_root = context_fingerprint(
@@ -555,9 +543,7 @@ def _write_legacy_binding_plan(
     for row in rows:
         payload = parse_legacy_mutation_payload(row["payload"])
         payload_sha = _payload_sha256(row["payload"])
-        for legacy_surface, status in sorted(
-            payload.surface_apply_status.items()
-        ):
+        for legacy_surface, status in sorted(payload.surface_apply_status.items()):
             surface = _surface_from_legacy(legacy_surface)
             planned = cast(
                 CanonicalMutationPlannedSurfaceFact,
@@ -579,22 +565,15 @@ def _write_legacy_binding_plan(
                     LegacySurfaceHistoricalBindingProofFact,
                     build_projection_fact(
                         LegacySurfaceHistoricalBindingProofFact,
-                        schema_version=(
-                            "legacy_surface_historical_binding_proof.v1"
-                        ),
+                        schema_version=("legacy_surface_historical_binding_proof.v1"),
                         binding_kind="historical_confirmed",
                         surface=surface,
-                        historical_handler_contract=(
-                            planned.handler_contract
-                        ),
+                        historical_handler_contract=(planned.handler_contract),
                         observed_target_semantic_identity=target_proof,
                         observed_target_contract_fingerprint=(
-                            planned.handler_contract
-                            .target_compatibility_fingerprint
+                            planned.handler_contract.target_compatibility_fingerprint
                         ),
-                        ordered_target_authority_fingerprints=(
-                            target_proof,
-                        ),
+                        ordered_target_authority_fingerprints=(target_proof,),
                     ),
                 )
             elif status in {"pending", "failed"}:
@@ -605,18 +584,14 @@ def _write_legacy_binding_plan(
                         "surface": surface.value,
                         "legacy_status": status,
                         "payload_sha256": payload_sha,
-                        "claim_token_present": bool(
-                            row.get("vector_claim_token")
-                        ),
+                        "claim_token_present": bool(row.get("vector_claim_token")),
                     },
                 )
                 authority = cast(
                     LegacySurfaceMigrationRebindAuthorityFact,
                     build_projection_fact(
                         LegacySurfaceMigrationRebindAuthorityFact,
-                        schema_version=(
-                            "legacy_surface_migration_rebind_authority.v1"
-                        ),
+                        schema_version=("legacy_surface_migration_rebind_authority.v1"),
                         binding_kind="migration_rebound",
                         authority_id=(
                             "legacy-surface-rebind:"
@@ -631,9 +606,7 @@ def _write_legacy_binding_plan(
                                 },
                             )
                         ),
-                        database_target_fingerprint=(
-                            database_target_fingerprint
-                        ),
+                        database_target_fingerprint=(database_target_fingerprint),
                         maintenance_authority_fingerprint=(
                             maintenance_authority_fingerprint
                         ),
@@ -646,17 +619,13 @@ def _write_legacy_binding_plan(
                 )
                 privileged.append(authority.authority_fingerprint)
             else:
-                raise ValueError(
-                    f"unsupported legacy surface status {status!r}"
-                )
+                raise ValueError(f"unsupported legacy surface status {status!r}")
             entries.append(
                 cast(
                     LegacySurfaceMigrationBindingEntryFact,
                     build_projection_fact(
                         LegacySurfaceMigrationBindingEntryFact,
-                        schema_version=(
-                            "legacy_surface_migration_binding_entry.v1"
-                        ),
+                        schema_version=("legacy_surface_migration_binding_entry.v1"),
                         legacy_outbox_id=str(row["outbox_id"]),
                         legacy_payload_sha256=payload_sha,
                         surface=surface,
@@ -719,9 +688,7 @@ def _write_legacy_binding_plan(
         {
             "database_target_fingerprint": database_target_fingerprint,
             "expected_v5_registry_prefix_fingerprint": expected_v5_prefix,
-            "maintenance_authority_fingerprint": (
-                maintenance_authority_fingerprint
-            ),
+            "maintenance_authority_fingerprint": (maintenance_authority_fingerprint),
             "legacy_row_accumulator": legacy_root,
         },
     )
@@ -733,9 +700,7 @@ def _write_legacy_binding_plan(
             plan_id=plan_id,
             database_target_fingerprint=database_target_fingerprint,
             expected_v5_registry_prefix_fingerprint=expected_v5_prefix,
-            maintenance_authority_fingerprint=(
-                maintenance_authority_fingerprint
-            ),
+            maintenance_authority_fingerprint=(maintenance_authority_fingerprint),
             legacy_row_count=len(rows),
             legacy_row_accumulator=legacy_root,
             binding_page_count=len(pages),
@@ -769,10 +734,7 @@ def _write_legacy_binding_plan(
     ).fetchone()
     if (
         observed is None
-        or LegacySurfaceMigrationBindingPlanFact.model_validate(
-            observed[0]
-        )
-        != plan
+        or LegacySurfaceMigrationBindingPlanFact.model_validate(observed[0]) != plan
         or str(observed[1]) != plan.plan_fingerprint
     ):
         raise ValueError("legacy surface binding plan exact confirmation failed")
@@ -840,7 +802,8 @@ def _exact_legacy_binding_plan(
     ):
         raise ValueError("legacy binding plan page set drifted")
     current_rows = tuple(
-        connection.cursor(row_factory=dict_row).execute(
+        connection.cursor(row_factory=dict_row)
+        .execute(
             """
             SELECT outbox_id, graph_id, governance_batch_id, decision_id,
                    mutation_lane, sequence_key, target_entry_key,
@@ -849,13 +812,17 @@ def _exact_legacy_binding_plan(
             FROM public.memory_write_outbox
             ORDER BY sequence_key, created_at, outbox_id
             """
-        ).fetchall()
+        )
+        .fetchall()
     )
     root = context_fingerprint(
         "legacy-canonical-mutation-row-accumulator:v1",
         tuple(_legacy_row_fingerprint(row) for row in current_rows),
     )
-    if len(current_rows) != plan.legacy_row_count or root != plan.legacy_row_accumulator:
+    if (
+        len(current_rows) != plan.legacy_row_count
+        or root != plan.legacy_row_accumulator
+    ):
         raise ValueError("legacy mutation rows changed after binding plan")
     return plan
 
@@ -891,9 +858,7 @@ def read_legacy_binding_plan(
             (maintenance_operation_id,),
         ).fetchall()
     )
-    entries = tuple(
-        entry for page in pages for entry in page.ordered_entries
-    )
+    entries = tuple(entry for page in pages for entry in page.ordered_entries)
     if (
         len(entries) != plan.binding_entry_count
         or context_fingerprint(
@@ -946,11 +911,8 @@ def _coverage_set_is_complete(
     for receipt in receipts:
         if (
             receipt.maintenance_operation_id != maintenance_operation_id
-            or receipt.maintenance_authority_fingerprint
-            != expected_authority
-            or ledger_horizon_for_session(
-                connection, receipt.runtime_session_id
-            )
+            or receipt.maintenance_authority_fingerprint != expected_authority
+            or ledger_horizon_for_session(connection, receipt.runtime_session_id)
             != receipt.frozen_horizon
         ):
             return False
@@ -1007,9 +969,7 @@ def _legacy_applied_target_proof(
     else:
         # PostgreSQL cannot prove an old external Oxigraph side effect. The
         # reset-only V1 policy refuses to invent historical authority.
-        raise ValueError(
-            "applied legacy Oxigraph delivery requires rebuild or reset"
-        )
+        raise ValueError("applied legacy Oxigraph delivery requires rebuild or reset")
     return context_fingerprint(
         "legacy-surface-observed-target-semantic:v1",
         {
@@ -1091,8 +1051,7 @@ def _validate_legacy_plan_resource() -> None:
     payload = _resource_json(_LEGACY_PLAN_RESOURCE)
     if (
         int(payload["maximum_rows_per_page"]) != _MAX_PAGE_ROWS
-        or int(payload["maximum_canonical_utf8_bytes_per_page"])
-        != _MAX_PAGE_BYTES
+        or int(payload["maximum_canonical_utf8_bytes_per_page"]) != _MAX_PAGE_BYTES
         or tuple(payload["ordered_surface_kinds"])
         != tuple(item.value for item in CanonicalMutationSurface)
     ):
@@ -1100,9 +1059,7 @@ def _validate_legacy_plan_resource() -> None:
 
 
 def _resource_json(name: str) -> dict[str, Any]:
-    resource = files("pulsara_agent.storage.migrations.resources").joinpath(
-        name
-    )
+    resource = files("pulsara_agent.storage.migrations.resources").joinpath(name)
     return cast(dict[str, Any], json.loads(resource.read_text("utf-8")))
 
 

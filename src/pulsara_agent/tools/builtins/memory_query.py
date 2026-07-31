@@ -18,72 +18,17 @@ from pulsara_agent.memory.recall.service import (
 )
 from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
+from pulsara_agent.ports.tool_execution import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolRuntimeContext,
+)
 from pulsara_agent.tools.builtins.schemas import (
     bounded_int_arg,
     int_arg,
     json_text,
-    object_schema,
     required_str_arg,
     str_arg,
-)
-
-
-_MEMORY_SEARCH_PARAMETERS = object_schema(
-    properties={
-        "query": {
-            "type": "string",
-            "description": "Natural-language or lexical query for canonical durable memory.",
-        },
-        "scope": {
-            "type": "string",
-            "description": (
-                "Optional exact visible memory scope. Omit this field to search all visible scopes. "
-                "Only set it when the user explicitly names a scope; do not infer the current workspace."
-            ),
-        },
-        "kind": {
-            "type": "string",
-            "description": (
-                "Optional exact canonical memory type: Claim, Preference, Observation, ActionBoundary, or Decision. "
-                "Omit unless the user explicitly names one of these types; do not infer a type from the question."
-            ),
-        },
-        "limit": {
-            "type": "integer",
-            "default": 5,
-            "description": "Maximum results to return.",
-        },
-        "max_hops": {
-            "type": "integer",
-            "default": 0,
-            "description": (
-                "Graph expansion depth: 0 for direct retrieval only, 1 for direct relations, "
-                "or 2 for bounded typed multi-hop paths. Choose explicitly from task complexity."
-            ),
-        },
-    },
-    required=["query"],
-)
-
-_MEMORY_GET_PARAMETERS = object_schema(
-    properties={
-        "memory_id": {
-            "type": "string",
-            "description": "Canonical memory node id, e.g. preference:abc.",
-        }
-    },
-    required=["memory_id"],
-)
-
-_MEMORY_EXPLAIN_PARAMETERS = object_schema(
-    properties={
-        "memory_id": {
-            "type": "string",
-            "description": "Canonical memory node id to explain from materialized graph data.",
-        }
-    },
-    required=["memory_id"],
 )
 
 
@@ -94,13 +39,6 @@ class MemorySearchTool:
     read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_search"
-    description: ClassVar[str] = (
-        "Search canonical durable memory. Use this for user preferences, prior durable decisions, "
-        "remembered observations, and other semantic memories. If no result is found, say so; do not guess."
-    )
-    parameters: ClassVar[dict[str, Any]] = _MEMORY_SEARCH_PARAMETERS
-    is_read_only: ClassVar[bool] = True
-    is_concurrency_safe: ClassVar[bool] = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         return asyncio.run(self.execute_async(call, runtime_context=None))
@@ -117,7 +55,9 @@ class MemorySearchTool:
         if scope == "":
             scope = None
         kind = str_arg(call.arguments, "kind")
-        limit = bounded_int_arg(call.arguments, "limit", default=5, minimum=1, maximum=20)
+        limit = bounded_int_arg(
+            call.arguments, "limit", default=5, minimum=1, maximum=20
+        )
         max_hops = int_arg(call.arguments, "max_hops", 0)
         if max_hops not in {0, 1, 2}:
             raise ValueError("max_hops must be 0, 1, or 2")
@@ -125,7 +65,9 @@ class MemorySearchTool:
         if scope_error is not None:
             return _tool_success(call, scope_error)
         scopes = (scope,) if scope else _default_scopes(self.read_scopes)
-        event_context = runtime_context.event_context if runtime_context is not None else None
+        event_context = (
+            runtime_context.event_context if runtime_context is not None else None
+        )
         query = RecallQuery(
             text=query_text,
             scopes=scopes,
@@ -133,7 +75,9 @@ class MemorySearchTool:
             limit=limit,
             max_hops=max_hops,
             trigger=RecallTrigger.EXPLICIT_SEARCH,
-            session_id=runtime_context.runtime_session_id if runtime_context is not None else None,
+            session_id=runtime_context.runtime_session_id
+            if runtime_context is not None
+            else None,
             run_id=event_context.run_id if event_context is not None else None,
             turn_id=event_context.turn_id if event_context is not None else None,
             reply_id=event_context.reply_id if event_context is not None else None,
@@ -231,7 +175,9 @@ class MemorySearchTool:
         selected_warnings: tuple[str, ...] = ()
         selected_metadata: dict[str, Any] = {}
         for attempt_query, warnings, metadata in attempts:
-            probe = await self.recall.recall(replace(attempt_query, trace=False), graph_id=self.graph_id)
+            probe = await self.recall.recall(
+                replace(attempt_query, trace=False), graph_id=self.graph_id
+            )
             if probe.status is RecallStatus.OK:
                 selected_query = attempt_query
                 selected_warnings = warnings
@@ -258,12 +204,6 @@ class MemoryGetTool:
     read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_get"
-    description: ClassVar[str] = (
-        "Fetch one canonical durable memory by id with status, evidence ids, and direct graph relations."
-    )
-    parameters: ClassVar[dict[str, Any]] = _MEMORY_GET_PARAMETERS
-    is_read_only: ClassVar[bool] = True
-    is_concurrency_safe: ClassVar[bool] = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         memory_id = required_str_arg(call.arguments, "memory_id")
@@ -297,13 +237,6 @@ class MemoryExplainTool:
     read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_explain"
-    description: ClassVar[str] = (
-        "Explain one canonical durable memory using only materialized edges, fields, and recall signals. "
-        "If the graph has no supporting edge, the explanation will stay silent about that relation."
-    )
-    parameters: ClassVar[dict[str, Any]] = _MEMORY_EXPLAIN_PARAMETERS
-    is_read_only: ClassVar[bool] = True
-    is_concurrency_safe: ClassVar[bool] = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         memory_id = required_str_arg(call.arguments, "memory_id")
@@ -359,7 +292,9 @@ def _default_scopes(read_scopes: frozenset[str] | None) -> tuple[str, ...]:
     return tuple(sorted(_effective_read_scopes(read_scopes)))
 
 
-def _scope_error_payload(scope: str | None, read_scopes: frozenset[str] | None) -> dict[str, Any] | None:
+def _scope_error_payload(
+    scope: str | None, read_scopes: frozenset[str] | None
+) -> dict[str, Any] | None:
     if scope is None:
         return None
     if not is_valid_scope(scope):
@@ -367,7 +302,9 @@ def _scope_error_payload(scope: str | None, read_scopes: frozenset[str] | None) 
             "status": "empty",
             "results": [],
             "reason": "invalid_scope",
-            "guidance": ["Use ctx:user or one of the visible ctx:workspace/<id> scopes."],
+            "guidance": [
+                "Use ctx:user or one of the visible ctx:workspace/<id> scopes."
+            ],
         }
     effective_read_scopes = _effective_read_scopes(read_scopes)
     if scope not in effective_read_scopes:
@@ -381,7 +318,9 @@ def _scope_error_payload(scope: str | None, read_scopes: frozenset[str] | None) 
     return None
 
 
-def _is_view_visible(view: CanonicalNodeView, read_scopes: frozenset[str] | None) -> bool:
+def _is_view_visible(
+    view: CanonicalNodeView, read_scopes: frozenset[str] | None
+) -> bool:
     return view.scope in _effective_read_scopes(read_scopes)
 
 
@@ -394,7 +333,9 @@ def _forbidden_memory_payload(memory_id: str) -> dict[str, Any]:
         "status": "empty",
         "memory_id": memory_id,
         "reason": "scope_not_visible",
-        "guidance": ["No canonical memory with this id was found in the visible scopes."],
+        "guidance": [
+            "No canonical memory with this id was found in the visible scopes."
+        ],
     }
 
 
@@ -406,9 +347,15 @@ def _view_payload(view: CanonicalNodeView) -> dict[str, Any]:
         "status": view.status.value,
         "statement": view.statement,
         "summary": view.summary,
-        "source_authority": view.source_authority.value if view.source_authority else None,
-        "verification_status": view.verification_status.value if view.verification_status else None,
-        "confidence_level": view.confidence_level.value if view.confidence_level else None,
+        "source_authority": view.source_authority.value
+        if view.source_authority
+        else None,
+        "verification_status": view.verification_status.value
+        if view.verification_status
+        else None,
+        "confidence_level": view.confidence_level.value
+        if view.confidence_level
+        else None,
         "applies_when": view.applies_when,
         "do_not_apply_when": view.do_not_apply_when,
         "created_at": view.created_at.isoformat(),

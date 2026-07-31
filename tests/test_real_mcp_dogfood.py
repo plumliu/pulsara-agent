@@ -11,6 +11,11 @@ from pulsara_agent.runtime.mcp import (
     McpServerSupervisor,
     McpStreamableHttpConfig,
 )
+from pulsara_agent.primitives.mcp_protocol import (
+    McpFinalDiscoverWireReceiptFact,
+    McpLegacyInitializeWireReceiptFact,
+    McpProtocolBehaviorEra,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -48,16 +53,44 @@ def test_real_langchain_docs_mcp_dogfood() -> None:
                 retiring_slot_ids=(),
             )
             assert snapshot.status is McpServerStatus.READY
+            assert snapshot.authority is not None
+            negotiation = snapshot.authority.discovery_attribution.negotiation
+            assert negotiation.sdk_version == "2.0.0"
+            protocol = candidate.manager_slot.manager._connections[
+                "langchain-docs"
+            ].protocol_binding
+            assert protocol is not None
+            if protocol.protocol_semantic.behavior_era is (
+                McpProtocolBehaviorEra.STATELESS_PER_REQUEST
+            ):
+                assert negotiation.negotiation_source == "server_discover"
+                assert isinstance(
+                    protocol.negotiation_wire_receipt,
+                    McpFinalDiscoverWireReceiptFact,
+                )
+            else:
+                assert negotiation.negotiation_source == "legacy_initialize"
+                assert isinstance(
+                    protocol.negotiation_wire_receipt,
+                    McpLegacyInitializeWireReceiptFact,
+                )
+            assert snapshot.authority.discovery_attribution.page_set_receipts
             tool_names = {tool.name for tool in snapshot.tools}
             assert "search_docs_by_lang_chain" in tool_names
 
             assert candidate.manager_slot is not None
-            result = await candidate.manager_slot.manager.call_tool(
-                "langchain-docs",
-                "search_docs_by_lang_chain",
-                {"query": "LangChain MCP adapters Python quickstart"},
-                timeout_ms=20_000,
+            lease = supervisor.acquire_binding_lease(
+                candidate.manager_slot.binding_identity
             )
+            try:
+                result = await candidate.manager_slot.manager.call_tool(
+                    lease,
+                    "search_docs_by_lang_chain",
+                    {"query": "LangChain MCP adapters Python quickstart"},
+                    timeout_ms=20_000,
+                )
+            finally:
+                supervisor.release_lease(lease)
 
             assert result.is_error is False
             assert "LangChain" in result.output

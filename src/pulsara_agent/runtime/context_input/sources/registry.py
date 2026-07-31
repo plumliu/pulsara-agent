@@ -22,7 +22,7 @@ from pulsara_agent.runtime.context_input.sources.input import (
     ContextSourceCollectInput,
     recompute_context_source_input_dependency,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
 )
 

@@ -13,16 +13,16 @@ from tests.support.model_stream import (
     make_text_block_segment_event,
 )
 from tests.support.governance import make_test_governance_decision_record
+from tests.support.memory_uow import postgres_memory_uow
 
 from pulsara_agent.event import EventContext
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     InvalidAttemptPayload,
     PreferenceCandidate,
     ValidCandidatePayload,
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
-    MemoryWriteUnitOfWork,
     NoWriteOutcome,
     PooledMemoryCandidate,
     PostgresArtifactStore,
@@ -323,7 +323,7 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(
         }
     )
     try:
-        with MemoryWriteUnitOfWork(
+        with postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             workspace_root=tmp_path,

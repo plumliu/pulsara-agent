@@ -45,7 +45,7 @@ from pulsara_agent.primitives.terminal_projection import (
     ToolResultSemanticSourceFact,
     ToolTerminalProjectionPayloadFact,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationKind,
     DurableContentAddressedArtifactReferenceFact,
     DurableProjectionCommitConfirmation,
@@ -77,7 +77,7 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
     build_projection_fact,
     projection_target_key,
 )
-from pulsara_agent.runtime.projection_jobs.graph_relation import (
+from pulsara_agent.graph.projection_relations import (
     GRAPH_RELATION_LOWERING_CONTRACT,
 )
 from pulsara_agent.runtime.projection_jobs.mutation_writer import (
@@ -212,9 +212,9 @@ def _strict_tool_arguments_evidence(
         canonical_arguments,
         canonical_arguments.decode("utf-8"),
     )
-_TIMELINE_MANIFEST_MEDIA_TYPE = (
-    "application/vnd.pulsara.run-timeline-manifest+json"
-)
+
+
+_TIMELINE_MANIFEST_MEDIA_TYPE = "application/vnd.pulsara.run-timeline-manifest+json"
 _TIMELINE_LEAF_MEDIA_TYPE = "application/vnd.pulsara.run-timeline-leaf+json"
 _TOOL_EVIDENCE_SOURCE_MEDIA_TYPE = (
     "application/vnd.pulsara.tool-result-evidence-source+json"
@@ -225,12 +225,8 @@ _ARTIFACT_STORE_CONTRACT = context_fingerprint(
 _ARTIFACT_CODEC = context_fingerprint(
     "durable-projection-canonical-json-artifact-codec:v1", {}
 )
-_ARTIFACT_METADATA = context_fingerprint(
-    "durable-projection-artifact-metadata:v1", {}
-)
-_JSONLD_CODEC = context_fingerprint(
-    "durable-projection-jsonld-codec:v1", {}
-)
+_ARTIFACT_METADATA = context_fingerprint("durable-projection-artifact-metadata:v1", {})
+_JSONLD_CODEC = context_fingerprint("durable-projection-jsonld-codec:v1", {})
 _TIMELINE_ITEM_ACCUMULATOR_GENESIS = context_fingerprint(
     "run-timeline-item-accumulator:v1", "empty"
 )
@@ -240,9 +236,7 @@ _TIMELINE_COMPLETED_LEAF_GENESIS = context_fingerprint(
 _TIMELINE_EMPTY_ROOT = context_fingerprint(
     "run-timeline-persistent-vector-root:v1", "empty"
 )
-_TIMELINE_EMPTY_OPEN_STATE = context_fingerprint(
-    "run-timeline-open-state:v1", "empty"
-)
+_TIMELINE_EMPTY_OPEN_STATE = context_fingerprint("run-timeline-open-state:v1", "empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,9 +295,7 @@ class _TimelineLeafBuilder:
                 {
                     "previous": self.item_accumulator,
                     "item_semantic_fingerprint": semantic,
-                    "absolute_item_ordinal": int(
-                        item["absolute_item_ordinal"]
-                    ),
+                    "absolute_item_ordinal": int(item["absolute_item_ordinal"]),
                 },
             )
             if len(self.tail_items) == _TIMELINE_LEAF_ITEMS:
@@ -355,12 +347,10 @@ class _TimelineLeafBuilder:
             "runtime_session_id": self.source_reference.runtime_session_id,
             "run_id": self.source_reference.run_id,
             "absolute_start_ordinal": min(
-                int(item["absolute_item_ordinal"])
-                for item in self.tail_items
+                int(item["absolute_item_ordinal"]) for item in self.tail_items
             ),
             "absolute_end_ordinal": max(
-                int(item["absolute_item_ordinal"])
-                for item in self.tail_items
+                int(item["absolute_item_ordinal"]) for item in self.tail_items
             ),
             "previous_leaf_artifact_id": self.tail_previous_artifact_id,
             "items": self.tail_items,
@@ -378,9 +368,7 @@ class _TimelineLeafBuilder:
         )
         self.documents.append(document)
         self.tail_artifact_id = leaf_id
-        self.tail_document_semantic_fingerprint = (
-            document.document_semantic_fingerprint
-        )
+        self.tail_document_semantic_fingerprint = document.document_semantic_fingerprint
         self.tail_dirty = False
 
 
@@ -488,8 +476,7 @@ def _prepare_projection(
     surface_plan,
 ) -> _PreparedProjection:
     if (
-        trigger_horizon.runtime_session_id
-        != source_reference.runtime_session_id
+        trigger_horizon.runtime_session_id != source_reference.runtime_session_id
         or trigger_horizon.through_sequence != source_reference.sequence
     ):
         raise ValueError("projection trigger horizon is not event-local")
@@ -513,9 +500,7 @@ def _prepare_projection(
             target_key=target_key,
         )
     else:
-        decoded = source_bound.envelope.decode_owned(
-            DEFAULT_EVENT_SCHEMA_REGISTRY
-        )
+        decoded = source_bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
         if not isinstance(decoded, ToolResultEndEvent):
             raise ValueError("evidence source is not ToolResultEndEvent")
         target_key = projection_target_key(
@@ -555,8 +540,7 @@ def _prepare_projection(
                 document_semantic_fingerprint(item) for item in documents
             ),
             ordered_canonical_mutation_semantic_fingerprints=tuple(
-                item.mutation_semantic_fingerprint
-                for item in mutation_semantics
+                item.mutation_semantic_fingerprint for item in mutation_semantics
             ),
         ),
     )
@@ -571,14 +555,15 @@ def _prepare_projection(
         graph_id=_GRAPH_ID,
         payloads=mutation_payloads,
         surface_plan=surface_plan,
-        source_authority_fingerprints=(
-            source_reference.reference_fingerprint,
-        ),
+        source_authority_fingerprints=(source_reference.reference_fingerprint,),
     )
-    if tuple(
-        item.mutation_semantic.mutation_semantic_fingerprint
-        for item in mutation_bundle.ordered_mutation_candidates
-    ) != result_semantic.ordered_canonical_mutation_semantic_fingerprints:
+    if (
+        tuple(
+            item.mutation_semantic.mutation_semantic_fingerprint
+            for item in mutation_bundle.ordered_mutation_candidates
+        )
+        != result_semantic.ordered_canonical_mutation_semantic_fingerprints
+    ):
         raise ValueError("projection mutation semantic factory drifted")
     prepared = cast(
         PreparedDurableProjectionResultFact,
@@ -588,9 +573,7 @@ def _prepare_projection(
             result_owner=result_owner,
             result_semantic=result_semantic,
             ordered_documents=documents,
-            canonical_mutation_candidates=(
-                mutation_bundle.ordered_mutation_candidates
-            ),
+            canonical_mutation_candidates=(mutation_bundle.ordered_mutation_candidates),
         ),
     )
     return _PreparedProjection(target_key=target_key, prepared_result=prepared)
@@ -622,16 +605,10 @@ def _prepare_timeline_documents(
         runtime_session_id=source_reference.runtime_session_id,
         run_id=source_reference.run_id,
         payload=base.open_state,
-        next_item_ordinal=(
-            base.state.item_count if base.state is not None else 0
-        ),
+        next_item_ordinal=(base.state.item_count if base.state is not None else 0),
         status=base.state.status if base.state is not None else "running",
-        start_sequence=(
-            base.state.start_sequence if base.state is not None else None
-        ),
-        terminal_sequence=(
-            base.state.end_sequence if base.state is not None else None
-        ),
+        start_sequence=(base.state.start_sequence if base.state is not None else None),
+        terminal_sequence=(base.state.end_sequence if base.state is not None else None),
     )
     leaf_builder = _TimelineLeafBuilder.from_base(
         source_reference=source_reference,
@@ -666,9 +643,7 @@ def _prepare_timeline_documents(
                 "run-timeline-source-event-accumulator:v1",
                 {
                     "previous": source_event_accumulator,
-                    "stored_event_fingerprint": (
-                        stored.stored_event_fingerprint
-                    ),
+                    "stored_event_fingerprint": (stored.stored_event_fingerprint),
                 },
             )
             last_reference = stored.event_reference
@@ -692,9 +667,7 @@ def _prepare_timeline_documents(
                 tail["tail_document_semantic_fingerprint"]
             ),
             "item_count": reducer.next_item_ordinal,
-            "open_item_state_semantic_fingerprint": (
-                open_state_fingerprint
-            ),
+            "open_item_state_semantic_fingerprint": (open_state_fingerprint),
         },
     )
     state = cast(
@@ -723,8 +696,7 @@ def _prepare_timeline_documents(
         ),
         "completed_leaf_accumulator": tail["completed_leaf_accumulator"],
         "completed_leaf_count": tail["completed_leaf_count"],
-        "created_at": base.created_at
-        or first_event_created_at,
+        "created_at": base.created_at or first_event_created_at,
         "open_state": open_state,
         "trigger_event_reference": source_reference.model_dump(mode="json"),
         "source_event_accumulator": source_event_accumulator,
@@ -747,8 +719,7 @@ def _prepare_timeline_documents(
         text=manifest_text,
     )
     timeline_id = (
-        f"run-timeline:{source_reference.runtime_session_id}:"
-        f"{source_reference.run_id}"
+        f"run-timeline:{source_reference.runtime_session_id}:{source_reference.run_id}"
     )
     graph_payload = RunTimelineRecord(
         id=timeline_id,
@@ -760,9 +731,7 @@ def _prepare_timeline_documents(
         status=state.status,
         item_count=state.item_count,
         created_at=str(manifest_payload["created_at"]),
-        updated_at=_event_created_at(
-            connection, source_reference.event_id
-        ),
+        updated_at=_event_created_at(connection, source_reference.event_id),
         stored_as=NodeRef(manifest_id),
     ).to_jsonld()
     graph_document = _graph_document(
@@ -778,7 +747,10 @@ def _prepare_timeline_documents(
             "interpretation_contract": "event-sequence-items.v1",
         },
     )
-    return ((*leaf_builder.documents, manifest_document, graph_document), source_projection)
+    return (
+        (*leaf_builder.documents, manifest_document, graph_document),
+        source_projection,
+    )
 
 
 def _read_timeline_base(
@@ -787,8 +759,10 @@ def _read_timeline_base(
     source_reference: DurableProjectionSourceEventReferenceFact,
     target_key: str,
 ) -> _TimelineBase:
-    row = connection.cursor(row_factory=dict_row).execute(
-        """
+    row = (
+        connection.cursor(row_factory=dict_row)
+        .execute(
+            """
         SELECT h.head_payload, r.receipt_payload
         FROM durable_projection_target_heads AS h
         JOIN durable_projection_result_receipts AS r
@@ -796,8 +770,10 @@ def _read_timeline_base(
              h.head_payload->'applied_result_receipt_reference'->>'receipt_id'
         WHERE h.projection_kind = %s AND h.target_key = %s
         """,
-        (DurableProjectionKind.RUN_TIMELINE.value, target_key),
-    ).fetchone()
+            (DurableProjectionKind.RUN_TIMELINE.value, target_key),
+        )
+        .fetchone()
+    )
     if row is None:
         return _TimelineBase(
             state=None,
@@ -829,9 +805,7 @@ def _read_timeline_base(
         expected_bytes=int(manifest_ref["content_utf8_bytes"]),
     )
     payload = json.loads(manifest_text)
-    state = RunTimelinePersistentStateSemanticFact.model_validate(
-        payload["state"]
-    )
+    state = RunTimelinePersistentStateSemanticFact.model_validate(payload["state"])
     if (
         state.runtime_session_id != source_reference.runtime_session_id
         or state.run_id != source_reference.run_id
@@ -848,9 +822,7 @@ def _read_timeline_base(
     return _TimelineBase(
         state=state,
         item_accumulator=state.ordered_item_semantic_accumulator,
-        completed_leaf_accumulator=str(
-            payload["completed_leaf_accumulator"]
-        ),
+        completed_leaf_accumulator=str(payload["completed_leaf_accumulator"]),
         completed_leaf_count=int(payload["completed_leaf_count"]),
         tail_artifact_id=str(tail_id) if tail_id is not None else None,
         tail_document_semantic_fingerprint=payload.get(
@@ -879,7 +851,8 @@ def _prepare_evidence_documents(
 ]:
     rows = tuple(
         dict(row)
-        for row in connection.cursor(row_factory=dict_row).execute(
+        for row in connection.cursor(row_factory=dict_row)
+        .execute(
             """
             SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                    event_type, event_schema_version,
@@ -912,7 +885,8 @@ def _prepare_evidence_documents(
                 ],
                 _EVIDENCE_EVENT_READS + 1,
             ),
-        ).fetchall()
+        )
+        .fetchall()
     )
     if len(rows) > _EVIDENCE_EVENT_READS:
         raise ValueError("tool evidence exact event bound exceeded")
@@ -928,9 +902,7 @@ def _prepare_evidence_documents(
     call_starts = tuple(
         item for item in decoded if isinstance(item[1], ToolCallStartEvent)
     )
-    call_ends = tuple(
-        item for item in decoded if isinstance(item[1], ToolCallEndEvent)
-    )
+    call_ends = tuple(item for item in decoded if isinstance(item[1], ToolCallEndEvent))
     result_starts = tuple(
         item for item in decoded if isinstance(item[1], ToolResultStartEvent)
     )
@@ -945,9 +917,7 @@ def _prepare_evidence_documents(
     if result_ends[0][0].source_reference != source_reference:
         raise ValueError("tool evidence End source mismatch")
     segments = tuple(
-        item
-        for item in decoded
-        if isinstance(item[1], ToolCallArgumentsSegmentEvent)
+        item for item in decoded if isinstance(item[1], ToolCallArgumentsSegmentEvent)
     )
     ordered_lifecycle = (
         call_starts[0],
@@ -975,9 +945,11 @@ def _prepare_evidence_documents(
         item[1].model_stream_attribution.durable_semantic_event_index
         for item in call_stream
     )
-    if len(call_stream_identities) != 1 or call_stream_indices != tuple(
-        sorted(call_stream_indices)
-    ) or len(call_stream_indices) != len(set(call_stream_indices)):
+    if (
+        len(call_stream_identities) != 1
+        or call_stream_indices != tuple(sorted(call_stream_indices))
+        or len(call_stream_indices) != len(set(call_stream_indices))
+    ):
         raise ValueError("tool evidence model-stream attribution drifted")
     tool_name = cast(ToolCallStartEvent, call_starts[0][1]).tool_call_name
     if cast(ToolResultStartEvent, result_starts[0][1]).tool_call_name != tool_name:
@@ -1015,8 +987,7 @@ def _prepare_evidence_documents(
             arguments_segment_reference_accumulator=context_fingerprint(
                 "tool-call-arguments-segment-reference-accumulator:v1",
                 tuple(
-                    item[0].source_reference.reference_fingerprint
-                    for item in segments
+                    item[0].source_reference.reference_fingerprint for item in segments
                 ),
             ),
             raw_arguments_json=arguments_text,
@@ -1033,9 +1004,7 @@ def _prepare_evidence_documents(
                 else None
             ),
             canonical_arguments_json_utf8_bytes=(
-                len(canonical_arguments)
-                if canonical_arguments is not None
-                else None
+                len(canonical_arguments) if canonical_arguments is not None else None
             ),
             bounded_input_summary=input_summary,
             bounded_input_summary_sha256=_sha_text(input_summary),
@@ -1052,8 +1021,10 @@ def _prepare_evidence_documents(
     projection_identity = (
         end_event.terminal_projection.projection_committed_event_identity
     )
-    projection_row = connection.cursor(row_factory=dict_row).execute(
-        """
+    projection_row = (
+        connection.cursor(row_factory=dict_row)
+        .execute(
+            """
         SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                event_type, event_schema_version,
                event_schema_fingerprint,
@@ -1066,21 +1037,21 @@ def _prepare_evidence_documents(
         FROM agent_events
         WHERE id = %s AND session_id = %s AND sequence <= %s
         """,
-        (
-            projection_identity.event_id,
-            source_reference.runtime_session_id,
-            source_reference.sequence,
-        ),
-    ).fetchone()
+            (
+                projection_identity.event_id,
+                source_reference.runtime_session_id,
+                source_reference.sequence,
+            ),
+        )
+        .fetchone()
+    )
     if projection_row is None:
         raise LookupError("tool terminal projection event is absent")
     projection_event = _bound_event_from_row(
         dict(projection_row)
     ).envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
     if (
-        not isinstance(
-            projection_event, ToolResultTerminalProjectionCommittedEvent
-        )
+        not isinstance(projection_event, ToolResultTerminalProjectionCommittedEvent)
         or stable_event_identity(
             projection_event,
             runtime_session_id=source_reference.runtime_session_id,
@@ -1100,12 +1071,9 @@ def _prepare_evidence_documents(
         terminal_reference,
         terminal_text,
     )
-    if (
-        not isinstance(terminal_document.source_fact, ToolResultSemanticSourceFact)
-        or not isinstance(
-            terminal_document.payload, ToolTerminalProjectionPayloadFact
-        )
-    ):
+    if not isinstance(
+        terminal_document.source_fact, ToolResultSemanticSourceFact
+    ) or not isinstance(terminal_document.payload, ToolTerminalProjectionPayloadFact):
         raise ValueError("tool evidence terminal document kind drifted")
     if terminal_document.source_fact.source_event_identity != (
         stable_event_identity(
@@ -1137,9 +1105,7 @@ def _prepare_evidence_documents(
             ToolResultEvidenceOutputProjectionFact,
             schema_version="tool_result_evidence_output_projection.v1",
             result_state=end_event.state,
-            result_semantic_fingerprint=(
-                block.semantic_identity.semantic_fingerprint
-            ),
+            result_semantic_fingerprint=(block.semantic_identity.semantic_fingerprint),
             bounded_output_summary=output_summary,
             bounded_output_summary_sha256=_sha_text(output_summary),
             output_was_truncated=(
@@ -1173,9 +1139,7 @@ def _prepare_evidence_documents(
     source_document = _artifact_document(
         semantic_document_id="tool-evidence-source:" + source.source_fingerprint,
         media_type=_TOOL_EVIDENCE_SOURCE_MEDIA_TYPE,
-        text=canonical_json_bytes(source.model_dump(mode="json")).decode(
-            "utf-8"
-        ),
+        text=canonical_json_bytes(source.model_dump(mode="json")).decode("utf-8"),
     )
     evidence_id = "tool-result:" + context_fingerprint(
         "pulsara:tool-result-execution-evidence-document:v1",
@@ -1246,21 +1210,23 @@ def _prepare_evidence_documents(
     relation_documents: list[PreparedDurableProjectionGraphRelationFact] = [
         _prepared_relation(
             relation=turn_relation,
-            source_authority_fingerprint=(
-                source_reference.reference_fingerprint
-            ),
+            source_authority_fingerprint=(source_reference.reference_fingerprint),
         )
     ]
     for ordinal, artifact in enumerate(end_event.artifacts):
         if artifact.artifact_id not in seen_artifact_ids:
-            artifact_row = connection.cursor(row_factory=dict_row).execute(
-                """
+            artifact_row = (
+                connection.cursor(row_factory=dict_row)
+                .execute(
+                    """
                 SELECT id, media_type, digest, size_bytes, stored_at, created_at
                 FROM artifacts
                 WHERE id = %s
                 """,
-                (artifact.artifact_id,),
-            ).fetchone()
+                    (artifact.artifact_id,),
+                )
+                .fetchone()
+            )
             if artifact_row is None:
                 raise LookupError(
                     "tool evidence artifact base document authority is absent"
@@ -1269,16 +1235,13 @@ def _prepare_evidence_documents(
                 str(artifact_row["media_type"]) != artifact.media_type
                 or int(artifact_row["size_bytes"]) != artifact.size_bytes
             ):
-                raise ValueError(
-                    "tool evidence artifact reference metadata drifted"
-                )
+                raise ValueError("tool evidence artifact reference metadata drifted")
             artifact_payload = Artifact(
                 id=artifact.artifact_id,
                 stored_at=str(artifact_row["stored_at"]),
                 digest=str(artifact_row["digest"]),
                 summary=(
-                    f"{artifact.media_type} artifact "
-                    f"({artifact.size_bytes} bytes)"
+                    f"{artifact.media_type} artifact ({artifact.size_bytes} bytes)"
                 ),
                 created_at=artifact_row["created_at"].isoformat(),
                 scope=f"ctx:{source_reference.runtime_session_id}",
@@ -1321,9 +1284,7 @@ def _prepare_evidence_documents(
         relation_documents.append(
             _prepared_relation(
                 relation=relation,
-                source_authority_fingerprint=(
-                    source_reference.reference_fingerprint
-                ),
+                source_authority_fingerprint=(source_reference.reference_fingerprint),
             )
         )
     return (
@@ -1349,9 +1310,7 @@ def drain_pre_activation_kind(
 
     del database_target_fingerprint
     epoch = read_runtime_write_epoch(connection, privileged=True)
-    target_version = (
-        7 if kind is DurableProjectionKind.RUN_TIMELINE else 8
-    )
+    target_version = 7 if kind is DurableProjectionKind.RUN_TIMELINE else 8
     if (
         epoch.mode.value != "maintenance"
         or epoch.target_migration_version != target_version
@@ -1367,14 +1326,10 @@ def drain_pre_activation_kind(
     ).fetchone()
     if contract_row is None:
         raise ValueError("pre-activation contract is absent")
-    contract = PreActivationProjectionHookContractFact.model_validate(
-        contract_row[0]
-    )
+    contract = PreActivationProjectionHookContractFact.model_validate(contract_row[0])
     session_ids = tuple(
         str(row[0])
-        for row in connection.execute(
-            "SELECT id FROM sessions ORDER BY id"
-        ).fetchall()
+        for row in connection.execute("SELECT id FROM sessions ORDER BY id").fetchall()
     )
     receipts: list[PreActivationProjectionCoverageReceiptFact] = []
     for runtime_session_id in session_ids:
@@ -1402,9 +1357,7 @@ def drain_pre_activation_kind(
             cutover = PreActivationProjectionSessionCutoverFact.model_validate(
                 cutover_row[0]
             )
-            horizon = ledger_horizon_for_session(
-                connection, runtime_session_id
-            )
+            horizon = ledger_horizon_for_session(connection, runtime_session_id)
             trigger_rows = _read_pre_activation_triggers(
                 connection,
                 runtime_session_id=runtime_session_id,
@@ -1415,9 +1368,7 @@ def drain_pre_activation_kind(
             latest: dict[str, tuple[dict[str, object], object]] = {}
             for row in trigger_rows:
                 bound = _bound_event_from_row(row)
-                decoded = bound.envelope.decode_owned(
-                    DEFAULT_EVENT_SCHEMA_REGISTRY
-                )
+                decoded = bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
                 tool_call_id = (
                     decoded.tool_call_id
                     if isinstance(decoded, ToolResultEndEvent)
@@ -1430,8 +1381,7 @@ def drain_pre_activation_kind(
                     tool_call_id=tool_call_id,
                 )
                 if (
-                    kind
-                    is DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
+                    kind is DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE
                     and target_key in latest
                 ):
                     previous = _bound_event_from_row(latest[target_key][0])
@@ -1444,9 +1394,7 @@ def drain_pre_activation_kind(
                             "terminal source events"
                         )
                 latest[target_key] = (row, decoded)
-            coverage_items: list[
-                PreActivationProjectionTargetCoverageItemFact
-            ] = []
+            coverage_items: list[PreActivationProjectionTargetCoverageItemFact] = []
             for target_key in sorted(latest):
                 row, _decoded = latest[target_key]
                 bound = _bound_event_from_row(row)
@@ -1458,9 +1406,7 @@ def drain_pre_activation_kind(
                         owner_kind="pre_activation_hook",
                         projection_kind=kind,
                         source_event_reference=bound.source_reference,
-                        hook_contract_fingerprint=(
-                            contract.contract_fingerprint
-                        ),
+                        hook_contract_fingerprint=(contract.contract_fingerprint),
                     ),
                 )
                 prepared = _prepare_projection(
@@ -1470,28 +1416,21 @@ def drain_pre_activation_kind(
                     trigger_horizon=bound.trigger_horizon,
                     result_owner=owner,
                     surface_plan=(
-                        contract.contract_semantic
-                        .canonical_mutation_surface_plan
+                        contract.contract_semantic.canonical_mutation_surface_plan
                     ),
                 )
                 if prepared.target_key != target_key:
                     raise ValueError("pre-activation target resolver drifted")
-                outcome = (
-                    PostgresDurableProjectionRepository
-                    .commit_pre_activation_in_transaction(
-                        connection,
-                        prepared_result=prepared.prepared_result,
-                        admission_guard=guard,
-                    )
+                outcome = PostgresDurableProjectionRepository.commit_pre_activation_in_transaction(
+                    connection,
+                    prepared_result=prepared.prepared_result,
+                    admission_guard=guard,
                 )
                 if (
-                    outcome.confirmation
-                    is not DurableProjectionCommitConfirmation.FULL
+                    outcome.confirmation is not DurableProjectionCommitConfirmation.FULL
                     or outcome.result_receipt_reference is None
                 ):
-                    raise ValueError(
-                        "pre-activation target could not be covered"
-                    )
+                    raise ValueError("pre-activation target could not be covered")
                 coverage_items.append(
                     cast(
                         PreActivationProjectionTargetCoverageItemFact,
@@ -1502,9 +1441,7 @@ def drain_pre_activation_kind(
                             ),
                             projection_kind=kind,
                             target_key=target_key,
-                            latest_trigger_event_reference=(
-                                bound.source_reference
-                            ),
+                            latest_trigger_event_reference=(bound.source_reference),
                             applied_result_receipt_reference=(
                                 outcome.result_receipt_reference
                             ),
@@ -1532,9 +1469,7 @@ def drain_pre_activation_kind(
                     ),
                     ordered_target_item_accumulator=context_fingerprint(
                         "pre-activation-coverage-target-accumulator:v1",
-                        tuple(
-                            item.item_fingerprint for item in coverage_items
-                        ),
+                        tuple(item.item_fingerprint for item in coverage_items),
                     ),
                     last_page_fingerprint=(
                         pages[-1].page_fingerprint if pages else None
@@ -1544,8 +1479,7 @@ def drain_pre_activation_kind(
             trigger_accumulator = context_fingerprint(
                 "pre-activation-scanned-trigger-accumulator:v1",
                 tuple(
-                    _bound_event_from_row(row)
-                    .source_reference.reference_fingerprint
+                    _bound_event_from_row(row).source_reference.reference_fingerprint
                     for row in trigger_rows
                 ),
             )
@@ -1557,39 +1491,27 @@ def drain_pre_activation_kind(
                     "pre_activation_contract_fingerprint": (
                         contract.contract_fingerprint
                     ),
-                    "start_cutover_fingerprint": (
-                        cutover.cutover_fingerprint
-                    ),
-                    "frozen_horizon_fingerprint": (
-                        horizon.horizon_fingerprint
-                    ),
+                    "start_cutover_fingerprint": (cutover.cutover_fingerprint),
+                    "frozen_horizon_fingerprint": (horizon.horizon_fingerprint),
                     "coverage_root": set_reference.reference_fingerprint,
-                    "maintenance_operation_id": (
-                        epoch.maintenance_operation_id
-                    ),
+                    "maintenance_operation_id": (epoch.maintenance_operation_id),
                 },
             )
             receipt = cast(
                 PreActivationProjectionCoverageReceiptFact,
                 build_projection_fact(
                     PreActivationProjectionCoverageReceiptFact,
-                    schema_version=(
-                        "pre_activation_projection_coverage_receipt.v1"
-                    ),
+                    schema_version=("pre_activation_projection_coverage_receipt.v1"),
                     coverage_receipt_id=receipt_id,
                     runtime_session_id=runtime_session_id,
                     projection_kind=kind,
-                    pre_activation_contract_fingerprint=(
-                        contract.contract_fingerprint
-                    ),
+                    pre_activation_contract_fingerprint=(contract.contract_fingerprint),
                     start_cutover_fingerprint=cutover.cutover_fingerprint,
                     frozen_horizon=horizon,
                     scanned_trigger_event_count=len(trigger_rows),
                     scanned_trigger_event_accumulator=trigger_accumulator,
                     target_coverage_set=set_reference,
-                    maintenance_operation_id=cast(
-                        str, epoch.maintenance_operation_id
-                    ),
+                    maintenance_operation_id=cast(str, epoch.maintenance_operation_id),
                     maintenance_authority_fingerprint=cast(
                         str, guard.maintenance_authority_fingerprint
                     ),
@@ -1614,7 +1536,8 @@ def _iter_run_source_pages(
     while cursor < through_sequence_inclusive:
         rows = tuple(
             dict(row)
-            for row in connection.cursor(row_factory=dict_row).execute(
+            for row in connection.cursor(row_factory=dict_row)
+            .execute(
                 """
                 SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                        event_type, event_schema_version,
@@ -1638,17 +1561,14 @@ def _iter_run_source_pages(
                     through_sequence_inclusive,
                     _SOURCE_PAGE_EVENTS + 1,
                 ),
-            ).fetchall()
+            )
+            .fetchall()
         )
         if not rows:
             break
         selected = rows[:_SOURCE_PAGE_EVENTS]
-        stored = tuple(
-            _bound_event_from_row(row).stored_event for row in selected
-        )
-        payload_bytes = sum(
-            item.canonical_payload_utf8_bytes for item in stored
-        )
+        stored = tuple(_bound_event_from_row(row).stored_event for row in selected)
+        payload_bytes = sum(item.canonical_payload_utf8_bytes for item in stored)
         if payload_bytes > _SOURCE_PAGE_BYTES:
             raise ValueError("timeline source page exceeds byte bound")
         has_more = len(rows) > _SOURCE_PAGE_EVENTS
@@ -1668,9 +1588,7 @@ def _iter_run_source_pages(
                 selected_payload_bytes=payload_bytes,
                 selected_event_accumulator=context_fingerprint(
                     "run-projection-source-page-event-accumulator:v1",
-                    tuple(
-                        item.stored_event_fingerprint for item in stored
-                    ),
+                    tuple(item.stored_event_fingerprint for item in stored),
                 ),
                 has_more=has_more,
                 next_after_sequence=(
@@ -1708,7 +1626,8 @@ def _read_pre_activation_triggers(
     while cursor < end_inclusive:
         page = tuple(
             dict(row)
-            for row in connection.cursor(row_factory=dict_row).execute(
+            for row in connection.cursor(row_factory=dict_row)
+            .execute(
                 """
                 SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                        event_type, event_schema_version,
@@ -1733,7 +1652,8 @@ def _read_pre_activation_triggers(
                     event_types,
                     _SOURCE_PAGE_EVENTS,
                 ),
-            ).fetchall()
+            )
+            .fetchall()
         )
         if not page:
             break
@@ -1746,8 +1666,10 @@ def _read_exact_event_row(
     connection: Connection,
     reference: DurableProjectionSourceEventReferenceFact,
 ) -> dict[str, object]:
-    row = connection.cursor(row_factory=dict_row).execute(
-        """
+    row = (
+        connection.cursor(row_factory=dict_row)
+        .execute(
+            """
         SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                event_type, event_schema_version,
                event_schema_fingerprint,
@@ -1759,8 +1681,10 @@ def _read_exact_event_row(
                created_at, payload
         FROM agent_events WHERE id = %s
         """,
-        (reference.event_id,),
-    ).fetchone()
+            (reference.event_id,),
+        )
+        .fetchone()
+    )
     if row is None:
         raise LookupError("projection source event is absent")
     return dict(row)
@@ -1799,9 +1723,7 @@ def _artifact_document(
         PreparedDurableProjectionArtifactDocumentFact,
         build_projection_fact(
             PreparedDurableProjectionArtifactDocumentFact,
-            schema_version=(
-                "prepared_durable_projection_artifact_document.v1"
-            ),
+            schema_version=("prepared_durable_projection_artifact_document.v1"),
             document_kind="artifact",
             semantic_document_id=semantic_document_id,
             document_semantic_fingerprint=semantic,
@@ -1838,9 +1760,7 @@ def _graph_document(
         PreparedDurableProjectionGraphDocumentFact,
         build_projection_fact(
             PreparedDurableProjectionGraphDocumentFact,
-            schema_version=(
-                "prepared_durable_projection_graph_document.v1"
-            ),
+            schema_version=("prepared_durable_projection_graph_document.v1"),
             document_kind="graph_document",
             graph_id=_GRAPH_ID,
             semantic_document_id=semantic_document_id,
@@ -1856,8 +1776,7 @@ def _graph_document(
 
 def _prepared_relation(
     *,
-    relation: TurnProducedToolResultRelationFact
-    | ToolResultArtifactRelationFact,
+    relation: TurnProducedToolResultRelationFact | ToolResultArtifactRelationFact,
     source_authority_fingerprint: str,
 ) -> PreparedDurableProjectionGraphRelationFact:
     if isinstance(relation, TurnProducedToolResultRelationFact):
@@ -1870,18 +1789,14 @@ def _prepared_relation(
         DurableProjectionGraphRelationReferenceFact,
         build_projection_fact(
             DurableProjectionGraphRelationReferenceFact,
-            schema_version=(
-                "durable_projection_graph_relation_reference.v1"
-            ),
+            schema_version=("durable_projection_graph_relation_reference.v1"),
             document_kind="graph_relation",
             relation_id=relation.relation_document_id,
             graph_id=relation.graph_id,
             source_document_id=source_id,
             predicate_iri=relation.predicate_iri,
             target_document_id=target_id,
-            relation_semantic_fingerprint=(
-                relation.relation_semantic_fingerprint
-            ),
+            relation_semantic_fingerprint=(relation.relation_semantic_fingerprint),
             lowering_contract_fingerprint=(
                 GRAPH_RELATION_LOWERING_CONTRACT.contract_fingerprint
             ),
@@ -1891,9 +1806,7 @@ def _prepared_relation(
         PreparedDurableProjectionGraphRelationFact,
         build_projection_fact(
             PreparedDurableProjectionGraphRelationFact,
-            schema_version=(
-                "prepared_durable_projection_graph_relation.v1"
-            ),
+            schema_version=("prepared_durable_projection_graph_relation.v1"),
             document_kind="graph_relation",
             relation_reference=reference,
             source_authority_fingerprint=source_authority_fingerprint,
@@ -1910,9 +1823,7 @@ def _mutation_payload_for_document(
         return {
             "mutation_lane": "runtime_semantic",
             "artifact_id": document.semantic_document_id,
-            "artifact_reference": document.artifact_reference.model_dump(
-                mode="json"
-            ),
+            "artifact_reference": document.artifact_reference.model_dump(mode="json"),
         }
     if isinstance(document, PreparedDurableProjectionGraphDocumentFact):
         return {
@@ -1935,9 +1846,7 @@ def _write_coverage_pages(
 ) -> tuple[PreActivationProjectionCoveragePageFact, ...]:
     pages: list[PreActivationProjectionCoveragePageFact] = []
     previous: str | None = None
-    for page_index, offset in enumerate(
-        range(0, len(items), _COVERAGE_PAGE_ITEMS)
-    ):
+    for page_index, offset in enumerate(range(0, len(items), _COVERAGE_PAGE_ITEMS)):
         chunk = items[offset : offset + _COVERAGE_PAGE_ITEMS]
         encoded = canonical_json_bytes(
             tuple(item.model_dump(mode="json") for item in chunk)
@@ -1948,9 +1857,7 @@ def _write_coverage_pages(
             PreActivationProjectionCoveragePageFact,
             build_projection_fact(
                 PreActivationProjectionCoveragePageFact,
-                schema_version=(
-                    "pre_activation_projection_coverage_page.v1"
-                ),
+                schema_version=("pre_activation_projection_coverage_page.v1"),
                 runtime_session_id=runtime_session_id,
                 projection_kind=kind,
                 page_index=page_index,
@@ -2019,8 +1926,7 @@ def _insert_or_confirm_coverage_receipt(
     ).fetchone()
     if (
         row is None
-        or PreActivationProjectionCoverageReceiptFact.model_validate(row[0])
-        != receipt
+        or PreActivationProjectionCoverageReceiptFact.model_validate(row[0]) != receipt
         or str(row[1]) != receipt.receipt_fingerprint
     ):
         raise ValueError("pre-activation coverage receipt identity conflict")
@@ -2078,15 +1984,12 @@ def _decode_stored_event(stored):
         event_type=reference.event_type,
         event_schema_version=reference.event_schema_version,
         event_schema_fingerprint=reference.event_schema_fingerprint,
-        event_domain_contract_fingerprint=(
-            reference.event_domain_contract_fingerprint
-        ),
+        event_domain_contract_fingerprint=(reference.event_domain_contract_fingerprint),
     )
     payload = stored.canonical_payload_json_utf8.encode("utf-8")
     if (
         len(payload) != stored.canonical_payload_utf8_bytes
-        or f"sha256:{sha256(payload).hexdigest()}"
-        != stored.canonical_payload_sha256
+        or f"sha256:{sha256(payload).hexdigest()}" != stored.canonical_payload_sha256
     ):
         raise ValueError("timeline stored-event payload identity drifted")
     event = binding.decode_owned_payload(payload)
@@ -2101,18 +2004,14 @@ def _tool_output_text(connection: Connection, block) -> str:
         semantic = item.semantic_identity
         content = item.content
         if content is None:
-            assert isinstance(
-                semantic, CanonicalToolResultDataBlockSemanticFact
-            )
+            assert isinstance(semantic, CanonicalToolResultDataBlockSemanticFact)
             parts.append(
                 json.dumps(
                     {
                         "kind": "data",
                         "media_type": semantic.media_type,
                         "source_kind": semantic.source_kind,
-                        "artifact_count": len(
-                            semantic.artifact_content_fingerprints
-                        ),
+                        "artifact_count": len(semantic.artifact_content_fingerprints),
                     },
                     ensure_ascii=True,
                     sort_keys=True,

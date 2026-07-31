@@ -1,0 +1,2 @@
+VALUE=8
+NEXT=node-maple.txt

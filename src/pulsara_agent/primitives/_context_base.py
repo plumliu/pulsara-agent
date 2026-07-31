@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
@@ -86,7 +87,7 @@ def freeze_json(value: object) -> FrozenJsonValue:
         return value
     if isinstance(value, (list, tuple)):
         return FrozenJsonArrayFact(items=tuple(freeze_json(item) for item in value))
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise TypeError("JSON object keys must be strings")
         return FrozenJsonObjectFact(

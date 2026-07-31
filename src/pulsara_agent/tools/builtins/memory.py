@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ActionBoundaryCandidate,
     ClaimCandidate,
     DecisionCandidate,
@@ -24,130 +24,17 @@ from pulsara_agent.event.candidates import (
     ValidCandidatePayload,
 )
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.ontology import memory
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePoolProposal
-from pulsara_agent.memory.candidates.proposal_sink import MEMORY_INVALID_RETRY_LIMIT, MemoryProposalSink, MemoryRetryState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
-from pulsara_agent.tools.builtins.schemas import json_text, object_schema
+from pulsara_agent.memory.candidates.proposal_sink import (
+    MEMORY_INVALID_RETRY_LIMIT,
+    MemoryProposalSink,
+    MemoryRetryState,
+)
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.builtins.schemas import json_text
 from pulsara_agent.memory.candidates.main_agent_builder import (
     build_main_agent_memory_candidate_payload,
     main_agent_memory_candidate_entry_id,
-)
-
-
-_SOURCE_AUTHORITIES = [item.value for item in memory.SourceAuthority]
-_VERIFICATION_STATUSES = [item.value for item in memory.VerificationStatus]
-
-
-def _common_properties() -> dict[str, Any]:
-    return {
-        "statement": {
-            "type": "string",
-            "description": "The durable memory content as a single declarative statement.",
-        },
-        "scope": {
-            "type": "string",
-            "description": "Exact visible scope this memory applies to, e.g. ctx:user or the current ctx:workspace/<id>.",
-        },
-        "source_authority": {
-            "type": "string",
-            "enum": _SOURCE_AUTHORITIES,
-            "description": "Where the authority for this memory comes from.",
-        },
-        "verification_status": {
-            "type": "string",
-            "enum": _VERIFICATION_STATUSES,
-            "description": "How well this memory is verified.",
-        },
-        "evidence_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Evidence node ids that support this memory.",
-        },
-    }
-
-
-def _memory_parameters(
-    *,
-    extra_properties: dict[str, Any] | None = None,
-    extra_required: list[str] | None = None,
-) -> dict[str, Any]:
-    properties = _common_properties()
-    properties.update(extra_properties or {})
-    return object_schema(
-        properties=properties,
-        required=[
-            "statement",
-            "scope",
-            "source_authority",
-            "verification_status",
-            *(extra_required or []),
-        ],
-    )
-
-
-_COMMON_PARAMETERS = _memory_parameters()
-_ACTION_BOUNDARY_PARAMETERS = _memory_parameters(
-    extra_properties={
-        "applies_when": {
-            "type": "string",
-            "description": "Condition under which this action boundary applies.",
-        },
-        "do_not_apply_when": {
-            "type": "string",
-            "description": "Condition under which this action boundary does not apply.",
-        },
-        "trigger_tools": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional tool names that should trigger this boundary.",
-        },
-        "trigger_actions": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional action labels that should trigger this boundary.",
-        },
-        "trigger_file_globs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional file globs that should trigger this boundary.",
-        },
-        "trigger_scopes": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional scopes that should trigger this boundary.",
-        },
-        "trigger_keywords": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional literal keywords that should trigger this boundary.",
-        },
-        "negative_tools": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional tool names that should suppress this boundary.",
-        },
-        "negative_actions": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional action labels that should suppress this boundary.",
-        },
-        "negative_file_globs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional file globs that should suppress this boundary.",
-        },
-    },
-    extra_required=["applies_when", "do_not_apply_when"],
-)
-_DECISION_PARAMETERS = _memory_parameters(
-    extra_properties={
-        "based_on_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Prior memory ids this decision builds on.",
-        },
-    }
 )
 
 
@@ -157,12 +44,8 @@ class _RememberMemoryTool:
     runtime_session_id: str = "in-memory"
 
     name: ClassVar[str]
-    description: ClassVar[str]
-    parameters: ClassVar[dict[str, Any]]
     candidate_type: ClassVar[type[MemoryCandidateBase]]
     kind: ClassVar[str]
-    is_read_only: ClassVar[bool] = False
-    is_concurrency_safe: ClassVar[bool] = False
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         intent_fingerprint = _intent_fingerprint(
@@ -201,7 +84,9 @@ class _RememberMemoryTool:
                 ),
             )
         if not isinstance(candidate_payload, ValidCandidatePayload):
-            raise TypeError("main-agent memory candidate builder returned unknown payload")
+            raise TypeError(
+                "main-agent memory candidate builder returned unknown payload"
+            )
         candidate = candidate_payload.candidate
         self.sink.deposit_valid(
             CandidatePoolProposal(
@@ -230,16 +115,16 @@ class _RememberMemoryTool:
         )
 
 
-def _main_tool_candidate_entry_id(
-    *, runtime_session_id: str, tool_call_id: str
-) -> str:
+def _main_tool_candidate_entry_id(*, runtime_session_id: str, tool_call_id: str) -> str:
     return main_agent_memory_candidate_entry_id(
         runtime_session_id=runtime_session_id,
         tool_call_id=tool_call_id,
     )
 
 
-def _intent_fingerprint(*, tool_name: str, attempted_kind: str, raw_arguments: dict[str, Any]) -> str:
+def _intent_fingerprint(
+    *, tool_name: str, attempted_kind: str, raw_arguments: dict[str, Any]
+) -> str:
     statement = _normalize_intent_part(raw_arguments.get("statement"))
     scope = _normalize_intent_part(raw_arguments.get("scope"))
     if statement:
@@ -255,8 +140,12 @@ def _intent_fingerprint(*, tool_name: str, attempted_kind: str, raw_arguments: d
             "raw_arguments_hash": _stable_args_hash(raw_arguments),
             "tool_name": tool_name,
         }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return f"memory-intent:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:24]}"
+    serialized = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return (
+        f"memory-intent:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:24]}"
+    )
 
 
 def _normalize_intent_part(value: Any) -> str:
@@ -266,7 +155,13 @@ def _normalize_intent_part(value: Any) -> str:
 
 
 def _stable_args_hash(raw_arguments: dict[str, Any]) -> str:
-    serialized = json.dumps(raw_arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    serialized = json.dumps(
+        raw_arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
 
 
@@ -292,39 +187,29 @@ def _invalid_candidate_output(
 
 class RememberClaimTool(_RememberMemoryTool):
     name = "remember_claim"
-    description = "Remember a durable factual claim with optional evidence."
-    parameters = _COMMON_PARAMETERS
     candidate_type = ClaimCandidate
     kind = "Claim"
 
 
 class RememberPreferenceTool(_RememberMemoryTool):
     name = "remember_preference"
-    description = "Remember a durable user or workspace preference."
-    parameters = _COMMON_PARAMETERS
     candidate_type = PreferenceCandidate
     kind = "Preference"
 
 
 class RememberObservationTool(_RememberMemoryTool):
     name = "remember_observation"
-    description = "Remember a durable observation grounded in conversation, tool output, or another source."
-    parameters = _COMMON_PARAMETERS
     candidate_type = ObservationCandidate
     kind = "Observation"
 
 
 class RememberActionBoundaryTool(_RememberMemoryTool):
     name = "remember_action_boundary"
-    description = "Remember a durable action boundary with explicit apply and non-apply conditions."
-    parameters = _ACTION_BOUNDARY_PARAMETERS
     candidate_type = ActionBoundaryCandidate
     kind = "ActionBoundary"
 
 
 class RememberDecisionTool(_RememberMemoryTool):
     name = "remember_decision"
-    description = "Remember a durable decision, optionally linked to prior memory ids it is based on."
-    parameters = _DECISION_PARAMETERS
     candidate_type = DecisionCandidate
     kind = "Decision"

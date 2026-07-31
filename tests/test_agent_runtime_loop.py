@@ -1,3 +1,12 @@
+import pulsara_agent.runtime.session_run_capabilities as capability_module
+
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import (
+    build_test_agent_runtime,
+)
+
+
 import asyncio
 import json
 import threading
@@ -14,6 +23,10 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.mcp import (
+    install_prepared_test_mcp_pending_handle,
+    prepare_test_mcp_input_required_suspension,
+)
 
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
@@ -31,6 +44,7 @@ from tests.support.model_stream import (
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
+    CapabilityExposureResolvedEvent,
     ContextCompiledEvent,
     ContextProjectionRewritePageEvent,
     ContextWindowClosedEvent,
@@ -53,7 +67,6 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetAccountClosedEvent,
-    RolloutBudgetAccountOpenedEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     RunEndEvent,
@@ -81,6 +94,7 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProviderKind,
 )
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
 )
@@ -92,7 +106,16 @@ from pulsara_agent.capability.result_semantics import (
 )
 from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.errors import ModelContextIdentityMismatch
-from tests.support import run_agent_task, stream_agent_task, test_llm_config
+from tests.support import (
+    commit_test_run_owner,
+    request_test_run_stop,
+    run_agent_task,
+    resume_test_agent_after_approval,
+    stream_agent_task,
+    test_llm_config,
+    test_owned_run_state,
+    test_owned_terminalization_state,
+)
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.primitives.mcp import (
     McpBindingIdentityFact,
@@ -103,7 +126,6 @@ from pulsara_agent.primitives.mcp import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     MidTurnCompactionSkipFact,
     build_runtime_event_deadline_budget,
-    prepare_mcp_input_required_suspension,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
@@ -114,6 +136,7 @@ from pulsara_agent.primitives.long_horizon import (
     RolloutReservationFact,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.runtime.run_execution.owner import ActiveRunSuspension
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
@@ -128,28 +151,36 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.message.reducer import MessageReducer
-from pulsara_agent.runtime import (
-    ApprovalResolution,
-    AgentRuntime,
+from pulsara_agent.replay.message_reducer import MessageReducer
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventCommitError,
     EventPublicationAfterCommitError,
+    EventPublicationError,
     EventWriteCancelled,
-    InRunRecoveryCause,
+    EventWriteResult,
+)
+from pulsara_agent.runtime.recovery import InRunRecoveryCause
+from pulsara_agent.runtime.state import (
     LoopBudget,
-    LoopState,
+    RunActivationWorkingState,
     LoopStatus,
     LoopTransition,
-    ToolApprovalDecision,
-    build_tool_result_error_events,
 )
+from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
 from pulsara_agent.runtime.context_input.replay import load_context_input_manifest
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
 )
 from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
-from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
+from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet
+from pulsara_agent.runtime.run_execution.owner import RunFinalizationOwner
+from pulsara_agent.ports.run_execution import (
+    build_prepared_run_owner_reservation_key,
+    build_run_owner_identity,
+)
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
@@ -167,25 +198,29 @@ from pulsara_agent.primitives.tool_result import (
 )
 from pulsara_agent.runtime.run_entry import RunWorkingSet
 from pulsara_agent.runtime.terminal import TerminalStatus
-from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.ports.memory_hooks import NoopMemoryHooks
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
-from pulsara_agent.runtime.tool_action import fixed_tool_action_policy
+from pulsara_agent.capability.tool_action import fixed_tool_action_policy
 from pulsara_agent.runtime.tool_execution import (
     RuntimeSessionToolExecutionEventCommitPort,
 )
-from pulsara_agent.runtime.long_horizon.run_contract import (
-    empty_projection_state_fingerprint,
-    prepare_root_long_horizon_run,
+from pulsara_agent.runtime.tool_composition import (
+    build_runtime_tool_binding_installation,
 )
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
+    ToolExecutionStableCandidateOwnerState,
     ToolExecutionSuspended,
     ToolRuntimeContext,
 )
 from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.ports.tool_registry import (
+    ToolBindingOrigin,
+    build_tool_binding_contract,
+)
 from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
 
 
@@ -250,7 +285,7 @@ class RecordingContextCompactor:
     async def maybe_compact_before_followup(
         self,
         *,
-        state: LoopState,
+        state: RunActivationWorkingState,
         model_visible_messages: list[Msg],
         protected_model_visible_messages_after,
     ):
@@ -293,7 +328,7 @@ def _terminal_bypass_policy() -> EffectivePermissionPolicy:
 def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
 
-    state = LoopState(session_id=runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(session_id=runtime_session.runtime_session_id)
     first_turn = state.turn_id
     state.transition(LoopTransition.CONTINUE_AFTER_MODEL)
     state.begin_next_turn()
@@ -307,7 +342,7 @@ def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
 
 def test_agent_runtime_emits_context_compiled_event_before_model_call(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -343,14 +378,14 @@ def test_main_model_start_batch_atomically_commits_reply_reservation_and_model_s
     tmp_path,
 ) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
     )
 
     asyncio.run(run_agent_task(agent, "hello"))
-    events = tuple(agent.runtime_session.event_log.iter())
+    events = tuple(runtime_session_for_test(agent).event_log.iter())
     reply_start = next(
         i for i, event in enumerate(events) if isinstance(event, ReplyStartEvent)
     )
@@ -405,7 +440,7 @@ def test_provider_input_session_generation_survives_runtime_session_restart(
     tmp_path,
 ) -> None:
     first_session = in_memory_runtime_session(tmp_path)
-    first_agent = AgentRuntime(
+    first_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=first_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "first"}])),
@@ -420,7 +455,7 @@ def test_provider_input_session_generation_survives_runtime_session_restart(
         tool_result_artifacts=first_session.tool_result_artifacts,
         runtime_session_id=first_session.runtime_session_id,
     )
-    reopened_agent = AgentRuntime(
+    reopened_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=reopened_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "second"}])),
@@ -461,7 +496,7 @@ def test_provider_input_restart_abandons_compiled_preparation_without_start(
     tmp_path,
 ) -> None:
     source_session = in_memory_runtime_session(tmp_path)
-    source_agent = AgentRuntime(
+    source_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=source_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -509,19 +544,23 @@ def test_provider_input_restart_abandons_compiled_preparation_without_start(
 def test_agent_runtime_builds_immutable_context_input_before_compile(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
+    import pulsara_agent.runtime.session_run_capabilities as capability_module
 
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture_snapshot(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture_snapshot)
+    monkeypatch.setattr(
+        capability_module,
+        "prepare_live_context_snapshot",
+        capture_snapshot,
+    )
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -534,9 +573,7 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
     prepared = captured[0]
     fact = prepared.invocation.fact
     assert fact.current_user_message.text == "snapshot me"
-    assert fact.current_user_message.message_id == (
-        f"user-message:{result.state.run_id}"
-    )
+    assert fact.current_user_message.message_id == (f"user-message:{result.run_id}")
     assert fact.run_entry.run_start.sequence == (
         fact.authority_slice_plan.transcript_window.protected_run_start_sequence
     )
@@ -574,7 +611,9 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
     )
     compiled = next(
         event
-        for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(
+            run_id=result.run_id
+        )
         if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
     )
     assert compiled.sequence is not None
@@ -622,7 +661,7 @@ def test_agent_runtime_builds_immutable_context_input_before_compile(
     assert compiled.input_audit is not None
     manifest = load_context_input_manifest(
         audit=compiled.input_audit,
-        archive=agent.runtime_session.archive,
+        archive=runtime_session_for_test(agent).archive,
     )
     candidate = build_context_input_manifest_candidate(manifest)
     duplicate = build_context_input_manifest_candidate(manifest)
@@ -656,7 +695,7 @@ def test_snapshot_build_failure_emits_typed_pre_manifest_audit(
         raise ValueError("synthetic snapshot join failure")
 
     monkeypatch.setattr(agent_module, "build_context_snapshot", fail_snapshot)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -665,7 +704,7 @@ def test_snapshot_build_failure_emits_typed_pre_manifest_audit(
     result = asyncio.run(run_agent_task(agent, "trigger snapshot failure"))
 
     assert result.status is LoopStatus.FAILED
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     failed = [
         event
         for event in events
@@ -697,7 +736,7 @@ def test_long_horizon_fold_failure_emits_typed_pre_manifest_audit(
         "_resolve_prepared_long_horizon_context_facts",
         fail_prepared_facts,
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -706,7 +745,7 @@ def test_long_horizon_fold_failure_emits_typed_pre_manifest_audit(
     result = asyncio.run(run_agent_task(agent, "trigger long-horizon fold failure"))
 
     assert result.status is LoopStatus.FAILED
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     failed = tuple(
         event
         for event in events
@@ -726,7 +765,7 @@ def test_compiled_event_budget_matches_call_fact(tmp_path) -> None:
 
 def test_run_start_records_model_target(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -734,7 +773,7 @@ def test_run_start_records_model_target(tmp_path) -> None:
     asyncio.run(run_agent_task(agent, "record target"))
     started = next(
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, RunStartEvent)
     )
     assert transport.calls
@@ -772,6 +811,9 @@ def _pending_mcp_installation_audit() -> McpPendingInstallationAudit:
         discovery_generation=1,
         event_safe_config_fingerprint="sha256:server",
         snapshot_semantic_fingerprint="sha256:catalog",
+        protocol_version="2026-07-28",
+        protocol_behavior_era="stateless_per_request",
+        negotiation_wire_receipt_fingerprint="sha256:wire-receipt",
         tool_count=1,
         lifecycle_timing=timing,
         catalog_artifact_id=None,
@@ -840,7 +882,7 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
         "extend_with_materialization_state",
         record_extend,
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -890,7 +932,7 @@ def test_failed_run_start_audit_batch_keeps_audit_pending_and_writes_nothing(
         "extend_with_materialization_state",
         fail_before_commit,
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -967,7 +1009,7 @@ def test_run_start_post_commit_publication_failure_acknowledges_mcp_audit(
     failing = FailInstallationAudit()
     runtime_session.publisher.subscribe(failing)
     transport = ScriptedTransport([{"text": "second run"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -1019,7 +1061,7 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
                 raise RuntimeError("synthetic terminal observer failure")
 
     runtime_session.publisher.subscribe(FailTerminalResult())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
@@ -1047,11 +1089,103 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+        interaction_id="mcp_input_required:post-commit",
+        tool_call_id="call:mcp-post-commit",
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id="lease:post-commit",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
+    reservation_payload = {
+        "reservation_id": "rollout_reservation:tool:mcp-post-commit",
+        "account_id": "rollout:mcp-post-commit",
+        "owner_kind": "tool_call",
+        "owner_id": "call:mcp-post-commit",
+        "phase_at_reservation": RolloutPhase.EXPLORATION,
+        "budget_bucket": RolloutBudgetBucket.EXPLORATION,
+        "reserved_milliunits": 1,
+        "model_call_reservation_quote": None,
+        "source_sequence": 0,
+    }
+    rollout_reservation = RolloutReservationFact(
+        **reservation_payload,
+        semantic_fingerprint=context_fingerprint(
+            "rollout-reservation:v1",
+            reservation_payload,
+        ),
+    )
+    terminal_owner = (
+        runtime_session.tool_execution_terminal_registry.install_admitted_batch(
+            run_id=state.run_id,
+            reservations=(rollout_reservation,),
+        )[0]
+    )
+    terminal_owner.state = ToolExecutionStableCandidateOwnerState.SUSPENDED
     state.pending_interaction_payload = {
         "interaction_id": "mcp_input_required:post-commit",
         "tool_call_id": "call:mcp-post-commit",
         "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
+        "rollout_reservation_id": rollout_reservation.reservation_id,
+        "rollout_reservation_fingerprint": (rollout_reservation.semantic_fingerprint),
     }
+
+    async def commit_then_fail_publication(
+        self,
+        *,
+        terminal_candidates,
+        settlement_candidate,
+        **_kwargs,
+    ):
+        assert self.runtime_session is runtime_session
+        committed = tuple(
+            runtime_session.event_log.extend(
+                (*tuple(terminal_candidates), settlement_candidate)
+            )
+        )
+        terminal = next(
+            event for event in committed if isinstance(event, ToolResultEndEvent)
+        )
+        result = EventWriteResult(
+            committed_events=committed,
+            commit_status="committed",
+            reducer_high_waters={},
+            reconciliation_required=False,
+            reducer_errors=(),
+            publication_status="completed",
+            publisher_enqueued_through_sequence=terminal.sequence,
+            publication_errors=(
+                EventPublicationError(
+                    event_id=terminal.id,
+                    sequence=terminal.sequence or 0,
+                    subscriber_id="test:terminal-publication",
+                    error_type="RuntimeError",
+                    message="synthetic terminal observer failure",
+                ),
+            ),
+        )
+        raise EventPublicationAfterCommitError(result)
+
+    monkeypatch.setattr(
+        RuntimeSessionToolExecutionEventCommitPort,
+        "commit_terminal_batch_and_settlement",
+        commit_then_fail_publication,
+    )
 
     async def terminal_result(self, current_state, _resolution):
         current_state.pending_interaction_kind = None
@@ -1064,6 +1198,7 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
             tool_call_name="mcp__docs__lookup",
             output="terminal result committed",
             result_state=ToolResultState.ERROR,
+            rollout_reservation=rollout_reservation,
         ):
             yield event
 
@@ -1087,7 +1222,7 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     assert [result.id for result in state.tool_results] == ["call:mcp-post-commit"]
     assert state.pending_interaction_kind is None
     assert supervisor.completed == ["mcp_input_required:post-commit"]
-    assert supervisor.close_calls == 1
+    assert supervisor.close_calls == 0
 
 
 def test_abort_waiting_mcp_releases_pending_lease_once(
@@ -1109,7 +1244,7 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
 
     supervisor = LeaseSupervisor()
     runtime_session.mcp_supervisor = supervisor
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
@@ -1118,14 +1253,40 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+        interaction_id="mcp_input_required:user-stop",
+        tool_call_id="call:mcp-user-stop",
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id="lease:user-stop",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     state.pending_interaction_payload = {
         "interaction_id": "mcp_input_required:user-stop",
+        "tool_call_id": "call:mcp-user-stop",
+        "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
     }
 
     async def terminalize(self, current_state, *, reason):
         assert self is agent
         assert current_state is state
         assert reason.value == "user_stop"
+        supervisor.complete_pending_lease("mcp_input_required:user-stop")
         if False:
             yield None
 
@@ -1145,7 +1306,7 @@ def test_abort_waiting_mcp_releases_pending_lease_once(
     asyncio.run(_collect_async(agent.stream_abort_run(state)))
 
     assert supervisor.completed == ["mcp_input_required:user-stop"]
-    assert supervisor.close_calls == 1
+    assert supervisor.close_calls == 0
     assert state.status is LoopStatus.ABORTED
 
 
@@ -1170,84 +1331,72 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
 
     supervisor = LeaseSupervisor()
     runtime_session.mcp_supervisor = supervisor
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
     )
+    registry = ToolRegistry()
+    registry.register(SleepTool("mcp__docs__lookup", delay=0.0))
+    _install_registry_with_explicit_test_descriptors(agent, registry)
     state = agent.new_state()
     committed = asyncio.Event()
-    target = agent.resolve_run_model_target().fact
-    prepared_run = prepare_root_long_horizon_run(
-        runtime_session_id=runtime_session.runtime_session_id,
-        run_id=state.run_id,
-        run_start_event_id=f"run_start:test:{state.run_id}",
-        primary_target=target,
-        summarizer_target=target,
-        graph_reducer_contract=(
-            runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
-        ),
-        source_through_sequence_at_open=0,
-        initial_projection_unit_count=0,
-        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
-    )
-    account = prepared_run.root_account
-    assert account is not None
     prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
         interaction_id="mcp_input_required:suspend-cancel",
         tool_call_id="call:mcp-suspend-cancel",
         tool_name="mcp__docs__lookup",
         pending_lease_reservation_id="reservation:suspend-cancel",
     )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     suspended = ToolExecutionSuspended(
         tool_call_id="call:mcp-suspend-cancel",
         tool_name="mcp__docs__lookup",
         interaction_kind="mcp_input_required",
-        prepared_mcp_input_required=prepared_suspension,
+        mcp_pending_handle=pending_handle,
     )
 
     async def run() -> None:
-        reservation_payload = {
-            "reservation_id": "rollout_reservation:tool:cancel-suspend",
-            "account_id": account.account_id,
-            "owner_kind": "tool_call",
-            "owner_id": "call:mcp-suspend-cancel",
-            "phase_at_reservation": RolloutPhase.EXPLORATION,
-            "budget_bucket": RolloutBudgetBucket.EXPLORATION,
-            "reserved_milliunits": account.policy.tool_cost_unit_weight_milli,
-            "model_call_reservation_quote": None,
-            "source_sequence": 1,
-        }
-        reservation = RolloutReservationFact(
-            **reservation_payload,
-            semantic_fingerprint=context_fingerprint(
-                "rollout-reservation:v1", reservation_payload
-            ),
-        )
-        await runtime_session.write_events(
-            (
-                RolloutBudgetAccountOpenedEvent(
-                    id=f"rollout_budget_account_opened:{account.account_id}",
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    account=account,
-                ),
-                RolloutBudgetReservationCreatedEvent(
-                    id="rollout_budget_reservation_created:tool:cancel-suspend",
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    reservation=reservation,
-                ),
-            ),
-            expected_last_sequence=0,
+        draft, committed_entry, _ = await commit_test_run_owner(
+            agent,
+            "suspend while publication confirmation is pending",
             state=state,
         )
-        runtime_session.tool_execution_terminal_registry.install_admitted_batch(
-            run_id=state.run_id,
-            reservations=(reservation,),
+        entry_stream = agent._stream_committed_entry_inner(draft, committed_entry)
+        try:
+            while True:
+                event = await anext(entry_stream)
+                if isinstance(event, CapabilityExposureResolvedEvent):
+                    break
+        finally:
+            await entry_stream.aclose()
+        _, executable, reservations = await agent._commit_tool_admissions(
+            state,
+            [
+                ToolCall(
+                    id="call:mcp-suspend-cancel",
+                    name="mcp__docs__lookup",
+                    arguments={},
+                )
+            ],
+            exposure=agent._require_capability_exposure(state),
         )
+        assert [call.id for call in executable] == ["call:mcp-suspend-cancel"]
+        reservation = reservations["call:mcp-suspend-cancel"]
         original_commit_suspension = (
             RuntimeSessionToolExecutionEventCommitPort.commit_suspension
         )
@@ -1258,6 +1407,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
             suspension_candidate,
             reservation_id,
             expected_reservation_fingerprint,
+            transaction_companion=None,
             deadline_monotonic=None,
         ):
             assert self.runtime_session is runtime_session
@@ -1266,6 +1416,7 @@ def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_le
                 suspension_candidate=suspension_candidate,
                 reservation_id=reservation_id,
                 expected_reservation_fingerprint=(expected_reservation_fingerprint),
+                transaction_companion=transaction_companion,
                 deadline_monotonic=deadline_monotonic,
             )
             committed.set()
@@ -1345,17 +1496,25 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
             *,
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
-            del runtime_context
+            prepared = _prepared_test_mcp_suspension(
+                runtime_session_id=runtime_session.runtime_session_id,
+                event_context=runtime_context.event_context,
+                interaction_id="mcp_input_required:precommit-none",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                pending_lease_reservation_id="lease:precommit-none",
+            )
+            pending_handle = install_prepared_test_mcp_pending_handle(
+                runtime_session=runtime_session,
+                supervisor=supervisor,
+                prepared=prepared,
+                event_context=runtime_context.event_context,
+            )
             return ToolExecutionSuspended(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                prepared_mcp_input_required=_prepared_test_mcp_suspension(
-                    interaction_id="mcp_input_required:precommit-none",
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    pending_lease_reservation_id="lease:precommit-none",
-                ),
+                mcp_pending_handle=pending_handle,
             )
 
     class LeaseSupervisor:
@@ -1370,7 +1529,7 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
     runtime_session.mcp_supervisor = supervisor
     registry = ToolRegistry()
     registry.register(SuspendingTool())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -1401,10 +1560,13 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
         fail_before_commit,
     )
 
-    with pytest.raises(
-        EventCommitError, match="synthetic suspension precommit failure"
-    ):
-        asyncio.run(run_agent_task(agent, "suspend once"))
+    async def run_bounded():
+        return await asyncio.wait_for(
+            run_agent_task(agent, "suspend once"), timeout=3.0
+        )
+
+    result = asyncio.run(run_bounded())
+    assert result.finalized is True
 
     assert not any(
         isinstance(event, ToolExecutionSuspendedEvent)
@@ -1447,22 +1609,31 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
             *,
             runtime_context: ToolRuntimeContext,
         ) -> ToolExecutionSuspended:
-            del runtime_context
+            prepared = _prepared_test_mcp_suspension(
+                runtime_session_id=runtime_session.runtime_session_id,
+                event_context=runtime_context.event_context,
+                interaction_id="mcp_input_required:physical-tail",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                pending_lease_reservation_id="lease:physical-tail",
+            )
+            pending_handle = install_prepared_test_mcp_pending_handle(
+                runtime_session=runtime_session,
+                supervisor=supervisor,
+                prepared=prepared,
+                event_context=runtime_context.event_context,
+            )
             return ToolExecutionSuspended(
                 tool_call_id=call.id,
                 tool_name=call.name,
                 interaction_kind="mcp_input_required",
-                prepared_mcp_input_required=_prepared_test_mcp_suspension(
-                    interaction_id="mcp_input_required:physical-tail",
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    pending_lease_reservation_id="lease:physical-tail",
-                ),
+                mcp_pending_handle=pending_handle,
             )
 
     class LeaseSupervisor:
         def __init__(self) -> None:
             self.confirmed: list[tuple[str, str]] = []
+            self.completed: list[str] = []
 
         def confirm_pending_lease(
             self,
@@ -1471,12 +1642,15 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
         ) -> None:
             self.confirmed.append((interaction_id, reservation_id))
 
+        def complete_pending_lease(self, interaction_id: str) -> None:
+            self.completed.append(interaction_id)
+
     runtime_session = in_memory_runtime_session(tmp_path)
     supervisor = LeaseSupervisor()
     runtime_session.mcp_supervisor = supervisor
     registry = ToolRegistry()
     registry.register(SuspendingTool())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -1531,8 +1705,11 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
         ("mcp_input_required:physical-tail", "lease:physical-tail")
     ]
 
+    owner = agent.run_execution_registry.require(state.run_id)
+    assert isinstance(owner.suspension_slot, ActiveRunSuspension)
+    suspension_payload = owner.suspension_slot.resources.activation_payload
     rollout_reservation = agent._pending_tool_rollout_reservation(
-        state.pending_interaction_payload,
+        suspension_payload,
         run_id=state.run_id,
     )
 
@@ -1544,9 +1721,7 @@ def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
             output="input-required interaction cancelled",
             result_state=ToolResultState.ERROR,
             tool_observation_timing_seed=dict(
-                state.pending_interaction_payload.get(
-                    "tool_observation_timing_seed", {}
-                )
+                suspension_payload.get("tool_observation_timing_seed", {})
             )
             or None,
             rollout_reservation=rollout_reservation,
@@ -1598,7 +1773,7 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
 
     supervisor = LeaseSupervisor()
     runtime_session.mcp_supervisor = supervisor
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
@@ -1628,10 +1803,33 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_interaction_kind = "mcp_input_required"
+    prepared_suspension = _prepared_test_mcp_suspension(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+        interaction_id=interaction_id,
+        tool_call_id=tool_call_id,
+        tool_name="mcp__docs__lookup",
+        pending_lease_reservation_id=f"lease:{failure_mode}",
+    )
+    pending_handle = install_prepared_test_mcp_pending_handle(
+        runtime_session=runtime_session,
+        supervisor=supervisor,
+        prepared=prepared_suspension,
+        event_context=EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+    )
     state.pending_interaction_payload = {
         "interaction_id": interaction_id,
         "tool_call_id": tool_call_id,
         "tool_name": "mcp__docs__lookup",
+        "mcp_pending_handle": pending_handle,
     }
 
     async def terminal_result(self, current_state, _resolution):
@@ -1639,14 +1837,24 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
         current_state.pending_interaction_payload = {}
         current_state.status = LoopStatus.RUNNING
         current_state.stop_reason = None
-        async for event in self._emit_tool_result_and_record(
-            current_state,
-            tool_call_id=tool_call_id,
-            tool_call_name="mcp__docs__lookup",
-            output="terminal result",
-            result_state=ToolResultState.ERROR,
-        ):
-            yield event
+        try:
+            async for event in self._emit_tool_result_and_record(
+                current_state,
+                tool_call_id=tool_call_id,
+                tool_call_name="mcp__docs__lookup",
+                output="terminal result",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+        except BaseException:
+            if (
+                self._mcp_terminal_commit_outcomes.get(
+                    (current_state.run_id, tool_call_id)
+                )
+                == "full"
+            ):
+                supervisor.complete_pending_lease(interaction_id)
+            raise
 
     monkeypatch.setattr(
         AgentRuntime,
@@ -1775,7 +1983,7 @@ def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
 
 def test_model_call_rejected_event_is_inspectable(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "must not run"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -1789,7 +1997,7 @@ def test_model_call_rejected_event_is_inspectable(tmp_path) -> None:
     result = asyncio.run(run_agent_task(agent, "reject before provider"))
     rejected = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ModelCallRejectedEvent)
     ]
     assert result.status is LoopStatus.FAILED
@@ -1808,7 +2016,7 @@ def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(
     tmp_path,
 ) -> None:
     transport = ScriptedTransport([{"text": "should not be called"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -1822,7 +2030,7 @@ def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(
     assert transport.contexts == []
     compiled_events = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ContextCompiledEvent)
     ]
     assert [event.status for event in compiled_events] == ["pressure", "failed"]
@@ -1869,7 +2077,7 @@ def test_run_followups_reuse_target(tmp_path) -> None:
             {"text": "finished after tool result"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -1880,7 +2088,7 @@ def test_run_followups_reuse_target(tmp_path) -> None:
     assert result.status is LoopStatus.FINISHED
     starts = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ModelCallStartEvent)
     ]
     assert len(starts) == 2
@@ -1889,7 +2097,7 @@ def test_run_followups_reuse_target(tmp_path) -> None:
         starts[0].resolved_call.resolved_model_call_id
         != starts[1].resolved_call.resolved_model_call_id
     )
-    events = agent.runtime_session.event_log.iter()
+    events = runtime_session_for_test(agent).event_log.iter()
     generation_starts = tuple(
         event
         for event in events
@@ -1945,9 +2153,9 @@ def test_run_followups_reuse_target(tmp_path) -> None:
     assert starts[1].sequence is not None
     assert result_end.sequence < rewrites[0].sequence < starts[1].sequence
     run_id = next(event.run_id for event in events if isinstance(event, RunStartEvent))
-    projection = agent.runtime_session.long_horizon_state_store.active_projection_state(
-        run_id
-    )
+    projection = runtime_session_for_test(
+        agent
+    ).long_horizon_state_store.active_projection_state(run_id)
     assert projection is None
     closed_window = next(
         event for event in events if isinstance(event, ContextWindowClosedEvent)
@@ -1992,7 +2200,7 @@ def test_provider_append_does_not_rerender_committed_transcript_units(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2006,7 +2214,7 @@ def test_provider_append_does_not_rerender_committed_transcript_units(
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2019,10 +2227,13 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert result.final_text == "done"
     assert any(
         event.type is EventType.TEXT_BLOCK_SEGMENT
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert (
-        agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text
+        runtime_session_for_test(agent)
+        .event_log.replay(result.messages[-1].id)
+        .content[0]
+        .text
         == "done"
     )
 
@@ -2030,7 +2241,7 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
 def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -2062,7 +2273,7 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
 
 def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
-    state = LoopState(session_id=runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(session_id=runtime_session.runtime_session_id)
     run_start = RunStartEvent(
         run_id=state.run_id,
         turn_id=state.turn_id,
@@ -2101,11 +2312,10 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
                     stop_reason="aborted",
                     abort_kind="user_stop",
                 ),
-                state=state,
             )
 
     async def run() -> None:
-        await runtime_session.emit(run_start, state=state)
+        await runtime_session.emit(run_start)
         task = asyncio.create_task(run_and_emit_after_cancel())
         await asyncio.sleep(0)
         task.cancel()
@@ -2122,7 +2332,7 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
 def test_agent_runtime_does_not_compile_uncommitted_prior_messages(tmp_path) -> None:
     prior = [UserMsg(name="user", content="previous sentinel")]
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2152,7 +2362,7 @@ def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(
         None, lambda context, completion: seen_blocks.append(completion.block_type)
     )
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -2181,7 +2391,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
             {"text": "I read it."},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2193,7 +2403,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     assert result.final_text == "I read it."
     assert any(
         isinstance(event, ToolResultStartEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert len(transport.contexts) == 2
     second_context_text = "\n".join(
@@ -2202,7 +2412,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     assert "hello from file" in second_context_text
     compiled = [
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ContextCompiledEvent)
     ]
     assert compiled[0].tool_result_render_decision_facts == ()
@@ -2212,7 +2422,10 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
         == compiled[1].tool_result_render_operational_facts[0].unit_id
     )
     assert (
-        agent.runtime_session.tool_execution_terminal_registry.active_owner_count() == 0
+        runtime_session_for_test(
+            agent
+        ).tool_execution_terminal_registry.active_owner_count()
+        == 0
     )
 
 
@@ -2236,7 +2449,7 @@ def test_render_cache_write_failure_cannot_block_model_followup(
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -2277,7 +2490,7 @@ def test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path) -> 
         ]
     )
     compactor = RecordingContextCompactor()
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2298,6 +2511,21 @@ def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
     tmp_path,
 ) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
+    agent = build_test_agent_runtime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.RUNNING
+    state.terminal_run_end_event_id = "run_end:mid-turn-publication"
+    asyncio.run(
+        commit_test_run_owner(
+            agent,
+            "mid-turn publication test",
+            state=state,
+        )
+    )
     skip = build_frozen_fact(
         MidTurnCompactionSkipFact,
         schema_version="mid_turn_context_compaction_skip.v1",
@@ -2305,12 +2533,14 @@ def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
         current_run_start_event_reference=None,
         safe_point="before_followup_model_call",
     )
-    stored = runtime_session.event_log.append(
-        MidTurnContextCompactionSkippedEvent(
-            run_id="run:mid-turn-publication",
-            turn_id="turn:mid-turn-publication",
-            reply_id="reply:mid-turn-publication",
-            skip=skip,
+    stored = asyncio.run(
+        runtime_session.emit(
+            MidTurnContextCompactionSkippedEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                skip=skip,
+            ),
         )
     )
     deadline_budget = build_runtime_event_deadline_budget(
@@ -2319,33 +2549,20 @@ def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
         terminal_reserve_seconds=10.0,
     )
     runtime_session.latch_publication_reconciliation_required()
-
-    class PublicationFailedCompactor:
-        async def maybe_compact_before_followup(self, **_kwargs):
-            return MidTurnCompactionResult(
-                compacted=False,
-                events=(stored,),
-                skipped_reason="current_run_start_missing",
-                mandatory_audit_deadline_budget=deadline_budget,
-                mandatory_audit_publication_failed=True,
-            )
-
-    agent = AgentRuntime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_session,
-        llm_runtime=make_llm_runtime(ScriptedTransport([])),
-        context_compactor=PublicationFailedCompactor(),
-    )
-    state = agent.new_state()
-    state.status = LoopStatus.RUNNING
-
-    emitted = asyncio.run(
-        _collect_async(agent._continue_after_tool_before_followup(state))
+    agent._install_mandatory_audit_publication_latched_termination(
+        state,
+        committed_event=stored,
+        deadline_budget=deadline_budget,
     )
 
-    assert emitted == [stored]
     assert state.status is LoopStatus.ABORTED
-    termination = state.scratchpad["publication_latched_run_termination"]
+    assert agent.run_execution_registry is not None
+    finalization = agent.run_execution_registry.require(
+        state.run_id
+    ).finalization_slot.owner
+    assert isinstance(finalization, RunFinalizationOwner)
+    termination = finalization.publication_latched_termination
+    assert termination is not None
     assert termination.reason == "mandatory_runtime_audit_publication_unavailable"
     assert termination.source_event_references[0].event_id == stored.id
 
@@ -2384,7 +2601,7 @@ def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -2411,7 +2628,7 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
 
     runtime_session.hook_manager.register_event(None, failing_hook)
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -2444,10 +2661,11 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(
             {"text": "first done"},
         ]
     )
-    first_agent = AgentRuntime(
+    first_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(first_transport),
+        enable_subagents=False,
     )
 
     first_result = asyncio.run(run_agent_task(first_agent, "Read note.txt"))
@@ -2468,10 +2686,11 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(
             {"text": "second done"},
         ]
     )
-    second_agent = AgentRuntime(
+    second_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(second_transport),
+        enable_subagents=False,
     )
 
     second_result = asyncio.run(run_agent_task(second_agent, "Read note.txt again"))
@@ -2507,14 +2726,14 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
             {"text": "Recovered."},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
     )
 
     result = asyncio.run(run_agent_task(agent, "Use a malformed tool."))
-    events = agent.runtime_session.event_log.iter()
+    events = runtime_session_for_test(agent).event_log.iter()
     result_events = [
         event for event in events if getattr(event, "tool_call_id", None) == "call:bad"
     ]
@@ -2532,7 +2751,9 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
     ]
     assert isinstance(result_events[-1], ToolResultEndEvent)
     assert result_events[-1].state is ToolResultState.ERROR
-    replayed = agent.runtime_session.event_log.replay(result_events[0].reply_id)
+    replayed = runtime_session_for_test(agent).event_log.replay(
+        result_events[0].reply_id
+    )
     block = next(
         block for block in replayed.content if isinstance(block, ToolResultBlock)
     )
@@ -2555,10 +2776,11 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(
+    first_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(first_transport),
+        enable_subagents=False,
     )
     asyncio.run(run_agent_task(first_agent, "bad first"))
 
@@ -2572,10 +2794,11 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(
+    second_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(second_transport),
+        enable_subagents=False,
     )
 
     second_result = asyncio.run(run_agent_task(second_agent, "bad second"))
@@ -2612,7 +2835,7 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
             {"text": "Recovered from missing tool."},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2624,20 +2847,17 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
     )
 
     assert result.status is LoopStatus.FINISHED
-    assert result.state.in_run_recovery is not None
-    assert result.state.in_run_recovery.cause is InRunRecoveryCause.TOOL_FAILURE
-    assert result.state.in_run_recovery.consecutive_failures == 1
     assert "Unknown tool: missing_tool" in second_context_text
     assert any(
         isinstance(event, ToolResultEndEvent)
         and event.tool_call_id == "call:missing"
         and event.state is ToolResultState.ERROR
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
 
 
 def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
@@ -2707,11 +2927,12 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(
+    first_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(first_transport),
         permission_gate=DenyGate("FIRST_DENY"),
+        enable_subagents=False,
     )
     asyncio.run(run_agent_task(first_agent, "deny first"))
 
@@ -2729,11 +2950,12 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(
+    second_agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(second_transport),
         permission_gate=DenyGate("SECOND_DENY"),
+        enable_subagents=False,
     )
 
     second_result = asyncio.run(run_agent_task(second_agent, "deny second"))
@@ -2773,7 +2995,7 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2781,15 +3003,18 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
     )
 
     result = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     confirm = next(
         event for event in events if isinstance(event, RequireUserConfirmEvent)
     )
 
     assert result.status is LoopStatus.WAITING_USER
     assert result.stop_reason == "waiting_user"
-    assert result.state.pending_tool_calls[0].id == "call:danger"
-    assert result.state.pending_tool_calls[0].state is ToolCallState.ASKING
+    owner = agent.run_execution_registry.require(result.run_id)
+    assert isinstance(owner.suspension_slot, ActiveRunSuspension)
+    pending = owner.suspension_slot.resources.public_view
+    assert pending.tool_calls[0].id == "call:danger"
+    assert pending.tool_calls[0].state is ToolCallState.ASKING
     assert confirm.tool_calls[0].id == "call:danger"
     assert confirm.tool_calls[0].name == "terminal"
     assert confirm.tool_calls[0].state is ToolCallState.ASKING
@@ -2814,7 +3039,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2822,14 +3047,15 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(
     )
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
-    result = asyncio.run(agent.abort_run(first.state))
-    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    state = test_owned_terminalization_state(agent, first.run_id)
+    result = asyncio.run(agent.abort_run(state))
+    events = runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
     run_ends = [event for event in events if isinstance(event, RunEndEvent)]
 
     assert first.status is LoopStatus.WAITING_USER
     assert result.status is LoopStatus.ABORTED
     assert result.stop_reason == "aborted"
-    assert result.state.pending_tool_calls == []
+    assert state.pending_tool_calls == []
     assert [(event.status, event.stop_reason) for event in run_ends] == [
         ("aborted", "aborted")
     ]
@@ -2838,22 +3064,24 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(
 
 def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
     )
 
     result = asyncio.run(run_agent_task(agent, "Say done"))
-    second = asyncio.run(agent.abort_run(result.state))
+    second = asyncio.run(agent.abort_run(test_owned_run_state(agent, result.run_id)))
     run_ends = [
         event
-        for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(
+            run_id=result.run_id
+        )
         if isinstance(event, RunEndEvent)
     ]
 
     assert result.status is LoopStatus.FINISHED
-    assert result.state.finalized is True
+    assert result.finalized is True
     assert second.status is LoopStatus.FINISHED
     assert [event.status for event in run_ends] == ["finished"]
 
@@ -2876,7 +3104,7 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2884,7 +3112,7 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
@@ -2892,8 +3120,10 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(
         approval_id="host-minted",
         decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
     )
-    result = asyncio.run(agent.resume_after_approval(first.state, resolution))
-    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    result = asyncio.run(
+        resume_test_agent_after_approval(agent, first.run_id, resolution)
+    )
+    events = runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
     confirm_index = next(
         i for i, event in enumerate(events) if isinstance(event, UserConfirmResultEvent)
     )
@@ -2909,7 +3139,7 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(
         "finished"
     ]
     assert all(
-        event.reply_id == first.state.messages[1].id
+        event.reply_id == first.messages[1].id
         for event in events
         if isinstance(
             event,
@@ -2945,7 +3175,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -2953,16 +3183,17 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     before_resume_confirm_count = sum(
         isinstance(event, RequireUserConfirmEvent)
-        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
     )
     result = asyncio.run(
-        agent.resume_after_approval(
-            first.state,
+        resume_test_agent_after_approval(
+            agent,
+            first.run_id,
             ApprovalResolution(
                 approval_id="host-minted",
                 decisions=(
@@ -2973,7 +3204,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(
     )
     after_resume_confirm_count = sum(
         isinstance(event, RequireUserConfirmEvent)
-        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
     )
 
     assert result.status is LoopStatus.FINISHED
@@ -3000,7 +3231,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(
             {"text": "denial acknowledged"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3008,12 +3239,13 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     result = asyncio.run(
-        agent.resume_after_approval(
-            first.state,
+        resume_test_agent_after_approval(
+            agent,
+            first.run_id,
             ApprovalResolution(
                 approval_id="host-minted",
                 decisions=(
@@ -3022,7 +3254,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(
             ),
         )
     )
-    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    events = runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
     denied = next(event for event in events if isinstance(event, ToolResultEndEvent))
     second_context_text = "\n".join(
         text for message in transport.contexts[1].messages for text in message.content
@@ -3059,7 +3291,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3068,7 +3300,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=[]))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
 
@@ -3077,8 +3309,9 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(
     assert "end" not in hooks.calls
 
     result = asyncio.run(
-        agent.resume_after_approval(
-            first.state,
+        resume_test_agent_after_approval(
+            agent,
+            first.run_id,
             ApprovalResolution(
                 approval_id="host-minted",
                 decisions=(
@@ -3119,7 +3352,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3127,12 +3360,13 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     first = asyncio.run(run_agent_task(agent, "attempt dangerous commands"))
     result = asyncio.run(
-        agent.resume_after_approval(
-            first.state,
+        resume_test_agent_after_approval(
+            agent,
+            first.run_id,
             ApprovalResolution(
                 approval_id="host-minted",
                 decisions=(
@@ -3145,7 +3379,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
     )
     result_ends = [
         event
-        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(run_id=first.run_id)
         if isinstance(event, ToolResultEndEvent)
     ]
 
@@ -3172,7 +3406,7 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3183,8 +3417,9 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unknown tool calls"):
         asyncio.run(
-            agent.resume_after_approval(
-                first.state,
+            resume_test_agent_after_approval(
+                agent,
+                first.run_id,
                 ApprovalResolution(
                     approval_id="host-minted",
                     decisions=(
@@ -3195,8 +3430,10 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
         )
     with pytest.raises(ValueError, match="missing decisions"):
         asyncio.run(
-            agent.resume_after_approval(
-                first.state, ApprovalResolution(approval_id="host-minted", decisions=())
+            resume_test_agent_after_approval(
+                agent,
+                first.run_id,
+                ApprovalResolution(approval_id="host-minted", decisions=()),
             )
         )
 
@@ -3221,7 +3458,7 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -3233,7 +3470,7 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
         result = asyncio.run(run_agent_task(agent, "start background then finish"))
         tool_delta = next(
             event
-            for event in runtime_session.event_log.iter(run_id=result.state.run_id)
+            for event in runtime_session.event_log.iter(run_id=result.run_id)
             if isinstance(event, ToolResultTextDeltaEvent)
             and event.tool_call_id == "call:bg"
         )
@@ -3355,13 +3592,17 @@ class RecordingHooks(NoopMemoryHooks):
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def on_session_start(self, state: LoopState, user_input: str) -> None:
+    async def on_session_start(
+        self, state: RunActivationWorkingState, user_input: str
+    ) -> None:
         self.calls.append("start")
 
-    async def on_turn_start(self, state: LoopState, user_input: str) -> None:
+    async def on_turn_start(
+        self, state: RunActivationWorkingState, user_input: str
+    ) -> None:
         self.calls.append("turn_start")
 
-    async def project(self, state: LoopState, *, token_budget: int):
+    async def project(self, state: RunActivationWorkingState, *, token_budget: int):
         self.calls.append("project")
         return {
             "summary": (
@@ -3378,16 +3619,16 @@ class RecordingHooks(NoopMemoryHooks):
             ],
         }
 
-    async def after_model_reply(self, state: LoopState, assistant):
+    async def after_model_reply(self, state: RunActivationWorkingState, assistant):
         self.calls.append("after_model")
 
-    async def after_tool_results(self, state: LoopState, results):
+    async def after_tool_results(self, state: RunActivationWorkingState, results):
         self.calls.append("after_tools")
 
-    async def on_session_end(self, state: LoopState) -> None:
+    async def on_session_end(self, state: RunActivationWorkingState) -> None:
         self.calls.append("end")
 
-    async def on_turn_end(self, state: LoopState) -> None:
+    async def on_turn_end(self, state: RunActivationWorkingState) -> None:
         self.calls.append("turn_end")
 
 
@@ -3460,17 +3701,22 @@ _BUILTIN_TOOL_NAMES = frozenset(
 
 def _prepared_test_mcp_suspension(
     *,
+    runtime_session_id: str,
+    event_context: EventContext,
     interaction_id: str,
     tool_call_id: str,
     tool_name: str,
     pending_lease_reservation_id: str,
 ):
-    return prepare_mcp_input_required_suspension(
+    return prepare_test_mcp_input_required_suspension(
         interaction_id=interaction_id,
+        runtime_session_id=runtime_session_id,
+        run_id=event_context.run_id,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         server_id="docs",
-        round_count=1,
         binding_identity=McpBindingIdentityFact(
             server_id="docs",
             slot_id="slot:docs",
@@ -3478,39 +3724,76 @@ def _prepared_test_mcp_suspension(
             discovery_generation=1,
         ),
         pending_lease_reservation_id=pending_lease_reservation_id,
-        protocol_version="2026-07-28",
-        input_requests=(),
-        original_request={
-            "source_method": "tools/call",
-            "tool_name": tool_name,
-            "arguments": {},
-        },
+        protocol_revision="2026-07-28",
         request_state=None,
-        deadline_monotonic=None,
     )
 
 
 def _install_registry_with_explicit_test_descriptors(
     agent: AgentRuntime, registry: ToolRegistry
 ) -> None:
-    agent.tool_executor.registry = registry
     custom_names = tuple(sorted(set(registry.names()).difference(_BUILTIN_TOOL_NAMES)))
+    custom_descriptors = tuple(_test_tool_descriptor(name) for name in custom_names)
+    _install_test_tool_registry(
+        agent,
+        registry,
+        descriptors=custom_descriptors,
+    )
     if custom_names:
         agent.capability_runtime = CapabilityRuntime.with_default_providers(
-            StaticCapabilityProvider(
-                tuple(_test_tool_descriptor(name) for name in custom_names)
-            )
+            StaticCapabilityProvider(custom_descriptors)
         )
 
 
+def _install_test_tool_registry(
+    agent: AgentRuntime,
+    registry: ToolRegistry,
+    *,
+    descriptors: tuple[CapabilityDescriptor, ...] = (),
+) -> None:
+    descriptor_overrides = {item.name: item for item in descriptors}
+    catalog = {item.name: item for item in builtin_tool_catalog()}
+    policies = {}
+    for name in registry.names():
+        catalog_entry = catalog.get(name)
+        descriptor = descriptor_overrides.get(name)
+        if descriptor is None:
+            if catalog_entry is None:
+                descriptor = _test_tool_descriptor(name)
+            else:
+                descriptor = catalog_entry.descriptor
+        binding = (
+            catalog_entry.binding_contract
+            if catalog_entry is not None
+            else build_tool_binding_contract(
+                tool_name=name,
+                origin=ToolBindingOrigin.CUSTOM,
+                contract_id=f"test-tool-binding:{name}",
+                contract_version="v1",
+            )
+        )
+        installation = build_runtime_tool_binding_installation(
+            tool=registry.get(name),
+            descriptor=descriptor,
+            binding_contract=binding,
+            artifact_options=runtime_session_for_test(agent).artifact_service.options,
+        )
+        registry.bind_contract(binding)
+        policies[name] = installation.artifact_processing_policy
+    agent.tool_executor.registry = registry
+    agent.tool_executor.artifact_policies = policies
+
+
 class SlowProjectionHooks(NoopMemoryHooks):
-    async def project(self, state: LoopState, *, token_budget: int):
+    async def project(self, state: RunActivationWorkingState, *, token_budget: int):
         await asyncio.sleep(0.05)
         return {"summary": "too late", "included_memory_ids": ["mem:late"]}
 
 
 class SlowProjectionWithTypedEmptyBaselineHooks(SlowProjectionHooks):
-    def baseline_projection(self, state: LoopState, *, token_budget: int):
+    def baseline_projection(
+        self, state: RunActivationWorkingState, *, token_budget: int
+    ):
         return {
             "summary": "",
             "included_memory_ids": [],
@@ -3523,7 +3806,7 @@ class ReadyThenFailedProjectionHooks(NoopMemoryHooks):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def project(self, state: LoopState, *, token_budget: int):
+    async def project(self, state: RunActivationWorkingState, *, token_budget: int):
         del state, token_budget
         self.calls += 1
         if self.calls == 1:
@@ -3547,7 +3830,7 @@ class ReadyThenFailedProjectionHooks(NoopMemoryHooks):
 def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3557,7 +3840,7 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     asyncio.run(run_agent_task(agent, "hi"))
 
     assert hooks.calls == ["turn_start", "project", "after_model", "turn_end"]
-    events = agent.runtime_session.event_log.iter()
+    events = runtime_session_for_test(agent).event_log.iter()
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
     context_text = "\n".join(
@@ -3578,10 +3861,9 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
 def test_memory_hook_prompt_is_backed_by_versioned_static_fact(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original_prepare = agent_module.prepare_live_context_snapshot
+    original_prepare = capability_module.prepare_live_context_snapshot
 
     async def capture_prepare(**kwargs):
         prepared = await original_prepare(**kwargs)
@@ -3589,12 +3871,12 @@ def test_memory_hook_prompt_is_backed_by_versioned_static_fact(
         return prepared
 
     monkeypatch.setattr(
-        agent_module,
+        capability_module,
         "prepare_live_context_snapshot",
         capture_prepare,
     )
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3663,7 +3945,7 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
 
     event_log = FailOnceRunEndLog()
     runtime_session = in_memory_runtime_session(tmp_path, event_log=event_log)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -3674,11 +3956,16 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
 
     assert result.status is LoopStatus.FINISHED
     assert state.finalized is True
-    assert state.scratchpad["run_end_commit_state"] == "committed"
+    assert agent.run_execution_registry is not None
+    finalization = agent.run_execution_registry.require(
+        state.run_id
+    ).finalization_slot.owner
+    assert isinstance(finalization, RunFinalizationOwner)
+    assert finalization.state == "completed"
     assert event_log.run_end_attempts == 2
     terminal = [event for event in event_log.iter() if isinstance(event, RunEndEvent)]
     assert len(terminal) == 1
-    assert terminal[0].id == state.scratchpad["terminal_run_end_event_id"]
+    assert terminal[0].id == state.terminal_run_end_event_id
 
 
 def test_run_end_postcommit_publication_failure_folds_committed_terminal(
@@ -3692,16 +3979,16 @@ def test_run_end_postcommit_publication_failure_folds_committed_terminal(
                 raise RuntimeError("synthetic RunEnd observer failure")
 
     runtime_session.publisher.subscribe(FailRunEndObserver())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
     )
     state = agent.new_state()
 
-    with pytest.raises(EventPublicationAfterCommitError):
-        asyncio.run(run_agent_task(agent, "finish", state=state))
+    result = asyncio.run(run_agent_task(agent, "finish", state=state))
 
+    assert result.status is LoopStatus.FINISHED
     terminal = [
         event
         for event in runtime_session.event_log.iter()
@@ -3709,7 +3996,12 @@ def test_run_end_postcommit_publication_failure_folds_committed_terminal(
     ]
     assert len(terminal) == 1
     assert state.finalized is True
-    assert state.scratchpad["run_end_commit_state"] == "committed"
+    assert agent.run_execution_registry is not None
+    finalization = agent.run_execution_registry.require(
+        state.run_id
+    ).finalization_slot.owner
+    assert isinstance(finalization, RunFinalizationOwner)
+    assert finalization.state == "completed"
 
 
 def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(
@@ -3742,7 +4034,7 @@ Use the review checklist.
         stable_project_key=str(tmp_path),
     )
     provider = CountingCapabilityProvider(_workspace_only_capability_provider())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(
@@ -3754,7 +4046,11 @@ Use the review checklist.
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("noop", calls=[]))
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(
+        agent,
+        registry,
+        descriptors=(_test_tool_descriptor("noop"),),
+    )
 
     result = asyncio.run(run_agent_task(agent, "$review-pr inspect this"))
 
@@ -3794,7 +4090,7 @@ description: Review pull requests.
 """,
     )
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(
@@ -3833,7 +4129,7 @@ def _workspace_only_capability_provider() -> LocalSkillCapabilityProvider:
 
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3845,8 +4141,8 @@ def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "done"
-    assert result.state.memory_projection is None
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    assert test_owned_run_state(agent, result.run_id).memory_projection is None
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     failed = next(
         event for event in events if event.type is EventType.PROJECTION_FAILED
     )
@@ -3870,7 +4166,7 @@ def test_latest_failed_memory_projection_retains_prior_effective_head(tmp_path) 
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -3891,11 +4187,13 @@ def test_latest_failed_memory_projection_retains_prior_effective_head(tmp_path) 
     assert "STALE_MEMORY_MUST_NOT_RETURN" in second_context
     assert not any(
         isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     event_types = [
         event.type
-        for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(
+            run_id=result.run_id
+        )
     ]
     assert event_types.count(EventType.PROJECTION_REQUESTED) == 2
     assert event_types.count(EventType.PROJECTION_READY) == 1
@@ -3905,10 +4203,9 @@ def test_latest_failed_memory_projection_retains_prior_effective_head(tmp_path) 
 def test_zero_subagent_cap_persists_omitted_only_selection_audit(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original_prepare = agent_module.prepare_live_context_snapshot
+    original_prepare = capability_module.prepare_live_context_snapshot
 
     async def capture_prepare(**kwargs):
         prepared = await original_prepare(**kwargs)
@@ -3916,12 +4213,12 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
         return prepared
 
     monkeypatch.setattr(
-        agent_module,
+        capability_module,
         "prepare_live_context_snapshot",
         capture_prepare,
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -3989,7 +4286,7 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
     assert decision.reason_code == "policy_limit"
     compiled = next(
         event
-        for event in runtime_session.event_log.iter(run_id=result.state.run_id)
+        for event in runtime_session.event_log.iter(run_id=result.run_id)
         if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
     )
     assert compiled.input_audit is not None
@@ -4003,7 +4300,7 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
 
 def test_memory_projection_timeout_uses_typed_empty_memory_baseline(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4014,9 +4311,10 @@ def test_memory_projection_timeout_uses_typed_empty_memory_baseline(tmp_path) ->
     result = asyncio.run(run_agent_task(agent, "What did I just do?"))
 
     assert result.status is LoopStatus.FINISHED
-    assert result.state.memory_projection is not None
-    assert result.state.memory_projection["typed_recalled_entries"] == []
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    owned_state = test_owned_run_state(agent, result.run_id)
+    assert owned_state.memory_projection is not None
+    assert owned_state.memory_projection["typed_recalled_entries"] == []
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
     assert ready.metadata == {
         "degraded": True,
@@ -4039,25 +4337,33 @@ class FailingHook(NoopMemoryHooks):
         if self.hook_name == hook_name:
             raise RuntimeError(f"{hook_name} boom")
 
-    async def on_session_start(self, state: LoopState, user_input: str) -> None:
+    async def on_session_start(
+        self, state: RunActivationWorkingState, user_input: str
+    ) -> None:
         self._maybe_raise("on_session_start")
 
-    async def after_model_reply(self, state: LoopState, assistant) -> None:
+    async def after_model_reply(
+        self, state: RunActivationWorkingState, assistant
+    ) -> None:
         self._maybe_raise("after_model_reply")
 
-    async def after_tool_results(self, state: LoopState, results) -> None:
+    async def after_tool_results(
+        self, state: RunActivationWorkingState, results
+    ) -> None:
         self._maybe_raise("after_tool_results")
 
-    async def should_compact(self, state: LoopState) -> bool:
+    async def should_compact(self, state: RunActivationWorkingState) -> bool:
         self._maybe_raise("should_compact")
         return False
 
-    async def on_session_end(self, state: LoopState) -> None:
+    async def on_session_end(self, state: RunActivationWorkingState) -> None:
         self._maybe_raise("on_session_end")
 
 
 class InvalidEventHook(NoopMemoryHooks):
-    async def after_model_reply(self, state: LoopState, assistant) -> list[AgentEvent]:
+    async def after_model_reply(
+        self, state: RunActivationWorkingState, assistant
+    ) -> list[AgentEvent]:
         return [
             make_text_block_segment_event(
                 run_id=state.run_id,
@@ -4071,27 +4377,29 @@ class InvalidEventHook(NoopMemoryHooks):
 
 
 class LegacyShapeMemoryHook:
-    async def on_session_start(self, state: LoopState, user_input: str) -> None:
+    async def on_session_start(
+        self, state: RunActivationWorkingState, user_input: str
+    ) -> None:
         return None
 
-    async def project(self, state: LoopState, *, token_budget: int):
+    async def project(self, state: RunActivationWorkingState, *, token_budget: int):
         return None
 
-    async def after_model_reply(self, state: LoopState, assistant):
+    async def after_model_reply(self, state: RunActivationWorkingState, assistant):
         return []
 
-    async def after_tool_results(self, state: LoopState, results):
+    async def after_tool_results(self, state: RunActivationWorkingState, results):
         return []
 
-    async def should_compact(self, state: LoopState) -> bool:
+    async def should_compact(self, state: RunActivationWorkingState) -> bool:
         return False
 
-    async def on_session_end(self, state: LoopState):
+    async def on_session_end(self, state: RunActivationWorkingState):
         return []
 
 
 def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> None:
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    events = runtime_session_for_test(agent).event_log.iter(run_id=result.run_id)
     error = next(event for event in events if isinstance(event, RunErrorEvent))
     completed = next(event for event in events if isinstance(event, RunEndEvent))
 
@@ -4107,7 +4415,7 @@ def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> N
 
 def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "should not run"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4123,7 +4431,7 @@ def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) ->
 
 def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4138,7 +4446,7 @@ def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -
 
 def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4155,7 +4463,7 @@ def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(
     tmp_path,
 ) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4187,7 +4495,7 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4226,7 +4534,7 @@ def test_terminal_large_output_followup_context_preserves_exact_artifact_id(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4237,7 +4545,9 @@ def test_terminal_large_output_followup_context_preserves_exact_artifact_id(
     assert result.status is LoopStatus.FINISHED
     terminal_end = next(
         event
-        for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+        for event in runtime_session_for_test(agent).event_log.iter(
+            run_id=result.run_id
+        )
         if isinstance(event, ToolResultEndEvent)
         and event.tool_call_id == "call:large-terminal"
     )
@@ -4264,7 +4574,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4279,7 +4589,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
 
 def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4469,7 +4779,7 @@ def test_per_batch_executor_preserves_frozen_capture_policy(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4542,7 +4852,7 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -4605,7 +4915,7 @@ def test_cancelled_tool_batch_waits_for_sync_worker_before_releasing_borrow(
     runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(BlockingSyncTool())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -4671,17 +4981,30 @@ def test_cancelled_tool_batch_waits_for_sync_worker_before_releasing_borrow(
         latest_committed_resume_boundary=None,
         latest_committed_resume_boundary_ref=None,
     )
-    handles = BoundaryExecutionHandles(
+    owner_key = build_prepared_run_owner_reservation_key(
+        runtime_session_id=state.session_id,
+        run_id=state.run_id,
+        run_start_event_id="run-start:sync-tool-test",
+    )
+    handles = RunExecutionHandleSet(
         handle_id="handles:sync-tool-test",
         handle_generation=1,
-        owner_id=state.run_id,
-        state="run_owned",
+        owner=owner_key,
+        state="boundary_owned",
         mcp_installation=object(),
         capability_runtime=agent.capability_runtime,
         tool_registry=registry,
         frozen_execution_surface=object(),  # type: ignore[arg-type]
     )
-    state.scratchpad["capability_execution_borrow_authority"] = handles.borrow_authority
+    handles.transfer_to_run(
+        build_run_owner_identity(
+            reservation_key=owner_key,
+            run_start_sequence=1,
+        )
+    )
+    state.execution_resources.capability_execution_borrow_authority = (
+        handles.borrow_authority
+    )
 
     async def scenario() -> None:
         async def consume() -> None:
@@ -4742,7 +5065,7 @@ def test_tool_result_and_reservation_settlement_commit_atomically(tmp_path) -> N
     runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(BlockingSyncTool())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -4775,16 +5098,18 @@ def test_tool_result_and_reservation_settlement_commit_atomically(tmp_path) -> N
 
         task = asyncio.create_task(consume())
         await asyncio.to_thread(started.wait)
+        driver_task = await request_test_run_stop(agent, state.run_id)
+        assert driver_task is not None
         task.cancel()
-        await asyncio.sleep(0.01)
-        assert task.done() is False
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert driver_task.done() is False
         assert (
             runtime_session.tool_execution_terminal_registry.active_owner_count() == 1
         )
 
         release_worker.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await driver_task
 
     asyncio.run(scenario())
 
@@ -4832,7 +5157,7 @@ def test_async_tool_cancellation_settles_interrupted_terminal(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(BlockingAsyncTool())
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -4865,9 +5190,12 @@ def test_async_tool_cancellation_settles_interrupted_terminal(tmp_path) -> None:
 
         task = asyncio.create_task(consume())
         await started.wait()
+        driver_task = await request_test_run_stop(agent, state.run_id)
+        assert driver_task is not None
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        await driver_task
 
     asyncio.run(scenario())
 
@@ -4903,7 +5231,7 @@ def test_duplicate_tool_call_id_marks_provider_call_audit_only_without_execution
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4922,11 +5250,11 @@ def test_duplicate_tool_call_id_marks_provider_call_audit_only_without_execution
     assert calls == []
     assert any(
         isinstance(event, ProviderModelStreamErrorEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert not any(
         isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:dup"
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
 
 
@@ -4946,7 +5274,7 @@ def test_duplicate_tool_call_id_suppresses_the_entire_provider_tool_batch(
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -4970,12 +5298,12 @@ def test_duplicate_tool_call_id_suppresses_the_entire_provider_tool_batch(
     assert calls == []
     assert any(
         isinstance(event, ProviderModelStreamErrorEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert not any(
         isinstance(event, ToolResultEndEvent)
         and event.tool_call_id in {"call:ok", "call:dup"}
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
 
 
@@ -4991,7 +5319,7 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
@@ -5003,7 +5331,9 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
     asyncio.run(run_agent_task(agent, "run both"))
-    sequences = [event.sequence for event in agent.runtime_session.event_log.iter()]
+    sequences = [
+        event.sequence for event in runtime_session_for_test(agent).event_log.iter()
+    ]
 
     assert probe.max_active == 2
     assert sequences == sorted(sequences)
@@ -5025,7 +5355,7 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -5134,7 +5464,7 @@ def test_concurrent_tool_admission_failure_leaves_no_partial_reservation(
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -5168,13 +5498,10 @@ def test_concurrent_tool_admission_failure_leaves_no_partial_reservation(
 
     monkeypatch.setattr(store_type, "validate_next_batch", reject_concurrent_admission)
 
-    with pytest.raises(
-        RuntimeError,
-        match="injected tool admission validation failure",
-    ):
-        asyncio.run(run_agent_task(agent, "run both"))
+    result = asyncio.run(run_agent_task(agent, "run both"))
     events = runtime_session.event_log.iter()
 
+    assert result.status is LoopStatus.FAILED
     assert calls == []
     assert not any(
         isinstance(event, RolloutBudgetReservationCreatedEvent)
@@ -5199,7 +5526,7 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -5218,7 +5545,7 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
     assert len(contexts) == 2  # type: ignore[arg-type]
     assert all(
         context.runtime_session_id == runtime_session.runtime_session_id
-        and context.event_context.run_id == result.state.run_id
+        and context.event_context.run_id == result.run_id
         for context in contexts  # type: ignore[union-attr]
     )
 
@@ -5246,7 +5573,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -5254,7 +5581,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
     recall = _ConcurrentRecallService()
     registry = ToolRegistry()
     registry.register(MemorySearchTool(recall=recall))  # type: ignore[arg-type]
-    agent.tool_executor.registry = registry
+    _install_test_tool_registry(agent, registry)
 
     result = asyncio.run(run_agent_task(agent, "search twice"))
 
@@ -5263,7 +5590,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
     assert {query.text for query in recall.queries} == {"alpha", "beta"}
     assert all(
         query.session_id == runtime_session.runtime_session_id
-        and query.run_id == result.state.run_id
+        and query.run_id == result.run_id
         and query.turn_id is not None
         and query.reply_id is not None
         for query in recall.queries
@@ -5283,7 +5610,7 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),

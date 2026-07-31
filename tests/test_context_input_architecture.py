@@ -103,7 +103,7 @@ def test_immutable_renderer_has_no_msg_or_loop_state_input() -> None:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     assert "Msg" not in names
-    assert "LoopState" not in names
+    assert "RunActivationWorkingState" not in names
     assert "LLMMessage" not in names
     assert "LLMToolCall" not in names
     assert "segmented_messages" not in path.read_text(encoding="utf-8")
@@ -168,13 +168,30 @@ def test_agent_uses_context_source_registry_not_legacy_candidate_facade() -> Non
 
 def test_all_production_model_lifecycle_callers_supply_provider_input() -> None:
     callers = (
-        ROOT / "src/pulsara_agent/runtime/agent.py",
-        ROOT / "src/pulsara_agent/runtime/compaction/service.py",
-        ROOT / "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
-        ROOT / "src/pulsara_agent/memory/reflection/engine.py",
-        ROOT / "src/pulsara_agent/memory/governance/engine.py",
+        (ROOT / "src/pulsara_agent/runtime/agent.py", "prepare_lifecycle_start_bundle"),
+        (
+            ROOT / "src/pulsara_agent/runtime/compaction/service.py",
+            "prepare_model_lifecycle_start_bundle",
+        ),
+        (
+            ROOT / "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+            "prepare_model_lifecycle_start_bundle",
+        ),
+        (
+            ROOT
+            / "src/pulsara_agent/runtime/projection_jobs/compaction_memory_driver.py",
+            "prepare_model_lifecycle_start_bundle",
+        ),
+        (
+            ROOT / "src/pulsara_agent/memory/reflection/engine.py",
+            "prepare_model_lifecycle_start_bundle",
+        ),
+        (
+            ROOT / "src/pulsara_agent/memory/governance/engine.py",
+            "prepare_model_lifecycle_start_bundle",
+        ),
     )
-    for path in callers:
+    for path, function_name in callers:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         calls = tuple(
             node
@@ -182,9 +199,9 @@ def test_all_production_model_lifecycle_callers_supply_provider_input() -> None:
             if isinstance(node, ast.Call)
             and (
                 isinstance(node.func, ast.Name)
-                and node.func.id == "prepare_model_lifecycle_start_bundle"
+                and node.func.id == function_name
                 or isinstance(node.func, ast.Attribute)
-                and node.func.attr == "prepare_model_lifecycle_start_bundle"
+                and node.func.attr == function_name
             )
         )
         assert calls, f"{path} has no model lifecycle preparation"
@@ -237,8 +254,8 @@ def test_provider_input_generation_hard_cut_has_no_remote_or_clock_ingress() -> 
             f"{path} reintroduced provider-owned continuation state"
         )
 
-    pure_modules = (
-        ROOT / "src/pulsara_agent/runtime/provider_input/materialization.py",
+        pure_modules = (
+            ROOT / "src/pulsara_agent/llm/provider_input_materialization.py",
         ROOT / "src/pulsara_agent/runtime/provider_input/planner.py",
         ROOT / "src/pulsara_agent/runtime/provider_input/vector.py",
     )

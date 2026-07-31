@@ -9,26 +9,21 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pulsara_agent.primitives.capability_owner import (
+    CapabilityExposureOwnerFact,
+    CapabilityExposureOwnerKind,
+)
+from pulsara_agent.primitives.run_boundary_kind import HostRunBoundaryKind
 from pulsara_agent.primitives.subagent import ChildResultRenderPolicyFact
 
 if TYPE_CHECKING:
+    from pulsara_agent.primitives.capability import CapabilityResolveBasisFact
     from pulsara_agent.primitives.host_ingress import HostRunIngressFact
-
-
-class HostRunBoundaryKind(StrEnum):
-    PRE_RUN = "pre_run"
-    PRE_RUNTIME_REQUEST = "pre_runtime_request"
-    PRE_INTERACTION_RESUME = "pre_interaction_resume"
 
 
 class RunEntryKind(StrEnum):
     HOST = "host"
     SUBAGENT_CHILD = "subagent_child"
-
-
-class CapabilityExposureOwnerKind(StrEnum):
-    HOST_BOUNDARY = "host_boundary"
-    SUBAGENT_RUN_START = "subagent_run_start"
 
 
 class DurableRunExistence(StrEnum):
@@ -106,25 +101,6 @@ class CurrentUserMessageFact(BaseModel):
         return self
 
 
-class CapabilityExposureOwnerFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    owner_kind: CapabilityExposureOwnerKind
-    owner_id: str = Field(min_length=1)
-    host_boundary_kind: HostRunBoundaryKind | None
-    runtime_session_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_owner(self) -> "CapabilityExposureOwnerFact":
-        if self.owner_kind is CapabilityExposureOwnerKind.HOST_BOUNDARY:
-            if self.host_boundary_kind is None:
-                raise ValueError("host exposure owner requires boundary kind")
-        elif self.host_boundary_kind is not None:
-            raise ValueError("subagent exposure owner cannot carry boundary kind")
-        return self
-
-
 class SubagentRunEntryFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -141,6 +117,7 @@ class SubagentRunEntryFact(BaseModel):
     model_target_fingerprint: str = Field(min_length=1)
     mcp_installation_id: str = Field(min_length=1)
     mcp_installation_owner_runtime_session_id: str = Field(min_length=1)
+    capability_basis: "CapabilityResolveBasisFact"
 
     @field_validator("task_observed_at_utc")
     @classmethod
@@ -154,6 +131,19 @@ class SubagentRunEntryFact(BaseModel):
             != self.parent_runtime_session_id
         ):
             raise ValueError("child MCP installation must be parent-owned")
+        basis = self.capability_basis
+        owner = basis.owner
+        if basis.basis_kind != "initial":
+            raise ValueError("child capability basis must be initial")
+        if (
+            owner.owner_kind is not CapabilityExposureOwnerKind.SUBAGENT_RUN_START
+            or owner.host_boundary_kind is not None
+        ):
+            raise ValueError("child capability basis requires a subagent owner")
+        if basis.permission_snapshot_id != self.permission_snapshot_id:
+            raise ValueError("child capability basis permission mismatch")
+        if basis.mcp_installation_id != self.mcp_installation_id:
+            raise ValueError("child capability basis MCP installation mismatch")
         return self
 
 
@@ -229,3 +219,15 @@ __all__ = [
     "validate_host_current_user_attribution",
     "validate_subagent_current_user_attribution",
 ]
+
+
+# Resolve the one deliberate forward reference after capability.py has defined
+# CapabilityResolveBasisFact.  capability.py invokes this helper at module end.
+def _rebuild_subagent_run_entry_fact(
+    capability_resolve_basis_type: type[BaseModel],
+) -> None:
+    SubagentRunEntryFact.model_rebuild(
+        _types_namespace={
+            "CapabilityResolveBasisFact": capability_resolve_basis_type,
+        }
+    )

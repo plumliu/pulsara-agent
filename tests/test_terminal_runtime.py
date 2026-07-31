@@ -10,7 +10,12 @@ import pulsara_agent.runtime.terminal.process as process_mod
 
 from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
+from pulsara_agent.runtime.terminal import (
+    TerminalRequest,
+    TerminalSessionManager,
+    TerminalStatus,
+)
+from pulsara_agent.runtime.terminal.models import TerminalExecutionOwner
 from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
 from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal
 from pulsara_agent.runtime.terminal.process import (
@@ -38,6 +43,14 @@ def make_manager(tmp_path, **kwargs):
 
 def run(session, command: str, **kwargs):
     return session.execute(TerminalRequest(command=command, **kwargs))
+
+
+def completion_owner(ctx, tool_call_id: str, recorder) -> TerminalExecutionOwner:
+    return TerminalExecutionOwner(
+        origin_event_context=ctx,
+        origin_tool_call_id=tool_call_id,
+        record_event=recorder,
+    )
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -123,7 +136,9 @@ def test_terminal_runtime_default_shell_is_non_login(tmp_path) -> None:
     assert session.state.backend_metadata["shell"]["login"] is False
 
 
-def test_terminal_runtime_does_not_update_cwd_when_command_ends_outside_workspace(tmp_path) -> None:
+def test_terminal_runtime_does_not_update_cwd_when_command_ends_outside_workspace(
+    tmp_path,
+) -> None:
     session = make_session(tmp_path)
 
     result = run(session, "cd /tmp && pwd")
@@ -135,7 +150,9 @@ def test_terminal_runtime_does_not_update_cwd_when_command_ends_outside_workspac
     assert after.output == str(tmp_path)
 
 
-def test_terminal_runtime_recovers_deleted_current_cwd_to_existing_workspace_ancestor(tmp_path) -> None:
+def test_terminal_runtime_recovers_deleted_current_cwd_to_existing_workspace_ancestor(
+    tmp_path,
+) -> None:
     nested = tmp_path / "src" / "nested"
     nested.mkdir(parents=True)
     session = make_session(tmp_path)
@@ -160,7 +177,9 @@ def test_terminal_runtime_rejects_empty_command(tmp_path) -> None:
     assert result.error == "command must not be empty"
 
 
-def test_terminal_runtime_yield_keeps_partial_output_and_does_not_kill(tmp_path) -> None:
+def test_terminal_runtime_yield_keeps_partial_output_and_does_not_kill(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
@@ -197,7 +216,9 @@ def test_terminal_runtime_cleans_per_process_cwd_file_after_readback(tmp_path) -
     assert not cwd_file.exists()
 
 
-def test_spawn_local_process_starts_isolated_session_without_preexec_hook(tmp_path) -> None:
+def test_spawn_local_process_starts_isolated_session_without_preexec_hook(
+    tmp_path,
+) -> None:
     process = spawn_local_process(
         terminal_session_id="default",
         command="sleep 10",
@@ -213,7 +234,9 @@ def test_spawn_local_process_starts_isolated_session_without_preexec_hook(tmp_pa
         wait_for_process(process, timeout_seconds=0.01, kill_on_timeout=True)
 
 
-def test_spawn_local_process_default_env_does_not_inherit_provider_secret(tmp_path, monkeypatch) -> None:
+def test_spawn_local_process_default_env_does_not_inherit_provider_secret(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("PULSARA_API_KEY", "pulsara-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     process = spawn_local_process(
@@ -245,7 +268,7 @@ def test_terminal_runtime_truncates_with_head_and_tail(tmp_path) -> None:
 
     result = run(
         session,
-        "python -c 'print(\"HEAD\" + \"x\" * 200 + \"TAIL\")'",
+        'python -c \'print("HEAD" + "x" * 200 + "TAIL")\'',
         max_output_chars=60,
     )
 
@@ -322,14 +345,20 @@ def test_terminal_runtime_sanitizes_pty_child_environment(tmp_path) -> None:
     manager = make_manager(tmp_path, env_builder=env_builder)
     session = manager.get_or_create()
 
-    result = run(session, "python -c 'import os; print(\"present\", \"PULSARA_API_KEY\" in os.environ)'", tty=True)
+    result = run(
+        session,
+        'python -c \'import os; print("present", "PULSARA_API_KEY" in os.environ)\'',
+        tty=True,
+    )
 
     assert result.status is TerminalStatus.SUCCESS
     assert "present False" in result.output
     assert "pulsara-secret" not in result.output
 
 
-def test_terminal_runtime_shell_snapshot_path_is_used_without_login_shell_default(tmp_path) -> None:
+def test_terminal_runtime_shell_snapshot_path_is_used_without_login_shell_default(
+    tmp_path,
+) -> None:
     bin_dir = tmp_path / "custom-bin"
     bin_dir.mkdir()
     tool = bin_dir / "snapshot-tool"
@@ -339,9 +368,9 @@ def test_terminal_runtime_shell_snapshot_path_is_used_without_login_shell_defaul
         fake_shell,
         "#!/bin/sh\n"
         "command=''\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
-        "    -c) shift; command=\"${1:-}\"; break ;;\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    -c) shift; command="${1:-}"; break ;;\n'
         "    *) shift ;;\n"
         "  esac\n"
         "done\n"
@@ -351,7 +380,7 @@ def test_terminal_runtime_shell_snapshot_path_is_used_without_login_shell_defaul
         "  printf 'OPENAI_API_KEY=secret\\0'\n"
         "  exit 0\n"
         "fi\n"
-        "exec /bin/sh -c \"$command\"\n",
+        'exec /bin/sh -c "$command"\n',
     )
     env_builder = TerminalEnvBuilder(
         config=TerminalEnvConfig(enable_shell_snapshot=True),
@@ -394,10 +423,14 @@ def test_terminal_runtime_nearest_venv_overlay_uses_session_cwd(tmp_path) -> Non
     assert root.output == "root-venv"
     assert cd.status is TerminalStatus.SUCCESS
     assert package.output == "package-venv"
-    assert package.metadata["env"]["venv_overlay"] == str(tmp_path / "packages" / "foo" / ".venv" / "bin")
+    assert package.metadata["env"]["venv_overlay"] == str(
+        tmp_path / "packages" / "foo" / ".venv" / "bin"
+    )
 
 
-def test_terminal_runtime_venv_overlay_falls_back_to_root_and_ignores_outside(tmp_path) -> None:
+def test_terminal_runtime_venv_overlay_falls_back_to_root_and_ignores_outside(
+    tmp_path,
+) -> None:
     outside = tmp_path.parent / f"outside-venv-{os.getpid()}"
     try:
         (tmp_path / ".venv" / "bin").mkdir(parents=True)
@@ -439,8 +472,13 @@ def test_terminal_runtime_venv_overlay_switches_python_resolution(tmp_path) -> N
         make_manager(
             tmp_path,
             env_builder=TerminalEnvBuilder(
-                config=TerminalEnvConfig(enable_shell_snapshot=False, enable_venv_overlay=False),
-                parent_env={"PATH": f"{parent_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+                config=TerminalEnvConfig(
+                    enable_shell_snapshot=False, enable_venv_overlay=False
+                ),
+                parent_env={
+                    "PATH": f"{parent_bin}:/usr/bin:/bin",
+                    "HOME": str(tmp_path),
+                },
             ),
         ).get_or_create(),
         command,
@@ -449,8 +487,13 @@ def test_terminal_runtime_venv_overlay_switches_python_resolution(tmp_path) -> N
         make_manager(
             tmp_path,
             env_builder=TerminalEnvBuilder(
-                config=TerminalEnvConfig(enable_shell_snapshot=False, enable_venv_overlay=True),
-                parent_env={"PATH": f"{parent_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+                config=TerminalEnvConfig(
+                    enable_shell_snapshot=False, enable_venv_overlay=True
+                ),
+                parent_env={
+                    "PATH": f"{parent_bin}:/usr/bin:/bin",
+                    "HOME": str(tmp_path),
+                },
             ),
         ).get_or_create(),
         command,
@@ -461,7 +504,10 @@ def test_terminal_runtime_venv_overlay_switches_python_resolution(tmp_path) -> N
     assert disabled.metadata["env"]["venv_overlay"] is None
 
     assert enabled.status is TerminalStatus.SUCCESS
-    assert enabled.output.splitlines() == [str(workspace_python), "workspace-venv-python"]
+    assert enabled.output.splitlines() == [
+        str(workspace_python),
+        "workspace-venv-python",
+    ]
     assert enabled.metadata["env"]["venv_overlay"] == str(workspace_venv_bin)
 
 
@@ -473,7 +519,7 @@ def test_terminal_runtime_lifetime_watchdog_kills_process_group(tmp_path) -> Non
         session,
         (
             "python -c 'import subprocess, time; "
-            f"subprocess.Popen([\"sh\", \"-c\", \"sleep 2; touch /tmp/{marker}\"]); "
+            f'subprocess.Popen(["sh", "-c", "sleep 2; touch /tmp/{marker}"]); '
             "time.sleep(10)'"
         ),
         yield_time_ms=5000,
@@ -512,7 +558,9 @@ def test_terminal_runtime_yielded_process_poll_wait_and_kill(tmp_path) -> None:
     assert killed.status is TerminalStatus.KILLED
 
 
-def test_terminal_runtime_yielded_process_without_lifetime_survives_past_default_window(tmp_path) -> None:
+def test_terminal_runtime_yielded_process_without_lifetime_survives_past_default_window(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
@@ -555,7 +603,9 @@ def test_terminal_runtime_yielded_high_output_does_not_deadlock(tmp_path) -> Non
     )
     assert result.process_id is not None
 
-    final = manager.wait_process(result.process_id, timeout_seconds=10, max_output_chars=200)
+    final = manager.wait_process(
+        result.process_id, timeout_seconds=10, max_output_chars=200
+    )
 
     assert final.status is TerminalStatus.SUCCESS
     assert final.truncated is True
@@ -577,7 +627,9 @@ def test_terminal_runtime_yielded_process_does_not_update_session_cwd(tmp_path) 
     assert after.output == str(tmp_path)
 
 
-def test_terminal_runtime_long_running_command_yields_to_managed_process(tmp_path) -> None:
+def test_terminal_runtime_long_running_command_yields_to_managed_process(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
@@ -588,18 +640,25 @@ def test_terminal_runtime_long_running_command_yields_to_managed_process(tmp_pat
     assert manager.kill_process(yielded.process_id).status is TerminalStatus.KILLED
 
 
-def test_terminal_runtime_shell_background_wrapper_suggests_terminal_yield(tmp_path) -> None:
+def test_terminal_runtime_shell_background_wrapper_suggests_terminal_yield(
+    tmp_path,
+) -> None:
     session = make_session(tmp_path)
 
     result = run(session, "sleep 5 &")
 
     assert result.status is TerminalStatus.BLOCKED
-    assert result.error == "shell-level background wrappers should use terminal yield semantics instead"
+    assert (
+        result.error
+        == "shell-level background wrappers should use terminal yield semantics instead"
+    )
     assert result.metadata["policy_code"] == "use_terminal_yield"
     assert result.metadata["suggested_args"] == {"yield_time_ms": 0}
 
 
-def test_terminal_runtime_non_hardline_risky_command_is_not_blocked_by_runtime_floor(tmp_path) -> None:
+def test_terminal_runtime_non_hardline_risky_command_is_not_blocked_by_runtime_floor(
+    tmp_path,
+) -> None:
     session = make_session(tmp_path)
     (tmp_path / "build").mkdir()
 
@@ -609,7 +668,9 @@ def test_terminal_runtime_non_hardline_risky_command_is_not_blocked_by_runtime_f
     assert not (tmp_path / "build").exists()
 
 
-def test_terminal_runtime_hardline_command_is_blocked_when_called_directly(tmp_path) -> None:
+def test_terminal_runtime_hardline_command_is_blocked_when_called_directly(
+    tmp_path,
+) -> None:
     session = make_session(tmp_path)
 
     result = run(session, "rm -rf /")
@@ -619,7 +680,9 @@ def test_terminal_runtime_hardline_command_is_blocked_when_called_directly(tmp_p
     assert result.metadata["policy_code"] == "hardline_terminal_command"
 
 
-def test_terminal_runtime_yield_limit_does_not_count_in_window_completion(tmp_path) -> None:
+def test_terminal_runtime_yield_limit_does_not_count_in_window_completion(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path, max_live_processes=1)
     session = manager.get_or_create()
 
@@ -636,17 +699,25 @@ def test_terminal_runtime_yield_limit_does_not_count_in_window_completion(tmp_pa
     manager.kill_process(first.process_id)
 
 
-def test_terminal_runtime_finished_process_retention_is_lazy_and_bounded(tmp_path) -> None:
+def test_terminal_runtime_finished_process_retention_is_lazy_and_bounded(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path, max_finished_processes=1)
     session = manager.get_or_create()
 
     first = run(session, "sleep 0.05 && printf first", yield_time_ms=0)
     assert first.process_id is not None
-    assert manager.wait_process(first.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
+    assert (
+        manager.wait_process(first.process_id, timeout_seconds=2).status
+        is TerminalStatus.SUCCESS
+    )
 
     second = run(session, "sleep 0.05 && printf second", yield_time_ms=0)
     assert second.process_id is not None
-    assert manager.wait_process(second.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
+    assert (
+        manager.wait_process(second.process_id, timeout_seconds=2).status
+        is TerminalStatus.SUCCESS
+    )
     manager.poll_process(second.process_id)
 
     try:
@@ -680,26 +751,38 @@ def test_terminal_runtime_owner_scoped_process_access(tmp_path) -> None:
 
     with pytest.raises(KeyError):
         manager.poll_process(result.process_id, owner_host_session_id="host:b")
-    assert manager.poll_process(result.process_id, owner_host_session_id="host:a").status is TerminalStatus.RUNNING
+    assert (
+        manager.poll_process(result.process_id, owner_host_session_id="host:a").status
+        is TerminalStatus.RUNNING
+    )
     assert second.current_cwd == tmp_path
     assert manager.kill_owned("host:a")[0].status is TerminalStatus.KILLED
 
 
-def test_terminal_runtime_list_processes_returns_running_and_finished_tasks(tmp_path) -> None:
+def test_terminal_runtime_list_processes_returns_running_and_finished_tasks(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create(owner_host_session_id="host:a")
 
     running = session.execute(TerminalRequest(command="sleep 5", yield_time_ms=0))
-    finished = session.execute(TerminalRequest(command="sleep 0.05 && printf done", yield_time_ms=0))
+    finished = session.execute(
+        TerminalRequest(command="sleep 0.05 && printf done", yield_time_ms=0)
+    )
     assert running.process_id is not None
     assert finished.process_id is not None
     manager.wait_process(finished.process_id, timeout_seconds=2)
 
     processes = manager.list_processes(owner_host_session_id="host:a")
-    running_only = manager.list_processes(owner_host_session_id="host:a", include_finished=False)
+    running_only = manager.list_processes(
+        owner_host_session_id="host:a", include_finished=False
+    )
 
     assert [process.status for process in running_only] == ["running"]
-    assert {process.process_id for process in processes} == {running.process_id, finished.process_id}
+    assert {process.process_id for process in processes} == {
+        running.process_id,
+        finished.process_id,
+    }
     assert all(process.duration_seconds >= 0 for process in processes)
     assert all(process.started_at_monotonic > 0 for process in processes)
     assert manager.kill_process(running.process_id).status is TerminalStatus.KILLED
@@ -715,12 +798,14 @@ def test_terminal_runtime_list_processes_is_owner_scoped(tmp_path) -> None:
     assert first_result.process_id is not None
     assert second_result.process_id is not None
 
-    assert [process.process_id for process in manager.list_processes(owner_host_session_id="host:a")] == [
-        first_result.process_id
-    ]
-    assert [process.process_id for process in manager.list_processes(owner_host_session_id="host:b")] == [
-        second_result.process_id
-    ]
+    assert [
+        process.process_id
+        for process in manager.list_processes(owner_host_session_id="host:a")
+    ] == [first_result.process_id]
+    assert [
+        process.process_id
+        for process in manager.list_processes(owner_host_session_id="host:b")
+    ] == [second_result.process_id]
     manager.shutdown()
 
 
@@ -728,7 +813,9 @@ def test_terminal_runtime_log_process_returns_output_and_summary(tmp_path) -> No
     manager = make_manager(tmp_path)
     session = manager.get_or_create(owner_host_session_id="host:a")
 
-    result = session.execute(TerminalRequest(command="sleep 0.05 && printf LOG_OK", yield_time_ms=0))
+    result = session.execute(
+        TerminalRequest(command="sleep 0.05 && printf LOG_OK", yield_time_ms=0)
+    )
     assert result.process_id is not None
     manager.wait_process(result.process_id, timeout_seconds=2)
     log = manager.log_process(result.process_id, owner_host_session_id="host:a")
@@ -745,7 +832,9 @@ def test_terminal_runtime_finished_process_list_respects_ttl_cleanup(tmp_path) -
     manager = make_manager(tmp_path, finished_ttl_seconds=0.01)
     session = manager.get_or_create(owner_host_session_id="host:a")
 
-    result = session.execute(TerminalRequest(command="sleep 0.05 && printf old", yield_time_ms=0))
+    result = session.execute(
+        TerminalRequest(command="sleep 0.05 && printf old", yield_time_ms=0)
+    )
     assert result.process_id is not None
     manager.wait_process(result.process_id, timeout_seconds=2)
     time.sleep(0.03)
@@ -753,9 +842,13 @@ def test_terminal_runtime_finished_process_list_respects_ttl_cleanup(tmp_path) -
     assert manager.list_processes(owner_host_session_id="host:a") == []
 
 
-def test_terminal_runtime_yielded_process_records_completion_event_once(tmp_path) -> None:
+def test_terminal_runtime_yielded_process_records_completion_event_once(
+    tmp_path,
+) -> None:
     events = []
-    ctx = EventContext(run_id="run:terminal", turn_id="turn:terminal", reply_id="reply:terminal")
+    ctx = EventContext(
+        run_id="run:terminal", turn_id="turn:terminal", reply_id="reply:terminal"
+    )
     manager = make_manager(tmp_path)
     session = manager.get_or_create(owner_host_session_id="host:a")
 
@@ -763,12 +856,8 @@ def test_terminal_runtime_yielded_process_records_completion_event_once(tmp_path
         TerminalRequest(
             command="sleep 0.05 && printf API_KEY=secret-token",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:terminal",
-                "record_event": events.append,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:terminal", events.append),
     )
     assert result.process_id is not None
     manager.wait_process(result.process_id, timeout_seconds=2)
@@ -788,9 +877,13 @@ def test_terminal_runtime_yielded_process_records_completion_event_once(tmp_path
     assert "secret-token" not in event.output_preview
 
 
-def test_terminal_runtime_in_window_completion_does_not_record_completion_event(tmp_path) -> None:
+def test_terminal_runtime_in_window_completion_does_not_record_completion_event(
+    tmp_path,
+) -> None:
     events = []
-    ctx = EventContext(run_id="run:foreground", turn_id="turn:foreground", reply_id="reply:foreground")
+    ctx = EventContext(
+        run_id="run:foreground", turn_id="turn:foreground", reply_id="reply:foreground"
+    )
     manager = make_manager(tmp_path)
     session = manager.get_or_create(owner_host_session_id="host:a")
 
@@ -798,12 +891,8 @@ def test_terminal_runtime_in_window_completion_does_not_record_completion_event(
         TerminalRequest(
             command="printf FOREGROUND_DONE",
             yield_time_ms=10_000,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:terminal",
-                "record_event": events.append,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:terminal", events.append),
     )
 
     assert result.status is TerminalStatus.SUCCESS
@@ -811,7 +900,9 @@ def test_terminal_runtime_in_window_completion_does_not_record_completion_event(
     assert events == []
 
 
-def test_terminal_runtime_completion_event_race_does_not_miss_fast_yield(tmp_path) -> None:
+def test_terminal_runtime_completion_event_race_does_not_miss_fast_yield(
+    tmp_path,
+) -> None:
     events = []
     ctx = EventContext(run_id="run:race", turn_id="turn:race", reply_id="reply:race")
     manager = make_manager(tmp_path)
@@ -821,12 +912,8 @@ def test_terminal_runtime_completion_event_race_does_not_miss_fast_yield(tmp_pat
         TerminalRequest(
             command="printf FAST_DONE",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:terminal",
-                "record_event": events.append,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:terminal", events.append),
     )
     if result.process_id is not None:
         manager.wait_process(result.process_id, timeout_seconds=2)
@@ -834,7 +921,9 @@ def test_terminal_runtime_completion_event_race_does_not_miss_fast_yield(tmp_pat
     assert result.process_id is None or len(events) == 1
 
 
-def test_terminal_runtime_user_kill_and_shutdown_both_record_lifecycle_completion(tmp_path) -> None:
+def test_terminal_runtime_user_kill_and_shutdown_both_record_lifecycle_completion(
+    tmp_path,
+) -> None:
     ctx = EventContext(run_id="run:kill", turn_id="turn:kill", reply_id="reply:kill")
     user_events = []
     teardown_events = []
@@ -845,19 +934,15 @@ def test_terminal_runtime_user_kill_and_shutdown_both_record_lifecycle_completio
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={"origin_event_context": ctx, "tool_call_id": "call:user", "record_event": user_events.append},
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:user", user_events.append),
     )
     teardown = session.execute(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:teardown",
-                "record_event": teardown_events.append,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:teardown", teardown_events.append),
     )
     assert user.process_id is not None
     assert teardown.process_id is not None
@@ -921,12 +1006,8 @@ def test_terminal_completion_record_failure_returns_pending_and_retries_stable_e
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-retry",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:completion-retry", recorder),
     )
     assert result.process_id is not None
 
@@ -972,12 +1053,8 @@ def test_terminal_completion_uncertain_commit_is_confirmed_by_bounded_retry(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-uncertain",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:completion-uncertain", recorder),
     )
     assert result.process_id is not None
 
@@ -1015,12 +1092,10 @@ def test_terminal_pending_completion_is_not_pruned_by_ttl_or_capacity(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-pending-retention",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-pending-retention", recorder
+        ),
     )
     assert result.process_id is not None
 
@@ -1056,12 +1131,10 @@ def test_terminal_pending_completion_cap_blocks_new_yielded_process(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-pending-cap:first",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-pending-cap:first", recorder
+        ),
     )
     assert first.process_id is not None
     manager.kill_process(first.process_id, owner_host_session_id="host:a")
@@ -1071,12 +1144,10 @@ def test_terminal_pending_completion_cap_blocks_new_yielded_process(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-pending-cap:blocked",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-pending-cap:blocked", recorder
+        ),
     )
 
     assert blocked.status is TerminalStatus.BLOCKED
@@ -1107,12 +1178,10 @@ def test_terminal_owner_release_drains_pending_completion_or_remains_retryable(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-owner-release",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-owner-release", recorder
+        ),
     )
     assert first.process_id is not None
     manager.kill_process(first.process_id, owner_host_session_id="host:a")
@@ -1139,16 +1208,16 @@ def test_terminal_owner_release_drains_pending_completion_or_remains_retryable(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": EventContext(
-                    run_id="run:completion-new-owner",
-                    turn_id="turn:completion-new-owner",
-                    reply_id="reply:completion-new-owner",
-                ),
-                "tool_call_id": "call:completion-new-owner",
-                "record_event": lambda event: event,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            EventContext(
+                run_id="run:completion-new-owner",
+                turn_id="turn:completion-new-owner",
+                reply_id="reply:completion-new-owner",
+            ),
+            "call:completion-new-owner",
+            lambda event: event,
+        ),
     )
     assert second.status is TerminalStatus.RUNNING
     assert second.process_id is not None
@@ -1180,12 +1249,10 @@ def test_terminal_owner_release_deadline_is_not_blocked_by_stuck_recorder(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-blocked-recorder",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-blocked-recorder", recorder
+        ),
     )
     assert started.process_id is not None
     manager.kill_process(started.process_id, owner_host_session_id="host:a")
@@ -1242,12 +1309,10 @@ def test_terminal_recording_worker_start_failure_restores_pending_and_close_bloc
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-worker-start-failure",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-worker-start-failure", recorder
+        ),
     )
     assert started.process_id is not None
     manager.kill_process(started.process_id, owner_host_session_id="host:a")
@@ -1308,14 +1373,14 @@ def test_terminal_retry_timer_start_failure_does_not_leave_fake_schedule(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-timer-start-failure",
-                "record_event": lambda _event: (_ for _ in ()).throw(
-                    RuntimeError("synthetic event store outage")
-                ),
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx,
+            "call:completion-timer-start-failure",
+            lambda _event: (_ for _ in ()).throw(
+                RuntimeError("synthetic event store outage")
+            ),
+        ),
     )
     assert started.process_id is not None
 
@@ -1347,12 +1412,10 @@ def test_terminal_recording_worker_base_exception_returns_ownership_to_pending(
         TerminalRequest(
             command="sleep 5",
             yield_time_ms=0,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:completion-worker-base-exception",
-                "record_event": recorder,
-            },
-        )
+        ),
+        execution_owner=completion_owner(
+            ctx, "call:completion-worker-base-exception", recorder
+        ),
     )
     assert started.process_id is not None
     manager.kill_process(started.process_id, owner_host_session_id="host:a")
@@ -1376,7 +1439,9 @@ def test_terminal_recording_worker_base_exception_returns_ownership_to_pending(
 
 
 def test_terminal_runtime_lifetime_watchdog_records_completion_event(tmp_path) -> None:
-    ctx = EventContext(run_id="run:watchdog", turn_id="turn:watchdog", reply_id="reply:watchdog")
+    ctx = EventContext(
+        run_id="run:watchdog", turn_id="turn:watchdog", reply_id="reply:watchdog"
+    )
     events = []
     manager = make_manager(tmp_path)
     session = manager.get_or_create(owner_host_session_id="host:a")
@@ -1386,12 +1451,8 @@ def test_terminal_runtime_lifetime_watchdog_records_completion_event(tmp_path) -
             command="sleep 5",
             yield_time_ms=0,
             max_lifetime_seconds=1,
-            metadata={
-                "origin_event_context": ctx,
-                "tool_call_id": "call:watchdog",
-                "record_event": events.append,
-            },
-        )
+        ),
+        execution_owner=completion_owner(ctx, "call:watchdog", events.append),
     )
     assert result.process_id is not None
 
@@ -1424,7 +1485,7 @@ def test_terminal_runtime_write_does_not_append_newline(tmp_path) -> None:
 
     result = run(
         session,
-        "python -c 'import sys; data=sys.stdin.read(4); print(\"NL\" if data.endswith(\"\\n\") else \"NO_NL\")'",
+        'python -c \'import sys; data=sys.stdin.read(4); print("NL" if data.endswith("\\n") else "NO_NL")\'',
         yield_time_ms=0,
     )
     assert result.process_id is not None
@@ -1442,7 +1503,7 @@ def test_terminal_runtime_submit_appends_newline(tmp_path) -> None:
 
     result = run(
         session,
-        "python -c 'import sys; line=sys.stdin.readline(); print(\"NL\" if line.endswith(\"\\n\") else \"NO_NL\")'",
+        'python -c \'import sys; line=sys.stdin.readline(); print("NL" if line.endswith("\\n") else "NO_NL")\'',
         yield_time_ms=0,
     )
     assert result.process_id is not None
@@ -1479,18 +1540,23 @@ def test_terminal_runtime_rejects_write_after_process_finished(tmp_path) -> None
 
     result = run(session, "sleep 0.05 && printf done", yield_time_ms=0)
     assert result.process_id is not None
-    assert manager.wait_process(result.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
+    assert (
+        manager.wait_process(result.process_id, timeout_seconds=2).status
+        is TerminalStatus.SUCCESS
+    )
 
     with pytest.raises(ProcessInputError, match="finished"):
         manager.write_process(result.process_id, "late")
 
 
-def test_terminal_runtime_large_output_keeps_redacted_full_output_text(tmp_path) -> None:
+def test_terminal_runtime_large_output_keeps_redacted_full_output_text(
+    tmp_path,
+) -> None:
     session = make_session(tmp_path)
 
     result = run(
         session,
-        "python -c 'print(\"HEAD\"); print(\"API_KEY=secret-token\"); print(\"x\" * 1100000); print(\"TAIL\")'",
+        'python -c \'print("HEAD"); print("API_KEY=secret-token"); print("x" * 1100000); print("TAIL")\'',
         max_output_chars=120,
     )
 
@@ -1506,18 +1572,22 @@ def test_terminal_runtime_large_output_keeps_redacted_full_output_text(tmp_path)
     assert "secret-token" not in result.full_output_text
 
 
-def test_terminal_runtime_yielded_large_output_log_keeps_full_output_text(tmp_path) -> None:
+def test_terminal_runtime_yielded_large_output_log_keeps_full_output_text(
+    tmp_path,
+) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
     result = run(
         session,
-        "python -c 'print(\"START\"); print(\"y\" * 100000); print(\"END\")'",
+        'python -c \'print("START"); print("y" * 100000); print("END")\'',
         yield_time_ms=0,
         max_output_chars=100,
     )
     assert result.process_id is not None
-    final = manager.wait_process(result.process_id, timeout_seconds=5, max_output_chars=100)
+    final = manager.wait_process(
+        result.process_id, timeout_seconds=5, max_output_chars=100
+    )
     log = manager.log_process(result.process_id, max_output_chars=100)
 
     assert final.status is TerminalStatus.SUCCESS
@@ -1555,14 +1625,18 @@ def test_terminal_runtime_pty_python_repl_submit_and_close(tmp_path) -> None:
     result = run(session, "python", yield_time_ms=0, tty=True, max_output_chars=5000)
     assert result.process_id is not None
 
-    manager.write_process(result.process_id, 'print("PULSARA_PTY_OK")', append_newline=True)
+    manager.write_process(
+        result.process_id, 'print("PULSARA_PTY_OK")', append_newline=True
+    )
     poll = manager.poll_process(result.process_id, max_output_chars=5000)
     deadline = time.monotonic() + 3
     while "PULSARA_PTY_OK" not in poll.output and time.monotonic() < deadline:
         time.sleep(0.05)
         poll = manager.poll_process(result.process_id, max_output_chars=5000)
     manager.close_process_stdin(result.process_id)
-    final = manager.wait_process(result.process_id, timeout_seconds=3, max_output_chars=5000)
+    final = manager.wait_process(
+        result.process_id, timeout_seconds=3, max_output_chars=5000
+    )
 
     assert "PULSARA_PTY_OK" in poll.output
     assert final.status is TerminalStatus.SUCCESS

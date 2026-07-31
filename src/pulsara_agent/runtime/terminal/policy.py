@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsara_agent.runtime.terminal.models import TerminalRequest
-from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
+from pulsara_agent.capability.terminal_risk import is_hardline_terminal_command
 
 
 class ExecPolicyDecisionKind(StrEnum):
@@ -50,7 +50,9 @@ class TerminalExecPolicy:
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root.expanduser().resolve()
 
-    def evaluate(self, request: TerminalRequest, *, current_cwd: Path) -> ExecPolicyDecision:
+    def evaluate(
+        self, request: TerminalRequest, *, current_cwd: Path
+    ) -> ExecPolicyDecision:
         command = request.command.strip()
         if not command:
             return ExecPolicyDecision(
@@ -70,7 +72,10 @@ class TerminalExecPolicy:
                 reason="max_output_chars must be positive",
                 code="invalid_output_limit",
             )
-        if request.max_lifetime_seconds is not None and request.max_lifetime_seconds <= 0:
+        if (
+            request.max_lifetime_seconds is not None
+            and request.max_lifetime_seconds <= 0
+        ):
             return ExecPolicyDecision(
                 kind=ExecPolicyDecisionKind.BLOCK,
                 reason="max_lifetime_seconds must be positive when provided",
@@ -83,7 +88,9 @@ class TerminalExecPolicy:
                 code="pipe_stdin_required",
             )
         try:
-            effective_cwd = self.resolve_workdir(request.workdir, current_cwd=current_cwd)
+            effective_cwd = self.resolve_workdir(
+                request.workdir, current_cwd=current_cwd
+            )
         except ValueError as exc:
             return ExecPolicyDecision(
                 kind=ExecPolicyDecisionKind.BLOCK,
@@ -114,7 +121,10 @@ class TerminalExecPolicy:
         raw = Path(normalized_workdir).expanduser()
         candidate = raw if raw.is_absolute() else self.workspace_root / raw
         resolved = candidate.resolve()
-        if resolved != self.workspace_root and self.workspace_root not in resolved.parents:
+        if (
+            resolved != self.workspace_root
+            and self.workspace_root not in resolved.parents
+        ):
             raise ValueError(f"workdir escapes workspace root: {workdir}")
         if not resolved.exists():
             raise ValueError(f"workdir does not exist: {workdir}")

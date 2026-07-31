@@ -13,7 +13,7 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultEndEvent,
 )
-from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
+from pulsara_agent.capability.builtin_catalog import PLAN_WORKFLOW_TOOL_NAMES
 
 
 def sequence_gap_diagnostics(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:
@@ -42,7 +42,9 @@ def sequence_gap_diagnostics(events: Iterable[AgentEvent]) -> list[dict[str, Any
     return diagnostics
 
 
-def run_projection_diagnostics(run_row: dict[str, Any] | None, events: Iterable[AgentEvent]) -> list[dict[str, Any]]:
+def run_projection_diagnostics(
+    run_row: dict[str, Any] | None, events: Iterable[AgentEvent]
+) -> list[dict[str, Any]]:
     if run_row is None:
         return [
             {
@@ -57,14 +59,23 @@ def run_projection_diagnostics(run_row: dict[str, Any] | None, events: Iterable[
         return []
     stale_fields: dict[str, Any] = {}
     if run_row.get("status") != latest_end.status:
-        stale_fields["status"] = {"run_row": run_row.get("status"), "event": latest_end.status}
+        stale_fields["status"] = {
+            "run_row": run_row.get("status"),
+            "event": latest_end.status,
+        }
     if run_row.get("stop_reason") != latest_end.stop_reason:
-        stale_fields["stop_reason"] = {"run_row": run_row.get("stop_reason"), "event": latest_end.stop_reason}
+        stale_fields["stop_reason"] = {
+            "run_row": run_row.get("stop_reason"),
+            "event": latest_end.stop_reason,
+        }
     completed_at = run_row.get("completed_at")
     if completed_at is None:
         stale_fields["completed_at"] = {"run_row": None, "event": latest_end.created_at}
     elif _same_instant(completed_at, latest_end.created_at) is False:
-        stale_fields["completed_at"] = {"run_row": completed_at, "event": latest_end.created_at}
+        stale_fields["completed_at"] = {
+            "run_row": completed_at,
+            "event": latest_end.created_at,
+        }
     if not stale_fields:
         return []
     return [
@@ -77,9 +88,13 @@ def run_projection_diagnostics(run_row: dict[str, Any] | None, events: Iterable[
     ]
 
 
-def permission_snapshot_diagnostics(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:
+def permission_snapshot_diagnostics(
+    events: Iterable[AgentEvent],
+) -> list[dict[str, Any]]:
     event_list = list(events)
-    run_start = next((event for event in event_list if isinstance(event, RunStartEvent)), None)
+    run_start = next(
+        (event for event in event_list if isinstance(event, RunStartEvent)), None
+    )
     if run_start is None:
         return []
 
@@ -134,7 +149,11 @@ def tool_flow_diagnostics(
                 run_end_sequence = event.sequence
         elif isinstance(event, ToolResultEndEvent):
             completed.add(event.tool_call_id)
-            if run_end_sequence is not None and event.sequence is not None and event.sequence > run_end_sequence:
+            if (
+                run_end_sequence is not None
+                and event.sequence is not None
+                and event.sequence > run_end_sequence
+            ):
                 diagnostics.append(
                     {
                         "code": "late_tool_result",

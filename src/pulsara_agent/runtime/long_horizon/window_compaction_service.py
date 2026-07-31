@@ -74,7 +74,7 @@ from pulsara_agent.runtime.session import (
 if TYPE_CHECKING:
     from pulsara_agent.llm.runtime import LLMRuntime
     from pulsara_agent.runtime.session import RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
+    from pulsara_agent.runtime.state import RunActivationWorkingState
 
 
 WINDOW_COMPACTION_PROMPT_VERSION = "window-compaction-summary-prompt.v1"
@@ -108,7 +108,7 @@ class WindowCompactionSourceStale(WindowCompactionError):
 @dataclass(frozen=True, slots=True)
 class WindowCompactionRequest:
     event_context: EventContext
-    state: LoopState | None
+    state: RunActivationWorkingState | None
     run_contract: RunLongHorizonContractFact
     source_window: ContextWindowFact
     source_projection: ContextWindowProjectionState
@@ -244,7 +244,7 @@ class ContextWindowCompactionService:
     async def recover_interrupted(
         self,
         *,
-        state: LoopState | None = None,
+        state: RunActivationWorkingState | None = None,
     ) -> tuple[ContextWindowCompactionFailedEvent, ...]:
         if self._recovery_done:
             return ()
@@ -607,7 +607,6 @@ class ContextWindowCompactionService:
                     start_bundle=bundle,
                     commit_port=RuntimeSessionModelStreamEventCommitPort(
                         runtime_session=self.runtime_session,
-                        state=request.state,
                     ),
                     execution_registry=(
                         self.runtime_session.model_stream_execution_registry
@@ -847,13 +846,12 @@ class ContextWindowCompactionService:
         self,
         candidates: tuple[AgentEvent, ...],
         *,
-        state: LoopState | None,
+        state: RunActivationWorkingState | None,
     ) -> EventWriteResult:
         try:
             return await self.runtime_session.write_events(
                 candidates,
-                state=state,
-            )
+                            )
         except EventPublicationAfterCommitError as exc:
             return exc.result
         except BaseException as original:
@@ -871,7 +869,7 @@ class ContextWindowCompactionService:
         self,
         candidates: tuple[AgentEvent, ...],
         *,
-        state: LoopState | None,
+        state: RunActivationWorkingState | None,
     ) -> EventWriteResult:
         """Hold the Started-to-terminal obligation across confirmed NONE writes."""
 

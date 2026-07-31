@@ -6,11 +6,11 @@ import pytest
 
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     TurnProducedToolResultRelationFact,
     build_projection_fact,
 )
-from pulsara_agent.runtime.projection_jobs.graph_relation import (
+from pulsara_agent.graph.projection_relations import (
     InMemoryCanonicalGraphRelationRepository,
     reject_owned_relation_predicates,
 )

@@ -198,7 +198,7 @@ class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
 
 
 class ToolDeltaBurstContractFact(PhysicalBurstContractBase):
-    schema_version: Literal["tool_delta_burst_contract.v1"]
+    schema_version: Literal["tool_delta_burst_contract.v2"]
     burst_shape: Literal["tool_delta"]
     operation_kind: Literal[
         PhysicalOperationKind.TOOL_CALL,
@@ -208,11 +208,31 @@ class ToolDeltaBurstContractFact(PhysicalBurstContractBase):
     max_result_delta_payload_bytes: PositiveInt
     max_durable_events_per_delta_item: PositiveInt
     max_canonical_wrapper_payload_bytes_per_delta_item: PositiveInt
+    maximum_successor_suspension_commits: NonNegativeInt
+    successor_suspension_reserved_events: NonNegativeInt
+    successor_suspension_reserved_payload_bytes: NonNegativeInt
+    minimum_terminal_tail_events: NonNegativeInt
+    minimum_terminal_tail_payload_bytes: NonNegativeInt
     result_capture_contract_fingerprint: Fingerprint
     artifact_fallback_contract_fingerprint: Fingerprint
 
     @model_validator(mode="after")
     def _covers_delta_burst(self) -> "ToolDeltaBurstContractFact":
+        if self.terminal_tail_reserved_events != (
+            self.minimum_terminal_tail_events
+            + self.successor_suspension_reserved_events
+        ):
+            raise ValueError("tool terminal event tail partition mismatch")
+        if self.terminal_tail_reserved_payload_bytes != (
+            self.minimum_terminal_tail_payload_bytes
+            + self.successor_suspension_reserved_payload_bytes
+        ):
+            raise ValueError("tool terminal byte tail partition mismatch")
+        if self.maximum_successor_suspension_commits == 0 and (
+            self.successor_suspension_reserved_events
+            or self.successor_suspension_reserved_payload_bytes
+        ):
+            raise ValueError("disabled successor suspension cannot reserve a tail")
         required_events = (
             self.max_result_delta_items * self.max_durable_events_per_delta_item
             + self.max_structural_tail_events
@@ -762,6 +782,10 @@ class ActivePhysicalReservationStateFact(FrozenFactBase):
     suspension_fingerprint: Fingerprint | None
     reserved_events_total: PositiveInt
     reserved_payload_bytes_total: PositiveInt
+    companion_payload_reserved_bytes_total: NonNegativeInt = 0
+    companion_payload_charged_bytes_lifetime: NonNegativeInt = 0
+    companion_payload_remaining_bytes: NonNegativeInt = 0
+    companion_charge_contract_fingerprint: Fingerprint | None = None
     charged_candidate_events_lifetime: NonNegativeInt
     charged_candidate_payload_bytes_lifetime: NonNegativeInt
     charged_wrapper_bytes_lifetime: NonNegativeInt
@@ -801,6 +825,14 @@ class ActivePhysicalReservationStateFact(FrozenFactBase):
             > self.reserved_payload_bytes_total
         ):
             raise ValueError("active reservation byte balance exceeds total")
+        if self.companion_payload_charged_bytes_lifetime + (
+            self.companion_payload_remaining_bytes
+        ) != self.companion_payload_reserved_bytes_total:
+            raise ValueError("active reservation companion byte balance mismatch")
+        if (self.companion_payload_reserved_bytes_total > 0) != (
+            self.companion_charge_contract_fingerprint is not None
+        ):
+            raise ValueError("active reservation companion contract matrix mismatch")
         return self
 
 
@@ -930,6 +962,8 @@ class PhysicalOperationReservationFact(FrozenFactBase):
     reserved_payload_bytes: PositiveInt
     terminal_tail_reserved_events: NonNegativeInt
     terminal_tail_reserved_payload_bytes: NonNegativeInt
+    companion_payload_reserved_bytes: NonNegativeInt = 0
+    companion_charge_contract_fingerprint: Fingerprint | None = None
     reservation_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -943,6 +977,10 @@ class PhysicalOperationReservationFact(FrozenFactBase):
             raise ValueError("terminal event tail exceeds reservation")
         if self.terminal_tail_reserved_payload_bytes > self.reserved_payload_bytes:
             raise ValueError("terminal byte tail exceeds reservation")
+        if (self.companion_payload_reserved_bytes > 0) != (
+            self.companion_charge_contract_fingerprint is not None
+        ):
+            raise ValueError("physical reservation companion contract matrix mismatch")
         return self
 
 
@@ -972,6 +1010,10 @@ class PhysicalOperationSuspensionTailFact(FrozenFactBase):
     released_on_suspension_payload_bytes: NonNegativeInt
     retained_tail_after_suspension_events: NonNegativeInt
     retained_tail_after_suspension_payload_bytes: NonNegativeInt
+    companion_remaining_before_suspension_bytes: NonNegativeInt = 0
+    companion_charged_on_suspension_bytes: NonNegativeInt = 0
+    companion_retained_after_suspension_bytes: NonNegativeInt = 0
+    companion_charge_contract_fingerprint: Fingerprint | None = None
     resulting_reservation_state_fingerprint: Fingerprint
     suspension_fingerprint: Fingerprint
 
@@ -994,6 +1036,19 @@ class PhysicalOperationSuspensionTailFact(FrozenFactBase):
             - self.released_on_suspension_payload_bytes
         ):
             raise ValueError("suspension byte balance mismatch")
+        if self.companion_retained_after_suspension_bytes != (
+            self.companion_remaining_before_suspension_bytes
+            - self.companion_charged_on_suspension_bytes
+        ):
+            raise ValueError("suspension companion byte balance mismatch")
+        if self.companion_charge_contract_fingerprint is None and any(
+            (
+                self.companion_remaining_before_suspension_bytes,
+                self.companion_charged_on_suspension_bytes,
+                self.companion_retained_after_suspension_bytes,
+            )
+        ):
+            raise ValueError("suspension companion contract matrix mismatch")
         return self
 
 
@@ -1041,6 +1096,10 @@ class PhysicalOperationSettlementFact(FrozenFactBase):
     released_on_suspension_payload_bytes_lifetime: NonNegativeInt
     released_on_settlement_events: NonNegativeInt
     released_on_settlement_payload_bytes: NonNegativeInt
+    predecessor_companion_remaining_bytes: NonNegativeInt = 0
+    terminal_companion_charge_bytes: NonNegativeInt = 0
+    released_on_settlement_companion_bytes: NonNegativeInt = 0
+    companion_charge_contract_fingerprint: Fingerprint | None = None
     resulting_reservation_state_fingerprint: Fingerprint
     settlement_fingerprint: Fingerprint
 
@@ -1080,6 +1139,19 @@ class PhysicalOperationSettlementFact(FrozenFactBase):
             )
         ):
             raise ValueError("active settlement cannot report suspension release")
+        if self.released_on_settlement_companion_bytes != (
+            self.predecessor_companion_remaining_bytes
+            - self.terminal_companion_charge_bytes
+        ):
+            raise ValueError("settlement companion byte balance mismatch")
+        if self.companion_charge_contract_fingerprint is None and any(
+            (
+                self.predecessor_companion_remaining_bytes,
+                self.terminal_companion_charge_bytes,
+                self.released_on_settlement_companion_bytes,
+            )
+        ):
+            raise ValueError("settlement companion contract matrix mismatch")
         if (self.owner_kind == PhysicalOperationKind.MODEL_CALL) != (
             self.model_stream_measurement_fingerprint is not None
         ):
@@ -1109,6 +1181,10 @@ class PhysicalOperationChargeAppliedFact(FrozenFactBase):
     remaining_before_payload_bytes: NonNegativeInt
     remaining_after_events: NonNegativeInt
     remaining_after_payload_bytes: NonNegativeInt
+    companion_charge_payload_bytes: NonNegativeInt = 0
+    companion_remaining_before_bytes: NonNegativeInt = 0
+    companion_remaining_after_bytes: NonNegativeInt = 0
+    companion_charge_contract_fingerprint: Fingerprint | None = None
     resulting_reservation_state_fingerprint: Fingerprint
     charge_fingerprint: Fingerprint
 
@@ -1135,6 +1211,19 @@ class PhysicalOperationChargeAppliedFact(FrozenFactBase):
             - self.charge_applied_event_charge_payload_bytes
         ):
             raise ValueError("charge-applied byte balance mismatch")
+        if self.companion_remaining_after_bytes != (
+            self.companion_remaining_before_bytes
+            - self.companion_charge_payload_bytes
+        ):
+            raise ValueError("charge-applied companion byte balance mismatch")
+        if self.companion_charge_contract_fingerprint is None and any(
+            (
+                self.companion_charge_payload_bytes,
+                self.companion_remaining_before_bytes,
+                self.companion_remaining_after_bytes,
+            )
+        ):
+            raise ValueError("charge-applied companion contract matrix mismatch")
         return self
 
 
@@ -1204,7 +1293,7 @@ class PhysicalStoredEnvelopeObservation(FrozenRuntimeStateBase):
 _OWN_FINGERPRINTS: tuple[tuple[str, str, str], ...] = (
     ("fixed_batch_event_contract.v1", "event_contract_fingerprint", "fixed-batch-event-contract:v1"),
     ("transport_segmented_burst_contract.v1", "contract_fingerprint", "transport-segmented-burst-contract:v1"),
-    ("tool_delta_burst_contract.v1", "contract_fingerprint", "tool-delta-burst-contract:v1"),
+    ("tool_delta_burst_contract.v2", "contract_fingerprint", "tool-delta-burst-contract:v2"),
     ("fixed_batch_burst_contract.v1", "contract_fingerprint", "fixed-batch-burst-contract:v1"),
     ("stored_envelope_identity_bounds.v1", "bounds_contract_fingerprint", "stored-envelope-identity-bounds:v1"),
     ("physical_bookkeeping_event_bound.v1", "bound_fingerprint", "physical-bookkeeping-event-bound:v1"),

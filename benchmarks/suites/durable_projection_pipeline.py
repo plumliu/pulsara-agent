@@ -13,14 +13,14 @@ from time import monotonic
 from typing import Any
 
 from pulsara_agent.event import EventContext, ReplyEndEvent, ReplyStartEvent
-from pulsara_agent.runtime.blocking_executor import (
+from pulsara_agent.blocking_executor import (
     blocking_executor_capacity,
     projection_maintenance_executor,
 )
 from pulsara_agent.runtime.projection_jobs.service import (
     DurableProjectionJobService,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionKind,
 )
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent

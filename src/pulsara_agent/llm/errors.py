@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.ports.model_lifecycle import ModelLifecycleContractError
 
-class ModelContractError(RuntimeError):
+
+class ModelContractError(ModelLifecycleContractError):
     reason_code = "model_contract_error"
 
 

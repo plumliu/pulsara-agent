@@ -60,7 +60,7 @@ from pulsara_agent.memory.foundation.protocols import (
     ArtifactStore,
     RuntimeEventReadStore,
 )
-from pulsara_agent.memory.foundation.provenance import (
+from pulsara_agent.replay.provenance import (
     RuntimeEventRef,
     RuntimeEventSpan,
     runtime_event_span_from_events,
@@ -81,10 +81,10 @@ from pulsara_agent.memory.recall.service import (
     RecallTrigger,
 )
 from pulsara_agent.memory.foundation.records import (
-    ArtifactContentConflict,
     ArtifactPutConfirmation,
     ArtifactWriteResult,
 )
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 from pulsara_agent.memory.scope import (
     CTX_USER,

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 from dataclasses import replace
 
@@ -27,7 +32,6 @@ from pulsara_agent.primitives.context import (
     ContextCompileInputManifestFact,
     context_fingerprint,
 )
-from pulsara_agent.runtime import AgentRuntime
 from pulsara_agent.runtime.context_input.live import (
     _advance_sparse_relevant_through_sequence,
     collect_live_context_inputs,
@@ -372,13 +376,13 @@ async def _captured_live_collect_args(tmp_path, monkeypatch):
         return original(**kwargs)
 
     monkeypatch.setattr(live_module, "collect_live_context_inputs", capture)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
     )
     await run_agent_task(agent, "snapshot joins")
-    return captured[0], agent.runtime_session
+    return captured[0], runtime_session_for_test(agent)
 
 
 def test_live_snapshot_permission_join_fails_closed(tmp_path, monkeypatch) -> None:

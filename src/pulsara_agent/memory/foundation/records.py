@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.jsonld import jsonld_value
-from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
+from pulsara_agent.replay.provenance import RuntimeEventSpan
 from pulsara_agent.ontology import memory, runtime as rt
 
 
@@ -28,10 +28,6 @@ class ArtifactWriteResult:
             "stored_at": self.stored_at,
             "size_bytes": self.size_bytes,
         }
-
-
-class ArtifactContentConflict(RuntimeError):
-    """A deterministic artifact id already names different semantic content."""
 
 
 @dataclass(frozen=True, slots=True)

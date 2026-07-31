@@ -8,15 +8,20 @@ from typing import cast
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.event_log.transcript_prefix import (
+from pulsara_agent.primitives.transcript_accumulators import (
     EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
     EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.primitives.compaction import (
+    BackgroundDerivedWorkBudgetAccountFact,
+    DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+    build_background_budget_genesis,
+)
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionCommitConfirmation,
     DurableProjectionKindActivationFact,
     DurableProjectionSessionCutoverFact,
@@ -40,7 +45,9 @@ def build_runtime_session_owner_semantic(
     runtime_session_id: str,
     workspace_root: str | None,
 ) -> RuntimeSessionOwnerSemanticFact:
-    normalized_workspace = workspace_root.strip() if workspace_root is not None else None
+    normalized_workspace = (
+        workspace_root.strip() if workspace_root is not None else None
+    )
     if not runtime_session_id:
         raise ValueError("runtime_session_id must be non-empty")
     if normalized_workspace == "":
@@ -72,8 +79,11 @@ def build_runtime_session_bootstrap_candidate(
             RuntimeSessionOwnerBootstrapCandidateFact,
             schema_version="runtime_session_owner_bootstrap_candidate.v1",
             session_owner=owner,
-            expected_admission_epoch_fingerprint=(
-                expected_admission_epoch_fingerprint
+            expected_admission_epoch_fingerprint=(expected_admission_epoch_fingerprint),
+            background_budget_policy=DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+            background_budget_account=build_background_budget_genesis(
+                runtime_session_id=runtime_session_id,
+                policy=DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
             ),
         ),
     )
@@ -98,8 +108,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             runtime_session_id=runtime_session_id,
             workspace_root=workspace_root,
             expected_admission_epoch_fingerprint=(
-                self._connection_provider.schema_binding
-                .runtime_write_admission_epoch_fingerprint
+                self._connection_provider.schema_binding.runtime_write_admission_epoch_fingerprint
             ),
         )
 
@@ -186,9 +195,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                 confirmation=DurableProjectionCommitConfirmation.FULL,
                 candidate=candidate,
                 resulting_state=state,
-                physical_disposition=(
-                    "inserted" if inserted else "exact_confirmed"
-                ),
+                physical_disposition=("inserted" if inserted else "exact_confirmed"),
             )
         except BaseException as error:
             return self._confirm_after_uncertain_write(
@@ -239,10 +246,21 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                         (candidate.session_owner.runtime_session_id,),
                     ).fetchone()[0]
                 )
+                budget_count = int(
+                    connection.execute(
+                        """
+                        SELECT count(*)
+                        FROM public.background_derived_work_budget_accounts
+                        WHERE runtime_session_id = %s
+                        """,
+                        (candidate.session_owner.runtime_session_id,),
+                    ).fetchone()[0]
+                )
                 if (
                     row is None
                     and active_count == 0
                     and pre_count == 0
+                    and budget_count == 0
                     and epoch.epoch_fingerprint
                     == candidate.expected_admission_epoch_fingerprint
                 ):
@@ -330,6 +348,29 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     cutover.cutover_fingerprint,
                 ),
             )
+        account = candidate.background_budget_account
+        policy = candidate.background_budget_policy
+        connection.execute(
+            """
+            INSERT INTO public.background_derived_work_budget_accounts (
+                runtime_session_id,
+                policy_payload,
+                policy_fingerprint,
+                account_revision,
+                account_payload,
+                account_fingerprint
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (runtime_session_id) DO NOTHING
+            """,
+            (
+                account.runtime_session_id,
+                Jsonb(policy.model_dump(mode="json")),
+                policy.policy_fingerprint,
+                account.account_revision,
+                Jsonb(account.model_dump(mode="json")),
+                account.account_fingerprint,
+            ),
+        )
 
     @staticmethod
     def _expected_cutovers(
@@ -366,12 +407,8 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             PreActivationProjectionHookContractFact.model_validate(row[0])
             for row in pre_rows
         )
-        active_kinds = {
-            item.activation_semantic.projection_kind for item in active
-        }
-        pre_kinds = {
-            item.contract_semantic.projection_kind for item in pre_activation
-        }
+        active_kinds = {item.activation_semantic.projection_kind for item in active}
+        pre_kinds = {item.contract_semantic.projection_kind for item in pre_activation}
         if active_kinds & pre_kinds:
             raise ValueError("projection kind has active and pre-activation authority")
         expected_active: list[DurableProjectionSessionCutoverFact] = []
@@ -382,9 +419,7 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     DurableProjectionSessionCutoverFact,
                     schema_version="durable_projection_session_cutover.v1",
                     runtime_session_id=candidate.session_owner.runtime_session_id,
-                    projection_kind=(
-                        activation.activation_semantic.projection_kind
-                    ),
+                    projection_kind=(activation.activation_semantic.projection_kind),
                     cutover_through_sequence=0,
                     cutover_ledger_continuity_accumulator=(
                         EMPTY_LEDGER_CONTINUITY_ACCUMULATOR
@@ -400,30 +435,23 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                     ),
                     activation_fingerprint=activation.activation_fingerprint,
                     seed_contract_fingerprint=(
-                        activation.activation_semantic.seed_contract
-                        .seed_contract_fingerprint
+                        activation.activation_semantic.seed_contract.seed_contract_fingerprint
                     ),
                     cutover_policy_id="post_cutover_events_only",
                 ),
             )
             expected_active.append(cutover)
-        expected_pre_activation: list[
-            PreActivationProjectionSessionCutoverFact
-        ] = []
+        expected_pre_activation: list[PreActivationProjectionSessionCutoverFact] = []
         for contract in pre_activation:
             semantic = contract.contract_semantic
             cutover = cast(
                 PreActivationProjectionSessionCutoverFact,
                 build_projection_fact(
                     PreActivationProjectionSessionCutoverFact,
-                    schema_version=(
-                        "pre_activation_projection_session_cutover.v1"
-                    ),
+                    schema_version=("pre_activation_projection_session_cutover.v1"),
                     runtime_session_id=candidate.session_owner.runtime_session_id,
                     projection_kind=semantic.projection_kind,
-                    pre_activation_contract_fingerprint=(
-                        contract.contract_fingerprint
-                    ),
+                    pre_activation_contract_fingerprint=(contract.contract_fingerprint),
                     cutover_through_sequence=0,
                     cutover_ledger_continuity_accumulator=(
                         EMPTY_LEDGER_CONTINUITY_ACCUMULATOR
@@ -502,26 +530,50 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             or len(pre_rows) != len(expected_pre)
             or any(
                 item.cutover_fingerprint != str(row[1])
-                for item, row in zip(
-                    active_cutovers, active_rows, strict=True
-                )
+                for item, row in zip(active_cutovers, active_rows, strict=True)
             )
             or any(
                 item.cutover_fingerprint != str(row[1])
-                for item, row in zip(
-                    pre_cutovers, pre_rows, strict=True
-                )
+                for item, row in zip(pre_cutovers, pre_rows, strict=True)
             )
             or active_cutovers != expected_active
             or pre_cutovers != expected_pre
         ):
             return None
+        budget_row = connection.execute(
+            """
+            SELECT policy_payload, policy_fingerprint, account_revision,
+                   account_payload, account_fingerprint
+            FROM public.background_derived_work_budget_accounts
+            WHERE runtime_session_id = %s
+            """,
+            (candidate.session_owner.runtime_session_id,),
+        ).fetchone()
+        if budget_row is None or (
+            budget_row[0] != candidate.background_budget_policy.model_dump(mode="json")
+            or str(budget_row[1])
+            != candidate.background_budget_policy.policy_fingerprint
+        ):
+            return None
+        try:
+            current_budget_account = (
+                BackgroundDerivedWorkBudgetAccountFact.model_validate(budget_row[3])
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            current_budget_account.runtime_session_id
+            != candidate.session_owner.runtime_session_id
+            or current_budget_account.policy_fingerprint
+            != candidate.background_budget_policy.policy_fingerprint
+            or int(budget_row[2]) != current_budget_account.account_revision
+            or str(budget_row[4]) != current_budget_account.account_fingerprint
+        ):
+            return None
         active_fingerprints = tuple(
             item.cutover_fingerprint for item in active_cutovers
         )
-        pre_fingerprints = tuple(
-            item.cutover_fingerprint for item in pre_cutovers
-        )
+        pre_fingerprints = tuple(item.cutover_fingerprint for item in pre_cutovers)
         return cast(
             RuntimeSessionBootstrapStateFact,
             build_projection_fact(
@@ -536,6 +588,9 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                         "active": active_fingerprints,
                         "pre_activation": pre_fingerprints,
                     },
+                ),
+                background_budget_account_fingerprint=(
+                    current_budget_account.account_fingerprint
                 ),
                 admission_epoch_fingerprint=(
                     candidate.expected_admission_epoch_fingerprint

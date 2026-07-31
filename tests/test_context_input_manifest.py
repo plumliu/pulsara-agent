@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import pulsara_agent.runtime.session_run_capabilities as capability_module
+
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import (
+    build_test_agent_runtime,
+)
+
+
 import asyncio
 from dataclasses import dataclass, replace
 from threading import Event
@@ -9,7 +18,7 @@ import pytest
 
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.foundation.records import ArtifactContentConflict
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.user_carrier import ROOT_USER_CARRIER_INTERPRETATION
 from pulsara_agent.llm.registry import LLMTransportRegistry
@@ -20,7 +29,7 @@ from pulsara_agent.primitives.context_source import (
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonContextAllocationPolicyFact,
 )
-from pulsara_agent.runtime import AgentRuntime, LoopBudget
+from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.long_horizon.rollup import (
     ObservationRollupRendererRegistry,
 )
@@ -53,18 +62,17 @@ from tests.test_agent_runtime_loop import (
 
 
 async def _candidate(tmp_path, monkeypatch, *, system_prompt: str | None = None):
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
-    agent = AgentRuntime(
+    monkeypatch.setattr(capability_module, "prepare_live_context_snapshot", capture)
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -74,13 +82,13 @@ async def _candidate(tmp_path, monkeypatch, *, system_prompt: str | None = None)
     prepared = captured[0]
     compiled = next(
         event
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
         if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
     )
     assert compiled.input_audit is not None
     manifest = load_context_input_manifest(
         audit=compiled.input_audit,
-        archive=agent.runtime_session.archive,
+        archive=runtime_session_for_test(agent).archive,
     )
     prepared = replace(
         prepared,
@@ -333,12 +341,12 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         _, prepared, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -349,8 +357,8 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         )
         replayed = replay_context_input(
             audit=audit,
-            archive=agent.runtime_session.archive,
-            event_log=agent.runtime_session.event_log,
+            archive=runtime_session_for_test(agent).archive,
+            event_log=runtime_session_for_test(agent).event_log,
             event_slice=event_slice,
         )
         assert replayed.manifest.snapshot == prepared.invocation.fact
@@ -394,8 +402,8 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         )
         exact = replay_compiled_context(
             event=compiled,
-            archive=agent.runtime_session.archive,
-            event_log=agent.runtime_session.event_log,
+            archive=runtime_session_for_test(agent).archive,
+            event_log=runtime_session_for_test(agent).event_log,
             event_slice=event_slice,
         )
         assert exact.status is ContextInputReplayStatus.EXACT_REPLAY
@@ -447,7 +455,7 @@ def test_exact_replay_hydrates_artifact_backed_context_source(
         )
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
         )
         assert compiled.input_audit is not None
@@ -455,7 +463,7 @@ def test_exact_replay_hydrates_artifact_backed_context_source(
         event_slice = ContextEventSlice.from_read_snapshot(
             runtime_session_id=audit.source_runtime_session_id,
             minimum_sequence=audit.authority_from_sequence,
-            snapshot=agent.runtime_session.event_log.read_raw_range_snapshot(
+            snapshot=runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
                 minimum_sequence=audit.authority_from_sequence,
                 through_sequence=audit.source_through_sequence,
             ),
@@ -463,8 +471,8 @@ def test_exact_replay_hydrates_artifact_backed_context_source(
 
         replayed = replay_compiled_context(
             event=compiled,
-            archive=agent.runtime_session.archive,
-            event_log=agent.runtime_session.event_log,
+            archive=runtime_session_for_test(agent).archive,
+            event_log=runtime_session_for_test(agent).event_log,
             event_slice=event_slice,
         )
 
@@ -551,7 +559,7 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
         registry = LLMTransportRegistry()
         registry.register(transport)
         runtime_session = in_memory_runtime_session(tmp_path)
-        agent = AgentRuntime(
+        agent = build_test_agent_runtime(
             capability_runtime=CapabilityRuntime(),
             runtime_session=runtime_session,
             llm_runtime=LLMRuntime(config=config, registry=registry),
@@ -563,9 +571,7 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
         assert result.status.value == "finished", result.error_message
         compiled = next(
             event
-            for event in reversed(
-                runtime_session.event_log.iter(run_id=result.state.run_id)
-            )
+            for event in reversed(runtime_session.event_log.iter(run_id=result.run_id))
             if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
         )
         assert compiled.input_audit is not None
@@ -699,7 +705,7 @@ def test_current_run_recent_protection_moves_to_latest_tool_batch(tmp_path) -> N
             flash_limits=limits,
         )
         runtime_session = in_memory_runtime_session(tmp_path)
-        agent = AgentRuntime(
+        agent = build_test_agent_runtime(
             capability_runtime=CapabilityRuntime(),
             runtime_session=runtime_session,
             llm_runtime=LLMRuntime(config=config, registry=registry),
@@ -714,15 +720,13 @@ def test_current_run_recent_protection_moves_to_latest_tool_batch(tmp_path) -> N
                     getattr(event, "code", None),
                     getattr(event, "message", None),
                 )
-                for event in runtime_session.event_log.iter(run_id=result.state.run_id)
+                for event in runtime_session.event_log.iter(run_id=result.run_id)
                 if type(event).__name__ == "RunErrorEvent"
             ),
         )
         compiled = next(
             event
-            for event in reversed(
-                runtime_session.event_log.iter(run_id=result.state.run_id)
-            )
+            for event in reversed(runtime_session.event_log.iter(run_id=result.run_id))
             if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
         )
         assert compiled.input_audit is not None
@@ -752,12 +756,12 @@ def test_live_and_replay_subagent_selection_use_same_semantic_source(
         _, prepared, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -769,8 +773,8 @@ def test_live_and_replay_subagent_selection_use_same_semantic_source(
 
         replayed = replay_context_input(
             audit=audit,
-            archive=agent.runtime_session.archive,
-            event_log=agent.runtime_session.event_log,
+            archive=runtime_session_for_test(agent).archive,
+            event_log=runtime_session_for_test(agent).event_log,
             event_slice=event_slice,
         )
 
@@ -796,12 +800,12 @@ def test_replay_unknown_or_unsupported_graph_domain_event_is_contract_mismatch(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -823,8 +827,8 @@ def test_replay_unknown_or_unsupported_graph_domain_event_is_contract_mismatch(
         with pytest.raises(ContextInputReplayError) as raised:
             replay_context_input(
                 audit=audit,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
@@ -840,12 +844,12 @@ def test_context_input_replay_classifies_missing_manifest_artifact(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -858,7 +862,7 @@ def test_context_input_replay_classifies_missing_manifest_artifact(
             replay_context_input(
                 audit=audit,
                 archive=InMemoryArchiveStore(),
-                event_log=agent.runtime_session.event_log,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.ARTIFACT_MISSING
@@ -874,14 +878,14 @@ def test_context_input_replay_classifies_audit_contract_mismatch(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit.model_copy(
             update={"input_manifest_fingerprint": "sha256:synthetic-mismatch"}
         )
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -893,8 +897,8 @@ def test_context_input_replay_classifies_audit_contract_mismatch(
         with pytest.raises(ContextInputReplayError) as raised:
             replay_context_input(
                 audit=audit,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
@@ -910,12 +914,12 @@ def test_context_input_replay_classifies_wrong_authority_range_as_untrusted(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -928,8 +932,8 @@ def test_context_input_replay_classifies_wrong_authority_range_as_untrusted(
         with pytest.raises(ContextInputReplayError) as raised:
             replay_context_input(
                 audit=audit,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=wrong_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.LEDGER_UNTRUSTED
@@ -948,12 +952,12 @@ def test_exact_replay_rederives_selection_and_candidate_authority(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
         audit = compiled.input_audit
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=audit.authority_from_sequence,
             through_sequence=audit.source_through_sequence,
         )
@@ -974,8 +978,8 @@ def test_exact_replay_rederives_selection_and_candidate_authority(
         with pytest.raises(ContextInputReplayError) as selection_error:
             replay_context_input(
                 audit=audit,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert (
@@ -1002,8 +1006,8 @@ def test_exact_replay_rederives_selection_and_candidate_authority(
         with pytest.raises(ContextInputReplayError) as authority_error:
             replay_context_input(
                 audit=audit,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert (
@@ -1025,7 +1029,7 @@ def test_inspector_reports_exact_only_after_payload_replay(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
 
@@ -1035,18 +1039,21 @@ def test_inspector_reports_exact_only_after_payload_replay(
 
             @staticmethod
             def events_for_session(runtime_session_id):
-                assert runtime_session_id == agent.runtime_session.runtime_session_id
-                return agent.runtime_session.event_log.iter()
+                assert (
+                    runtime_session_id
+                    == runtime_session_for_test(agent).runtime_session_id
+                )
+                return runtime_session_for_test(agent).event_log.iter()
 
             monkeypatch.setattr(
                 inspector_service,
                 "PostgresArtifactStore",
-                lambda _dsn: agent.runtime_session.archive,
+                lambda _dsn: runtime_session_for_test(agent).archive,
             )
             monkeypatch.setattr(
                 inspector_service,
                 "PostgresEventLog",
-                lambda **_kwargs: agent.runtime_session.event_log,
+                lambda **_kwargs: runtime_session_for_test(agent).event_log,
             )
 
         projection = inspector_service._context_input_replay_projection(  # noqa: SLF001
@@ -1079,7 +1086,7 @@ def test_inspector_distinguishes_zero_cap_omitted_subagent_selection(
 
     async def scenario() -> None:
         runtime_session = in_memory_runtime_session(tmp_path)
-        agent = AgentRuntime(
+        agent = build_test_agent_runtime(
             capability_runtime=CapabilityRuntime(),
             runtime_session=runtime_session,
             llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -1109,7 +1116,7 @@ def test_inspector_distinguishes_zero_cap_omitted_subagent_selection(
         assert result.status.value == "finished"
         compiled = next(
             event
-            for event in runtime_session.event_log.iter(run_id=result.state.run_id)
+            for event in runtime_session.event_log.iter(run_id=result.run_id)
             if isinstance(event, ContextCompiledEvent)
         )
 
@@ -1162,11 +1169,11 @@ def test_exact_replay_rejects_provider_neutral_payload_drift(
         _, _, agent = await _candidate(tmp_path, monkeypatch)
         compiled = next(
             event
-            for event in agent.runtime_session.event_log.iter()
+            for event in runtime_session_for_test(agent).event_log.iter()
             if isinstance(event, ContextCompiledEvent)
         )
         assert compiled.input_audit is not None
-        read = agent.runtime_session.event_log.read_raw_range_snapshot(
+        read = runtime_session_for_test(agent).event_log.read_raw_range_snapshot(
             minimum_sequence=compiled.input_audit.authority_from_sequence,
             through_sequence=compiled.input_audit.source_through_sequence,
         )
@@ -1181,8 +1188,8 @@ def test_exact_replay_rejects_provider_neutral_payload_drift(
         with pytest.raises(ContextInputReplayError) as raised:
             replay_compiled_context(
                 event=drifted,
-                archive=agent.runtime_session.archive,
-                event_log=agent.runtime_session.event_log,
+                archive=runtime_session_for_test(agent).archive,
+                event_log=runtime_session_for_test(agent).event_log,
                 event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
@@ -1216,7 +1223,7 @@ def test_manifest_conflict_emits_input_failure_then_latches_session(tmp_path) ->
             _ConflictingManifestArchive(runtime_session.archive)
         )
         transport = ScriptedTransport([{"text": "must not run"}])
-        agent = AgentRuntime(
+        agent = build_test_agent_runtime(
             capability_runtime=CapabilityRuntime(),
             runtime_session=runtime_session,
             llm_runtime=make_llm_runtime(transport),

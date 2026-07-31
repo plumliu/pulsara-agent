@@ -2,25 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, cast
 
 import pytest
 
 from pulsara_agent.event import EventContext, RunStartEvent
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.runtime import EventCommitError
-from pulsara_agent.runtime.execution_handles import (
-    BoundaryExecutionHandles,
-    CapabilityExecutionBorrowUnavailable,
+from pulsara_agent.ports.subagent import (
+    RecoveredChildCapacityOccupancySlot,
+    build_recovered_child_occupancy_proof,
 )
+from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.runtime.run_execution.commit_gateway import read_ledger_horizon
+from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.runtime.subagent import (
-    ChildExecutionRegistry,
+    ChildActivationOperationRegistry,
+    ChildAdmissionSessionRegistry,
     InMemoryEventLogLocator,
     SubagentRuntime,
     fold_subagent_graph,
 )
-from tests.support.runtime_session import in_memory_runtime_session
 from tests.conftest import run_start_permission_fields
+from tests.support.runtime_session import in_memory_runtime_session
 
 
 CTX = EventContext(run_id="run:parent", turn_id="turn:parent", reply_id="reply:parent")
@@ -41,36 +43,66 @@ async def _start_parent_run(parent) -> None:
     )
 
 
-def test_registry_handle_never_appears_in_graph_projection(tmp_path) -> None:
-    registry = ChildExecutionRegistry()
-    reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
-    session = in_memory_runtime_session(
-        tmp_path,
-        runtime_session_id="runtime:child",
-    )
-    registry.register_prepared(
-        subagent_run_id="subagent_run:ephemeral",
+def _register_owner(
+    registry: ChildAdmissionSessionRegistry,
+    session,
+    *,
+    subagent_run_id: str,
+    reservation=None,
+):
+    reservation = reservation or registry.reserve(parent_run_id=CTX.run_id, count=1)
+    horizon = read_ledger_horizon(session.event_log)
+    return registry.register_prepared(
+        subagent_run_id=subagent_run_id,
         child_runtime_session_id=session.runtime_session_id,
         child_session=session,
         reservation=reservation,
+        parent_runtime_session_id="runtime:parent",
+        parent_run_id=CTX.run_id,
+        spawn_edge_id=f"edge:{subagent_run_id}",
+        parent_graph_horizon=horizon,
+        parent_graph_state_fingerprint=context_fingerprint(
+            "test-subagent-graph-state:v1",
+            [subagent_run_id, horizon.horizon_fingerprint],
+        ),
     )
-    assert registry.get("subagent_run:ephemeral").child_session is session  # type: ignore[union-attr]
+
+
+def _operation_registry(admission: ChildAdmissionSessionRegistry):
+    return ChildActivationOperationRegistry(
+        on_started=admission.mark_activation_started,
+        on_exited=admission.mark_activation_exited,
+    )
+
+
+def test_admission_owner_never_appears_in_graph_projection(tmp_path) -> None:
+    registry = ChildAdmissionSessionRegistry()
+    session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:child")
+    owner = _register_owner(
+        registry,
+        session,
+        subagent_run_id="subagent_run:ephemeral",
+    )
+
+    assert owner.child_composition_lease.child_session is session
+    assert not hasattr(owner, "coroutine")
+    assert not hasattr(owner, "execution_handles")
     assert fold_subagent_graph(()).runs == {}
 
 
-def test_partial_reservation_release_keeps_attached_closing_slot_occupied(
+def test_partial_reservation_keeps_attached_capacity_until_graph_settlement(
     tmp_path,
 ) -> None:
-    registry = ChildExecutionRegistry()
+    registry = ChildAdmissionSessionRegistry()
     reservation = registry.reserve(parent_run_id=CTX.run_id, count=2)
     session = in_memory_runtime_session(
         tmp_path,
         runtime_session_id="runtime:child:partial-reservation",
     )
-    registry.register_prepared(
+    owner = _register_owner(
+        registry,
+        session,
         subagent_run_id="subagent_run:partial-reservation",
-        child_runtime_session_id=session.runtime_session_id,
-        child_session=session,
         reservation=reservation,
     )
 
@@ -78,55 +110,55 @@ def test_partial_reservation_release_keeps_attached_closing_slot_occupied(
 
     assert reservation.uncommitted_count == 0
     assert reservation.active_slot_count == 1
-    assert reservation.released is False
     assert registry.occupied_run_ids(parent_run_id=CTX.run_id) == {
-        "subagent_run:partial-reservation"
+        owner.subagent_run_id
     }
 
-    registry.release_handle("subagent_run:partial-reservation")
+    registry.mark_parent_graph_terminal_full(owner.subagent_run_id)
     assert reservation.released is True
     assert registry.occupied_run_ids(parent_run_id=CTX.run_id) == frozenset()
 
 
-def test_child_registry_owns_and_retires_child_execution_authority(tmp_path) -> None:
-    registry = ChildExecutionRegistry()
+def test_admission_registry_has_no_activation_or_execution_handle_attach_api() -> None:
+    registry = ChildAdmissionSessionRegistry()
+
+    assert not hasattr(registry, "attach_coroutine")
+    assert not hasattr(registry, "attach_execution_handles")
+    assert not hasattr(registry, "cancel")
+
+
+def test_recovered_occupancy_installs_before_repair_and_exact_confirms(tmp_path) -> None:
+    registry = ChildAdmissionSessionRegistry()
     session = in_memory_runtime_session(
         tmp_path,
-        runtime_session_id="runtime:child:authority",
+        runtime_session_id="runtime:child:recovered",
     )
-    registry.register_prepared(
-        subagent_run_id="subagent_run:authority",
+    horizon = read_ledger_horizon(session.event_log)
+    proof = build_recovered_child_occupancy_proof(
+        parent_runtime_session_id="runtime:parent",
+        parent_run_id=CTX.run_id,
+        subagent_run_id="subagent_run:recovered",
+        spawn_edge_id="edge:recovered",
+        parent_graph_horizon=horizon,
+        parent_graph_state_fingerprint=context_fingerprint(
+            "test-recovered-graph:v1", [horizon.horizon_fingerprint]
+        ),
+    )
+
+    owner = registry.register_recovered(
+        proof=proof,
         child_runtime_session_id=session.runtime_session_id,
         child_session=session,
-        reservation=None,
     )
-    handles = BoundaryExecutionHandles(
-        handle_id="child_execution_handles:test",
-        handle_generation=1,
-        owner_id="subagent_run:authority",
-        state="run_owned",
-        mcp_installation="mcp_installation:test",
-        capability_runtime=object(),
-        tool_registry=object(),
-        frozen_execution_surface=cast(Any, object()),
+    same = registry.register_recovered(
+        proof=proof,
+        child_runtime_session_id=session.runtime_session_id,
+        child_session=session,
     )
-    registry.attach_execution_handles("subagent_run:authority", handles)
-    authority = handles.borrow_authority
 
-    authority.borrow_child_tool_call()
-    registry.release_handle("subagent_run:authority")
-
-    retained = registry.get("subagent_run:authority")
-    assert retained is not None
-    assert retained.phase == "closing"
-    assert handles.state == "retiring"
-
-    authority.release_child_tool_call()
-
-    assert handles.state == "closed"
-    assert registry.get("subagent_run:authority") is None
-    with pytest.raises(CapabilityExecutionBorrowUnavailable):
-        authority.borrow_child_tool_call()
+    assert same is owner
+    assert isinstance(owner.capacity_slot, RecoveredChildCapacityOccupancySlot)
+    assert registry.occupied_run_ids() == {owner.subagent_run_id}
 
 
 def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
@@ -135,26 +167,7 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
     class FailingCommitEventLog:
         fail_writes = False
 
-        def append(
-            self,
-            event,
-            *,
-            expected_last_sequence=None,
-            deadline_monotonic=None,
-        ):
-            return self.extend(
-                (event,),
-                expected_last_sequence=expected_last_sequence,
-                deadline_monotonic=deadline_monotonic,
-            )[0]
-
-        def extend(
-            self,
-            events,
-            *,
-            expected_last_sequence=None,
-            deadline_monotonic=None,
-        ):
+        def extend(self, events, *, expected_last_sequence=None, deadline_monotonic=None):
             if self.fail_writes:
                 raise RuntimeError("synthetic event commit failure")
             return backing.extend(
@@ -168,15 +181,7 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
                 raise RuntimeError("synthetic event commit failure")
             return backing.extend_with_materialization_state(events, **kwargs)
 
-        def iter(self, **kwargs):
-            return backing.iter(**kwargs)
-
-        def next_sequence(self):
-            return backing.next_sequence()
-
         def __getattr__(self, name):
-            # This double only faults writes; checkpoint/raw reads still use the
-            # complete EventLog contract provided by the backing store.
             return getattr(backing, name)
 
     faulting_log = FailingCommitEventLog()
@@ -198,11 +203,11 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
             await runtime.spawn_fake(task="must not reserve forever", event_context=CTX)
 
     asyncio.run(run())
-    assert runtime._execution_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
-    assert runtime._execution_registry.handles() == ()  # noqa: SLF001
+    assert runtime._admission_registry.uncommitted_reservation_count() == 0  # noqa: SLF001
+    assert runtime._admission_registry.owners() == ()  # noqa: SLF001
 
 
-def test_terminal_graph_reconciles_and_cancels_live_handle(tmp_path) -> None:
+def test_terminal_graph_reports_independent_active_operation(tmp_path) -> None:
     parent = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
     locator = InMemoryEventLogLocator()
 
@@ -220,40 +225,23 @@ def test_terminal_graph_reconciles_and_cancels_live_handle(tmp_path) -> None:
     async def run() -> None:
         await _start_parent_run(parent)
         child = await runtime.spawn_fake(task="task", event_context=CTX)
-        child_session = runtime.child_runtime_session(child.subagent_run_id)
         await runtime.complete_fake(child.subagent_run_id, summary="done")
-        assert runtime._execution_registry.handles() == ()  # noqa: SLF001
-        registry = ChildExecutionRegistry()
-        handle = registry.register_prepared(
-            subagent_run_id=child.subagent_run_id,
-            child_runtime_session_id=child.child_runtime_session_id,
-            child_session=child_session,
-            reservation=None,
+        diagnostics = ChildAdmissionSessionRegistry().reconcile(
+            fold_subagent_graph(parent.event_log.iter()),
+            active_operation_run_ids=frozenset({child.subagent_run_id}),
         )
-        handle.coroutine = asyncio.create_task(asyncio.sleep(10))  # type: ignore[assignment]
-        handle.phase = "started"
-        diagnostics = registry.reconcile(fold_subagent_graph(parent.event_log.iter()))
-        assert [item.code for item in diagnostics] == ["subagent_terminal_run_handle_active"]
-        await registry.cancel(child.subagent_run_id)
-        assert handle.coroutine.done()
-        assert registry.handles() == ()
+        assert [item.code for item in diagnostics] == [
+            "subagent_terminal_activation_operation_active"
+        ]
 
     asyncio.run(run())
 
 
-def test_graph_active_registry_missing_reports_dangling(tmp_path) -> None:
+def test_graph_active_admission_owner_missing_reports_dangling(tmp_path) -> None:
     parent = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
-    locator = InMemoryEventLogLocator()
-
-    def child_factory(runtime_session_id: str):
-        log = InMemoryEventLog()
-        locator.register(runtime_session_id, log)
-        return log
-
     runtime = SubagentRuntime(
         parent_runtime_session=parent,
-        child_event_log_factory=child_factory,
-        event_log_locator=locator,
+        child_event_log_factory=lambda _runtime_session_id: InMemoryEventLog(),
     )
 
     async def seed() -> None:
@@ -261,41 +249,23 @@ def test_graph_active_registry_missing_reports_dangling(tmp_path) -> None:
         await runtime.spawn_fake(task="task", event_context=CTX)
 
     asyncio.run(seed())
-    diagnostics = ChildExecutionRegistry().reconcile(
+    diagnostics = ChildAdmissionSessionRegistry().reconcile(
         fold_subagent_graph(parent.event_log.iter())
     )
-    assert [item.code for item in diagnostics] == ["subagent_active_run_handle_missing"]
+    assert [item.code for item in diagnostics] == [
+        "subagent_active_admission_owner_missing"
+    ]
 
 
-def test_host_close_drains_all_handles(tmp_path) -> None:
-    registry = ChildExecutionRegistry()
-    session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:child")
-
-    async def run() -> None:
-        handle = registry.register_prepared(
-            subagent_run_id="subagent_run:drain",
-            child_runtime_session_id=session.runtime_session_id,
-            child_session=session,
-            reservation=None,
-        )
-        task = asyncio.create_task(asyncio.sleep(10))
-        registry.attach_coroutine(handle.subagent_run_id, task)
-        await registry.drain(timeout_seconds=1)
-        assert task.done()
-        assert handle.phase == "released"
-        assert registry.handles() == ()
-
-    asyncio.run(run())
-
-
-def test_cancel_waits_for_child_finally_before_session_close(tmp_path) -> None:
-    registry = ChildExecutionRegistry()
+def test_cancel_waits_for_activation_finally_before_session_close(tmp_path) -> None:
+    admission = ChildAdmissionSessionRegistry()
+    operations = _operation_registry(admission)
     order: list[str] = []
     started = asyncio.Event()
-    release_child = asyncio.Event()
 
     class RecordingChildSession:
         runtime_session_id = "runtime:child:drain-order"
+        event_log = InMemoryEventLog()
 
         def close(self) -> None:
             order.append("session_close")
@@ -303,34 +273,35 @@ def test_cancel_waits_for_child_finally_before_session_close(tmp_path) -> None:
     async def child() -> None:
         started.set()
         try:
-            await release_child.wait()
+            await asyncio.Event().wait()
         finally:
             await asyncio.sleep(0)
-            order.append("child_finally")
+            order.append("activation_finally")
 
     async def run() -> None:
-        handle = registry.register_prepared(
+        owner = _register_owner(
+            admission,
+            RecordingChildSession(),
             subagent_run_id="subagent_run:drain-order",
-            child_runtime_session_id=RecordingChildSession.runtime_session_id,
-            child_session=RecordingChildSession(),  # type: ignore[arg-type]
-            reservation=None,
         )
         task = asyncio.create_task(child())
-        registry.attach_coroutine(handle.subagent_run_id, task)
+        operations.install(owner.subagent_run_id, task)
         await started.wait()
+        admission.mark_parent_graph_terminal_full(owner.subagent_run_id)
 
-        await registry.cancel(handle.subagent_run_id, timeout_seconds=1)
+        await operations.cancel(owner.subagent_run_id, timeout_seconds=1)
+        await asyncio.sleep(0)
 
         assert task.cancelled()
-        assert order == ["child_finally", "session_close"]
-        assert handle.phase == "released"
-        assert registry.handles() == ()
+        assert order == ["activation_finally", "session_close"]
+        assert admission.owners() == ()
 
     asyncio.run(run())
 
 
-def test_sync_cancel_requests_on_owner_loop_and_releases_after_done(tmp_path) -> None:
-    registry = ChildExecutionRegistry()
+def test_sync_cancel_runs_on_owner_loop_and_releases_after_exit(tmp_path) -> None:
+    admission = ChildAdmissionSessionRegistry()
+    operations = _operation_registry(admission)
     started = asyncio.Event()
     finished = asyncio.Event()
     owner_thread_id = threading.get_ident()
@@ -349,41 +320,43 @@ def test_sync_cancel_requests_on_owner_loop_and_releases_after_done(tmp_path) ->
             tmp_path,
             runtime_session_id="runtime:child:cross-thread",
         )
-        handle = registry.register_prepared(
+        owner = _register_owner(
+            admission,
+            session,
             subagent_run_id="subagent_run:cross-thread",
-            child_runtime_session_id=session.runtime_session_id,
-            child_session=session,
-            reservation=None,
         )
         task = asyncio.create_task(child())
-        registry.attach_coroutine(handle.subagent_run_id, task)
+        operations.install(owner.subagent_run_id, task)
+        admission.mark_parent_graph_terminal_full(owner.subagent_run_id)
         await started.wait()
 
-        thread = threading.Thread(target=registry.cancel_now, args=(handle.subagent_run_id,))
+        thread = threading.Thread(
+            target=operations.cancel_now,
+            args=(owner.subagent_run_id,),
+        )
         thread.start()
         thread.join(timeout=1)
         assert not thread.is_alive()
-        assert handle.phase == "closing"
 
         await asyncio.wait_for(finished.wait(), timeout=1)
         await asyncio.sleep(0)
         assert task.cancelled()
         assert finally_thread_ids == [owner_thread_id]
-        assert registry.handles() == ()
+        assert admission.owners() == ()
 
     asyncio.run(run())
 
 
-def test_cancel_timeout_keeps_live_handle_and_session_until_coroutine_exits(
-    tmp_path,
-) -> None:
-    registry = ChildExecutionRegistry()
+def test_cancel_timeout_retains_admission_until_physical_exit(tmp_path) -> None:
+    admission = ChildAdmissionSessionRegistry()
+    operations = _operation_registry(admission)
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
     closed: list[bool] = []
 
     class RecordingChildSession:
         runtime_session_id = "runtime:child:slow-cleanup"
+        event_log = InMemoryEventLog()
 
         def close(self) -> None:
             closed.append(True)
@@ -396,28 +369,27 @@ def test_cancel_timeout_keeps_live_handle_and_session_until_coroutine_exits(
             await allow_cleanup.wait()
 
     async def run() -> None:
-        handle = registry.register_prepared(
+        owner = _register_owner(
+            admission,
+            RecordingChildSession(),
             subagent_run_id="subagent_run:slow-cleanup",
-            child_runtime_session_id=RecordingChildSession.runtime_session_id,
-            child_session=RecordingChildSession(),  # type: ignore[arg-type]
-            reservation=None,
         )
         task = asyncio.create_task(child())
-        registry.attach_coroutine(handle.subagent_run_id, task)
+        operations.install(owner.subagent_run_id, task)
+        admission.mark_parent_graph_terminal_full(owner.subagent_run_id)
         await asyncio.sleep(0)
 
-        with pytest.raises(TimeoutError, match="Timed out draining child coroutine"):
-            await registry.cancel(handle.subagent_run_id, timeout_seconds=0.01)
+        with pytest.raises(TimeoutError, match="Timed out draining child activation"):
+            await operations.cancel(owner.subagent_run_id, timeout_seconds=0.01)
 
         await cleanup_started.wait()
-        assert registry.get(handle.subagent_run_id) is handle
-        assert handle.phase == "closing"
+        assert admission.get(owner.subagent_run_id) is owner
         assert closed == []
 
         allow_cleanup.set()
         await task
         await asyncio.sleep(0)
-        assert registry.handles() == ()
+        assert admission.owners() == ()
         assert closed == [True]
 
     asyncio.run(run())

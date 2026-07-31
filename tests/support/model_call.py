@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from tests.support.runtime_owner import runtime_session_for_test
+
+import asyncio
+
 from dataclasses import dataclass, replace
 from typing import AsyncIterator
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
@@ -288,9 +293,7 @@ def _compiled_provider_input_candidate_fixture(
     )
     candidate = bundle.prepared_candidate
     policy = build_default_resolved_causal_physical_policy()
-    empty_wire = context_fingerprint(
-        "provider-ordered-transcript-wire:v2:empty", ()
-    )
+    empty_wire = context_fingerprint("provider-ordered-transcript-wire:v2:empty", ())
     empty_causal = context_fingerprint(
         "provider-ordered-transcript-causal:v2:empty", ()
     )
@@ -623,25 +626,70 @@ def model_terminal_projection_end_reference_fixture(
     )
 
 
+def _test_run_activation_service(agent):
+    service = _TEST_ACTIVATION_SERVICES.get(agent)
+    if service is not None:
+        return service
+
+    from pulsara_agent.runtime.run_execution.interaction_transition import (
+        RuntimeInteractionTransitionService,
+    )
+    from pulsara_agent.runtime.run_execution.service import RunActivationService
+
+    registry = agent.run_execution_registry
+    if registry is None:
+        raise RuntimeError("test activation service requires a run registry")
+
+    async def unexpected_resume_commit(_prepared):
+        raise RuntimeError("test support has no Host resume-boundary commit owner")
+
+    transition = RuntimeInteractionTransitionService(
+        registry=registry,
+        event_log=runtime_session_for_test(agent).event_log,
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
+        commit_resume_boundary=unexpected_resume_commit,
+        classify_write_failure=lambda _exc: "other",
+    )
+    service = RunActivationService(
+        registry=registry,
+        event_log=runtime_session_for_test(agent).event_log,
+        agent_runtime=agent,
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
+    )
+    service.bind_interaction_transition_port(transition)
+    _TEST_ACTIVATION_SERVICES[agent] = service
+    return service
+
+
 async def run_agent_task(agent, user_input: str, **kwargs):
-    """Commit a test-owned Host entry, then invoke the production committed API."""
+    """Commit a test Host entry and run it through the production activation owner."""
 
     _prepare_test_host_run_entry(agent, user_input, kwargs)
     draft, committed, _stored = await _commit_test_host_run_entry(
         agent, user_input, kwargs
     )
-    try:
-        return await agent.run_committed_entry(draft, committed)
-    finally:
-        state = kwargs["state"]
-        working_set = state.run_working_set
-        if (
-            state.status.value != "waiting_user"
-            and working_set is not None
-            and working_set.model_call_control_owner is not None
-        ):
-            await working_set.model_call_control_owner.retire()
-            working_set.model_call_control_owner = None
+    service = _test_run_activation_service(agent)
+    dispatch = service.start_result_activation(
+        run_id=committed.run_start_event.run_id,
+        host_session_id="host:test-support",
+        result_factory=lambda: agent.run_committed_entry(draft, committed),
+    )
+    from pulsara_agent.ports.run_execution import RunSegmentInstallBlocked
+
+    if isinstance(dispatch, RunSegmentInstallBlocked):
+        raise RuntimeError(f"test activation was blocked: {dispatch.reason}")
+    return await _wait_test_activation_result(
+        agent,
+        dispatch,
+        legacy_state=draft.state,
+    )
+
+
+async def commit_test_run_owner(agent, user_input: str, **kwargs):
+    """Commit and promote a test run without starting its activation driver."""
+
+    _prepare_test_host_run_entry(agent, user_input, kwargs)
+    return await _commit_test_host_run_entry(agent, user_input, kwargs)
 
 
 def stream_agent_task(agent, user_input: str, **kwargs):
@@ -653,23 +701,43 @@ def stream_agent_task(agent, user_input: str, **kwargs):
         draft, committed, stored = await _commit_test_host_run_entry(
             agent, user_input, kwargs
         )
+        service = _test_run_activation_service(agent)
+        dispatch = service.start_stream_activation(
+            run_id=committed.run_start_event.run_id,
+            host_session_id="host:test-support",
+            stream_factory=lambda: agent.stream_committed_entry(draft, committed),
+        )
+        from pulsara_agent.ports.run_execution import RunSegmentInstallBlocked
+
+        if isinstance(dispatch, RunSegmentInstallBlocked):
+            raise RuntimeError(f"test activation was blocked: {dispatch.reason}")
+        if dispatch.observer is None:
+            raise RuntimeError("test stream activation lacks its observer")
         try:
             for event in stored:
                 yield event
-            async for event in agent.stream_committed_entry(draft, committed):
+            async for event in dispatch.observer:
                 yield event
+            await _wait_test_activation_result(
+                agent,
+                dispatch,
+                legacy_state=draft.state,
+            )
         finally:
-            state = kwargs["state"]
-            working_set = state.run_working_set
-            if (
-                state.status.value != "waiting_user"
-                and working_set is not None
-                and working_set.model_call_control_owner is not None
-            ):
-                await working_set.model_call_control_owner.retire()
-                working_set.model_call_control_owner = None
+            await dispatch.observer.aclose()
 
     return _stream()
+
+
+async def request_test_run_stop(agent, run_id: str):
+    """Exercise run control independently from the detachable observer."""
+
+    from pulsara_agent.runtime.recovery import AbortKind
+
+    return await _test_run_activation_service(agent).request_active_stop(
+        run_id,
+        AbortKind.USER_STOP,
+    )
 
 
 async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
@@ -681,7 +749,12 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
     from pulsara_agent.runtime.run_entry import (
         CommittedHostRunEntry,
         install_run_working_set,
-        prepare_agent_run_draft,
+    )
+    from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet
+    from pulsara_agent.runtime.run_execution.prepared import PreparedRunActivationOwner
+    from pulsara_agent.runtime.run_execution.registry import RunExecutionRegistry
+    from pulsara_agent.ports.run_execution import (
+        build_prepared_run_owner_reservation_key,
     )
     from pulsara_agent.runtime.session import EventPublicationAfterCommitError
     from pulsara_agent.runtime.long_horizon.run_contract import (
@@ -691,52 +764,84 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
 
     state = kwargs["state"]
     target = kwargs["run_model_target"]
-    if (
-        agent._subagent_parent_features_enabled
-        and agent.subagent_runtime is not None
-        and not agent._subagent_dangling_repair_done
-    ):
+    prepared = kwargs["_prepared_test_host_run_authority"]
+    if agent._subagent_parent_features_enabled and agent.subagent_runtime is not None:
         await agent.subagent_runtime.repair_dangling_children()
-        agent._subagent_dangling_repair_done = True
     run_start_event_id = f"run_start:test:{uuid4().hex}"
     long_horizon = prepare_root_long_horizon_run(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
         run_id=state.run_id,
         run_start_event_id=run_start_event_id,
         primary_target=target.fact,
         summarizer_target=agent.llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
         graph_reducer_contract=(
-            agent.runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
+            runtime_session_for_test(
+                agent
+            ).subagent_graph_checkpoint_service.reducer_binding.contract
         ),
         source_through_sequence_at_open=(
-            agent.runtime_session.event_log.next_sequence() - 1
+            runtime_session_for_test(agent).event_log.next_sequence() - 1
         ),
         initial_projection_unit_count=0,
         initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
     )
-    draft = await prepare_agent_run_draft(
-        agent,
+    draft = await agent.prepare_run_draft(
         state,
         run_model_target=target,
         permission_snapshot=state.permission_snapshot,
-        current_user_message=state.scratchpad["current_user_message_fact"],
+        current_user_message=prepared["current_user_message_fact"],
         run_start_event_id=run_start_event_id,
-        terminal_run_end_event_id=state.scratchpad["terminal_run_end_event_id"],
-        capability_basis=state.scratchpad["capability_resolve_basis"].fact,
-        frozen_execution_surface=state.scratchpad[
-            "frozen_capability_execution_surface"
-        ],
-        host_run_ingress=state.scratchpad["host_run_ingress"],
-        host_ingress_admission_proof=state.scratchpad[
-            "host_ingress_admission_proof"
-        ],
-        new_run_boundary=state.scratchpad["new_run_boundary_fact"],
+        terminal_run_end_event_id=state.terminal_run_end_event_id,
+        capability_basis=state.execution_resources.capability_resolve_basis.fact,
+        frozen_execution_surface=(
+            state.execution_resources.frozen_capability_execution_surface
+        ),
+        host_run_ingress=prepared["host_run_ingress"],
+        host_ingress_admission_proof=prepared["host_ingress_admission_proof"],
+        new_run_boundary=prepared["new_run_boundary_fact"],
         subagent_run_entry=None,
         long_horizon=long_horizon,
         child_rollout_subaccount=None,
         prior_messages=kwargs.get("prior_messages"),
     )
-    audits = agent.runtime_session.pending_mcp_installation_audit_events(
+    registry = agent.run_execution_registry
+    if registry is None:
+        registry = RunExecutionRegistry()
+        agent.bind_run_execution_registry(registry)
+    reservation_key = build_prepared_run_owner_reservation_key(
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
+        run_id=state.run_id,
+        run_start_event_id=run_start_event_id,
+    )
+    frozen_surface = state.execution_resources.frozen_capability_execution_surface
+    if frozen_surface is None:
+        raise RuntimeError("test run entry lost its frozen execution surface")
+    execution_handles = RunExecutionHandleSet(
+        handle_id=f"test_execution_handles:{uuid4().hex}",
+        handle_generation=1,
+        owner=reservation_key,
+        state="boundary_owned",
+        mcp_installation=runtime_session_for_test(agent).mcp_installation_id,
+        capability_runtime=agent.capability_runtime,
+        tool_registry=agent.tool_executor.registry,
+        frozen_execution_surface=frozen_surface,
+    )
+    registry.reserve_prepared(
+        key=reservation_key,
+        execution_handles=execution_handles,
+        reservation_generation=1,
+    )
+    current_task = asyncio.current_task()
+    if current_task is None:
+        raise RuntimeError("test run entry requires an asyncio task owner")
+    prepared_activation = PreparedRunActivationOwner(
+        run_id=state.run_id,
+        boundary_id=draft.run_start_event.new_run_boundary.identity.boundary_id,
+        owner_task=current_task,
+        generation=1,
+        _working_state=state,
+    )
+    audits = runtime_session_for_test(agent).pending_mcp_installation_audit_events(
         EventContext(
             run_id=state.run_id,
             turn_id=state.turn_id,
@@ -763,17 +868,23 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
     )
     try:
         stored = tuple(
-            await agent.runtime_session.emit_many(
+            await runtime_session_for_test(agent).emit_many(
                 (draft.run_start_event, window_open, account_open, *audits),
-                state=state,
             )
         )
     except EventPublicationAfterCommitError as exc:
-        agent.runtime_session.acknowledge_committed_mcp_installation_audits(
+        runtime_session_for_test(agent).acknowledge_committed_mcp_installation_audits(
             exc.result.committed_events
         )
+        registry.release_prepared(reservation_key, outcome="unknown")
         raise
-    agent.runtime_session.acknowledge_committed_mcp_installation_audits(stored)
+    except BaseException:
+        registry.release_prepared(reservation_key, outcome="none")
+        prepared_activation.release()
+        raise
+    runtime_session_for_test(agent).acknowledge_committed_mcp_installation_audits(
+        stored
+    )
     run_start = stored[0]
     assert run_start.sequence is not None
     assert draft.run_start_event.new_run_boundary is not None
@@ -785,41 +896,29 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         boundary_id=draft.run_start_event.new_run_boundary.identity.boundary_id,
         committed_audit_event_ids=tuple(event.id for event in stored[3:]),
     )
-    agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
-        run_start
+    owner = registry.promote_committed_entry(
+        reservation_key=reservation_key,
+        committed=committed,
+        run_start_envelope=runtime_session_for_test(
+            agent
+        ).event_log.read_raw_events_by_id((run_start.id,))[0],
+        prepared_activation=prepared_activation,
     )
+    state.execution_resources.capability_execution_borrow_authority = (
+        owner.execution_handles.borrow_authority
+    )
+    state.execution_resources.capability_execution_borrow_kind = "parent"
+    runtime_session_for_test(
+        agent
+    ).transcript_projection_checkpoint_service.adopt_committed_run_seed(run_start)
     install_run_working_set(
         state,
         committed,
-        plan_snapshot=state.scratchpad["host_run_boundary_plan"],
-        capability_resolve_basis=state.scratchpad["capability_resolve_basis"],
-        frozen_execution_surface=state.scratchpad[
-            "frozen_capability_execution_surface"
-        ],
-    )
-    from pulsara_agent.llm.control import RunModelCallControlOwner
-
-    working_set = state.run_working_set
-    assert working_set is not None
-    activation_payload = {
-        "schema_version": "run_execution_activation.v1",
-        "activation_owner_kind": "host_run_boundary",
-        "activation_owner_id": draft.run_start_event.new_run_boundary.identity.boundary_id,
-        "segment_generation": 1,
-    }
-    activation = RunExecutionActivationFact(
-        **activation_payload,
-        activation_fingerprint=sha256_fingerprint(
-            "run-execution-activation:v1", activation_payload
+        plan_snapshot=prepared["host_run_boundary_plan"],
+        capability_resolve_basis=state.execution_resources.capability_resolve_basis,
+        frozen_execution_surface=(
+            state.execution_resources.frozen_capability_execution_surface
         ),
-    )
-    working_set.run_execution_activation = activation
-    working_set.process_segment_id = f"test_segment:{state.run_id}:1"
-    working_set.model_call_control_owner = RunModelCallControlOwner(
-        run_id=state.run_id,
-        activation=activation,
-        segment_id=working_set.process_segment_id,
-        segment_generation=1,
     )
     return draft, committed, stored
 
@@ -858,13 +957,14 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
 
     _ensure_test_postgres_runtime_owner(agent)
     state = kwargs.setdefault("state", agent.new_state())
+    _TEST_RUN_STATES.setdefault(agent, {})[state.run_id] = state
     target = kwargs.setdefault("run_model_target", agent.resolve_run_model_target())
     permission = agent._capture_run_permission_snapshot(state)
     observed_at = utc_now()
     boundary = HostRunBoundaryIdentityFact(
         boundary_id=f"run_boundary:test:{uuid4().hex}",
         kind="pre_run",
-        runtime_session_id=agent.runtime_session.runtime_session_id,
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
         run_id=state.run_id,
         turn_id=state.turn_id,
         reply_id=state.reply_id,
@@ -890,14 +990,14 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
             )
     frozen_surface = agent.capability_runtime.freeze_execution_surface(
         CapabilityExecutionSurfaceSnapshotContext(
-            workspace_root=agent.runtime_session.workspace_root,
+            workspace_root=runtime_session_for_test(agent).workspace_root,
             workspace_kind=agent.workspace_kind,
             available_tool_names=frozenset(agent.tool_executor.registry.names()),
-            mcp_installation_id=agent.runtime_session.mcp_installation_id,
+            mcp_installation_id=runtime_session_for_test(agent).mcp_installation_id,
         ),
         tool_registry=agent.tool_executor.registry,
-        archive=agent.runtime_session.archive,
-        runtime_session_id=agent.runtime_session.runtime_session_id,
+        archive=runtime_session_for_test(agent).archive,
+        runtime_session_id=runtime_session_for_test(agent).runtime_session_id,
         owner_id=boundary.boundary_id,
     )
     surface = frozen_surface.identity
@@ -908,7 +1008,7 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         source_basis_fingerprint=None,
         owner=owner,
         workspace_identity_fingerprint=sha256_fingerprint(
-            "test-workspace:v1", str(agent.runtime_session.workspace_root)
+            "test-workspace:v1", str(runtime_session_for_test(agent).workspace_root)
         ),
         memory_domain_id="memory_domain:test",
         permission_snapshot_id=permission.snapshot_id,
@@ -950,7 +1050,7 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         user_input,
         causal_occurrence_semantic_fingerprint=context_fingerprint(
             "test-host-ingress-occurrence:v1",
-            (agent.runtime_session.runtime_session_id, state.run_id),
+            (runtime_session_for_test(agent).runtime_session_id, state.run_id),
         ),
     ).semantic_fact
     placement = build_frozen_fact(
@@ -970,12 +1070,10 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         HostRunIngressAttributionFact,
         schema_version="host_run_ingress_attribution.v1",
         ingress_id=ingress_id,
-        host_session_id=f"host:test:{agent.runtime_session.runtime_session_id}",
+        host_session_id=f"host:test:{runtime_session_for_test(agent).runtime_session_id}",
         conversation_id=None,
         observed_at_utc=observed_at,
-        ingress_semantic_fingerprint=(
-            ingress_semantic.ingress_semantic_fingerprint
-        ),
+        ingress_semantic_fingerprint=(ingress_semantic.ingress_semantic_fingerprint),
         ordered_item_placements=(placement,),
     )
     host_ingress = build_frozen_fact(
@@ -1005,50 +1103,49 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
     )
     state.permission_snapshot = permission
     state.run_model_target = target
-    state.scratchpad.update(
-        {
-            "current_user_message_fact": current_user,
-            "host_run_ingress": host_ingress,
-            "host_ingress_admission_proof": host_admission,
-            "terminal_run_end_event_id": f"run_end:test:{uuid4().hex}",
-            "new_run_boundary_fact": NewRunBoundaryFact(
-                identity=boundary,
-                transcript=transcript,
-                model_target_fingerprint=target.fact.target_fingerprint,
-                permission_snapshot_id=permission.snapshot_id,
-                mcp_installation_id=surface.mcp_installation_id,
-                capability_basis=basis,
-                degraded_reason_codes=(),
-            ),
-            "frozen_capability_execution_surface": frozen_surface,
-            "capability_resolve_basis": CapabilityResolveBasis(
-                fact=basis,
-                user_input=user_input,
-                prior_messages=tuple(
-                    message.model_copy(deep=True)
-                    for message in (kwargs.get("prior_messages") or ())
-                ),
-                active_skill_names=frozenset(kwargs.get("active_skill_names") or ()),
-                workspace_root=agent.runtime_session.workspace_root,
-                memory_domain_id="memory_domain:test",
-            ),
-            "host_run_boundary_plan": PlanWorkflowStateFact(
-                workflow_id=None,
-                active=False,
-                pending_entry_audit=False,
-                revision=0,
-                entered_event_id=None,
-                entered_event_sequence=None,
-                entry_run_id=None,
-                entry_turn_id=None,
-                entry_reply_id=None,
-                stored_default_permission=preset_permission_policy_fact(
-                    permission.permission_mode
-                ),
-                accepted_plan_artifact_id=None,
-            ),
-        }
+    state.execution_resources.current_user_message_fact = current_user
+    state.terminal_run_end_event_id = f"run_end:test:{uuid4().hex}"
+    state.execution_resources.frozen_capability_execution_surface = frozen_surface
+    state.execution_resources.capability_resolve_basis = CapabilityResolveBasis(
+        fact=basis,
+        user_input=user_input,
+        prior_messages=tuple(
+            message.model_copy(deep=True)
+            for message in (kwargs.get("prior_messages") or ())
+        ),
+        active_skill_names=frozenset(kwargs.get("active_skill_names") or ()),
+        workspace_root=runtime_session_for_test(agent).workspace_root,
+        memory_domain_id="memory_domain:test",
     )
+    kwargs["_prepared_test_host_run_authority"] = {
+        "current_user_message_fact": current_user,
+        "host_run_ingress": host_ingress,
+        "host_ingress_admission_proof": host_admission,
+        "new_run_boundary_fact": NewRunBoundaryFact(
+            identity=boundary,
+            transcript=transcript,
+            model_target_fingerprint=target.fact.target_fingerprint,
+            permission_snapshot_id=permission.snapshot_id,
+            mcp_installation_id=surface.mcp_installation_id,
+            capability_basis=basis,
+            degraded_reason_codes=(),
+        ),
+        "host_run_boundary_plan": PlanWorkflowStateFact(
+            workflow_id=None,
+            active=False,
+            pending_entry_audit=False,
+            revision=0,
+            entered_event_id=None,
+            entered_event_sequence=None,
+            entry_run_id=None,
+            entry_turn_id=None,
+            entry_reply_id=None,
+            stored_default_permission=preset_permission_policy_fact(
+                permission.permission_mode
+            ),
+            accepted_plan_artifact_id=None,
+        ),
+    }
 
 
 def _ensure_test_postgres_runtime_owner(agent) -> None:
@@ -1061,11 +1158,11 @@ def _ensure_test_postgres_runtime_owner(agent) -> None:
 
     from pulsara_agent.memory import PostgresArtifactStore
 
-    archive = agent.runtime_session.archive
+    archive = runtime_session_for_test(agent).archive
     if not isinstance(archive, PostgresArtifactStore):
         return
 
-    event_log = agent.runtime_session.event_log
+    event_log = runtime_session_for_test(agent).event_log
     ensure_owner = getattr(event_log, "ensure_runtime_session_owner", None)
     if ensure_owner is None:
         raise TypeError("PostgreSQL test runtime lacks a verified session-owner port")
@@ -1327,7 +1424,6 @@ async def start_test_direct_model_stream(
         start_bundle=bundle,
         commit_port=RuntimeSessionModelStreamEventCommitPort(
             runtime_session=runtime_session,
-            state=None,
         ),
         execution_registry=runtime_session.model_stream_execution_registry,
     )
@@ -1359,4 +1455,172 @@ compaction_completed_contract_fields.__test__ = False
 compaction_started_contract_fields.__test__ = False
 compaction_failed_contract_fields.__test__ = False
 run_agent_task.__test__ = False
+commit_test_run_owner.__test__ = False
 stream_agent_task.__test__ = False
+request_test_run_stop.__test__ = False
+_TEST_RUN_STATES: WeakKeyDictionary = WeakKeyDictionary()
+_TEST_ACTIVATION_SERVICES: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def test_owned_run_state(agent, run_id: str):
+    """Return a test-owned working state without widening production results."""
+
+    states = _TEST_RUN_STATES.get(agent, {})
+    state = states.get(run_id)
+    if state is None:
+        raise KeyError(f"test run state is unavailable: {run_id}")
+    owner = agent.run_execution_registry.require(run_id)
+    if (
+        owner.lifecycle == "suspended"
+        and not state.pending_tool_calls
+        and (state.pending_interaction_kind is None)
+    ):
+        service = _test_run_activation_service(agent)
+        transition = service._interaction_transition_port
+        if transition is None:
+            raise RuntimeError("test activation service lacks interaction owner")
+        return transition.hydrate_suspended_working_state(run_id=run_id)
+    return state
+
+
+test_owned_run_state.__test__ = False
+
+
+def test_owned_terminalization_state(agent, run_id: str):
+    """Borrow a suspended test run through its stable finalization owner.
+
+    Direct AgentRuntime component tests intentionally omit the Host continuation
+    boundary.  They must still make the process-state ownership transfer explicit
+    instead of weakening the production finalization guard.
+    """
+
+    state = test_owned_run_state(agent, run_id)
+    owner = agent.run_execution_registry.require(run_id)
+    if owner.lifecycle == "suspended":
+        agent.run_execution_registry.transfer_suspension_state_to_finalization(run_id)
+    return state
+
+
+test_owned_terminalization_state.__test__ = False
+
+
+async def resume_test_agent_after_approval(agent, run_id: str, resolution):
+    """Drive a direct Agent component resume through a real activation owner."""
+
+    from pulsara_agent.runtime.run_execution.owner import (
+        ActiveRunSuspension,
+        NoActiveSuspension,
+    )
+    from pulsara_agent.ports.run_execution import RunSegmentInstallBlocked
+
+    state = test_owned_run_state(agent, run_id)
+    pending_by_id = {call.id: call for call in state.pending_tool_calls}
+    decisions_by_id = {
+        decision.tool_call_id: decision for decision in resolution.decisions
+    }
+    unknown_ids = set(decisions_by_id).difference(pending_by_id)
+    if unknown_ids:
+        raise ValueError(
+            f"approval resolution referenced unknown tool calls: {sorted(unknown_ids)}"
+        )
+    missing_ids = set(pending_by_id).difference(decisions_by_id)
+    if missing_ids:
+        raise ValueError(
+            f"approval resolution missing decisions for tool calls: {sorted(missing_ids)}"
+        )
+    owner = agent.run_execution_registry.require(run_id)
+    suspension = owner.suspension_slot
+    if not isinstance(suspension, ActiveRunSuspension):
+        raise RuntimeError("test resume requires one active suspension owner")
+    carrier = suspension.resources.state_carrier
+    pending_token = (
+        f"test-resume-pending:{owner.identity.owner_fingerprint}:"
+        f"{owner.next_segment_generation + 1}"
+    )
+    carrier.transfer(
+        expected_owner_token=suspension.resources.state_owner_token,
+        new_owner_token=pending_token,
+    )
+    owner.pending_activation_state = carrier
+    owner.pending_activation_owner_token = pending_token
+    owner.suspension_slot = NoActiveSuspension()
+    owner.lifecycle = "initializing"
+
+    service = _test_run_activation_service(agent)
+    dispatch = service.start_result_activation(
+        run_id=run_id,
+        host_session_id="host:test-support",
+        result_factory=lambda: agent.resume_after_approval(state, resolution),
+    )
+    if isinstance(dispatch, RunSegmentInstallBlocked):
+        raise RuntimeError(f"test resume activation was blocked: {dispatch.reason}")
+    try:
+        return await _wait_test_activation_result(
+            agent,
+            dispatch,
+            legacy_state=state,
+        )
+    except BaseException:
+        # This test-only path bypasses the production transition service so it
+        # can exercise malformed resolutions. Restore the immutable suspension
+        # when validation rejects before any durable continuation exists.
+        active = owner.active_segment
+        if (
+            active is not None
+            and active.state_carrier is carrier
+            and active.state_owner_token is not None
+        ):
+            carrier.transfer(
+                expected_owner_token=active.state_owner_token,
+                new_owner_token=suspension.resources.state_owner_token,
+            )
+            active.state_carrier = None
+            active.state_owner_token = None
+            if active.execution_handle_borrow is not None:
+                active.execution_handle_borrow.release()
+                active.execution_handle_borrow = None
+            owner.active_segment = None
+            owner.suspension_slot = suspension
+            owner.lifecycle = "suspended"
+        raise
+
+
+resume_test_agent_after_approval.__test__ = False
+
+
+async def _wait_test_activation_result(agent, dispatch, *, legacy_state=None):
+    """Adapt the production closed outcome at the test-support boundary only."""
+
+    from pulsara_agent.ports.run_execution import (
+        RunReconciliationRequired,
+        RunSuspendedOutcome,
+        RunTerminalOutcome,
+        RunTerminalOutputPending,
+        RunTerminalizationPending,
+    )
+    from pulsara_agent.runtime.agent import agent_run_result_from_terminal_outcome
+
+    outcome = await dispatch.wait_activation()
+    if isinstance(outcome, RunTerminalOutcome):
+        if legacy_state is not None:
+            return agent.result_from_owned_state(legacy_state)
+        return agent_run_result_from_terminal_outcome(outcome)
+    if isinstance(outcome, (RunTerminalizationPending, RunTerminalOutputPending)):
+        terminal = await dispatch.run_handle.wait_run_completion()
+        if legacy_state is not None:
+            return agent.result_from_owned_state(legacy_state)
+        return agent_run_result_from_terminal_outcome(terminal)
+    if isinstance(outcome, RunSuspendedOutcome):
+        # Legacy unit tests inspect the mutable state after suspension. This
+        # compatibility view is deliberately confined to tests/support;
+        # production Host and child callers consume the closed authority.
+        return agent.result_from_owned_state(
+            legacy_state
+            if legacy_state is not None
+            else test_owned_run_state(agent, outcome.owner_identity.run_id)
+        )
+    if isinstance(outcome, RunReconciliationRequired):
+        raise RuntimeError(
+            f"test activation requires reconciliation: {outcome.diagnostic_code}"
+        )
+    raise TypeError(f"unsupported activation outcome: {type(outcome).__name__}")

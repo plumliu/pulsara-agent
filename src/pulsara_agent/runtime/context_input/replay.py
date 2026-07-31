@@ -122,7 +122,7 @@ from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_candidate_from_state,
     fold_sparse_rollout_state,
 )
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     hydrate_carrier,
     validate_carrier_against_plan,
 )

@@ -6,14 +6,14 @@ import asyncio
 from dataclasses import dataclass, field
 from threading import RLock
 from time import monotonic
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
     AgentEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionMemoryExtractionCompletedEvent,
     MemoryReflectionCompletedEvent,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
@@ -26,9 +26,33 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.ports.event_write import (
+    EventCommitError,
+    EventReconciliationRequired,
+    EventWriteCancelled,
+    EventWriteResult,
+    PendingRuntimeEventWriteError,
+)
 
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
+
+class CandidateProjectionRuntimeGateway(Protocol):
+    runtime_session_id: str
+    event_write_service: Any
+    context_input_io_service: Any
+
+    async def write_events(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        transaction_companion: object | None = None,
+    ) -> EventWriteResult: ...
+
+    async def confirm_and_handoff_event_batch_async(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        deadline_monotonic: float,
+    ) -> EventWriteResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +65,13 @@ class CandidateProjectionOutboxRow:
             raise ValueError("candidate projection outbox entry ID drifted")
         if self.candidate.payload != self.item.candidate_payload:
             raise ValueError("candidate projection outbox payload drifted")
+        semantic = self.candidate.candidate_semantic
+        if (
+            semantic is None
+            or semantic.semantic_fingerprint
+            != self.item.candidate_semantic_fingerprint
+        ):
+            raise ValueError("candidate projection outbox semantic drifted")
         identity = stable_event_identity(
             producer_event,
             runtime_session_id=runtime_session_id,
@@ -222,10 +253,11 @@ class PostgresCandidateProjectionOutbox:
                     producer_payload_fingerprint,
                     producer_event_identity,
                     candidate_payload_fingerprint,
+                    candidate_semantic_fingerprint,
                     candidate_attribution_fingerprint,
                     candidate_payload,
                     status
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
                 on conflict (
                     runtime_session_id,
                     producer_kind,
@@ -243,6 +275,7 @@ class PostgresCandidateProjectionOutbox:
                     identity.payload_fingerprint,
                     Jsonb(identity.model_dump(mode="json")),
                     row.item.candidate_payload_fingerprint,
+                    row.item.candidate_semantic_fingerprint,
                     row.item.candidate_attribution_fingerprint,
                     Jsonb(candidate_payload),
                 ),
@@ -348,7 +381,7 @@ class CandidateProjectionOutboxDispatcher:
 class MemoryCandidateProjectionCommitPort:
     """RuntimeSession-owned atomic producer event/account/outbox commit port."""
 
-    runtime_session: "RuntimeSession"
+    runtime_session: CandidateProjectionRuntimeGateway
     repository: CandidateProjectionOutboxRepository
     dispatcher: CandidateProjectionOutboxDispatcher
     _dispatch_retry_required: bool = field(default=False, init=False, repr=False)
@@ -439,15 +472,6 @@ class MemoryCandidateProjectionCommitPort:
         self,
         bundle: "_CandidateProjectionCommitBundle",
     ) -> "EventWriteResult":
-        from pulsara_agent.runtime.event_write_service import (
-            PendingRuntimeEventWriteError,
-        )
-        from pulsara_agent.runtime.session import (
-            EventCommitError,
-            EventReconciliationRequired,
-            EventWriteCancelled,
-        )
-
         retry_delay = 0.05
         operation = "write"
         while True:
@@ -575,8 +599,8 @@ def _validate_producer_rows(
     expected_kind: CandidateProjectionProducerKind
     if isinstance(producer_event, MemoryReflectionCompletedEvent):
         expected_kind = CandidateProjectionProducerKind.REFLECTION
-    elif isinstance(producer_event, ContextCompactionMemoryCandidatesProposedEvent):
-        expected_kind = CandidateProjectionProducerKind.COMPACTION
+    elif isinstance(producer_event, ContextCompactionMemoryExtractionCompletedEvent):
+        expected_kind = CandidateProjectionProducerKind.COMPACTION_MEMORY_EXTRACTION
     else:
         raise TypeError("candidate projection producer event is unsupported")
     if len(rows) != len({row.item.candidate_entry_id for row in rows}):
@@ -623,6 +647,9 @@ def _row_from_postgres(row: dict[str, object]) -> CandidateProjectionOutboxRow:
             "candidate_entry_id": row["candidate_entry_id"],
             "candidate_index": row["candidate_index"],
             "candidate_payload": candidate.payload,
+            "candidate_semantic_fingerprint": row[
+                "candidate_semantic_fingerprint"
+            ],
             "candidate_payload_fingerprint": row["candidate_payload_fingerprint"],
             "candidate_attribution_fingerprint": row["candidate_attribution_fingerprint"],
             "item_fingerprint": row["outbox_item_fingerprint"],

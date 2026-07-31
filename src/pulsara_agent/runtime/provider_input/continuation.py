@@ -28,7 +28,7 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptProjectionLeafEntryFact,
     TranscriptProjectionLeafEntryReferenceFact,
 )
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     message_semantic_fingerprint,
 )
 

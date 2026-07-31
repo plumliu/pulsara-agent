@@ -185,7 +185,7 @@ def encode_runtime_request(
     business_occurrence_semantic_fingerprint: str,
     lifecycle_class: str | None = None,
 ) -> EncodedProviderUserCarrier:
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         default_runtime_request_protocol,
     )
 
@@ -458,7 +458,7 @@ def encode_runtime_observation(
     authority_class: str,
     causal_occurrence_semantic_fingerprint: str,
 ) -> EncodedProviderUserCarrier:
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         runtime_observation_kind_contract,
     )
 
@@ -622,7 +622,7 @@ def _validate_human_input_body(body: Mapping[str, object]) -> None:
     text = body.get("text")
     if not _is_sha256_fingerprint(semantic_id) or not isinstance(text, str):
         raise ValueError("human input carrier identity is malformed")
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         default_provider_user_carrier_protocol,
     )
 
@@ -656,7 +656,7 @@ def _validate_runtime_request_body(body: Mapping[str, object]) -> None:
         or body.get("instruction_policy") != "task_under_root_policy"
     ):
         raise ValueError("runtime request carrier identity is malformed")
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         default_runtime_request_protocol,
     )
 
@@ -705,7 +705,7 @@ def _validate_runtime_observation_body(body: Mapping[str, object]) -> None:
         or not isinstance(payload, dict)
     ):
         raise ValueError("runtime observation carrier identity is malformed")
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         runtime_observation_kind_contract,
     )
 
@@ -925,7 +925,7 @@ def replace_runtime_observation_predecessor(
 
 
 def _payload_schema_for_observation_kind(kind: str) -> str:
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         runtime_observation_kind_contract,
     )
 
@@ -1000,7 +1000,7 @@ def _validate_runtime_observation_payload_binding(
     lifecycle_class: str,
     payload: RuntimeObservationPayloadFact,
 ) -> None:
-    from pulsara_agent.runtime.context_input.sources.lifecycle import (
+    from pulsara_agent.llm.user_carrier_lifecycle import (
         runtime_observation_context_source_producer,
     )
 
@@ -1103,6 +1103,7 @@ _REQUEST_OPERATION_KIND = {
     "governance_request": "governance",
     "reflection_request": "reflection",
     "summarizer_request": "summarizer",
+    "compaction_memory_extraction_request": "compaction_memory_extraction",
 }
 
 

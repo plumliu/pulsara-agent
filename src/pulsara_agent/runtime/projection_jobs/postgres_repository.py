@@ -14,7 +14,15 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
-from pulsara_agent.event import ToolResultEndEvent
+from pulsara_agent.event import (
+    ContextCompactionMemoryExtractionCompletedEvent,
+    ToolResultEndEvent,
+)
+from pulsara_agent.runtime.projection_jobs.compaction_budget import (
+    DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+    BackgroundBudgetReserveOutcome,
+    reserve_background_budget,
+)
 from pulsara_agent.event_log.protocol import (
     RawStoredEventEnvelope,
     RawTranscriptDomainPrefixFact,
@@ -29,7 +37,20 @@ from pulsara_agent.primitives.runtime_event_vocabulary import (
     BoundedRuntimeFailureDiagnosticFact,
     build_bounded_runtime_failure_diagnostic,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.primitives.long_horizon import ModelCallReservationQuoteFact
+from pulsara_agent.primitives.compaction import (
+    BackgroundDerivedWorkBudgetReservationFact,
+    BackgroundDerivedWorkBudgetSettlementFact,
+)
+from pulsara_agent.projection_jobs.compaction_memory import (
+    CompactionMemoryExtractionResultCandidateFact,
+    ResultCandidateInstallationGuard,
+    result_candidate_installation_guard,
+)
+from pulsara_agent.projection_jobs.contracts import (
+    CompactionMemoryExtractionJobDeferralFact,
+    CompactionMemoryExtractionProjectionResultReceiptFact,
+    CompactionMemoryExtractionSupersededReceiptFact,
     DurableProjectionCommitConfirmation,
     DurableProjectionDeliveryPolicyFact,
     DurableProjectionFailureKind,
@@ -119,11 +140,28 @@ from pulsara_agent.storage.runtime_write_admission import (
 _RECEIPT_ADAPTER = TypeAdapter(DurableProjectionResultReceiptFact)
 _SEED_SCHEMA_VERSION = "durable_projection_seed_state.v1"
 _MAX_SEED_EVENTS = 512
+_MODEL_JOB_DEFERRAL_POLICY_FINGERPRINT = context_fingerprint(
+    "compaction-memory-extraction-job-deferral-policy:v1",
+    {"minimum_seconds": 1, "maximum_seconds": 5, "basis": "lease_generation"},
+)
 _MAX_SEED_BYTES = 8 * 1024 * 1024
 
 
 class DurableProjectionSeedBlockedError(RuntimeError):
     """An unresolved seed failure owns this authority until typed repair."""
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedCompactionMemoryExtractionSettlement:
+    result_candidate: CompactionMemoryExtractionResultCandidateFact
+    state: DurableProjectionJobOperationalStateFact
+
+
+@dataclass(frozen=True, slots=True)
+class SessionModelWorkSchedule:
+    immediate: bool
+    database_now: datetime
+    next_eligible_at: datetime | None
 
 
 def seed_projection_checkpoint_kind(kind: DurableProjectionKind) -> str:
@@ -163,7 +201,9 @@ def _raw_prefix_payload(
     }
 
 
-def _horizon_from_event_row(row: dict[str, object]) -> DurableProjectionLedgerHorizonFact:
+def _horizon_from_event_row(
+    row: dict[str, object],
+) -> DurableProjectionLedgerHorizonFact:
     prefix = RawTranscriptDomainPrefixFact(
         through_sequence=int(row["sequence"]),
         ledger_payload_bytes=int(row["ledger_payload_prefix_bytes"]),
@@ -218,7 +258,7 @@ def _bound_event_from_row(
     envelope = _raw_event_from_row(row)
     reference = source_event_reference(envelope)
     horizon = _horizon_from_event_row(row)
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         DurableProjectionStoredEventFact,
     )
 
@@ -231,9 +271,7 @@ def _bound_event_from_row(
             canonical_payload_json_utf8=(
                 envelope.canonical_payload_bytes.decode("utf-8")
             ),
-            canonical_payload_utf8_bytes=len(
-                envelope.canonical_payload_bytes
-            ),
+            canonical_payload_utf8_bytes=len(envelope.canonical_payload_bytes),
             canonical_payload_sha256=envelope.payload_fingerprint,
         ),
     )
@@ -278,11 +316,10 @@ class PostgresDurableProjectionRepository:
             activation = DurableProjectionKindActivationFact.model_validate(
                 row["activation_payload"]
             )
-            if (
-                activation.activation_semantic.projection_kind.value
-                != str(row["projection_kind"])
-                or activation.activation_fingerprint
-                != str(row["activation_fingerprint"])
+            if activation.activation_semantic.projection_kind.value != str(
+                row["projection_kind"]
+            ) or activation.activation_fingerprint != str(
+                row["activation_fingerprint"]
             ):
                 raise ValueError("projection activation row drifted")
             activations.append(activation)
@@ -347,8 +384,7 @@ class PostgresDurableProjectionRepository:
             if (
                 activation.activation_semantic.projection_kind
                 is not cutover.projection_kind
-                or activation.activation_fingerprint
-                != cutover.activation_fingerprint
+                or activation.activation_fingerprint != cutover.activation_fingerprint
                 or activation.activation_semantic.seed_contract.seed_contract_fingerprint
                 != cutover.seed_contract_fingerprint
             ):
@@ -364,10 +400,13 @@ class PostgresDurableProjectionRepository:
         runtime_session_id: str,
         projection_kind: DurableProjectionKind,
         deadline_monotonic: float | None = None,
-    ) -> tuple[
-        DurableProjectionKindActivationFact,
-        DurableProjectionSessionCutoverFact,
-    ] | None:
+    ) -> (
+        tuple[
+            DurableProjectionKindActivationFact,
+            DurableProjectionSessionCutoverFact,
+        ]
+        | None
+    ):
         deadline = deadline_monotonic or monotonic() + 20.0
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
@@ -383,9 +422,7 @@ class PostgresDurableProjectionRepository:
                     lock=False,
                 )
             except ValueError as error:
-                if str(error) == (
-                    "durable projection activation/cutover is absent"
-                ):
+                if str(error) == ("durable projection activation/cutover is absent"):
                     return None
                 raise
         return cast(DurableProjectionKindActivationFact, activation), cutover
@@ -513,9 +550,7 @@ class PostgresDurableProjectionRepository:
                 else None
             ),
             seed_repair_action_fingerprint=(
-                repair_action.action_fingerprint
-                if repair_action is not None
-                else None
+                repair_action.action_fingerprint if repair_action is not None else None
             ),
         )
 
@@ -839,8 +874,7 @@ class PostgresDurableProjectionRepository:
         if (
             cutover.cutover_fingerprint
             != candidate.expected_seed_state.cutover_fingerprint
-            or activation.activation_fingerprint
-            != cutover.activation_fingerprint
+            or activation.activation_fingerprint != cutover.activation_fingerprint
             or activation.activation_semantic.seed_contract.seed_contract_fingerprint
             != candidate.expected_seed_state.seed_contract_fingerprint
         ):
@@ -855,8 +889,7 @@ class PostgresDurableProjectionRepository:
             end_inclusive=candidate.scan_horizon.through_sequence,
         )
         expected_source_count = (
-            candidate.scan_horizon.through_sequence
-            - expected.through_sequence
+            candidate.scan_horizon.through_sequence - expected.through_sequence
         )
         expected_source_bytes = (
             candidate.scan_horizon.ledger_payload_prefix_bytes
@@ -1051,7 +1084,7 @@ class PostgresDurableProjectionRepository:
         ).fetchone()
         if activation_row is None or cutover_row is None:
             raise ValueError("durable projection activation/cutover is absent")
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             DurableProjectionKindActivationFact,
         )
 
@@ -1135,8 +1168,7 @@ class PostgresDurableProjectionRepository:
             or action.repair_generation != int(row["repair_generation"])
             or action.runtime_session_id != failure.runtime_session_id
             or action.projection_kind is not failure.projection_kind
-            or action.expected_seed_failure_fingerprint
-            != failure.failure_fingerprint
+            or action.expected_seed_failure_fingerprint != failure.failure_fingerprint
             or action.expected_seed_state_fingerprint
             != failure.expected_seed_state_fingerprint
         ):
@@ -1168,8 +1200,7 @@ class PostgresDurableProjectionRepository:
         if (
             action.action_fingerprint != str(row["action_fingerprint"])
             or action.repair_generation != int(row["repair_generation"])
-            or action.expected_seed_failure_fingerprint
-            != failure.failure_fingerprint
+            or action.expected_seed_failure_fingerprint != failure.failure_fingerprint
             or action.expected_seed_state_fingerprint
             != failure.expected_seed_state_fingerprint
         ):
@@ -1196,10 +1227,8 @@ class PostgresDurableProjectionRepository:
             row["resolution_payload"]
         )
         if (
-            resolution.resolution_fingerprint
-            != str(row["resolution_fingerprint"])
-            or resolution.seed_failure_fingerprint
-            != failure.failure_fingerprint
+            resolution.resolution_fingerprint != str(row["resolution_fingerprint"])
+            or resolution.seed_failure_fingerprint != failure.failure_fingerprint
         ):
             raise ValueError("projection seed failure resolution row drifted")
         return resolution
@@ -1292,9 +1321,7 @@ class PostgresDurableProjectionRepository:
                 schema_version="durable_projection_ledger_horizon.v1",
                 runtime_session_id=state.runtime_session_id,
                 through_sequence=state.through_sequence,
-                ledger_continuity_accumulator=(
-                    state.ledger_continuity_accumulator
-                ),
+                ledger_continuity_accumulator=(state.ledger_continuity_accumulator),
                 ledger_payload_prefix_bytes=state.ledger_payload_prefix_bytes,
                 transcript_semantic_prefix_count=(
                     state.transcript_semantic_prefix_count
@@ -1309,8 +1336,7 @@ class PostgresDurableProjectionRepository:
             or state.projection_kind is not projection_kind
             or state.through_sequence != int(row["through_sequence"])
             or state.state_fingerprint != str(row["payload_fingerprint"])
-            or _raw_prefix_payload(observed_horizon)
-            != dict(row["ledger_prefix"])
+            or _raw_prefix_payload(observed_horizon) != dict(row["ledger_prefix"])
         ):
             raise ValueError("projection seed checkpoint authority drifted")
         return state
@@ -1418,13 +1444,15 @@ class PostgresDurableProjectionRepository:
                 canonical_mutation_surface_plan_fingerprint,
                 job_semantic_fingerprint, job_candidate_fingerprint,
                 status, state_revision, repair_generation, attempt_count,
+                dispatch_attempt_count, settlement_generation,
                 lease_generation, lease_owner_id, lease_expires_at,
                 next_attempt_at, last_failure, result_receipt_reference,
-                state_fingerprint
+                compaction_memory_deferral, state_fingerprint
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, NULL, %s
+                %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, NULL,
+                NULL, %s
             )
             ON CONFLICT (job_id) DO NOTHING
             RETURNING job_id
@@ -1454,6 +1482,8 @@ class PostgresDurableProjectionRepository:
                 state.state_revision,
                 state.repair_generation,
                 state.attempt_count,
+                state.dispatch_attempt_count,
+                state.settlement_generation,
                 state.lease_generation,
                 state.state_fingerprint,
             ),
@@ -1553,18 +1583,15 @@ class PostgresDurableProjectionRepository:
                         candidate,
                         failure=_diagnostic(error),
                     )
-                if (
-                    str(row["failure_fingerprint"])
-                    == candidate.failure.failure_fingerprint
-                    and dict(row["failure_payload"])
-                    == candidate.failure.model_dump(mode="json")
-                ):
+                if str(
+                    row["failure_fingerprint"]
+                ) == candidate.failure.failure_fingerprint and dict(
+                    row["failure_payload"]
+                ) == candidate.failure.model_dump(mode="json"):
                     return self._seed_outcome(
                         DurableProjectionCommitConfirmation.FULL,
                         candidate,
-                        committed_failure=(
-                            candidate.failure.failure_fingerprint
-                        ),
+                        committed_failure=(candidate.failure.failure_fingerprint),
                     )
                 return self._seed_outcome(
                     DurableProjectionCommitConfirmation.CONFLICT,
@@ -1660,9 +1687,7 @@ class PostgresDurableProjectionRepository:
                         candidate,
                         committed_state=current.state_fingerprint,
                         committed_resolution=committed_resolution,
-                        committed_jobs=tuple(
-                            item.job_semantic.job_id for item in jobs
-                        ),
+                        committed_jobs=tuple(item.job_semantic.job_id for item in jobs),
                     )
                 return self._seed_outcome(
                     DurableProjectionCommitConfirmation.CONFLICT,
@@ -1707,9 +1732,7 @@ class PostgresDurableProjectionRepository:
                 attempted_candidate_fingerprint=candidate.candidate_fingerprint,
                 committed_seed_state_fingerprint=committed_state,
                 committed_seed_failure_fingerprint=committed_failure,
-                committed_seed_failure_resolution_fingerprint=(
-                    committed_resolution
-                ),
+                committed_seed_failure_resolution_fingerprint=(committed_resolution),
                 committed_job_ids=committed_jobs,
                 failure=failure,
             ),
@@ -1735,6 +1758,714 @@ class PostgresDurableProjectionRepository:
                 candidate=self._candidate_from_row(row),
                 state=self._state_from_row(row),
             )
+
+    def install_compaction_memory_result_candidate(
+        self,
+        *,
+        lease: LeasedDurableProjectionJob,
+        result_candidate: CompactionMemoryExtractionResultCandidateFact,
+        installation_guard: ResultCandidateInstallationGuard,
+        deadline_monotonic: float,
+    ) -> DurableProjectionCommitConfirmation:
+        """Atomically replace a live model lease with immutable RESULT_READY."""
+
+        if (
+            lease.job.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+            or result_candidate.job_id != lease.job.job_id
+            or result_candidate.target_key != lease.job.target_key
+            or result_candidate.result_owner.job_candidate_fingerprint
+            != lease.job_candidate_fingerprint
+            or result_candidate.result_owner.job_semantic_fingerprint
+            != lease.job.job_semantic_fingerprint
+            or installation_guard.result_candidate_id
+            != result_candidate.result_candidate_id
+            or installation_guard.result_candidate_fingerprint
+            != result_candidate.result_candidate_fingerprint
+            or installation_guard.job_id != lease.job.job_id
+            or installation_guard.source_job_lease_generation
+            != lease.lease_generation
+            or installation_guard.source_job_lease_fingerprint
+            != lease.lease_fingerprint
+        ):
+            raise ValueError("extraction result candidate/job authority drifted")
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                row = self._read_job_row(
+                    connection,
+                    lease.job.job_id,
+                    lock=True,
+                )
+                if row is None:
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                state = self._state_from_row(row)
+                existing = connection.execute(
+                    """
+                    SELECT candidate_payload, candidate_fingerprint
+                    FROM compaction_memory_extraction_result_candidates
+                    WHERE job_id = %s OR result_candidate_id = %s
+                    """,
+                    (lease.job.job_id, result_candidate.result_candidate_id),
+                ).fetchone()
+                if existing is not None:
+                    observed = (
+                        CompactionMemoryExtractionResultCandidateFact.model_validate(
+                            existing["candidate_payload"]
+                        )
+                    )
+                    if (
+                        observed != result_candidate
+                        or str(existing["candidate_fingerprint"])
+                        != result_candidate.result_candidate_fingerprint
+                    ):
+                        return DurableProjectionCommitConfirmation.CONFLICT
+                    if state.status is DurableProjectionJobStatus.RESULT_READY:
+                        return DurableProjectionCommitConfirmation.FULL
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                if (
+                    state.status is not DurableProjectionJobStatus.LEASED
+                    or state.state_revision
+                    != installation_guard.source_job_state_revision
+                    or state.lease_generation != lease.lease_generation
+                    or state.lease_owner_id != lease.lease_owner_id
+                ):
+                    return DurableProjectionCommitConfirmation.NONE
+                target_lease = connection.execute(
+                    """
+                    SELECT lease_fingerprint
+                    FROM durable_projection_target_execution_leases
+                    WHERE projection_kind = %s AND target_key = %s
+                      AND owner_job_id = %s AND lease_generation = %s
+                      AND lease_owner_id = %s
+                    FOR UPDATE
+                    """,
+                    (
+                        lease.job.projection_kind.value,
+                        lease.job.target_key,
+                        lease.job.job_id,
+                        lease.lease_generation,
+                        lease.lease_owner_id,
+                    ),
+                ).fetchone()
+                if (
+                    target_lease is None
+                    or str(target_lease["lease_fingerprint"])
+                    != installation_guard.target_lease_fingerprint
+                ):
+                    return DurableProjectionCommitConfirmation.NONE
+                head = self._read_head_in_connection(
+                    connection,
+                    projection_kind=lease.job.projection_kind,
+                    target_key=lease.job.target_key,
+                    lock=True,
+                )
+                if (
+                    (head.head_fingerprint if head is not None else None)
+                    != result_candidate.expected_target_head_fingerprint
+                    or result_candidate.intended_target_head_revision
+                    != (1 if head is None else head.head_revision + 1)
+                ):
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                connection.execute(
+                    """
+                    INSERT INTO compaction_memory_extraction_result_candidates (
+                        result_candidate_id, job_id, target_key,
+                        completed_event_id, result_semantic_fingerprint,
+                        candidate_payload, candidate_fingerprint
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        result_candidate.result_candidate_id,
+                        result_candidate.job_id,
+                        result_candidate.target_key,
+                        result_candidate.completed_event_id,
+                        result_candidate.result_semantic_fingerprint,
+                        _json(result_candidate),
+                        result_candidate.result_candidate_fingerprint,
+                    ),
+                )
+                next_state = cast(
+                    DurableProjectionJobOperationalStateFact,
+                    build_projection_fact(
+                        DurableProjectionJobOperationalStateFact,
+                        schema_version="durable_projection_job_operational_state.v1",
+                        status=DurableProjectionJobStatus.RESULT_READY,
+                        state_revision=state.state_revision + 1,
+                        repair_generation=state.repair_generation,
+                        attempt_count=state.attempt_count,
+                        dispatch_attempt_count=state.dispatch_attempt_count,
+                        settlement_generation=state.settlement_generation,
+                        lease_generation=state.lease_generation,
+                        lease_owner_id=None,
+                        lease_expires_at=None,
+                        next_attempt_at=None,
+                        last_failure=None,
+                        result_receipt_reference=None,
+                    ),
+                )
+                self._write_job_state(
+                    connection,
+                    job_id=lease.job.job_id,
+                    state=next_state,
+                )
+                self._release_target_lease(connection, lease)
+        return DurableProjectionCommitConfirmation.FULL
+
+    def prepare_compaction_memory_result_installation_guard(
+        self,
+        *,
+        lease: LeasedDurableProjectionJob,
+        result_candidate: CompactionMemoryExtractionResultCandidateFact,
+        deadline_monotonic: float,
+    ) -> ResultCandidateInstallationGuard:
+        """Freeze the exact job and target lease state used by installation CAS."""
+
+        if (
+            lease.job.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+            or result_candidate.job_id != lease.job.job_id
+            or result_candidate.target_key != lease.job.target_key
+        ):
+            raise ValueError("extraction installation guard authority drifted")
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            row = self._read_job_row(connection, lease.job.job_id, lock=False)
+            if row is None:
+                raise ValueError("extraction installation job disappeared")
+            state = self._state_from_row(row)
+            target_row = connection.execute(
+                """
+                SELECT lease_payload, lease_fingerprint
+                FROM durable_projection_target_execution_leases
+                WHERE projection_kind = %s AND target_key = %s
+                  AND owner_job_id = %s AND lease_generation = %s
+                  AND lease_owner_id = %s AND lease_expires_at > clock_timestamp()
+                """,
+                (
+                    lease.job.projection_kind.value,
+                    lease.job.target_key,
+                    lease.job.job_id,
+                    lease.lease_generation,
+                    lease.lease_owner_id,
+                ),
+            ).fetchone()
+        if (
+            state.status is not DurableProjectionJobStatus.LEASED
+            or state.lease_generation != lease.lease_generation
+            or state.lease_owner_id != lease.lease_owner_id
+            or target_row is None
+        ):
+            raise ValueError("extraction installation lease is no longer active")
+        target_lease = DurableProjectionTargetExecutionLeaseFact.model_validate(
+            target_row["lease_payload"]
+        )
+        if (
+            target_lease.projection_kind != lease.job.projection_kind
+            or target_lease.target_key != lease.job.target_key
+            or target_lease.owner_job_id != lease.job.job_id
+            or target_lease.lease_generation != lease.lease_generation
+            or target_lease.lease_owner_id != lease.lease_owner_id
+            or target_lease.lease_fingerprint
+            != str(target_row["lease_fingerprint"])
+        ):
+            raise ValueError("extraction target lease authority drifted")
+        return result_candidate_installation_guard(
+            result_candidate=result_candidate,
+            source_job_state_revision=state.state_revision,
+            source_job_lease_generation=lease.lease_generation,
+            source_job_lease_fingerprint=lease.lease_fingerprint,
+            target_lease_fingerprint=target_lease.lease_fingerprint,
+        )
+
+    def read_compaction_memory_result_candidate(
+        self,
+        job_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> CompactionMemoryExtractionResultCandidateFact | None:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            row = connection.execute(
+                """
+                SELECT candidate_payload, candidate_fingerprint
+                FROM compaction_memory_extraction_result_candidates
+                WHERE job_id = %s
+                """,
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        candidate = CompactionMemoryExtractionResultCandidateFact.model_validate(
+            row["candidate_payload"]
+        )
+        if candidate.result_candidate_fingerprint != str(row["candidate_fingerprint"]):
+            raise ValueError("extraction result candidate row drifted")
+        return candidate
+
+    def confirm_compaction_memory_settlement(
+        self,
+        result_candidate: CompactionMemoryExtractionResultCandidateFact,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[
+        DurableProjectionCommitConfirmation,
+        DurableProjectionResultReceiptReferenceFact | None,
+        int | None,
+    ]:
+        """Confirm one extraction settlement from a single durable snapshot."""
+
+        completed_event = ContextCompactionMemoryExtractionCompletedEvent.model_validate_json(
+            result_candidate.producer_event_candidate.canonical_unsequenced_payload_utf8
+        )
+        runtime_session_id = completed_event.occurrence_attribution.request_event_reference.stable_identity.runtime_session_id
+        if completed_event.id != result_candidate.completed_event_id:
+            return DurableProjectionCommitConfirmation.CONFLICT, None, None
+
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            result_row = connection.execute(
+                """
+                SELECT candidate_payload, candidate_fingerprint
+                FROM compaction_memory_extraction_result_candidates
+                WHERE result_candidate_id = %s AND job_id = %s
+                """,
+                (result_candidate.result_candidate_id, result_candidate.job_id),
+            ).fetchone()
+            job_row = self._read_job_row(
+                connection,
+                result_candidate.job_id,
+                lock=False,
+            )
+            if result_row is None or job_row is None:
+                return DurableProjectionCommitConfirmation.NONE, None, None
+            observed_candidate = (
+                CompactionMemoryExtractionResultCandidateFact.model_validate(
+                    result_row["candidate_payload"]
+                )
+            )
+            if (
+                observed_candidate != result_candidate
+                or str(result_row["candidate_fingerprint"])
+                != result_candidate.result_candidate_fingerprint
+            ):
+                return DurableProjectionCommitConfirmation.CONFLICT, None, None
+            state = self._state_from_row(job_row)
+            if (
+                state.status is DurableProjectionJobStatus.SETTLEMENT_WRITING
+                and state.result_receipt_reference is None
+            ):
+                event_row = connection.execute(
+                    """
+                    SELECT 1
+                    FROM agent_events
+                    WHERE session_id = %s AND id = %s
+                    LIMIT 1
+                    """,
+                    (
+                        runtime_session_id,
+                        result_candidate.completed_event_id,
+                    ),
+                ).fetchone()
+                receipt_row = connection.execute(
+                    """
+                    SELECT 1
+                    FROM durable_projection_result_receipts
+                    WHERE receipt_id = %s
+                    LIMIT 1
+                    """,
+                    (result_candidate.receipt_id,),
+                ).fetchone()
+                outbox_row = connection.execute(
+                    """
+                    SELECT 1
+                    FROM memory_candidate_projection_outbox
+                    WHERE runtime_session_id = %s
+                      AND producer_kind = 'compaction_memory_extraction'
+                      AND producer_event_id = %s
+                    LIMIT 1
+                    """,
+                    (
+                        runtime_session_id,
+                        result_candidate.completed_event_id,
+                    ),
+                ).fetchone()
+                head = self._read_head_in_connection(
+                    connection,
+                    projection_kind=DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION,
+                    target_key=result_candidate.target_key,
+                    lock=False,
+                )
+                observed_head_fingerprint = (
+                    head.head_fingerprint if head is not None else None
+                )
+                if (
+                    event_row is not None
+                    or receipt_row is not None
+                    or outbox_row is not None
+                    or observed_head_fingerprint
+                    != result_candidate.expected_target_head_fingerprint
+                ):
+                    return DurableProjectionCommitConfirmation.CONFLICT, None, None
+                return DurableProjectionCommitConfirmation.NONE, None, None
+            if (
+                state.status is not DurableProjectionJobStatus.SUCCEEDED
+                or state.result_receipt_reference is None
+                or state.result_receipt_reference.receipt_id
+                != result_candidate.receipt_id
+            ):
+                return DurableProjectionCommitConfirmation.CONFLICT, None, None
+            receipt = self._read_receipt_in_connection(
+                connection,
+                state.result_receipt_reference.receipt_id,
+            )
+            if not isinstance(
+                receipt,
+                CompactionMemoryExtractionProjectionResultReceiptFact,
+            ):
+                return DurableProjectionCommitConfirmation.CONFLICT, None, None
+            head = self._read_head_in_connection(
+                connection,
+                projection_kind=DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION,
+                target_key=result_candidate.target_key,
+                lock=False,
+            )
+            if (
+                receipt.receipt_fingerprint
+                != state.result_receipt_reference.receipt_fingerprint
+                or receipt.job_id != result_candidate.job_id
+                or receipt.target_key != result_candidate.target_key
+                or receipt.completed_event_reference.stable_identity.event_id
+                != result_candidate.completed_event_id
+                or receipt.completed_event_reference.stable_identity.runtime_session_id
+                != runtime_session_id
+                or receipt.source_request_event_reference.runtime_session_id
+                != runtime_session_id
+                or receipt.completed_result_semantic_fingerprint
+                != result_candidate.result_semantic_fingerprint
+                or receipt.outbox_item_count
+                != result_candidate.candidate_outbox_plan.item_count
+                or receipt.outbox_item_accumulator
+                != result_candidate.candidate_outbox_plan.ordered_item_accumulator
+                or head is None
+                or head.head_revision != receipt.target_head_revision
+                or head.applied_result_receipt_reference
+                != state.result_receipt_reference
+            ):
+                return DurableProjectionCommitConfirmation.CONFLICT, None, None
+            return (
+                DurableProjectionCommitConfirmation.FULL,
+                state.result_receipt_reference,
+                head.head_revision,
+            )
+
+    def prepare_background_budget_reservation(
+        self,
+        *,
+        runtime_session_id: str,
+        reservation_id: str,
+        extraction_job_id: str,
+        operation_id: str,
+        dispatch_attempt_ordinal: int,
+        quote: ModelCallReservationQuoteFact,
+        deadline_monotonic: float,
+    ) -> BackgroundBudgetReserveOutcome:
+        """Read one quote from a stable account revision; Start revalidates it."""
+
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            row = connection.execute(
+                """
+                SELECT policy_payload, policy_fingerprint, account_payload,
+                       account_fingerprint, account_revision
+                FROM background_derived_work_budget_accounts
+                WHERE runtime_session_id = %s
+                """,
+                (runtime_session_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                "background budget genesis is absent from session bootstrap"
+            )
+        from pulsara_agent.primitives.compaction import (
+            BackgroundDerivedWorkBudgetAccountFact,
+        )
+
+        account = BackgroundDerivedWorkBudgetAccountFact.model_validate(
+            row["account_payload"]
+        )
+        if (
+            account.account_fingerprint != str(row["account_fingerprint"])
+            or account.account_revision != int(row["account_revision"])
+            or str(row["policy_fingerprint"])
+            != DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY.policy_fingerprint
+            or row["policy_payload"]
+            != DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY.model_dump(mode="json")
+        ):
+            raise ValueError("background budget account row drifted")
+        return reserve_background_budget(
+            account=account,
+            policy=DEFAULT_BACKGROUND_DERIVED_WORK_BUDGET_POLICY,
+            reservation_id=reservation_id,
+            extraction_job_id=extraction_job_id,
+            operation_id=operation_id,
+            dispatch_attempt_ordinal=dispatch_attempt_ordinal,
+            quote=quote,
+        )
+
+    def read_background_budget_terminal_authority(
+        self,
+        *,
+        reservation_id: str,
+        extraction_job_id: str,
+        resolved_model_call_id: str,
+        dispatch_attempt_ordinal: int,
+        deadline_monotonic: float,
+    ) -> tuple[
+        BackgroundDerivedWorkBudgetReservationFact,
+        BackgroundDerivedWorkBudgetSettlementFact,
+    ]:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            row = connection.execute(
+                """
+                SELECT r.reservation_payload, r.reservation_fingerprint, r.status,
+                       s.settlement_payload, s.settlement_fingerprint
+                FROM background_derived_work_budget_reservations AS r
+                LEFT JOIN background_derived_work_budget_settlements AS s
+                  ON s.reservation_id = r.reservation_id
+                WHERE r.reservation_id = %s
+                """,
+                (reservation_id,),
+            ).fetchone()
+        if row is None or row["settlement_payload"] is None:
+            raise ValueError("background model terminal budget authority is incomplete")
+        reservation = BackgroundDerivedWorkBudgetReservationFact.model_validate(
+            row["reservation_payload"]
+        )
+        settlement = BackgroundDerivedWorkBudgetSettlementFact.model_validate(
+            row["settlement_payload"]
+        )
+        if (
+            reservation.reservation_fingerprint != str(row["reservation_fingerprint"])
+            or settlement.settlement_fingerprint != str(row["settlement_fingerprint"])
+            or str(row["status"]) != "settled"
+            or reservation.extraction_job_id != extraction_job_id
+            or reservation.dispatch_attempt_ordinal != dispatch_attempt_ordinal
+            or reservation.model_call_reservation_quote.resolved_model_call_id
+            != resolved_model_call_id
+            or settlement.reservation_fingerprint != reservation.reservation_fingerprint
+        ):
+            raise ValueError("background model terminal budget authority drifted")
+        return reservation, settlement
+
+    def claim_compaction_memory_settlements(
+        self,
+        *,
+        runtime_session_ids: tuple[str, ...],
+        limit: int,
+        bypass_retry_not_before: bool = False,
+        reclaim_active_writing: bool = False,
+        settlement_attempt_seconds: float = 20.0,
+        deadline_monotonic: float,
+    ) -> tuple[ClaimedCompactionMemoryExtractionSettlement, ...]:
+        if not runtime_session_ids or limit < 1:
+            return ()
+        if not 0.1 <= settlement_attempt_seconds <= 120.0:
+            raise ValueError("settlement attempt duration is outside the closed bound")
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                rows = tuple(
+                    connection.execute(
+                        """
+                        SELECT j.*, r.candidate_payload,
+                               r.candidate_fingerprint
+                        FROM durable_projection_jobs AS j
+                        JOIN compaction_memory_extraction_result_candidates AS r
+                          ON r.job_id = j.job_id
+                        WHERE j.runtime_session_id = ANY(%s)
+                          AND j.projection_kind = %s
+                          AND (
+                            j.status = 'result_ready'
+                            OR (
+                              j.status = 'settlement_retry_wait'
+                              AND (%s OR j.next_attempt_at <= clock_timestamp())
+                            )
+                            OR (
+                              j.status = 'settlement_writing'
+                              AND (
+                                %s
+                                OR j.next_attempt_at IS NULL
+                                OR j.next_attempt_at <= clock_timestamp()
+                              )
+                            )
+                          )
+                        ORDER BY j.created_at, j.job_id
+                        FOR UPDATE OF j SKIP LOCKED
+                        LIMIT %s
+                        """,
+                        (
+                            list(runtime_session_ids),
+                            DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION.value,
+                            bypass_retry_not_before,
+                            reclaim_active_writing,
+                            limit,
+                        ),
+                    ).fetchall()
+                )
+                database_now = cast(
+                    datetime,
+                    connection.execute(
+                        "SELECT clock_timestamp() AS database_now"
+                    ).fetchone()["database_now"],
+                )
+                claimed: list[ClaimedCompactionMemoryExtractionSettlement] = []
+                for row in rows:
+                    state = self._state_from_row(row)
+                    candidate = (
+                        CompactionMemoryExtractionResultCandidateFact.model_validate(
+                            row["candidate_payload"]
+                        )
+                    )
+                    if candidate.result_candidate_fingerprint != str(
+                        row["candidate_fingerprint"]
+                    ):
+                        raise ValueError("extraction result candidate row drifted")
+                    next_state = cast(
+                        DurableProjectionJobOperationalStateFact,
+                        build_projection_fact(
+                            DurableProjectionJobOperationalStateFact,
+                            schema_version=(
+                                "durable_projection_job_operational_state.v1"
+                            ),
+                            status=DurableProjectionJobStatus.SETTLEMENT_WRITING,
+                            state_revision=state.state_revision + 1,
+                            repair_generation=state.repair_generation,
+                            attempt_count=state.attempt_count,
+                            dispatch_attempt_count=state.dispatch_attempt_count,
+                            settlement_generation=state.settlement_generation + 1,
+                            lease_generation=state.lease_generation,
+                            lease_owner_id=None,
+                            lease_expires_at=None,
+                            # For SETTLEMENT_WRITING this is the durable physical
+                            # owner expiry, not a retry eligibility time.
+                            next_attempt_at=database_now
+                            + timedelta(seconds=settlement_attempt_seconds),
+                            last_failure=None,
+                            result_receipt_reference=None,
+                        ),
+                    )
+                    self._write_job_state(
+                        connection,
+                        job_id=candidate.job_id,
+                        state=next_state,
+                    )
+                    claimed.append(
+                        ClaimedCompactionMemoryExtractionSettlement(
+                            result_candidate=candidate,
+                            state=next_state,
+                        )
+                    )
+        return tuple(claimed)
+
+    def defer_compaction_memory_settlement(
+        self,
+        *,
+        result_candidate: CompactionMemoryExtractionResultCandidateFact,
+        settlement_generation: int,
+        failure: BoundedRuntimeFailureDiagnosticFact,
+        delay_seconds: float,
+        reconciliation_required: bool,
+        deadline_monotonic: float,
+    ) -> None:
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                row = self._read_job_row(
+                    connection,
+                    result_candidate.job_id,
+                    lock=True,
+                )
+                if row is None:
+                    raise ValueError("extraction settlement job disappeared")
+                state = self._state_from_row(row)
+                if (
+                    state.status is not DurableProjectionJobStatus.SETTLEMENT_WRITING
+                    or state.settlement_generation != settlement_generation
+                ):
+                    raise ValueError("extraction settlement attempt is stale")
+                database_now = cast(
+                    datetime,
+                    connection.execute(
+                        "SELECT clock_timestamp() AS database_now"
+                    ).fetchone()["database_now"],
+                )
+                next_state = cast(
+                    DurableProjectionJobOperationalStateFact,
+                    build_projection_fact(
+                        DurableProjectionJobOperationalStateFact,
+                        schema_version="durable_projection_job_operational_state.v1",
+                        status=(
+                            DurableProjectionJobStatus.RECONCILIATION_REQUIRED
+                            if reconciliation_required
+                            else DurableProjectionJobStatus.SETTLEMENT_RETRY_WAIT
+                        ),
+                        state_revision=state.state_revision + 1,
+                        repair_generation=state.repair_generation,
+                        attempt_count=state.attempt_count,
+                        dispatch_attempt_count=state.dispatch_attempt_count,
+                        settlement_generation=state.settlement_generation,
+                        lease_generation=state.lease_generation,
+                        lease_owner_id=None,
+                        lease_expires_at=None,
+                        next_attempt_at=(
+                            None
+                            if reconciliation_required
+                            else database_now
+                            + timedelta(seconds=max(0.01, delay_seconds))
+                        ),
+                        last_failure=failure,
+                        result_receipt_reference=None,
+                    ),
+                )
+                self._write_job_state(
+                    connection,
+                    job_id=result_candidate.job_id,
+                    state=next_state,
+                )
 
     def repair_dead_letter(
         self,
@@ -1773,10 +2504,8 @@ class PostgresDurableProjectionRepository:
                 state.status is DurableProjectionJobStatus.PENDING
                 and latest_action_row is not None
             ):
-                latest_action = (
-                    DurableProjectionRepairActionFact.model_validate(
-                        latest_action_row["action_payload"]
-                    )
+                latest_action = DurableProjectionRepairActionFact.model_validate(
+                    latest_action_row["action_payload"]
                 )
                 if (
                     latest_action.action_fingerprint
@@ -1790,9 +2519,8 @@ class PostgresDurableProjectionRepository:
                     for item in latest_action.authority_references
                     if item.authority_kind == "operator_command"
                 )
-                if (
-                    latest_action.operator_reason_code is reason
-                    and authority_ids == (operator_authority_id,)
+                if latest_action.operator_reason_code is reason and authority_ids == (
+                    operator_authority_id,
                 ):
                     return latest_action
             if state.status is not DurableProjectionJobStatus.DEAD_LETTER:
@@ -1859,9 +2587,7 @@ class PostgresDurableProjectionRepository:
                     schema_version="durable_repair_authority_reference.v1",
                     authority_kind="operator_command",
                     authority_id=operator_authority_id,
-                    authority_semantic_fingerprint=(
-                        authority_semantic_fingerprint
-                    ),
+                    authority_semantic_fingerprint=(authority_semantic_fingerprint),
                 ),
             )
             requested_at = connection.execute(
@@ -1910,9 +2636,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=DurableProjectionJobStatus.PENDING,
                     state_revision=state.state_revision + 1,
                     repair_generation=resulting_generation,
@@ -1965,16 +2689,14 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobSemanticFact,
                 schema_version="durable_projection_job_semantic.v1",
                 job_id=str(row["job_id"]),
-                projection_kind=DurableProjectionKind(
-                    str(row["projection_kind"])
-                ),
+                projection_kind=DurableProjectionKind(str(row["projection_kind"])),
                 target_key=str(row["target_key"]),
                 source_event_reference=source,
                 trigger_horizon=horizon,
                 handler_contract=handler,
             ),
         )
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             CanonicalMutationSurfacePlanFact,
         )
 
@@ -1985,9 +2707,7 @@ class PostgresDurableProjectionRepository:
                 schema_version="durable_projection_job_candidate.v1",
                 job_semantic=job,
                 activation_fingerprint=str(row["activation_fingerprint"]),
-                seed_contract_fingerprint=str(
-                    row["seed_contract_fingerprint"]
-                ),
+                seed_contract_fingerprint=str(row["seed_contract_fingerprint"]),
                 delivery_policy=DurableProjectionDeliveryPolicyFact.model_validate(
                     row["delivery_policy"]
                 ),
@@ -1999,10 +2719,8 @@ class PostgresDurableProjectionRepository:
             ),
         )
         if (
-            job.job_semantic_fingerprint
-            != str(row["job_semantic_fingerprint"])
-            or candidate.candidate_fingerprint
-            != str(row["job_candidate_fingerprint"])
+            job.job_semantic_fingerprint != str(row["job_semantic_fingerprint"])
+            or candidate.candidate_fingerprint != str(row["job_candidate_fingerprint"])
             or source.event_id != str(row["source_event_id"])
             or source.sequence != int(row["source_sequence"])
             or source.event_type != str(row["source_event_type"])
@@ -2015,9 +2733,7 @@ class PostgresDurableProjectionRepository:
         row: dict[str, object],
     ) -> DurableProjectionJobOperationalStateFact:
         last_failure = (
-            BoundedRuntimeFailureDiagnosticFact.model_validate(
-                row["last_failure"]
-            )
+            BoundedRuntimeFailureDiagnosticFact.model_validate(row["last_failure"])
             if row["last_failure"] is not None
             else None
         )
@@ -2026,6 +2742,13 @@ class PostgresDurableProjectionRepository:
                 row["result_receipt_reference"]
             )
             if row["result_receipt_reference"] is not None
+            else None
+        )
+        deferral = (
+            CompactionMemoryExtractionJobDeferralFact.model_validate(
+                row["compaction_memory_deferral"]
+            )
+            if row.get("compaction_memory_deferral") is not None
             else None
         )
         state = cast(
@@ -2037,6 +2760,8 @@ class PostgresDurableProjectionRepository:
                 state_revision=int(row["state_revision"]),
                 repair_generation=int(row["repair_generation"]),
                 attempt_count=int(row["attempt_count"]),
+                dispatch_attempt_count=int(row.get("dispatch_attempt_count", 0)),
+                settlement_generation=int(row.get("settlement_generation", 0)),
                 lease_generation=int(row["lease_generation"]),
                 lease_owner_id=(
                     str(row["lease_owner_id"])
@@ -2046,6 +2771,7 @@ class PostgresDurableProjectionRepository:
                 lease_expires_at=row["lease_expires_at"],
                 next_attempt_at=row["next_attempt_at"],
                 last_failure=last_failure,
+                compaction_memory_deferral=deferral,
                 result_receipt_reference=reference,
             ),
         )
@@ -2081,7 +2807,8 @@ class PostgresDurableProjectionRepository:
                                             created_at, job_id
                                ) AS target_row_ordinal
                         FROM durable_projection_jobs AS j
-                        WHERE (
+                        WHERE projection_kind <> %s
+                          AND (
                             status = 'pending'
                             OR (
                                 status = 'retry_wait'
@@ -2134,141 +2861,734 @@ class PostgresDurableProjectionRepository:
                              j.created_at, j.job_id
                     FOR UPDATE OF j SKIP LOCKED
                     """,
-                    (max(limit * 8, limit),),
+                    (
+                        DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION.value,
+                        max(limit * 8, limit),
+                    ),
                 ).fetchall()
             )
             selected = self._select_claim_rows(connection, rows, limit=limit)
-            leases: list[LeasedDurableProjectionJob] = []
-            for row in selected:
-                candidate = self._candidate_from_row(row)
-                state = self._state_from_row(row)
-                policy = candidate.delivery_policy.retry_policy
-                if state.attempt_count >= policy.maximum_attempts:
-                    self._dead_letter_attempts_exhausted(
-                        connection,
-                        candidate=candidate,
-                        state=state,
-                    )
-                    continue
-                database_now_row = connection.execute(
+            return self._lease_selected_rows(
+                connection,
+                selected,
+                owner_id=owner_id,
+                advance_attempt_count=True,
+            )
+
+    def claim_due_session_model(
+        self,
+        *,
+        owner_id: str,
+        runtime_session_ids: tuple[str, ...],
+        limit: int,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[LeasedDurableProjectionJob, ...]:
+        """Claim only jobs with a live session driver without consuming an attempt."""
+
+        if not owner_id or limit < 1 or not runtime_session_ids:
+            return ()
+        if len(runtime_session_ids) > 256:
+            raise ValueError("session-model claim driver set exceeds its hard bound")
+        deadline = deadline_monotonic or monotonic() + 20.0
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline,
+        ) as connection:
+            _set_deadline(connection, deadline)
+            rows = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT j.*
+                    FROM durable_projection_jobs AS j
+                    WHERE j.projection_kind = %s
+                      AND j.runtime_session_id = ANY(%s)
+                      AND (
+                              j.status = 'pending'
+                              AND (
+                                  j.next_attempt_at IS NULL
+                                  OR j.next_attempt_at <= clock_timestamp()
+                              )
+                          OR (
+                              j.status = 'model_retry_wait'
+                              AND j.next_attempt_at <= clock_timestamp()
+                          )
+                          OR (
+                              j.status = 'leased'
+                              AND j.lease_expires_at <= clock_timestamp()
+                          )
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM durable_projection_target_authority_conflicts AS c
+                          WHERE c.projection_kind = j.projection_kind
+                            AND c.target_key = j.target_key
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM durable_projection_target_execution_leases AS l
+                          WHERE l.projection_kind = j.projection_kind
+                            AND l.target_key = j.target_key
+                            AND l.lease_expires_at > clock_timestamp()
+                      )
+                    ORDER BY j.next_attempt_at NULLS FIRST,
+                             j.created_at, j.job_id
+                    LIMIT %s
+                    FOR UPDATE OF j SKIP LOCKED
+                    """,
+                    (
+                        DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION.value,
+                        list(runtime_session_ids),
+                        max(limit * 8, limit),
+                    ),
+                ).fetchall()
+            )
+            selected = self._select_claim_rows(connection, rows, limit=limit)
+            return self._lease_selected_rows(
+                connection,
+                selected,
+                owner_id=owner_id,
+                advance_attempt_count=False,
+            )
+
+    def session_model_work_schedule(
+        self,
+        *,
+        runtime_session_id: str,
+        deadline_monotonic: float,
+    ) -> SessionModelWorkSchedule:
+        """Return the database-clock schedule for all active model jobs."""
+
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            row = connection.execute(
+                """
+                SELECT
+                    clock_timestamp() AS database_now,
+                    COALESCE(bool_or(
+                        status = 'result_ready'
+                        OR (status = 'pending' AND (
+                            next_attempt_at IS NULL
+                            OR next_attempt_at <= clock_timestamp()
+                        ))
+                        OR (status IN (
+                            'model_retry_wait', 'settlement_retry_wait'
+                        ) AND next_attempt_at <= clock_timestamp())
+                        OR (status = 'leased'
+                            AND lease_expires_at <= clock_timestamp())
+                    ), false) AS immediate,
+                    min(CASE
+                        WHEN status = 'pending' THEN next_attempt_at
+                        WHEN status IN (
+                            'model_retry_wait', 'settlement_retry_wait'
+                        ) THEN next_attempt_at
+                        WHEN status = 'leased' THEN lease_expires_at
+                        ELSE NULL
+                    END) AS next_eligible_at
+                FROM durable_projection_jobs
+                WHERE runtime_session_id = %s
+                  AND projection_kind = %s
+                  AND status IN (
+                      'pending', 'leased', 'model_retry_wait', 'result_ready',
+                      'settlement_retry_wait'
+                  )
+                """,
+                (
+                    runtime_session_id,
+                    DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION.value,
+                ),
+            ).fetchone()
+        return SessionModelWorkSchedule(
+            immediate=bool(row["immediate"]),
+            database_now=cast(datetime, row["database_now"]),
+            next_eligible_at=cast(datetime | None, row["next_eligible_at"]),
+        )
+
+    def _lease_selected_rows(
+        self,
+        connection: Connection,
+        rows: tuple[dict[str, object], ...],
+        *,
+        owner_id: str,
+        advance_attempt_count: bool,
+    ) -> tuple[LeasedDurableProjectionJob, ...]:
+        leases: list[LeasedDurableProjectionJob] = []
+        for row in rows:
+            candidate = self._candidate_from_row(row)
+            state = self._state_from_row(row)
+            policy = candidate.delivery_policy.retry_policy
+            attempts_used = (
+                state.attempt_count
+                if advance_attempt_count
+                else state.dispatch_attempt_count
+            )
+            if attempts_used >= policy.maximum_attempts:
+                self._dead_letter_attempts_exhausted(
+                    connection,
+                    candidate=candidate,
+                    state=state,
+                )
+                continue
+            database_now_row = connection.execute(
+                "SELECT clock_timestamp() AS database_now"
+            ).fetchone()
+            database_now = cast(datetime, database_now_row["database_now"])
+            expires = database_now + timedelta(seconds=policy.lease_duration_seconds)
+            next_state = cast(
+                DurableProjectionJobOperationalStateFact,
+                build_projection_fact(
+                    DurableProjectionJobOperationalStateFact,
+                    schema_version="durable_projection_job_operational_state.v1",
+                    status=DurableProjectionJobStatus.LEASED,
+                    state_revision=state.state_revision + 1,
+                    repair_generation=state.repair_generation,
+                    attempt_count=(
+                        state.attempt_count + 1
+                        if advance_attempt_count
+                        else state.attempt_count
+                    ),
+                    dispatch_attempt_count=state.dispatch_attempt_count,
+                    settlement_generation=state.settlement_generation,
+                    lease_generation=state.lease_generation + 1,
+                    lease_owner_id=owner_id,
+                    lease_expires_at=expires,
+                    next_attempt_at=None,
+                    last_failure=state.last_failure,
+                    compaction_memory_deferral=None,
+                    result_receipt_reference=None,
+                ),
+            )
+            target_lease = cast(
+                DurableProjectionTargetExecutionLeaseFact,
+                build_projection_fact(
+                    DurableProjectionTargetExecutionLeaseFact,
+                    schema_version="durable_projection_target_execution_lease.v1",
+                    projection_kind=candidate.job_semantic.projection_kind,
+                    target_key=candidate.job_semantic.target_key,
+                    owner_job_id=candidate.job_semantic.job_id,
+                    owner_source_sequence=(
+                        candidate.job_semantic.source_event_reference.sequence
+                    ),
+                    lease_generation=next_state.lease_generation,
+                    lease_owner_id=owner_id,
+                    lease_expires_at=expires,
+                    state_revision=next_state.state_revision,
+                ),
+            )
+            self._write_job_state(
+                connection,
+                job_id=candidate.job_semantic.job_id,
+                state=next_state,
+            )
+            target_inserted = connection.execute(
+                """
+                INSERT INTO durable_projection_target_execution_leases (
+                    projection_kind, target_key, owner_job_id,
+                    source_sequence, lease_generation, lease_owner_id,
+                    lease_expires_at, lease_payload, lease_fingerprint
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (projection_kind, target_key) DO UPDATE SET
+                    owner_job_id = EXCLUDED.owner_job_id,
+                    source_sequence = EXCLUDED.source_sequence,
+                    lease_generation = EXCLUDED.lease_generation,
+                    lease_owner_id = EXCLUDED.lease_owner_id,
+                    lease_expires_at = EXCLUDED.lease_expires_at,
+                    lease_payload = EXCLUDED.lease_payload,
+                    lease_fingerprint = EXCLUDED.lease_fingerprint
+                WHERE durable_projection_target_execution_leases.lease_expires_at
+                      <= clock_timestamp()
+                RETURNING lease_fingerprint
+                """,
+                (
+                    candidate.job_semantic.projection_kind.value,
+                    candidate.job_semantic.target_key,
+                    candidate.job_semantic.job_id,
+                    candidate.job_semantic.source_event_reference.sequence,
+                    next_state.lease_generation,
+                    owner_id,
+                    expires,
+                    _json(target_lease),
+                    target_lease.lease_fingerprint,
+                ),
+            ).fetchone()
+            if (
+                target_inserted is None
+                or str(target_inserted["lease_fingerprint"])
+                != target_lease.lease_fingerprint
+            ):
+                raise ValueError("projection target lease compare-and-set failed")
+            leases.append(
+                cast(
+                    LeasedDurableProjectionJob,
+                    build_projection_fact(
+                        LeasedDurableProjectionJob,
+                        schema_version="leased_durable_projection_job.v1",
+                        job=candidate.job_semantic,
+                        job_candidate_fingerprint=candidate.candidate_fingerprint,
+                        activation_fingerprint=candidate.activation_fingerprint,
+                        seed_contract_fingerprint=(candidate.seed_contract_fingerprint),
+                        delivery_policy=candidate.delivery_policy,
+                        canonical_mutation_surface_plan=(
+                            candidate.canonical_mutation_surface_plan
+                        ),
+                        expected_state_revision=next_state.state_revision,
+                        repair_generation=next_state.repair_generation,
+                        attempt_count=next_state.attempt_count,
+                        dispatch_attempt_count=next_state.dispatch_attempt_count,
+                        lease_generation=next_state.lease_generation,
+                        lease_owner_id=owner_id,
+                        lease_expires_at=expires,
+                    ),
+                )
+            )
+        return tuple(leases)
+
+    def release_session_model_lease_without_attempt(
+        self,
+        lease: LeasedDurableProjectionJob,
+        *,
+        reason: str,
+        deadline_monotonic: float | None = None,
+    ) -> DurableProjectionCommitConfirmation:
+        """Return a never-dispatched session-model lease to PENDING."""
+
+        if (
+            lease.job.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+        ):
+            raise ValueError("only session-model projection leases may be deferred")
+        if reason not in {"driver_busy", "safe_point_stale"}:
+            raise ValueError("session-model deferral reason is invalid")
+        deadline = deadline_monotonic or monotonic() + 10.0
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline,
+        ) as connection:
+            _set_deadline(connection, deadline)
+            row = connection.execute(
+                """
+                SELECT * FROM durable_projection_jobs
+                WHERE job_id = %s
+                FOR UPDATE
+                """,
+                (lease.job.job_id,),
+            ).fetchone()
+            if row is None:
+                return DurableProjectionCommitConfirmation.CONFLICT
+            state = self._state_from_row(dict(row))
+            if state.status is DurableProjectionJobStatus.PENDING:
+                deferral = state.compaction_memory_deferral
+                return (
+                    DurableProjectionCommitConfirmation.FULL
+                    if deferral is not None
+                    and deferral.job_id == lease.job.job_id
+                    and deferral.reason == reason
+                    else DurableProjectionCommitConfirmation.CONFLICT
+                )
+            if (
+                state.status is not DurableProjectionJobStatus.LEASED
+                or state.state_revision != lease.expected_state_revision
+                or state.lease_generation != lease.lease_generation
+                or state.lease_owner_id != lease.lease_owner_id
+                or state.dispatch_attempt_count != lease.dispatch_attempt_count
+            ):
+                return DurableProjectionCommitConfirmation.CONFLICT
+            database_now = cast(
+                datetime,
+                connection.execute(
                     "SELECT clock_timestamp() AS database_now"
-                ).fetchone()
-                database_now = cast(datetime, database_now_row["database_now"])
-                expires = database_now + timedelta(
-                    seconds=policy.lease_duration_seconds
+                ).fetchone()["database_now"],
+            )
+            not_before = database_now + timedelta(
+                seconds=1 + ((state.lease_generation - 1) % 5)
+            )
+            deferral = cast(
+                CompactionMemoryExtractionJobDeferralFact,
+                build_projection_fact(
+                    CompactionMemoryExtractionJobDeferralFact,
+                    schema_version="compaction_memory_extraction_job_deferral.v1",
+                    job_id=lease.job.job_id,
+                    reason=reason,
+                    deferral_ordinal=state.lease_generation,
+                    not_before_utc=not_before,
+                    deferral_policy_fingerprint=(
+                        _MODEL_JOB_DEFERRAL_POLICY_FINGERPRINT
+                    ),
+                ),
+            )
+            next_state = cast(
+                DurableProjectionJobOperationalStateFact,
+                build_projection_fact(
+                    DurableProjectionJobOperationalStateFact,
+                    schema_version="durable_projection_job_operational_state.v1",
+                    status=DurableProjectionJobStatus.PENDING,
+                    state_revision=state.state_revision + 1,
+                    repair_generation=state.repair_generation,
+                    attempt_count=state.attempt_count,
+                    dispatch_attempt_count=state.dispatch_attempt_count,
+                    settlement_generation=state.settlement_generation,
+                    lease_generation=state.lease_generation,
+                    lease_owner_id=None,
+                    lease_expires_at=None,
+                    next_attempt_at=not_before,
+                    last_failure=None,
+                    compaction_memory_deferral=deferral,
+                    result_receipt_reference=None,
+                ),
+            )
+            self._write_job_state(
+                connection,
+                job_id=lease.job.job_id,
+                state=next_state,
+            )
+            self._release_target_lease(connection, lease)
+        return DurableProjectionCommitConfirmation.FULL
+
+    def dead_letter_session_model_job_before_attempt(
+        self,
+        lease: LeasedDurableProjectionJob,
+        *,
+        failure_kind: DurableProjectionFailureKind,
+        error: BaseException,
+        deadline_monotonic: float,
+    ) -> DurableProjectionCommitConfirmation:
+        """Terminalize a deterministic failure before ModelCallStart is FULL."""
+
+        if (
+            lease.job.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+        ):
+            raise ValueError("only extraction model jobs use pre-dispatch failure")
+        if failure_kind not in {
+            DurableProjectionFailureKind.SOURCE_AUTHORITY_CONFLICT,
+            DurableProjectionFailureKind.TARGET_AUTHORITY_CONFLICT,
+            DurableProjectionFailureKind.HANDLER_CONTRACT_MISMATCH,
+        }:
+            raise ValueError("pre-dispatch dead-letter failure kind is invalid")
+        diagnostic = _diagnostic(error)
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                row = self._read_job_row(connection, lease.job.job_id, lock=True)
+                if row is None:
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                state = self._state_from_row(row)
+                if state.status is DurableProjectionJobStatus.DEAD_LETTER:
+                    return (
+                        DurableProjectionCommitConfirmation.FULL
+                        if state.dispatch_attempt_count == lease.dispatch_attempt_count
+                        and state.last_failure == diagnostic
+                        else DurableProjectionCommitConfirmation.CONFLICT
+                    )
+                if (
+                    state.status is not DurableProjectionJobStatus.LEASED
+                    or state.state_revision != lease.expected_state_revision
+                    or state.lease_generation != lease.lease_generation
+                    or state.lease_owner_id != lease.lease_owner_id
+                    or state.dispatch_attempt_count != lease.dispatch_attempt_count
+                ):
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                terminal = cast(
+                    DurableProjectionJobOperationalStateFact,
+                    build_projection_fact(
+                        DurableProjectionJobOperationalStateFact,
+                        schema_version=("durable_projection_job_operational_state.v1"),
+                        status=DurableProjectionJobStatus.DEAD_LETTER,
+                        state_revision=state.state_revision + 1,
+                        repair_generation=state.repair_generation,
+                        attempt_count=state.attempt_count,
+                        dispatch_attempt_count=state.dispatch_attempt_count,
+                        settlement_generation=state.settlement_generation,
+                        lease_generation=state.lease_generation,
+                        lease_owner_id=None,
+                        lease_expires_at=None,
+                        next_attempt_at=None,
+                        last_failure=diagnostic,
+                        compaction_memory_deferral=None,
+                        result_receipt_reference=None,
+                    ),
+                )
+                self._write_job_state(
+                    connection,
+                    job_id=lease.job.job_id,
+                    state=terminal,
+                )
+                self._release_target_lease(connection, lease)
+        return DurableProjectionCommitConfirmation.FULL
+
+    def defer_session_model_job_after_attempt(
+        self,
+        lease: LeasedDurableProjectionJob,
+        *,
+        failure: BoundedRuntimeFailureDiagnosticFact,
+        delay_seconds: float,
+        deadline_monotonic: float,
+    ) -> DurableProjectionCommitConfirmation:
+        """Close one dispatched attempt while preserving its durable ordinal."""
+
+        if (
+            lease.job.projection_kind
+            is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+        ):
+            raise ValueError("only extraction model jobs use model retry wait")
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                row = self._read_job_row(
+                    connection,
+                    lease.job.job_id,
+                    lock=True,
+                )
+                if row is None:
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                state = self._state_from_row(row)
+                if state.status is DurableProjectionJobStatus.MODEL_RETRY_WAIT:
+                    target_lease = connection.execute(
+                        """
+                        SELECT 1
+                        FROM durable_projection_target_execution_leases
+                        WHERE projection_kind = %s AND target_key = %s
+                        """,
+                        (
+                            lease.job.projection_kind.value,
+                            lease.job.target_key,
+                        ),
+                    ).fetchone()
+                    return (
+                        DurableProjectionCommitConfirmation.FULL
+                        if state.dispatch_attempt_count
+                        == lease.dispatch_attempt_count + 1
+                        and state.state_revision
+                        == lease.expected_state_revision + 2
+                        and state.attempt_count == 0
+                        and state.lease_generation == lease.lease_generation
+                        and state.last_failure == failure
+                        and state.lease_owner_id is None
+                        and state.lease_expires_at is None
+                        and state.next_attempt_at is not None
+                        and state.compaction_memory_deferral is None
+                        and state.result_receipt_reference is None
+                        and target_lease is None
+                        else DurableProjectionCommitConfirmation.CONFLICT
+                    )
+                if (
+                    state.status is not DurableProjectionJobStatus.LEASED
+                    or state.lease_generation != lease.lease_generation
+                    or state.lease_owner_id != lease.lease_owner_id
+                    or state.dispatch_attempt_count != lease.dispatch_attempt_count + 1
+                ):
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                now = cast(
+                    datetime,
+                    connection.execute(
+                        "SELECT clock_timestamp() AS database_now"
+                    ).fetchone()["database_now"],
                 )
                 next_state = cast(
                     DurableProjectionJobOperationalStateFact,
                     build_projection_fact(
                         DurableProjectionJobOperationalStateFact,
-                        schema_version=(
-                            "durable_projection_job_operational_state.v1"
-                        ),
-                        status=DurableProjectionJobStatus.LEASED,
+                        schema_version="durable_projection_job_operational_state.v1",
+                        status=DurableProjectionJobStatus.MODEL_RETRY_WAIT,
                         state_revision=state.state_revision + 1,
                         repair_generation=state.repair_generation,
-                        attempt_count=state.attempt_count + 1,
-                        lease_generation=state.lease_generation + 1,
-                        lease_owner_id=owner_id,
-                        lease_expires_at=expires,
-                        next_attempt_at=None,
-                        last_failure=state.last_failure,
+                        attempt_count=state.attempt_count,
+                        dispatch_attempt_count=state.dispatch_attempt_count,
+                        settlement_generation=state.settlement_generation,
+                        lease_generation=state.lease_generation,
+                        lease_owner_id=None,
+                        lease_expires_at=None,
+                        next_attempt_at=now
+                        + timedelta(seconds=max(0.01, delay_seconds)),
+                        last_failure=failure,
                         result_receipt_reference=None,
-                    ),
-                )
-                target_lease = cast(
-                    DurableProjectionTargetExecutionLeaseFact,
-                    build_projection_fact(
-                        DurableProjectionTargetExecutionLeaseFact,
-                        schema_version=(
-                            "durable_projection_target_execution_lease.v1"
-                        ),
-                        projection_kind=candidate.job_semantic.projection_kind,
-                        target_key=candidate.job_semantic.target_key,
-                        owner_job_id=candidate.job_semantic.job_id,
-                        owner_source_sequence=(
-                            candidate.job_semantic.source_event_reference.sequence
-                        ),
-                        lease_generation=next_state.lease_generation,
-                        lease_owner_id=owner_id,
-                        lease_expires_at=expires,
-                        state_revision=next_state.state_revision,
                     ),
                 )
                 self._write_job_state(
                     connection,
-                    job_id=candidate.job_semantic.job_id,
+                    job_id=lease.job.job_id,
                     state=next_state,
                 )
-                target_inserted = connection.execute(
-                    """
-                    INSERT INTO durable_projection_target_execution_leases (
-                        projection_kind, target_key, owner_job_id,
-                        source_sequence, lease_generation, lease_owner_id,
-                        lease_expires_at, lease_payload, lease_fingerprint
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (projection_kind, target_key) DO UPDATE SET
-                        owner_job_id = EXCLUDED.owner_job_id,
-                        source_sequence = EXCLUDED.source_sequence,
-                        lease_generation = EXCLUDED.lease_generation,
-                        lease_owner_id = EXCLUDED.lease_owner_id,
-                        lease_expires_at = EXCLUDED.lease_expires_at,
-                        lease_payload = EXCLUDED.lease_payload,
-                        lease_fingerprint = EXCLUDED.lease_fingerprint
-                    WHERE durable_projection_target_execution_leases.lease_expires_at
-                          <= clock_timestamp()
-                    RETURNING lease_fingerprint
-                    """,
-                    (
-                        candidate.job_semantic.projection_kind.value,
-                        candidate.job_semantic.target_key,
-                        candidate.job_semantic.job_id,
-                        candidate.job_semantic.source_event_reference.sequence,
-                        next_state.lease_generation,
-                        owner_id,
-                        expires,
-                        _json(target_lease),
-                        target_lease.lease_fingerprint,
-                    ),
-                ).fetchone()
-                if (
-                    target_inserted is None
-                    or str(target_inserted["lease_fingerprint"])
-                    != target_lease.lease_fingerprint
-                ):
-                    raise ValueError(
-                        "projection target lease compare-and-set failed"
+                self._release_target_lease(connection, lease)
+        return DurableProjectionCommitConfirmation.FULL
+
+    def supersede_unstarted_compaction_memory_jobs(
+        self,
+        *,
+        runtime_session_id: str,
+        deadline_monotonic: float,
+    ) -> int:
+        """Terminalize jobs that have no live model or RESULT_READY owner."""
+
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                rows = tuple(
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT * FROM durable_projection_jobs
+                        WHERE runtime_session_id = %s
+                          AND projection_kind = %s
+                          AND status IN ('pending', 'model_retry_wait')
+                        ORDER BY source_sequence, job_id
+                        FOR UPDATE
+                        """,
+                        (
+                            runtime_session_id,
+                            DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION.value,
+                        ),
+                    ).fetchall()
+                )
+                for row in rows:
+                    candidate = self._candidate_from_row(row)
+                    state = self._state_from_row(row)
+                    receipt_id = (
+                        "projection-receipt:compaction-memory-superseded:"
+                        + context_fingerprint(
+                            "compaction-memory-extraction-superseded-receipt-id:v1",
+                            (
+                                candidate.job_semantic.job_id,
+                                candidate.job_semantic.source_event_reference.reference_fingerprint,
+                                "graceful_session_close",
+                            ),
+                        ).removeprefix("sha256:")
                     )
-                leases.append(
-                    cast(
-                        LeasedDurableProjectionJob,
+                    receipt = cast(
+                        CompactionMemoryExtractionSupersededReceiptFact,
                         build_projection_fact(
-                            LeasedDurableProjectionJob,
-                            schema_version="leased_durable_projection_job.v1",
-                            job=candidate.job_semantic,
-                            job_candidate_fingerprint=(
-                                candidate.candidate_fingerprint
+                            CompactionMemoryExtractionSupersededReceiptFact,
+                            schema_version=(
+                                "compaction_memory_extraction_superseded_receipt.v1"
                             ),
-                            activation_fingerprint=(
-                                candidate.activation_fingerprint
+                            receipt_kind=("compaction_memory_extraction_superseded"),
+                            receipt_id=receipt_id,
+                            projection_kind=(
+                                DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
                             ),
-                            seed_contract_fingerprint=(
-                                candidate.seed_contract_fingerprint
+                            job_id=candidate.job_semantic.job_id,
+                            target_key=candidate.job_semantic.target_key,
+                            source_request_event_reference=(
+                                candidate.job_semantic.source_event_reference
                             ),
-                            delivery_policy=candidate.delivery_policy,
-                            canonical_mutation_surface_plan=(
-                                candidate.canonical_mutation_surface_plan
-                            ),
-                            expected_state_revision=next_state.state_revision,
-                            repair_generation=next_state.repair_generation,
-                            attempt_count=next_state.attempt_count,
-                            lease_generation=next_state.lease_generation,
-                            lease_owner_id=owner_id,
-                            lease_expires_at=expires,
+                            supersession_reason="graceful_session_close",
+                            dispatch_attempt_count=state.dispatch_attempt_count,
                         ),
                     )
+                    self._insert_receipt(connection, receipt)
+                    terminal = cast(
+                        DurableProjectionJobOperationalStateFact,
+                        build_projection_fact(
+                            DurableProjectionJobOperationalStateFact,
+                            schema_version=(
+                                "durable_projection_job_operational_state.v1"
+                            ),
+                            status=DurableProjectionJobStatus.SUPERSEDED,
+                            state_revision=state.state_revision + 1,
+                            repair_generation=state.repair_generation,
+                            attempt_count=0,
+                            dispatch_attempt_count=state.dispatch_attempt_count,
+                            settlement_generation=state.settlement_generation,
+                            lease_generation=state.lease_generation,
+                            lease_owner_id=None,
+                            lease_expires_at=None,
+                            next_attempt_at=None,
+                            last_failure=None,
+                            compaction_memory_deferral=None,
+                            result_receipt_reference=(
+                                durable_result_receipt_reference(receipt)
+                            ),
+                        ),
+                    )
+                    self._write_job_state(
+                        connection,
+                        job_id=candidate.job_semantic.job_id,
+                        state=terminal,
+                    )
+                return len(rows)
+
+    def defer_recovered_session_model_attempt(
+        self,
+        lease: LeasedDurableProjectionJob,
+        *,
+        failure: BoundedRuntimeFailureDiagnosticFact,
+        delay_seconds: float,
+        deadline_monotonic: float,
+    ) -> DurableProjectionCommitConfirmation:
+        """Defer a previously dispatched attempt without advancing its ordinal."""
+
+        with self.connection_provider.connection(
+            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            _set_deadline(connection, deadline_monotonic)
+            with connection.transaction():
+                row = self._read_job_row(connection, lease.job.job_id, lock=True)
+                if row is None:
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                state = self._state_from_row(row)
+                if state.status is DurableProjectionJobStatus.MODEL_RETRY_WAIT:
+                    return DurableProjectionCommitConfirmation.FULL
+                if (
+                    state.status is not DurableProjectionJobStatus.LEASED
+                    or state.lease_generation != lease.lease_generation
+                    or state.lease_owner_id != lease.lease_owner_id
+                    or state.dispatch_attempt_count != lease.dispatch_attempt_count
+                    or state.dispatch_attempt_count < 1
+                ):
+                    return DurableProjectionCommitConfirmation.CONFLICT
+                now = cast(
+                    datetime,
+                    connection.execute(
+                        "SELECT clock_timestamp() AS database_now"
+                    ).fetchone()["database_now"],
                 )
-            return tuple(leases)
+                next_state = cast(
+                    DurableProjectionJobOperationalStateFact,
+                    build_projection_fact(
+                        DurableProjectionJobOperationalStateFact,
+                        schema_version="durable_projection_job_operational_state.v1",
+                        status=DurableProjectionJobStatus.MODEL_RETRY_WAIT,
+                        state_revision=state.state_revision + 1,
+                        repair_generation=state.repair_generation,
+                        attempt_count=state.attempt_count,
+                        dispatch_attempt_count=state.dispatch_attempt_count,
+                        settlement_generation=state.settlement_generation,
+                        lease_generation=state.lease_generation,
+                        lease_owner_id=None,
+                        lease_expires_at=None,
+                        next_attempt_at=now
+                        + timedelta(seconds=max(0.01, delay_seconds)),
+                        last_failure=failure,
+                        result_receipt_reference=None,
+                    ),
+                )
+                self._write_job_state(
+                    connection,
+                    job_id=lease.job.job_id,
+                    state=next_state,
+                )
+                self._release_target_lease(connection, lease)
+        return DurableProjectionCommitConfirmation.FULL
 
     def _select_claim_rows(
         self,
@@ -2315,8 +3635,7 @@ class PostgresDurableProjectionRepository:
             ).fetchone()
             if (
                 active is not None
-                and cast(datetime, active["lease_expires_at"])
-                > database_now
+                and cast(datetime, active["lease_expires_at"]) > database_now
             ):
                 continue
             candidates = grouped[key]
@@ -2324,8 +3643,7 @@ class PostgresDurableProjectionRepository:
                 candidates[0]
             ).job_semantic.handler_contract.target_update_policy
             if (
-                policy
-                is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
+                policy is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
                 and head is not None
             ):
                 effective = self._read_applied_head_receipt_in_connection(
@@ -2366,8 +3684,7 @@ class PostgresDurableProjectionRepository:
                 if not candidates:
                     continue
             if (
-                policy
-                is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
+                policy is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
                 and head is not None
             ):
                 candidates.sort(
@@ -2402,8 +3719,7 @@ class PostgresDurableProjectionRepository:
                     str(item["job_id"]),
                 ),
                 reverse=(
-                    policy
-                    is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
+                    policy is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
                 ),
             )
             selected.append(candidates[0])
@@ -2437,9 +3753,7 @@ class PostgresDurableProjectionRepository:
                 lease_expires_at=None,
                 next_attempt_at=None,
                 last_failure=None,
-                result_receipt_reference=(
-                    head.applied_result_receipt_reference
-                ),
+                result_receipt_reference=(head.applied_result_receipt_reference),
             ),
         )
         self._write_job_state(
@@ -2483,9 +3797,7 @@ class PostgresDurableProjectionRepository:
             DurableProjectionJobOperationalStateFact,
             build_projection_fact(
                 DurableProjectionJobOperationalStateFact,
-                schema_version=(
-                    "durable_projection_job_operational_state.v1"
-                ),
+                schema_version=("durable_projection_job_operational_state.v1"),
                 status=DurableProjectionJobStatus.SUPERSEDED,
                 state_revision=state.state_revision + 1,
                 repair_generation=state.repair_generation,
@@ -2495,9 +3807,7 @@ class PostgresDurableProjectionRepository:
                 lease_expires_at=None,
                 next_attempt_at=None,
                 last_failure=None,
-                result_receipt_reference=(
-                    durable_result_receipt_reference(receipt)
-                ),
+                result_receipt_reference=(durable_result_receipt_reference(receipt)),
             ),
         )
         self._write_job_state(
@@ -2561,12 +3871,15 @@ class PostgresDurableProjectionRepository:
                 state_revision = %s,
                 repair_generation = %s,
                 attempt_count = %s,
+                dispatch_attempt_count = %s,
+                settlement_generation = %s,
                 lease_generation = %s,
                 lease_owner_id = %s,
                 lease_expires_at = %s,
                 next_attempt_at = %s,
                 last_failure = %s,
                 result_receipt_reference = %s,
+                compaction_memory_deferral = %s,
                 state_fingerprint = %s,
                 updated_at = now()
             WHERE job_id = %s
@@ -2576,18 +3889,21 @@ class PostgresDurableProjectionRepository:
                 state.state_revision,
                 state.repair_generation,
                 state.attempt_count,
+                state.dispatch_attempt_count,
+                state.settlement_generation,
                 state.lease_generation,
                 state.lease_owner_id,
                 state.lease_expires_at,
                 state.next_attempt_at,
-                (
-                    _json(state.last_failure)
-                    if state.last_failure is not None
-                    else None
-                ),
+                (_json(state.last_failure) if state.last_failure is not None else None),
                 (
                     _json(state.result_receipt_reference)
                     if state.result_receipt_reference is not None
+                    else None
+                ),
+                (
+                    _json(state.compaction_memory_deferral)
+                    if state.compaction_memory_deferral is not None
                     else None
                 ),
                 state.state_fingerprint,
@@ -2718,9 +4034,7 @@ class PostgresDurableProjectionRepository:
                         candidate=candidate,
                         state=state,
                         head=head,
-                        conflict_kind=(
-                            "distinct_source_for_single_assignment"
-                        ),
+                        conflict_kind=("distinct_source_for_single_assignment"),
                         candidate_result_semantic_fingerprint=None,
                     )
                 if not same_result:
@@ -2782,14 +4096,12 @@ class PostgresDurableProjectionRepository:
 
         self._persist_prepared_documents(
             connection,
-            source_event_reference=(
-                candidate.job_semantic.source_event_reference
-            ),
+            source_event_reference=(candidate.job_semantic.source_event_reference),
             prepared=prepared,
             expected_head=head,
         )
         if prepared.canonical_mutation_candidates:
-            from pulsara_agent.runtime.projection_jobs.canonical_mutation import (
+            from pulsara_agent.runtime.projection_jobs.postgres_canonical_mutation_repository import (
                 PostgresCanonicalMutationRepository,
             )
 
@@ -2868,10 +4180,8 @@ class PostgresDurableProjectionRepository:
         )
         if (
             contract.contract_fingerprint != stored_contract_fingerprint
-            or owner.hook_contract_fingerprint
-            != contract.contract_fingerprint
-            or contract.contract_semantic.projection_kind
-            is not owner.projection_kind
+            or owner.hook_contract_fingerprint != contract.contract_fingerprint
+            or contract.contract_semantic.projection_kind is not owner.projection_kind
             or prepared_result.result_semantic.projection_kind
             is not owner.projection_kind
         ):
@@ -2886,8 +4196,10 @@ class PostgresDurableProjectionRepository:
         if activated is not None:
             raise ValueError("pre-activation writer is disabled after activation")
 
-        event_row = connection.cursor(row_factory=dict_row).execute(
-            """
+        event_row = (
+            connection.cursor(row_factory=dict_row)
+            .execute(
+                """
             SELECT id, session_id, run_id, turn_id, reply_id, sequence,
                    event_type, event_schema_version,
                    event_schema_fingerprint,
@@ -2900,8 +4212,10 @@ class PostgresDurableProjectionRepository:
             FROM agent_events
             WHERE id = %s
             """,
-            (owner.source_event_reference.event_id,),
-        ).fetchone()
+                (owner.source_event_reference.event_id,),
+            )
+            .fetchone()
+        )
         if event_row is None:
             raise ValueError("pre-activation source event is absent")
         bound = _bound_event_from_row(dict(event_row))
@@ -2919,9 +4233,7 @@ class PostgresDurableProjectionRepository:
             raise ValueError("pre-activation source schema is not accepted")
         decoded = bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
         tool_call_id = (
-            decoded.tool_call_id
-            if isinstance(decoded, ToolResultEndEvent)
-            else None
+            decoded.tool_call_id if isinstance(decoded, ToolResultEndEvent) else None
         )
         target_key = projection_target_key(
             projection_kind=owner.projection_kind,
@@ -2939,11 +4251,9 @@ class PostgresDurableProjectionRepository:
             for item in prepared_result.canonical_mutation_candidates
         )
         if (
-            prepared_result.result_semantic
-            .ordered_document_semantic_fingerprints
+            prepared_result.result_semantic.ordered_document_semantic_fingerprints
             != document_semantics
-            or prepared_result.result_semantic
-            .ordered_canonical_mutation_semantic_fingerprints
+            or prepared_result.result_semantic.ordered_canonical_mutation_semantic_fingerprints
             != mutation_semantics
             or any(
                 item.source_owner_fingerprint
@@ -2995,9 +4305,7 @@ class PostgresDurableProjectionRepository:
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=(
-                        head.applied_result_receipt_reference
-                    ),
+                    receipt_reference=(head.applied_result_receipt_reference),
                     head=head,
                     failure=None,
                 )
@@ -3013,9 +4321,7 @@ class PostgresDurableProjectionRepository:
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=durable_result_receipt_reference(
-                        superseded
-                    ),
+                    receipt_reference=durable_result_receipt_reference(superseded),
                     head=head,
                     failure=None,
                 )
@@ -3027,17 +4333,13 @@ class PostgresDurableProjectionRepository:
                         receipt_reference=None,
                         head=head,
                         failure=_diagnostic(
-                            ValueError(
-                                "same-sequence pre-activation result conflict"
-                            )
+                            ValueError("same-sequence pre-activation result conflict")
                         ),
                     )
                 return cls._pre_activation_outcome(
                     confirmation=DurableProjectionCommitConfirmation.FULL,
                     owner=owner,
-                    receipt_reference=(
-                        head.applied_result_receipt_reference
-                    ),
+                    receipt_reference=(head.applied_result_receipt_reference),
                     head=head,
                     failure=None,
                 )
@@ -3049,7 +4351,7 @@ class PostgresDurableProjectionRepository:
             expected_head=head,
         )
         if prepared_result.canonical_mutation_candidates:
-            from pulsara_agent.runtime.projection_jobs.canonical_mutation import (
+            from pulsara_agent.runtime.projection_jobs.postgres_canonical_mutation_repository import (
                 PostgresCanonicalMutationRepository,
             )
 
@@ -3125,9 +4427,7 @@ class PostgresDurableProjectionRepository:
             self._validate_or_issue_guard(
                 connection,
                 admission_guard=None,
-                transaction_owner_id=(
-                    "projection-failure:" + lease.lease_fingerprint
-                ),
+                transaction_owner_id=("projection-failure:" + lease.lease_fingerprint),
             )
             _, candidate, state = self._validated_lease_row(
                 connection,
@@ -3159,9 +4459,7 @@ class PostgresDurableProjectionRepository:
                     * multiplier,
                 )
                 status = DurableProjectionJobStatus.RETRY_WAIT
-                next_attempt_at = database_now + timedelta(
-                    milliseconds=delay
-                )
+                next_attempt_at = database_now + timedelta(milliseconds=delay)
                 confirmation = DurableProjectionCommitConfirmation.FULL
             else:
                 status = DurableProjectionJobStatus.DEAD_LETTER
@@ -3175,9 +4473,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=status,
                     state_revision=state.state_revision + 1,
                     repair_generation=state.repair_generation,
@@ -3220,9 +4516,7 @@ class PostgresDurableProjectionRepository:
             self._validate_or_issue_guard(
                 connection,
                 admission_guard=None,
-                transaction_owner_id=(
-                    "projection-release:" + lease.lease_fingerprint
-                ),
+                transaction_owner_id=("projection-release:" + lease.lease_fingerprint),
             )
             _, candidate, state = self._validated_lease_row(
                 connection,
@@ -3232,9 +4526,7 @@ class PostgresDurableProjectionRepository:
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
                     DurableProjectionJobOperationalStateFact,
-                    schema_version=(
-                        "durable_projection_job_operational_state.v1"
-                    ),
+                    schema_version=("durable_projection_job_operational_state.v1"),
                     status=DurableProjectionJobStatus.RETRY_WAIT,
                     state_revision=state.state_revision + 1,
                     repair_generation=state.repair_generation,
@@ -3290,12 +4582,9 @@ class PostgresDurableProjectionRepository:
         )
         if (
             candidate.job_semantic != lease.job
-            or candidate.candidate_fingerprint
-            != lease.job_candidate_fingerprint
-            or candidate.activation_fingerprint
-            != lease.activation_fingerprint
-            or candidate.seed_contract_fingerprint
-            != lease.seed_contract_fingerprint
+            or candidate.candidate_fingerprint != lease.job_candidate_fingerprint
+            or candidate.activation_fingerprint != lease.activation_fingerprint
+            or candidate.seed_contract_fingerprint != lease.seed_contract_fingerprint
             or state.status is not DurableProjectionJobStatus.LEASED
             or state.state_revision != lease.expected_state_revision
             or state.repair_generation != lease.repair_generation
@@ -3306,9 +4595,7 @@ class PostgresDurableProjectionRepository:
             or target.lease_generation != lease.lease_generation
             or target.lease_owner_id != lease.lease_owner_id
             or target.state_revision != lease.expected_state_revision
-            or target.lease_fingerprint != str(
-                target_row["lease_fingerprint"]
-            )
+            or target.lease_fingerprint != str(target_row["lease_fingerprint"])
         ):
             raise ValueError("projection job lease is stale")
         return row, candidate, state
@@ -3322,7 +4609,7 @@ class PostgresDurableProjectionRepository:
         prepared: PreparedDurableProjectionResultFact,
         expected_head: DurableProjectionTargetHeadFact | None,
     ) -> None:
-        from pulsara_agent.runtime.projection_jobs.contracts import (
+        from pulsara_agent.projection_jobs.contracts import (
             PreparedDurableProjectionArtifactDocumentFact,
             PreparedDurableProjectionGraphDocumentFact,
             PreparedDurableProjectionGraphRelationFact,
@@ -3376,9 +4663,7 @@ class PostgresDurableProjectionRepository:
                         SELECT media_type, text_body, digest, size_bytes
                         FROM artifacts WHERE id = %s
                         """,
-                        (
-                            document.artifact_reference.artifact_semantic_id,
-                        ),
+                        (document.artifact_reference.artifact_semantic_id,),
                     ).fetchone()
                     if row is None or (
                         str(row["media_type"]),
@@ -3391,18 +4676,14 @@ class PostgresDurableProjectionRepository:
                         digest,
                         document.content_utf8_bytes,
                     ):
-                        raise ValueError(
-                            "projection artifact identity conflict"
-                        )
+                        raise ValueError("projection artifact identity conflict")
             elif isinstance(
                 document,
                 PreparedDurableProjectionGraphDocumentFact,
             ):
                 payload = json.loads(document.canonical_json_utf8)
                 if not isinstance(payload, dict):
-                    raise ValueError(
-                        "projection graph document must be an object"
-                    )
+                    raise ValueError("projection graph document must be an object")
                 inserted = connection.execute(
                     """
                     INSERT INTO graph_documents (
@@ -3430,9 +4711,7 @@ class PostgresDurableProjectionRepository:
                         ),
                     ).fetchone()
                     if row is None:
-                        raise ValueError(
-                            "projection graph document disappeared"
-                        )
+                        raise ValueError("projection graph document disappeared")
                     current = (
                         str(row["type"]),
                         dict(row["payload"]),
@@ -3444,22 +4723,16 @@ class PostgresDurableProjectionRepository:
                         is not DurableProjectionKind.RUN_TIMELINE
                         or expected_head is None
                     ):
-                        raise ValueError(
-                            "projection graph document identity conflict"
-                        )
-                    expected_receipt = (
-                        cls._read_applied_head_receipt_in_connection(
-                            connection,
-                            expected_head,
-                        )
+                        raise ValueError("projection graph document identity conflict")
+                    expected_receipt = cls._read_applied_head_receipt_in_connection(
+                        connection,
+                        expected_head,
                     )
                     prior_refs = tuple(
                         item
                         for item in expected_receipt.result_document_references
-                        if getattr(item, "document_kind", None)
-                        == "graph_document"
-                        and getattr(item, "graph_id", None)
-                        == document.graph_id
+                        if getattr(item, "document_kind", None) == "graph_document"
+                        and getattr(item, "graph_id", None) == document.graph_id
                         and getattr(item, "semantic_document_id", None)
                         == document.semantic_document_id
                     )
@@ -3468,19 +4741,14 @@ class PostgresDurableProjectionRepository:
                             "timeline graph replacement lacks exact prior reference"
                         )
                     current_payload = canonical_json_bytes(current[1])
-                    current_sha = (
-                        f"sha256:{sha256(current_payload).hexdigest()}"
-                    )
+                    current_sha = f"sha256:{sha256(current_payload).hexdigest()}"
                     if (
                         current[0] != prior_refs[0].graph_document_type
-                        or current_sha
-                        != prior_refs[0].canonical_json_sha256
+                        or current_sha != prior_refs[0].canonical_json_sha256
                         or len(current_payload)
                         != prior_refs[0].canonical_json_utf8_bytes
                     ):
-                        raise ValueError(
-                            "timeline graph replacement prior CAS failed"
-                        )
+                        raise ValueError("timeline graph replacement prior CAS failed")
                     connection.execute(
                         """
                         UPDATE graph_documents
@@ -3508,9 +4776,7 @@ class PostgresDurableProjectionRepository:
                     ),
                 }
                 try:
-                    relation_kind = relation_kind_by_predicate[
-                        relation.predicate_iri
-                    ]
+                    relation_kind = relation_kind_by_predicate[relation.predicate_iri]
                 except KeyError as error:
                     raise ValueError(
                         "projection relation predicate is not registered"
@@ -3537,7 +4803,7 @@ class PostgresDurableProjectionRepository:
                         ),
                     ),
                 )
-                from pulsara_agent.runtime.projection_jobs.graph_relation import (
+                from pulsara_agent.graph.projection_relations import (
                     PostgresCanonicalGraphRelationRepository,
                 )
 
@@ -3566,9 +4832,7 @@ class PostgresDurableProjectionRepository:
         ).fetchone()
         if row is None:
             return None
-        head = DurableProjectionTargetHeadFact.model_validate(
-            row["head_payload"]
-        )
+        head = DurableProjectionTargetHeadFact.model_validate(row["head_payload"])
         if (
             head.projection_kind is not projection_kind
             or head.target_key != target_key
@@ -3620,8 +4884,22 @@ class PostgresDurableProjectionRepository:
             projection_kind = receipt.result_semantic.projection_kind
             candidate_sequence = receipt.source_sequence
             effective_sequence = receipt.source_sequence
-            semantic_fingerprint = (
-                receipt.result_semantic.result_semantic_fingerprint
+            semantic_fingerprint = receipt.result_semantic.result_semantic_fingerprint
+        elif isinstance(receipt, CompactionMemoryExtractionProjectionResultReceiptFact):
+            projection_kind = receipt.projection_kind
+            candidate_sequence = receipt.source_request_event_reference.sequence
+            effective_sequence = candidate_sequence
+            semantic_fingerprint = receipt.completed_result_semantic_fingerprint
+        elif isinstance(receipt, CompactionMemoryExtractionSupersededReceiptFact):
+            projection_kind = receipt.projection_kind
+            candidate_sequence = receipt.source_request_event_reference.sequence
+            effective_sequence = candidate_sequence
+            semantic_fingerprint = context_fingerprint(
+                "compaction-memory-extraction-supersession-semantic:v1",
+                (
+                    receipt.source_request_event_reference.reference_fingerprint,
+                    receipt.supersession_reason,
+                ),
             )
         else:
             effective = cls._read_receipt_in_connection(
@@ -3636,9 +4914,7 @@ class PostgresDurableProjectionRepository:
             projection_kind = receipt.projection_kind
             candidate_sequence = receipt.candidate_source_sequence
             effective_sequence = effective.source_sequence
-            semantic_fingerprint = (
-                effective.result_semantic.result_semantic_fingerprint
-            )
+            semantic_fingerprint = effective.result_semantic.result_semantic_fingerprint
         inserted = connection.execute(
             """
             INSERT INTO durable_projection_result_receipts (
@@ -3714,10 +4990,7 @@ class PostgresDurableProjectionRepository:
                     expected.head_fingerprint,
                 ),
             ).fetchone()
-        if (
-            row is None
-            or str(row["head_fingerprint"]) != resulting.head_fingerprint
-        ):
+        if row is None or str(row["head_fingerprint"]) != resulting.head_fingerprint:
             raise ValueError("projection target head compare-and-set failed")
 
     def _terminalize_job(
@@ -3794,9 +5067,7 @@ class PostgresDurableProjectionRepository:
             DurableProjectionTargetExecutionLeaseFact,
             build_projection_fact(
                 DurableProjectionTargetExecutionLeaseFact,
-                schema_version=(
-                    "durable_projection_target_execution_lease.v1"
-                ),
+                schema_version=("durable_projection_target_execution_lease.v1"),
                 projection_kind=current.projection_kind,
                 target_key=current.target_key,
                 owner_job_id=current.owner_job_id,
@@ -3982,15 +5253,11 @@ class PostgresDurableProjectionRepository:
             DurableProjectionTargetAuthorityConflictFact,
             build_projection_fact(
                 DurableProjectionTargetAuthorityConflictFact,
-                schema_version=(
-                    "durable_projection_target_authority_conflict.v1"
-                ),
+                schema_version=("durable_projection_target_authority_conflict.v1"),
                 conflict_id=conflict_id,
                 projection_kind=job.projection_kind,
                 target_key=job.target_key,
-                target_update_policy=(
-                    job.handler_contract.target_update_policy
-                ),
+                target_update_policy=(job.handler_contract.target_update_policy),
                 conflict_kind=conflict_kind,
                 candidate_source_event_reference_fingerprint=(
                     job.source_event_reference.reference_fingerprint
@@ -4049,12 +5316,9 @@ class PostgresDurableProjectionRepository:
                     row["conflict_payload"]
                 )
                 != conflict
-                or str(row["conflict_fingerprint"])
-                != conflict.conflict_fingerprint
+                or str(row["conflict_fingerprint"]) != conflict.conflict_fingerprint
             ):
-                raise ValueError(
-                    "projection target conflict identity conflict"
-                )
+                raise ValueError("projection target conflict identity conflict")
 
     @staticmethod
     def _settlement_outcome(
@@ -4062,9 +5326,7 @@ class PostgresDurableProjectionRepository:
         confirmation: DurableProjectionCommitConfirmation,
         lease: LeasedDurableProjectionJob,
         state: DurableProjectionJobOperationalStateFact | None,
-        receipt_reference: (
-            DurableProjectionResultReceiptReferenceFact | None
-        ),
+        receipt_reference: (DurableProjectionResultReceiptReferenceFact | None),
         failure: BoundedRuntimeFailureDiagnosticFact | None,
     ) -> DurableProjectionSettlementOutcome:
         return cast(
@@ -4076,9 +5338,7 @@ class PostgresDurableProjectionRepository:
                 job_id=lease.job.job_id,
                 attempted_lease_fingerprint=lease.lease_fingerprint,
                 resulting_status=state.status if state else None,
-                resulting_state_revision=(
-                    state.state_revision if state else None
-                ),
+                resulting_state_revision=(state.state_revision if state else None),
                 resulting_repair_generation=(
                     state.repair_generation if state else None
                 ),
@@ -4128,10 +5388,7 @@ class PostgresDurableProjectionRepository:
                     )
                     else receipt.candidate_result_owner
                 )
-                if (
-                    owner.owner_fingerprint
-                    == prepared.result_owner.owner_fingerprint
-                ):
+                if owner.owner_fingerprint == prepared.result_owner.owner_fingerprint:
                     return self._settlement_outcome(
                         confirmation=DurableProjectionCommitConfirmation.FULL,
                         lease=lease,
@@ -4142,8 +5399,7 @@ class PostgresDurableProjectionRepository:
                 confirmation = DurableProjectionCommitConfirmation.CONFLICT
             elif (
                 record.state.status is DurableProjectionJobStatus.LEASED
-                and record.state.state_revision
-                == lease.expected_state_revision
+                and record.state.state_revision == lease.expected_state_revision
                 and record.state.lease_generation == lease.lease_generation
                 and record.state.lease_owner_id == lease.lease_owner_id
             ):
@@ -4232,6 +5488,7 @@ def _diagnostic(error: BaseException) -> BoundedRuntimeFailureDiagnosticFact:
 
 
 __all__ = [
+    "ClaimedCompactionMemoryExtractionSettlement",
     "PostgresDurableProjectionRepository",
     "seed_projection_checkpoint_kind",
 ]

@@ -88,6 +88,7 @@ CONTEXT: dict[str, Any] = {
 
 class EvidenceSourceType(StrEnum):
     TOOL_RESULT = "tool_result"
+    HUMAN_INPUT = "human_input"
 
 
 class ToolExecutionStatus(StrEnum):

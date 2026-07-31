@@ -16,7 +16,8 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionMemoryExtractionCompletedEvent,
+    ContextCompactionMemoryExtractionRequestedEvent,
     ContextCompactionRequestedEvent,
     ContextCompactionStartedEvent,
     ContextWindowClosedEvent,
@@ -79,7 +80,6 @@ from pulsara_agent.event_log import (
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
-from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.inspector.diagnostics import (
     permission_snapshot_diagnostics,
     run_projection_diagnostics,
@@ -98,7 +98,8 @@ from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from pulsara_agent.message.reducer import MessageReducer
+from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
+from pulsara_agent.replay.message_reducer import MessageReducer
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
 from pulsara_agent.runtime.context_input.replay import (
     ContextInputReplayError,
@@ -112,6 +113,9 @@ from pulsara_agent.runtime.context_input.event_slice import (
     FrozenStoredEvent,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionInputDocumentFact,
+)
 from pulsara_agent.primitives.transcript_projection import (
     RunTranscriptSeedArtifactFact,
 )
@@ -168,6 +172,7 @@ _REQUIRED_TABLES = (
     "durable_projection_target_heads",
     "durable_projection_target_authority_conflicts",
     "durable_projection_target_execution_leases",
+    "compaction_memory_extraction_result_candidates",
     "graph_relation_facts",
     "canonical_mutations_v2",
     "canonical_mutation_sequence_heads",
@@ -175,6 +180,10 @@ _REQUIRED_TABLES = (
     "canonical_mutation_surface_sequence_heads",
     "canonical_mutation_surface_target_heads",
     "durable_projection_repair_actions",
+    "background_derived_work_budget_accounts",
+    "background_derived_work_budget_reservations",
+    "background_derived_work_budget_settlements",
+    "compaction_memory_extraction_result_candidates",
 )
 
 
@@ -837,7 +846,7 @@ def _typed_runtime_event_vocabulary_projection(
         runtime_session_id=runtime_session_id,
         run_id=run_id,
     )
-    compaction_projection = _compaction_candidate_projection_durable_status(
+    compaction_projection = _compaction_memory_extraction_durable_status(
         ordered,
         runtime_session_id=runtime_session_id,
         store=store,
@@ -868,7 +877,7 @@ def _typed_runtime_event_vocabulary_projection(
                     "D3 durable job/outbox remains open"
                 ),
             },
-            "compaction_candidate_projection_durable_status": (compaction_projection),
+            "compaction_memory_extraction_durable_status": compaction_projection,
         },
         "diagnostics": lifecycle_diagnostics,
     }
@@ -1096,153 +1105,365 @@ def _mcp_input_required_lifecycle_projection(
     return projections, diagnostics
 
 
-def _compaction_candidate_projection_durable_status(
+def _compaction_memory_extraction_durable_status(
     events: tuple[AgentEvent, ...],
     *,
     runtime_session_id: str,
     store: PostgresInspectorStore,
     run_id: str | None,
 ) -> list[dict[str, Any]]:
-    completed_events = tuple(
+    compactions = tuple(
         event
         for event in events
         if isinstance(event, ContextCompactionCompletedEvent)
         and (run_id is None or event.run_id == run_id)
     )
-    proposals_by_compaction: dict[
-        str, list[ContextCompactionMemoryCandidatesProposedEvent]
-    ] = {}
-    for event in events:
-        if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
-            proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
+    requests = {
+        event.id: event
+        for event in events
+        if isinstance(event, ContextCompactionMemoryExtractionRequestedEvent)
+    }
+    results_by_request = {
+        event.occurrence_attribution.request_event_reference.stable_identity.event_id: event
+        for event in events
+        if isinstance(event, ContextCompactionMemoryExtractionCompletedEvent)
+    }
+    durable = inspect_durable_projection_state(
+        store,
+        session_id=runtime_session_id,
+        run_id=run_id,
+        limit=256,
+    )
+    jobs_by_source = {
+        str(item.get("source_event_reference", {}).get("event_id")): item
+        for item in durable["jobs"]
+        if item.get("projection_kind") == "compaction_memory_extraction.v1"
+    }
     outbox_rows = store.candidate_projection_outbox_for_session(
         runtime_session_id,
         limit=4_096,
     )
+    result_candidate_rows = store.compaction_memory_result_candidates_for_session(
+        runtime_session_id,
+        limit=256,
+    )
+    result_candidates_by_job = {
+        str(row["job_id"]): row for row in result_candidate_rows
+    }
+    budget_account = store.background_derived_work_budget_account(runtime_session_id)
+    budget_reservations = (
+        store.background_derived_work_budget_reservations_for_session(
+            runtime_session_id,
+            limit=256,
+        )
+    )
+    budget_reservations_by_job: dict[str, list[dict[str, Any]]] = {}
+    for row in budget_reservations:
+        budget_reservations_by_job.setdefault(
+            str(row["extraction_job_id"]), []
+        ).append(row)
+    governance_claims = store.governance_claims_for_session(
+        runtime_session_id,
+        limit=512,
+    )
+    claims_by_candidate = {
+        str(row["candidate_entry_id"]): row for row in governance_claims
+    }
+    model_starts = {
+        event.resolved_call.resolved_model_call_id: event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.compaction_memory_extraction_input_attribution is not None
+    }
+    model_ends = {
+        event.resolved_model_call_id: event
+        for event in events
+        if isinstance(event, ModelCallEndEvent)
+    }
+    events_by_id = {event.id: event for event in events}
     rows_by_producer: dict[str, list[dict[str, Any]]] = {}
     for row in outbox_rows:
-        if row.get("producer_kind") != "compaction":
+        if row.get("producer_kind") != "compaction_memory_extraction":
             continue
         rows_by_producer.setdefault(str(row["producer_event_id"]), []).append(row)
 
     projections: list[dict[str, Any]] = []
-    for completed in completed_events:
-        proposals = proposals_by_compaction.get(completed.compaction_id, [])
+    for completed in compactions:
         base = {
             "compaction_id": completed.compaction_id,
             "completed_event_id": completed.id,
             "completed_sequence": completed.sequence,
             "core_status": "completed",
         }
-        if len(proposals) != 1:
+        dispositions = tuple(completed.post_completion_extension_dispositions)
+        requested = tuple(
+            item
+            for item in dispositions
+            if getattr(item, "disposition_kind", None) == "requested"
+        )
+        if not requested:
             projections.append(
                 {
                     **base,
                     "status": (
-                        "not_durably_observable"
-                        if not proposals
-                        else "reconciliation_required"
+                        "admission_failed" if dispositions else "not_configured"
                     ),
-                    "producer_event_id": None,
-                    "durable_evidence": [],
+                    "extension_dispositions": [
+                        item.model_dump(mode="json") for item in dispositions
+                    ],
                 }
             )
             continue
-
-        proposal = proposals[0]
-        completed_identity = stable_event_identity(
-            completed,
-            runtime_session_id=runtime_session_id,
-        )
-        if (
-            proposal.source_event_id != completed.id
-            or proposal.source_event_sequence != completed.sequence
-            or proposal.completed_compaction_event_identity != completed_identity
-        ):
+        disposition = requested[0]
+        request_id = disposition.extension_link.request_event_id
+        request = requests.get(request_id)
+        if request is None:
             projections.append(
                 {
                     **base,
                     "status": "reconciliation_required",
-                    "producer_event_id": proposal.id,
-                    "durable_evidence": ["producer_event"],
+                    "request_event_id": request_id,
+                    "extension_disposition": disposition.model_dump(mode="json"),
                 }
             )
             continue
-
-        expected_ids = tuple(proposal.candidate_entry_ids)
-        rows = rows_by_producer.get(proposal.id, [])
-        row_ids = tuple(sorted(str(row["candidate_entry_id"]) for row in rows))
-        proposal_identity = stable_event_identity(
-            proposal,
-            runtime_session_id=runtime_session_id,
+        job = jobs_by_source.get(request.id)
+        result = results_by_request.get(request.id)
+        rows = rows_by_producer.get(result.id, []) if result is not None else []
+        candidate_rows = (
+            store.memory_candidates_for_source_event(result.id)
+            if result is not None
+            else []
         )
-        producer_identity_valid = all(
-            row.get("producer_payload_fingerprint")
-            == proposal_identity.payload_fingerprint
-            and row.get("producer_event_identity")
-            == proposal_identity.model_dump(mode="json")
-            for row in rows
-        )
-        if not expected_ids:
-            status = "producer_bundle_full"
-            evidence = ["producer_event"]
-        elif row_ids != tuple(sorted(expected_ids)):
-            status = "not_durably_observable"
-            evidence = ["producer_event"]
-        elif not producer_identity_valid:
-            status = "reconciliation_required"
-            evidence = ["producer_event", "projection_outbox"]
-        elif any(row.get("last_stable_failure_code") for row in rows):
-            status = "reconciliation_required"
-            evidence = ["producer_event", "projection_outbox"]
-        elif any(
-            row.get("status") not in {"pending", "applying", "applied"} for row in rows
-        ):
-            status = "reconciliation_required"
-            evidence = ["producer_event", "projection_outbox"]
-        elif all(row.get("status") == "applied" for row in rows):
-            candidate_rows = store.memory_candidates_for_compaction(
-                completed.compaction_id
-            )
-            applied_ids = tuple(
-                sorted(
-                    str(row["entry_id"])
-                    for row in candidate_rows
-                    if row.get("source_event_id") == proposal.id
-                )
-            )
-            if applied_ids == tuple(sorted(expected_ids)):
-                status = "projection_applied"
-                evidence = [
-                    "producer_event",
-                    "projection_outbox",
-                    "candidate_pool",
-                ]
-            else:
-                status = "reconciliation_required"
-                evidence = ["producer_event", "projection_outbox"]
+        if job is None:
+            status = "pending_no_runtime_binding"
+        elif job.get("authority_status") != "trusted":
+            status = "job_or_target_reconciliation_required"
         else:
-            status = "producer_bundle_full"
-            evidence = ["producer_event", "projection_outbox"]
+            job_status = str(job["state"]["status"])
+            deferral = job["state"].get("compaction_memory_deferral")
+            status = {
+                "leased": "leased_model_call",
+                "model_retry_wait": "retry_wait",
+                "retry_wait": "retry_wait",
+                "result_ready": "result_ready",
+                "settlement_writing": "settlement_writing",
+                "settlement_retry_wait": "settlement_retry_wait",
+                "dead_letter": "dead_letter",
+                "reconciliation_required": "job_or_target_reconciliation_required",
+            }.get(job_status, job_status)
+            if job_status == "pending" and deferral is not None:
+                reason = str(deferral.get("reason"))
+                status = (
+                    "deferred_busy_not_before"
+                    if reason == "driver_busy"
+                    else "pending_safe_point"
+                )
+            if job_status == "succeeded" and result is not None:
+                outcome_kind = result.result_semantic.outcome_kind
+                if outcome_kind == "input_budget_unsatisfiable":
+                    status = "input_budget_unsatisfiable"
+                elif outcome_kind == "background_budget_exhausted":
+                    status = "background_budget_exhausted"
+                elif outcome_kind in {"no_eligible_evidence", "valid_empty"}:
+                    status = "governed_no_write"
+                elif not rows or not all(
+                    row.get("status") == "applied" for row in rows
+                ):
+                    status = "result_full_outbox_pending"
+                elif len(candidate_rows) != len(rows):
+                    status = "result_full_outbox_pending"
+                else:
+                    latest_decisions = []
+                    open_claim = False
+                    for candidate_row in candidate_rows:
+                        entry_id = str(candidate_row["entry_id"])
+                        decisions = store.governance_decisions_for_candidate(entry_id)
+                        if decisions:
+                            latest_decisions.append(decisions[-1])
+                        claim = claims_by_candidate.get(entry_id)
+                        if claim is not None and claim.get("status") != "terminal":
+                            open_claim = True
+                    if len(latest_decisions) == len(candidate_rows):
+                        outcomes = {
+                            str(item.get("write_outcome", {}).get("kind"))
+                            for item in latest_decisions
+                        }
+                        if "write_succeeded" in outcomes:
+                            status = "governed_write"
+                        elif outcomes == {"no_write"}:
+                            status = "governed_no_write"
+                        else:
+                            status = "governance_pending"
+                    elif open_claim:
+                        status = "governance_pending"
+                    else:
+                        status = "candidate_projected"
+        job_id = str(job["job_id"]) if job is not None else None
+        result_candidate = (
+            result_candidates_by_job.get(job_id) if job_id is not None else None
+        )
+        job_budget_rows = (
+            budget_reservations_by_job.get(job_id, ()) if job_id is not None else ()
+        )
+        model_lifecycle = []
+        for budget_row in job_budget_rows:
+            resolved_call_id = str(budget_row["resolved_model_call_id"])
+            start = model_starts.get(resolved_call_id)
+            end = model_ends.get(resolved_call_id)
+            model_lifecycle.append(
+                {
+                    "resolved_model_call_id": resolved_call_id,
+                    "start": (
+                        _typed_runtime_event_projection(
+                            start,
+                            "compaction_memory_extraction_input_attribution",
+                        )
+                        if start is not None
+                        else None
+                    ),
+                    "input": (
+                        _compaction_memory_input_artifact_projection(
+                            start=start,
+                            events_by_id=events_by_id,
+                            store=store,
+                        )
+                        if start is not None
+                        else None
+                    ),
+                    "end": (
+                        _typed_runtime_event_projection(end, "terminal_projection")
+                        if end is not None
+                        else None
+                    ),
+                    "budget": _json_safe(budget_row),
+                }
+            )
         projections.append(
             {
                 **base,
                 "status": status,
-                "producer_event_id": proposal.id,
-                "producer_sequence": proposal.sequence,
-                "expected_candidate_entry_ids": list(expected_ids),
-                "outbox_statuses": [
-                    {
-                        "candidate_entry_id": row["candidate_entry_id"],
-                        "status": row.get("status"),
-                        "last_stable_failure_code": row.get("last_stable_failure_code"),
-                    }
-                    for row in rows
+                "extension_disposition": disposition.model_dump(mode="json"),
+                "request": _typed_runtime_event_projection(request, "extension_link"),
+                "human_evidence_manifest": request.human_evidence_manifest_reference.model_dump(
+                    mode="json"
+                ),
+                "job": job,
+                "driver_availability": "not_durably_observable",
+                "result_candidate": _json_safe(result_candidate),
+                "background_budget_account": _json_safe(budget_account),
+                "model_lifecycle": model_lifecycle,
+                "result": (
+                    _typed_runtime_event_projection(result, "result_semantic")
+                    if result is not None
+                    else None
+                ),
+                "outbox": [_json_safe(row) for row in rows],
+                "candidates": [
+                    _memory_candidate_projection(row, store)
+                    for row in candidate_rows
                 ],
-                "durable_evidence": evidence,
             }
         )
     return projections
+
+
+def _compaction_memory_input_artifact_projection(
+    *,
+    start: ModelCallStartEvent,
+    events_by_id: dict[str, AgentEvent],
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    attribution = start.compaction_memory_extraction_input_attribution
+    if attribution is None:
+        return {"status": "missing_start_attribution"}
+    reference = attribution.input_artifact_reference
+    artifact = store.artifact(reference.artifact_id)
+    if artifact is None or artifact.get("text_body") is None:
+        return {
+            "status": "missing_artifact",
+            "artifact_reference": reference.model_dump(mode="json"),
+        }
+    text = str(artifact["text_body"])
+    encoded = text.encode("utf-8")
+    observed_digest = sha256(encoded).hexdigest()
+    stored_digest = str(artifact.get("digest") or "").removeprefix("sha256:")
+    if (
+        observed_digest != reference.content_sha256
+        or stored_digest != reference.content_sha256
+        or len(encoded) != reference.content_bytes
+        or int(artifact.get("size_bytes") or -1) != reference.content_bytes
+        or str(artifact.get("media_type")) != reference.media_type
+    ):
+        return {
+            "status": "artifact_identity_conflict",
+            "artifact_reference": reference.model_dump(mode="json"),
+        }
+    try:
+        document = CompactionMemoryExtractionInputDocumentFact.model_validate_json(text)
+    except (TypeError, ValueError, ValidationError) as exc:
+        return {
+            "status": "invalid_typed_document",
+            "artifact_reference": reference.model_dump(mode="json"),
+            "error_type": type(exc).__name__,
+        }
+    if (
+        document.document_fingerprint != attribution.input_document_fingerprint
+        or document.semantic.input_semantic_fingerprint
+        != attribution.input_semantic_fingerprint
+    ):
+        return {
+            "status": "document_identity_conflict",
+            "artifact_reference": reference.model_dump(mode="json"),
+        }
+    nodes = []
+    for semantic, source in zip(
+        document.semantic.evidence_set.ordered_evidence_semantics,
+        document.attribution.ordered_evidence_attributions,
+        strict=True,
+    ):
+        source_event = events_by_id.get(source.source_event_reference.stable_identity.event_id)
+        ingress_kind = (
+            source_event.host_run_ingress.ingress_kind
+            if isinstance(source_event, RunStartEvent)
+            and source_event.host_run_ingress is not None
+            else None
+        )
+        nodes.append(
+            {
+                "evidence_semantic_fingerprint": (
+                    semantic.evidence_semantic_fingerprint
+                ),
+                "sanitized_text_sha256": semantic.sanitized_full_message_sha256,
+                "sanitized_text_utf8_bytes": (
+                    semantic.sanitized_full_message_utf8_bytes
+                ),
+                "projection_kind": "full",
+                "source_event_id": (
+                    source.source_event_reference.stable_identity.event_id
+                ),
+                "source_sequence": source.source_event_reference.sequence,
+                "source_event_type": (
+                    source_event.type.value if source_event is not None else None
+                ),
+                "source_ingress_kind": ingress_kind,
+                "is_direct_human": (
+                    isinstance(source_event, RunStartEvent)
+                    and ingress_kind == "human"
+                ),
+            }
+        )
+    return {
+        "status": "full",
+        "artifact_reference": reference.model_dump(mode="json"),
+        "input_semantic_fingerprint": document.semantic.input_semantic_fingerprint,
+        "input_document_fingerprint": document.document_fingerprint,
+        "evidence_count": document.semantic.evidence_set.evidence_count,
+        "all_sources_direct_human": bool(nodes)
+        and all(bool(item["is_direct_human"]) for item in nodes),
+        "permanent_omission_count": document.attribution.permanent_omission_count,
+        "nodes": nodes,
+    }
 
 
 def _mcp_installation_events_projection(
@@ -2351,6 +2572,10 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "extractor_version",
         "context_id",
         "model_call_index",
+        "subagent_run_id",
+        "child_runtime_session_id",
+        "result_id",
+        "tool_call_count",
         "tools_estimated_tokens",
         "name",
     ):
@@ -4572,20 +4797,26 @@ def _compaction_windows(
 ) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
     events_list = list(events)
-    proposals_by_compaction: dict[
-        str, list[ContextCompactionMemoryCandidatesProposedEvent]
-    ] = {}
-    for event in events_list:
-        if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
-            proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
+    extraction_results_by_compaction = {
+        event.occurrence_attribution.compaction_id: event
+        for event in events_list
+        if isinstance(event, ContextCompactionMemoryExtractionCompletedEvent)
+    }
     for event in events_list:
         if not isinstance(event, ContextCompactionCompletedEvent):
             continue
         artifact = store.artifact(event.summary_artifact_id)
-        candidates = [
-            _memory_candidate_projection(row, store)
-            for row in store.memory_candidates_for_compaction(event.compaction_id)
-        ]
+        extraction_result = extraction_results_by_compaction.get(event.compaction_id)
+        candidates = (
+            [
+                _memory_candidate_projection(row, store)
+                for row in store.memory_candidates_for_source_event(
+                    extraction_result.id
+                )
+            ]
+            if extraction_result is not None
+            else []
+        )
         windows.append(
             {
                 "sequence": event.sequence,
@@ -4630,10 +4861,15 @@ def _compaction_windows(
                 "predicted_post_target_reached": event.predicted_post_target_reached,
                 "included_run_ids": list(event.included_run_ids),
                 "included_artifact_ids": list(event.included_artifact_ids),
-                "candidate_proposals": [
-                    _compaction_candidate_proposal_projection(proposal)
-                    for proposal in proposals_by_compaction.get(event.compaction_id, [])
+                "post_completion_extension_dispositions": [
+                    item.model_dump(mode="json")
+                    for item in event.post_completion_extension_dispositions
                 ],
+                "memory_extraction_result": (
+                    extraction_result.model_dump(mode="json")
+                    if extraction_result is not None
+                    else None
+                ),
                 "memory_candidates": candidates,
             }
         )
@@ -4869,27 +5105,6 @@ def _context_window_projection(
     }
 
 
-def _compaction_candidate_proposal_projection(
-    event: ContextCompactionMemoryCandidatesProposedEvent,
-) -> dict[str, Any]:
-    return {
-        "sequence": event.sequence,
-        "source_event_id": event.source_event_id,
-        "source_event_sequence": event.source_event_sequence,
-        "summary_artifact_id": event.summary_artifact_id,
-        "candidate_entry_ids": list(event.candidate_entry_ids),
-        "attempted_count": event.attempted_count,
-        "proposed_count": event.proposed_count,
-        "skipped_count": event.skipped_count,
-        "duplicate_count": event.duplicate_count,
-        "error_count": event.error_count,
-        "extractor_version": event.extractor_version,
-        "diagnostics": [
-            diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics
-        ],
-    }
-
-
 def _memory_candidate_projection(
     row: dict[str, Any], store: PostgresInspectorStore
 ) -> dict[str, Any]:
@@ -5100,6 +5315,7 @@ def _max_sequence(events: Iterable[AgentEvent]) -> int | None:
 
 
 def _json_safe(value: Any) -> Any:
+    assert_not_mcp_secret(value, sink="Inspector")
     return json.loads(json.dumps(value, default=str, ensure_ascii=False))
 
 

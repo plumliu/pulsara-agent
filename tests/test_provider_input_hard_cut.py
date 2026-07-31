@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import pulsara_agent.runtime.session_run_capabilities as capability_module
+
+from tests.support.runtime_owner import (
+    build_test_agent_runtime,
+)
+
+
 import asyncio
 import json
 from dataclasses import replace
@@ -26,8 +33,8 @@ from pulsara_agent.primitives.context_source import (
     LedgerAuthorityHorizonFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.runtime import AgentRuntime, LoopStatus
-from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.runtime.state import LoopStatus
+from pulsara_agent.ports.memory_hooks import NoopMemoryHooks
 from pulsara_agent.runtime.context_input.sources.builder import (
     default_context_source_registry,
 )
@@ -35,13 +42,13 @@ from pulsara_agent.runtime.context_input.sources.input import (
     CONTEXT_SOURCE_INPUT_TYPES,
     context_source_input_dependency_fingerprint,
 )
-from pulsara_agent.runtime.context_input.sources.lifecycle import (
+from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_transition_kind,
 )
 from pulsara_agent.runtime.context_input.sources.render import (
     render_context_source_candidate,
 )
-from pulsara_agent.runtime.provider_input.materialization import (
+from pulsara_agent.llm.provider_input_materialization import (
     append_carrier,
     freeze_message_unit,
     hydrate_carrier,
@@ -209,18 +216,17 @@ def test_one_shot_provider_input_commits_one_stable_runtime_clock() -> None:
 
 
 async def _capture_prepared_snapshot(tmp_path, monkeypatch):
-    import pulsara_agent.runtime.agent as agent_module
 
     captured = []
-    original = agent_module.prepare_live_context_snapshot
+    original = capability_module.prepare_live_context_snapshot
 
     async def capture(**kwargs):
         prepared = await original(**kwargs)
         captured.append(prepared)
         return prepared
 
-    monkeypatch.setattr(agent_module, "prepare_live_context_snapshot", capture)
-    agent = AgentRuntime(
+    monkeypatch.setattr(capability_module, "prepare_live_context_snapshot", capture)
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -325,7 +331,7 @@ def test_manifest_failure_retires_pre_start_provider_preparation(
 
     monkeypatch.setattr(agent_module, "build_context_input_manifest", reject_manifest)
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -357,7 +363,7 @@ def test_registry_rejection_transfers_and_terminalizes_preparation_owner(
         "install_and_start",
         reject_install,
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
@@ -396,7 +402,7 @@ def test_provider_input_carrier_deep_copies_tool_schema_at_dispatch(
 
     monkeypatch.setattr(coordinator, "prepare_compiled_call", capture)
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -455,7 +461,6 @@ def test_context_source_registry_rejects_self_certified_policy_and_payload(
 def test_unselected_optional_artifact_is_not_eagerly_hydrated(
     tmp_path, monkeypatch
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
 
     runtime_session = in_memory_runtime_session(tmp_path)
     read_artifact_ids: list[str] = []
@@ -469,7 +474,7 @@ def test_unselected_optional_artifact_is_not_eagerly_hydrated(
 
     monkeypatch.setattr(archive_type, "get_text", record_get_text)
     captured = []
-    original_prepare = agent_module.prepare_live_context_snapshot
+    original_prepare = capability_module.prepare_live_context_snapshot
 
     async def capture_prepare(**kwargs):
         prepared = await original_prepare(**kwargs)
@@ -477,11 +482,11 @@ def test_unselected_optional_artifact_is_not_eagerly_hydrated(
         return prepared
 
     monkeypatch.setattr(
-        agent_module,
+        capability_module,
         "prepare_live_context_snapshot",
         capture_prepare,
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -537,7 +542,7 @@ def test_system_prompt_retains_per_source_fragment_ownership(
         return result
 
     monkeypatch.setattr(agent_module, "compile_context_from_facts", capture_compile)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -599,7 +604,7 @@ def test_compiler_omission_is_final_provider_payload_truth(
         flash_limits=limits,
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=LLMRuntime(config=config, registry=registry),
@@ -655,7 +660,7 @@ def test_provider_units_preserve_exact_compiler_source_authority(
 
     monkeypatch.setattr(agent_module, "compile_context_from_facts", capture_compile)
     monkeypatch.setattr(coordinator, "prepare_compiled_call", capture_bundle)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -711,7 +716,7 @@ def test_provider_units_preserve_exact_compiler_source_authority(
 
 def test_append_event_rejects_outer_horizon_drift(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
@@ -734,7 +739,7 @@ def test_inspector_generation_projection_uses_session_history_across_runs(
     tmp_path,
 ) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -856,7 +861,7 @@ def test_tool_loop_projection_is_causal_and_strict_prefix(
 
     monkeypatch.setattr(agent_module, "compile_context_from_facts", capture_compile)
     monkeypatch.setattr(coordinator, "prepare_compiled_call", capture_plan)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(
@@ -923,7 +928,7 @@ def test_cross_run_classification_does_not_change_prefix_semantic(
         return result
 
     monkeypatch.setattr(agent_module, "compile_context_from_facts", capture_compile)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(
@@ -963,7 +968,7 @@ def test_accepted_continuation_commits_exact_materialization_proof(tmp_path) -> 
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -1002,7 +1007,7 @@ def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -1167,7 +1172,7 @@ def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
 def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -1225,7 +1230,7 @@ def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None
 def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -1285,7 +1290,7 @@ def test_budget_omitted_changed_memory_uses_typed_rollover(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=LLMRuntime(config=config, registry=registry),
@@ -1352,7 +1357,7 @@ def test_budget_omitted_new_memory_does_not_create_a_phantom_rollover(tmp_path) 
     transport = ScriptedTransport([{"text": "done"}])
     registry = LLMTransportRegistry()
     registry.register(transport)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=LLMRuntime(config=config, registry=registry),
@@ -1385,7 +1390,7 @@ description: Review pull requests.
     )
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(
@@ -1419,11 +1424,11 @@ description: Review pull requests.
     )
 
 
-def test_runtime_session_close_durably_closes_open_provider_generation(
+def runtime_session_for_test_close_durably_closes_open_provider_generation(
     tmp_path,
 ) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),

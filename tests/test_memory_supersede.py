@@ -18,7 +18,7 @@ from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Claim, Preference
 from pulsara_agent.event import EventContext, EventType
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ClaimCandidate,
     PreferenceCandidate,
     ValidCandidatePayload,
@@ -63,7 +63,7 @@ from pulsara_agent.memory.recall.service import (
 )
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
-from tests.support.memory_uow import fake_memory_uow_factory
+from tests.support.memory_uow import fake_memory_uow_factory, postgres_memory_uow
 
 
 _VERIFIED_REPLACEMENT_REF = "candidate_user_quote"
@@ -1045,7 +1045,8 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(
             event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: _FailingLifecycleUow(
+            memory_write_uow_factory=lambda: postgres_memory_uow(
+                uow_type=_FailingLifecycleUow,
                 connection_provider=verified_postgres_provider(dsn),
                 runtime_session_id=runtime_session_id,
                 archive=PostgresArtifactStore(
@@ -1267,6 +1268,27 @@ def test_related_dedupe_authority_remains_statement_exact() -> None:
     )
 
 
+def test_related_dedupe_uses_shared_semantic_without_casefold_or_space_collapse() -> (
+    None
+):
+    graph = InMemoryGraphStore()
+    service = _service_on(graph)
+    service.submit(
+        _preference_candidate("candidate:old", "Likes  Tea"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
+    )
+
+    assert (
+        already_exists(
+            _preference_candidate("candidate:new", " likes tea "),
+            graph,
+        )
+        is False
+    )
+
+
 def test_jsonld_type_names_accepts_compact_and_iri_types() -> None:
     assert _jsonld_type_names({"@type": ["Preference", memory.CLAIM.value]}) == {
         "Preference",
@@ -1324,7 +1346,7 @@ def _postgres_executor(
         event_commit_port=log.extend,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
-        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+        memory_write_uow_factory=lambda: postgres_memory_uow(
             connection_provider=verified_postgres_provider(dsn),
             runtime_session_id=runtime_session_id,
             archive=PostgresArtifactStore(

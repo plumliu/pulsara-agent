@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import AsyncIterator, TypeAlias
 
-from tests.support import test_llm_config
+from tests.support import memory_hook_view, test_llm_config
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
     RawProviderTextBlockStart,
@@ -50,8 +50,10 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelTokenUsageFact,
 )
-from pulsara_agent.runtime import LoopState
-from pulsara_agent.runtime.wiring import build_in_memory_runtime_wiring
+from pulsara_agent.runtime.state import RunActivationWorkingState
+from tests.support.runtime_factory import (
+    build_component_runtime_wiring,
+)
 
 
 ReplyFactory: TypeAlias = Callable[[LLMContext], dict[str, object]]
@@ -134,10 +136,14 @@ def test_memory_governance_engine_runs_event_first_evidence_pipeline(
 
         events = harness.wiring.event_log.iter()
         prepared = tuple(
-            event for event in events if isinstance(event, MemoryGovernanceBatchPreparedEvent)
+            event
+            for event in events
+            if isinstance(event, MemoryGovernanceBatchPreparedEvent)
         )
         completed = tuple(
-            event for event in events if isinstance(event, MemoryGovernanceBatchCompletedEvent)
+            event
+            for event in events
+            if isinstance(event, MemoryGovernanceBatchCompletedEvent)
         )
         governance_starts = tuple(
             event
@@ -171,6 +177,9 @@ def test_memory_governance_engine_runs_event_first_evidence_pipeline(
         assert preparation.status is GovernanceBatchPreparationStatus.TERMINAL
 
         model_input = _governance_input(harness.transport.contexts[1])
+        assert "`submit_as_is` and `skip` MUST NOT include a `candidate`" in (
+            harness.transport.contexts[1].system_prompt or ""
+        )
         prompt_view = model_input["candidates"][0]
         prompt_candidate = prompt_view["candidate"]
         assert prompt_candidate["candidate_entry_id"] == candidate_ids[0]
@@ -178,9 +187,7 @@ def test_memory_governance_engine_runs_event_first_evidence_pipeline(
         assert prompt_view["decision_candidate"]["statement"] == (
             "The user prefers concise summaries."
         )
-        assert prompt_view["lifecycle"][
-            "allowed_replacement_evidence_refs"
-        ] == []
+        assert prompt_view["lifecycle"]["allowed_replacement_evidence_refs"] == []
         assert "source_events" not in json.dumps(model_input, sort_keys=True)
         assert prompt_candidate["ordered_evidence_texts"][0]["field_code"] == (
             "reflection_report"
@@ -475,9 +482,7 @@ def test_memory_governance_engine_merges_one_reflection_batch(
         )
 
         assert result.error_type is None
-        assert [decision.kind for decision in result.decisions] == [
-            "merge_and_submit"
-        ]
+        assert [decision.kind for decision in result.decisions] == ["merge_and_submit"]
         assert harness.wiring.candidate_pool.list_pending() == []
         memories = harness.wiring.graph.find_by_type(
             memory.PREFERENCE,
@@ -487,10 +492,15 @@ def test_memory_governance_engine_merges_one_reflection_batch(
         assert memories[0][memory.STATEMENT.name] == (
             "The user prefers concise summaries."
         )
-        assert tuple(
-            item["candidate"]["candidate_entry_id"]
-            for item in _governance_input(harness.transport.contexts[1])["candidates"]
-        ) == candidate_ids
+        assert (
+            tuple(
+                item["candidate"]["candidate_entry_id"]
+                for item in _governance_input(harness.transport.contexts[1])[
+                    "candidates"
+                ]
+            )
+            == candidate_ids
+        )
 
     asyncio.run(scenario())
 
@@ -591,10 +601,13 @@ def test_memory_governance_engine_invalid_output_terminalizes_claim(
         assert result.error_type == "ValueError"
         assert result.applied == []
         assert harness.wiring.candidate_pool.list_decisions() == []
-        assert harness.wiring.graph.find_by_type(
-            memory.PREFERENCE,
-            graph_id=harness.wiring.graph_id,
-        ) == []
+        assert (
+            harness.wiring.graph.find_by_type(
+                memory.PREFERENCE,
+                graph_id=harness.wiring.graph_id,
+            )
+            == []
+        )
         failures = tuple(
             event
             for event in harness.wiring.event_log.iter()
@@ -724,9 +737,7 @@ def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
                             "verification_status": "user_confirmed",
                             "evidence_ids": [],
                         },
-                        "contradicted_memory_ids": [
-                            "preference:likes-egg-tarts"
-                        ],
+                        "contradicted_memory_ids": ["preference:likes-egg-tarts"],
                         "reason": "The new preference conflicts with the old one.",
                     }
                 ],
@@ -734,9 +745,7 @@ def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
         )
     )
 
-    assert [decision.kind for decision in output.decisions] == [
-        "contradict_and_submit"
-    ]
+    assert [decision.kind for decision in output.decisions] == ["contradict_and_submit"]
     assert output.decisions[0].contradicted_memory_ids == (
         "preference:likes-egg-tarts",
     )
@@ -762,7 +771,7 @@ def _harness(tmp_path: Path, replies: list[ScriptedReply]) -> _Harness:
         memory_domain_id="u_test",
         workspace_kind="transient",
     )
-    wiring = build_in_memory_runtime_wiring(
+    wiring = build_component_runtime_wiring(
         tmp_path,
         runtime_session_id="runtime:test",
         memory_domain=domain,
@@ -798,7 +807,7 @@ def _harness(tmp_path: Path, replies: list[ScriptedReply]) -> _Harness:
 
 
 async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
-    state = LoopState(session_id=harness.wiring.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(session_id=harness.wiring.runtime_session.runtime_session_id)
     state.messages.append(
         UserMsg(
             name="user",
@@ -809,8 +818,8 @@ async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
         harness.wiring.runtime_session._adopt_unbootstrapped_in_memory_account_for_test(
             incoming_run_id=state.run_id
         )
-    events = await harness.reflection.reflect(
-        state=state,
+        events = await harness.reflection.reflect(
+            view=memory_hook_view(state),
         event_store=harness.wiring.event_log,
         trigger_reasons=["cheap_memory_hint"],
         cheap_hints=[
@@ -864,9 +873,7 @@ def _reflection_json(*, two_candidates: bool = False) -> str:
         {
             "should_reflect": True,
             "reason": "The user explicitly requested a durable preference.",
-            "quoted_evidence": [
-                "Please remember that I prefer concise summaries."
-            ],
+            "quoted_evidence": ["Please remember that I prefer concise summaries."],
             "candidate_kinds": ["Preference"] * len(candidates),
             "summary": "found durable preference evidence",
             "candidates": candidates,
@@ -957,8 +964,7 @@ def _invalid_target_reply() -> str:
 def _candidate_ids(context: LLMContext) -> tuple[str, ...]:
     payload = _governance_input(context)
     return tuple(
-        item["candidate"]["candidate_entry_id"]
-        for item in payload["candidates"]
+        item["candidate"]["candidate_entry_id"] for item in payload["candidates"]
     )
 
 

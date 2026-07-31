@@ -6,7 +6,7 @@ import json
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, TypeAdapter
@@ -18,7 +18,7 @@ from pulsara_agent.event import (
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
 )
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
 from pulsara_agent.llm import LLMRuntime, ModelRole
@@ -48,6 +48,7 @@ from pulsara_agent.memory.candidates.projection_outbox import (
     MemoryCandidateProjectionCommitPort,
 )
 from pulsara_agent.memory.scope import format_scope_list
+from pulsara_agent.memory.foundation.protocols import MemoryModelRuntimeGateway
 from pulsara_agent.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.primitives.model_call import ModelCallPurpose
@@ -60,11 +61,7 @@ from pulsara_agent.primitives.governance_evidence import (
     ReflectionCandidateAttributionFact,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import RuntimeSession
-    from pulsara_agent.runtime.state import LoopState
-
+from pulsara_agent.ports.memory_hooks import MemoryHookRunView
 
 _CANDIDATE_ADAPTER = TypeAdapter(MemoryCandidate)
 _REMEMBER_TOOL_NAMES = {
@@ -211,7 +208,7 @@ class MemoryReflectionEngine:
     llm_runtime: LLMRuntime
     candidate_pool: CandidatePool
     graph: GraphStore
-    runtime_session: "RuntimeSession | None" = None
+    runtime_session: MemoryModelRuntimeGateway | None = None
     graph_id: str | None = None
     allowed_scopes: frozenset[str] | None = None
     options: MemoryReflectionOptions = field(default_factory=MemoryReflectionOptions)
@@ -220,7 +217,7 @@ class MemoryReflectionEngine:
     async def reflect(
         self,
         *,
-        state: "LoopState",
+        view: MemoryHookRunView,
         event_store: EventLog,
         pending_events: list[AgentEvent] | None = None,
         trigger_reasons: list[str] | None = None,
@@ -237,9 +234,9 @@ class MemoryReflectionEngine:
         resolved_call = None
         call_result: DirectModelCallResult | None = None
         try:
-            source_events = event_store.iter(run_id=state.run_id) + pending_events
+            source_events = event_store.iter(run_id=view.run_id) + pending_events
             reflection_input = self._build_input(
-                state,
+                view,
                 source_events,
                 trigger_reasons=trigger_reasons,
                 cheap_hints=cheap_hints,
@@ -334,10 +331,10 @@ class MemoryReflectionEngine:
                         entry_id=entry_id,
                         payload=payload,
                         origin=CandidateOrigin.REFLECTION,
-                        source_session_id=state.session_id,
-                        source_run_id=state.run_id,
-                        source_turn_id=state.turn_id,
-                        source_reply_id=state.reply_id,
+                        source_session_id=view.session_id,
+                        source_run_id=view.run_id,
+                        source_turn_id=view.turn_id,
+                        source_reply_id=view.reply_id,
                         user_quote=quote,
                         quoted_evidence_locator=locator,
                         source_event_id=f"{reflection_id}:completed",
@@ -350,7 +347,7 @@ class MemoryReflectionEngine:
 
             completed = MemoryReflectionCompletedEvent(
                 id=f"{reflection_id}:completed",
-                **_event_context(state).event_fields(),
+                **_event_context(view).event_fields(),
                 reflection_id=reflection_id,
                 trigger_reason=trigger_reasons[0],
                 trigger_reasons=trigger_reasons,
@@ -391,7 +388,7 @@ class MemoryReflectionEngine:
                 )
             producer_identity = stable_event_identity(
                 completed,
-                runtime_session_id=state.session_id,
+                runtime_session_id=view.session_id,
             )
             outbox_rows = tuple(
                 CandidateProjectionOutboxRow(
@@ -403,6 +400,9 @@ class MemoryReflectionEngine:
                         candidate_entry_id=candidate.entry_id,
                         candidate_index=index,
                         candidate_payload=candidate.payload,
+                        candidate_semantic_fingerprint=(
+                            _required_candidate_semantic_fingerprint(candidate)
+                        ),
                         candidate_payload_fingerprint=(
                             candidate_payload_fingerprint(candidate.payload)
                         ),
@@ -434,7 +434,7 @@ class MemoryReflectionEngine:
             estimate = getattr(exc, "estimate", None)
             return [
                 MemoryReflectionFailedEvent(
-                    **_event_context(state).event_fields(),
+                    **_event_context(view).event_fields(),
                     reflection_id=reflection_id,
                     trigger_reason=trigger_reasons[0],
                     trigger_reasons=trigger_reasons,
@@ -472,7 +472,7 @@ class MemoryReflectionEngine:
 
     def _build_input(
         self,
-        state: "LoopState",
+        view: MemoryHookRunView,
         events: list[AgentEvent],
         *,
         trigger_reasons: list[str],
@@ -480,25 +480,25 @@ class MemoryReflectionEngine:
     ) -> MemoryReflectionInput:
         attempts = _memory_tool_attempts(events)
         user_summary = _message_summary(
-            [message for message in state.messages if message.role == "user"],
+            [message for message in view.messages if message.role == "user"],
             self.options.max_summary_chars,
         )
         return MemoryReflectionInput(
-            runtime_session_id=state.session_id,
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
+            runtime_session_id=view.session_id,
+            run_id=view.run_id,
+            turn_id=view.turn_id,
+            reply_id=view.reply_id,
             graph_id=self.graph_id,
             trigger_reasons=trigger_reasons,
             cheap_hints=cheap_hints,
             prior_reflections=_prior_reflections(events),
             user_message_summary=user_summary,
             assistant_reply_summary=_message_summary(
-                [message for message in state.messages if message.role == "assistant"],
+                [message for message in view.messages if message.role == "assistant"],
                 self.options.max_summary_chars,
             ),
-            tool_traces=_tool_traces(state),
-            memory_projection_ids=_projection_ids(state.memory_projection),
+            tool_traces=_tool_traces(view),
+            memory_projection_ids=_projection_ids(view.memory_projection),
             memory_tool_attempts=attempts,
             available_evidence_ids=_available_evidence_ids(self.graph, self.graph_id),
             allowed_scopes=sorted(self.allowed_scopes or ()),
@@ -564,7 +564,6 @@ class MemoryReflectionEngine:
                 start_bundle=start_bundle,
                 commit_port=RuntimeSessionModelStreamEventCommitPort(
                     runtime_session=self.runtime_session,
-                    state=None,
                 ),
                 execution_registry=(
                     self.runtime_session.model_stream_execution_registry
@@ -586,6 +585,15 @@ class MemoryReflectionEngine:
 def _parse_reflection_output(text: str) -> MemoryReflectionOutput:
     payload = json.loads(_json_object_text(text))
     return MemoryReflectionOutput.model_validate(payload)
+
+
+def _required_candidate_semantic_fingerprint(
+    candidate: PooledMemoryCandidate,
+) -> str:
+    semantic = candidate.candidate_semantic
+    if semantic is None:
+        raise ValueError("valid reflection candidate lacks shared semantic identity")
+    return semantic.semantic_fingerprint
 
 
 def cheap_memory_hints(text: str) -> list[MemoryReflectionHint]:
@@ -794,17 +802,17 @@ def _message_text(message: Msg) -> str:
     return "\n".join(parts)
 
 
-def _tool_traces(state: "LoopState") -> list[dict[str, Any]]:
+def _tool_traces(view: MemoryHookRunView) -> list[dict[str, Any]]:
     traces: list[dict[str, Any]] = []
     calls = {
         call.id: call
-        for message in state.messages
+        for message in view.messages
         for call in message.content
         if isinstance(call, ToolCallBlock)
     }
     results = [
         result
-        for message in state.messages
+        for message in view.messages
         for result in message.content
         if isinstance(result, ToolResultBlock)
     ]
@@ -843,9 +851,9 @@ def _available_evidence_ids(graph: GraphStore, graph_id: str | None) -> list[str
     ]
 
 
-def _event_context(state: "LoopState") -> EventContext:
+def _event_context(view: MemoryHookRunView) -> EventContext:
     return EventContext(
-        run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
+        run_id=view.run_id, turn_id=view.turn_id, reply_id=view.reply_id
     )
 
 

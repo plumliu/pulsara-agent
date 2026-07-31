@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from hashlib import sha256
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Iterable, Protocol, Sequence, runtime_checkable
 
 from pulsara_agent.event.events import AgentEvent
 from pulsara_agent.event_log.serialization import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
     EventSchemaDomainRegistry,
     canonical_event_created_at,
     canonical_event_payload_bytes,
+    payload_sha256,
 )
 from pulsara_agent.message.message import Msg
 from pulsara_agent.primitives.authority_materialization import (
@@ -19,9 +21,11 @@ from pulsara_agent.primitives.authority_materialization import (
     PhysicalChargeContractFact,
 )
 from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
     canonical_utc_timestamp,
     context_fingerprint,
 )
+from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
 
 
 DEFAULT_SPARSE_EVENT_READ_MAX_EVENTS = 16_384
@@ -86,6 +90,201 @@ class EventLogTransactionCompanion(Protocol):
         self,
         stored_events: Sequence[AgentEvent],
     ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class EventLogPreparedCandidateBatchIdentity:
+    """Exact sequence-null event batch accepted by a candidate-bound companion."""
+
+    ordered_candidates: tuple[FrozenEventWriteCandidate, ...]
+    ordered_candidate_event_ids: tuple[str, ...]
+    ordered_candidate_schema_binding_fingerprints: tuple[str, ...]
+    ordered_candidate_payload_fingerprints: tuple[str, ...]
+    exact_ordered_batch_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.ordered_candidates:
+            raise ValueError("candidate-bound event batch cannot be empty")
+        event_ids = tuple(item.event_id for item in self.ordered_candidates)
+        schema_bindings = tuple(
+            _candidate_schema_binding_fingerprint(item)
+            for item in self.ordered_candidates
+        )
+        payloads = tuple(item.payload_fingerprint for item in self.ordered_candidates)
+        if self.ordered_candidate_event_ids != event_ids:
+            raise ValueError("prepared event IDs do not match ordered candidates")
+        if self.ordered_candidate_schema_binding_fingerprints != schema_bindings:
+            raise ValueError("prepared schema bindings do not match ordered candidates")
+        if self.ordered_candidate_payload_fingerprints != payloads:
+            raise ValueError("prepared payloads do not match ordered candidates")
+        expected = context_fingerprint(
+            "event-log-prepared-candidate-batch:v1",
+            {
+                "ordered_candidate_event_ids": event_ids,
+                "ordered_candidate_schema_binding_fingerprints": schema_bindings,
+                "ordered_candidate_payload_fingerprints": payloads,
+            },
+        )
+        if self.exact_ordered_batch_fingerprint != expected:
+            raise ValueError("prepared event batch fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class EventLogStoredCandidateBatchRebindReceipt:
+    """Proof that stored events are exactly the prepared batch plus sequence."""
+
+    exact_ordered_batch_fingerprint: str
+    ordered_event_ids: tuple[str, ...]
+    ordered_assigned_sequences: tuple[int, ...]
+    ordered_normalized_payload_fingerprints: tuple[str, ...]
+    sequence_continuity_fingerprint: str
+    receipt_fingerprint: str
+
+    def __post_init__(self) -> None:
+        count = len(self.ordered_event_ids)
+        if count == 0 or len(self.ordered_assigned_sequences) != count or len(
+            self.ordered_normalized_payload_fingerprints
+        ) != count:
+            raise ValueError("stored candidate rebind receipt shape mismatch")
+        first = self.ordered_assigned_sequences[0]
+        if self.ordered_assigned_sequences != tuple(range(first, first + count)):
+            raise ValueError("stored candidate sequence assignment is not contiguous")
+        expected_continuity = context_fingerprint(
+            "event-log-stored-sequence-continuity:v1",
+            tuple(zip(self.ordered_event_ids, self.ordered_assigned_sequences, strict=True)),
+        )
+        if self.sequence_continuity_fingerprint != expected_continuity:
+            raise ValueError("stored candidate continuity fingerprint mismatch")
+        expected = context_fingerprint(
+            "event-log-stored-candidate-rebind-receipt:v1",
+            {
+                "exact_ordered_batch_fingerprint": self.exact_ordered_batch_fingerprint,
+                "ordered_event_ids": self.ordered_event_ids,
+                "ordered_assigned_sequences": self.ordered_assigned_sequences,
+                "ordered_normalized_payload_fingerprints": (
+                    self.ordered_normalized_payload_fingerprints
+                ),
+                "sequence_continuity_fingerprint": self.sequence_continuity_fingerprint,
+            },
+        )
+        if self.receipt_fingerprint != expected:
+            raise ValueError("stored candidate rebind receipt fingerprint mismatch")
+
+
+@runtime_checkable
+class CandidateBoundEventLogTransactionCompanion(EventLogTransactionCompanion, Protocol):
+    @property
+    def prepared_candidate_batch_identity(
+        self,
+    ) -> EventLogPreparedCandidateBatchIdentity: ...
+
+    def accept_stored_candidate_rebind_receipt(
+        self,
+        receipt: EventLogStoredCandidateBatchRebindReceipt,
+    ) -> None: ...
+
+
+def build_prepared_candidate_batch_identity(
+    candidates: Sequence[FrozenEventWriteCandidate],
+) -> EventLogPreparedCandidateBatchIdentity:
+    ordered = tuple(candidates)
+    event_ids = tuple(item.event_id for item in ordered)
+    schema_bindings = tuple(
+        _candidate_schema_binding_fingerprint(item) for item in ordered
+    )
+    payloads = tuple(item.payload_fingerprint for item in ordered)
+    return EventLogPreparedCandidateBatchIdentity(
+        ordered_candidates=ordered,
+        ordered_candidate_event_ids=event_ids,
+        ordered_candidate_schema_binding_fingerprints=schema_bindings,
+        ordered_candidate_payload_fingerprints=payloads,
+        exact_ordered_batch_fingerprint=context_fingerprint(
+            "event-log-prepared-candidate-batch:v1",
+            {
+                "ordered_candidate_event_ids": event_ids,
+                "ordered_candidate_schema_binding_fingerprints": schema_bindings,
+                "ordered_candidate_payload_fingerprints": payloads,
+            },
+        ),
+    )
+
+
+def rebind_stored_candidate_batch(
+    prepared: EventLogPreparedCandidateBatchIdentity,
+    stored_events: Sequence[AgentEvent],
+    *,
+    registry: EventSchemaDomainRegistry = DEFAULT_EVENT_SCHEMA_REGISTRY,
+) -> EventLogStoredCandidateBatchRebindReceipt:
+    stored = tuple(stored_events)
+    candidates = prepared.ordered_candidates
+    if len(stored) != len(candidates):
+        raise ValueError("stored event batch is not the prepared candidate batch")
+    normalized_fingerprints: list[str] = []
+    assigned_sequences: list[int] = []
+    for candidate, event in zip(candidates, stored, strict=True):
+        if event.id != candidate.event_id or event.sequence is None:
+            raise ValueError("stored event identity/sequence does not match candidate")
+        binding = registry.resolve_historical_binding(
+            event_type=candidate.event_type,
+            event_schema_version=candidate.event_schema_version,
+            event_schema_fingerprint=candidate.event_schema_fingerprint,
+            event_domain_contract_fingerprint=(
+                candidate.event_domain_contract_fingerprint
+            ),
+        )
+        normalized_payload = event.model_dump(mode="json")
+        normalized_payload["sequence"] = None
+        normalized_bytes = canonical_json_bytes(normalized_payload)
+        rebound = binding.decode_owned_payload(normalized_bytes)
+        if not isinstance(rebound, type(event)):
+            raise ValueError("historical candidate decoder changed event type")
+        if canonical_event_payload_bytes(rebound) != normalized_bytes:
+            raise ValueError("historical candidate re-encoding is not canonical")
+        normalized_fingerprint = payload_sha256(normalized_bytes)
+        if (
+            normalized_bytes != candidate.canonical_payload_bytes
+            or normalized_fingerprint != candidate.payload_fingerprint
+        ):
+            raise ValueError("stored event differs from sequence-null candidate")
+        normalized_fingerprints.append(normalized_fingerprint)
+        assigned_sequences.append(event.sequence)
+    event_ids = tuple(item.event_id for item in candidates)
+    sequences = tuple(assigned_sequences)
+    payloads = tuple(normalized_fingerprints)
+    continuity = context_fingerprint(
+        "event-log-stored-sequence-continuity:v1",
+        tuple(zip(event_ids, sequences, strict=True)),
+    )
+    receipt_payload = {
+        "exact_ordered_batch_fingerprint": prepared.exact_ordered_batch_fingerprint,
+        "ordered_event_ids": event_ids,
+        "ordered_assigned_sequences": sequences,
+        "ordered_normalized_payload_fingerprints": payloads,
+        "sequence_continuity_fingerprint": continuity,
+    }
+    return EventLogStoredCandidateBatchRebindReceipt(
+        **receipt_payload,
+        receipt_fingerprint=context_fingerprint(
+            "event-log-stored-candidate-rebind-receipt:v1",
+            receipt_payload,
+        ),
+    )
+
+
+def _candidate_schema_binding_fingerprint(
+    candidate: FrozenEventWriteCandidate,
+) -> str:
+    return context_fingerprint(
+        "event-log-candidate-schema-binding:v1",
+        {
+            "event_type": candidate.event_type,
+            "event_schema_version": candidate.event_schema_version,
+            "event_schema_fingerprint": candidate.event_schema_fingerprint,
+            "event_domain_contract_fingerprint": (
+                candidate.event_domain_contract_fingerprint
+            ),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)

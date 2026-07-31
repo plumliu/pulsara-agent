@@ -80,7 +80,8 @@ from pulsara_agent.runtime.terminal.ui_stream import (
     TerminalMonitorEventChannel,
     TerminalMonitorUIReconnectCursor,
 )
-from pulsara_agent.tools.base import ToolRuntimeContext
+from pulsara_agent.ports.tool_execution import ToolInvocationOwnerKind
+from tests.support.capability import tool_runtime_context
 
 
 def _utc(seconds: int) -> str:
@@ -427,19 +428,27 @@ def test_tm2_physical_commit_guard_linearizes_permission_revision() -> None:
 
 
 def test_tm5_monitor_permission_action_matrix_is_explicit() -> None:
-    from pulsara_agent.capability.call_classifier import (
-        TERMINAL_MONITOR_OBSERVE_ACTIONS,
-        TERMINAL_PROCESS_OBSERVE_ACTIONS,
-    )
-    from pulsara_agent.runtime.permission import (
-        TERMINAL_MONITOR_READ_ONLY_ACTIONS,
-        TERMINAL_PROCESS_READ_ONLY_ACTIONS,
+    from pulsara_agent.capability.builtin_catalog import (
+        builtin_tool_catalog_entry,
     )
 
-    assert TERMINAL_PROCESS_OBSERVE_ACTIONS == {"list", "log", "poll", "wait"}
-    assert TERMINAL_PROCESS_READ_ONLY_ACTIONS == {"list", "log", "poll", "wait"}
-    assert TERMINAL_MONITOR_OBSERVE_ACTIONS == {"list"}
-    assert TERMINAL_MONITOR_READ_ONLY_ACTIONS == {"list"}
+    process_actions = {
+        item.discriminator_value
+        for item in builtin_tool_catalog_entry(
+            "terminal_process"
+        ).permission_contract.ordered_action_overrides
+        if item.allowed_in_read_only
+    }
+    monitor_actions = {
+        item.discriminator_value
+        for item in builtin_tool_catalog_entry(
+            "terminal_monitor"
+        ).permission_contract.ordered_action_overrides
+        if item.allowed_in_read_only
+    }
+
+    assert process_actions == {"list", "log", "poll", "wait"}
+    assert monitor_actions == {"list"}
 
 
 def _monitor_registration(journal: SanitizedOutputJournal):
@@ -1321,14 +1330,14 @@ def test_tm4_child_caller_is_rejected_before_session_authority_lookup() -> None:
         coordinator.prepare_registration(
             process_id="process:child",
             origin_tool_call_id="call:monitor-child",
-            runtime_context=ToolRuntimeContext(
+            runtime_context=tool_runtime_context(
                 runtime_session_id="runtime:child",
                 event_context=EventContext(
                     run_id="run:child",
                     turn_id="turn:child",
                     reply_id="reply:child",
                 ),
-                run_entry_kind="subagent_child",
+                owner_kind=ToolInvocationOwnerKind.SUBAGENT_CHILD,
             ),
             conditions=default_monitor_conditions(
                 min_new_output_chars=1,

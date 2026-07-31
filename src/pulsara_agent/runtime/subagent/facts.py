@@ -10,11 +10,11 @@ from typing import Literal, Mapping
 
 from types import MappingProxyType
 
-from pulsara_agent.runtime.subagent.immutable import (
+from pulsara_agent.primitives.subagent_json import (
     freeze_json_mapping,
     thaw_json_mapping,
 )
-from pulsara_agent.runtime.subagent.types import (
+from pulsara_agent.primitives.subagent import (
     SubagentBudget,
     SubagentCapabilityProfile,
     SubagentContextPolicy,
@@ -25,7 +25,9 @@ from pulsara_agent.runtime.subagent.types import (
 )
 
 
-DurableSubagentRunStatus = Literal["running", "suspended", "completed", "failed", "cancelled"]
+DurableSubagentRunStatus = Literal[
+    "running", "suspended", "completed", "failed", "cancelled"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,8 +181,7 @@ class SubagentRunFact:
                 payload.computed_from_parent_exposure_generation
             ),
             diagnostics=tuple(
-                thaw_json_mapping(diagnostic)
-                for diagnostic in payload.diagnostics
+                thaw_json_mapping(diagnostic) for diagnostic in payload.diagnostics
             ),
         )
 
@@ -250,7 +251,9 @@ class SubagentConsumptionFact:
     task_id: str | None
     subagent_run_id: str | None
     result_id: str | None
-    consumed_status: Literal["completed", "failed", "cancelled", "blocked_dependency_failed"]
+    consumed_status: Literal[
+        "completed", "failed", "cancelled", "blocked_dependency_failed"
+    ]
     terminal_event_id: str | None
     diagnostics: tuple[Mapping[str, object], ...]
     provenance: SubagentFactProvenance

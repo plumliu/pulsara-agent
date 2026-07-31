@@ -31,12 +31,12 @@ from pulsara_agent.capability.call_classifier import (
 )
 from pulsara_agent.capability.descriptor import (
     CapabilityAdvertisePolicy,
-    CapabilityArtifactMode,
     CapabilityAvailability,
     CapabilityDescriptor,
     CapabilityProviderKind,
     CapabilityProvenance,
 )
+from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
@@ -73,7 +73,6 @@ __all__ = [
     "BuiltinToolCapabilityProvider",
     "CapabilityDiagnostic",
     "CapabilityAdvertisePolicy",
-    "CapabilityArtifactMode",
     "CapabilityAvailability",
     "CapabilityCallClassification",
     "CapabilityDescriptor",
@@ -99,6 +98,7 @@ __all__ = [
     "ToolResultSemanticsBuilderBinding",
     "ToolResultSemanticsBuilderRegistry",
     "ToolResultSemanticsRuntimeInput",
+    "ToolArtifactMode",
     "bundled_skills_status",
     "default_pulsara_home",
     "render_active_skill_prompt",

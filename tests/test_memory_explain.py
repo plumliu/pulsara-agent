@@ -24,7 +24,7 @@ from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.memory_query import MemoryExplainTool, MemoryGetTool
 
 

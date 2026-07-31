@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -14,11 +13,10 @@ from uuid import uuid4
 
 from pulsara_agent.event import (
     AgentEvent,
-    CompactionCandidateDiagnosticEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionMemoryExtractionRequestedEvent,
     ContextCompactionStartedEvent,
     EventContext,
     EventType,
@@ -35,7 +33,10 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.event_log import EventLog
-from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+from pulsara_agent.event_log.serialization import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
+    decode_event_write_candidate,
+)
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.direct import (
     DirectModelCallResult,
@@ -76,63 +77,50 @@ from pulsara_agent.message import (
     ToolResultBlock,
     UserMsg,
 )
-from pulsara_agent.message.assembler import BlockAssembler
-from pulsara_agent.message.reducer import accepted_main_reply_ids
+from pulsara_agent.replay.message_assembler import BlockAssembler
+from pulsara_agent.replay.message_reducer import accepted_main_reply_ids
 from pulsara_agent.runtime.compaction.planner import (
     SUMMARY_ARTIFACT_KIND,
     latest_completed_boundary,
     render_compaction_summary,
     strip_compaction_analysis,
 )
-from pulsara_agent.runtime.compaction.candidates import (
-    CompactionCandidateAppendResult,
-    CompactionCandidateDiagnostic,
-    CompactionCandidateParseResult,
-    CompactionMemoryCandidateSink,
-    ContextCompactionMemoryCandidatePolicy,
-    parse_compaction_memory_candidates,
-    compaction_extractor_contract,
-)
-from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
-from pulsara_agent.memory.candidates.projection_outbox import (
-    CandidateProjectionOutboxRow,
-    MemoryCandidateProjectionCommitPort,
-)
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.primitives.context import (
-    ContextEventReferenceFact,
-    context_fingerprint,
-)
-from pulsara_agent.primitives.governance_evidence import (
-    CandidateProjectionOutboxItemFact,
-    CandidateProjectionProducerKind,
-)
-from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.compaction.commit import (
+    CompactionBatchCommitCancelledAfterCommit,
+    CompactionBatchCommitPendingAfterCancellation,
     CompactionCommitCancelledAfterCommit,
     CompactionCommitPendingAfterCancellation,
+    CompactionEventBatchCommitResult,
     CompactionEventCommitPort,
     CompactionEventCommitResult,
     CompactionPendingCommitNotDurable,
+    PendingCompactionEventBatchCommit,
     PendingCompactionEventCommit,
     RuntimeSessionCompactionEventCommitPort,
+)
+from pulsara_agent.ports.compaction_extensions import (
+    CompactionPostCompletionExtensionPrivateHandle,
+    CompactionPostCompletionExtensionPort,
+    PreparedCompactionPostCompletionExtensionAdmissionFailure,
+    PreparedCompactionPostCompletionExtensionBatch,
+    PreparedCompactionPostCompletionExtensionIntent,
+)
+from pulsara_agent.primitives.compaction import (
+    CompactionPostCompletionExtensionAdmissionFailedFact,
+    CompactionPostCompletionExtensionRequestedFact,
 )
 from pulsara_agent.runtime.context_input.event_slice import (
     event_reference_from_stored,
 )
 from pulsara_agent.primitives.runtime_event_vocabulary import (
-    BoundedRuntimeFailureDiagnosticFact,
-    CompactionCandidateProjectionReceipt,
-    CompactionCandidateProjectionRequestIdentity,
     CompactionPublicationTerminalizationScope,
-    PreparedCompactionCandidateProjectionInput,
     RuntimeEventOperationDeadlineBudget,
-    build_bounded_runtime_failure_diagnostic,
     build_runtime_event_deadline_budget,
-    ordered_fingerprint_accumulator,
 )
 from pulsara_agent.runtime.session import EventPublicationError, RuntimeSession
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 
 ContextCompactionTrigger = Literal["manual", "auto"]
 
@@ -154,19 +142,20 @@ class ContextCompactionAttemptResult:
     attempt_id: str
     compaction_id: str | None
     terminal_event_deadline_budget: RuntimeEventOperationDeadlineBudget | None
-    publication_terminalization_scope: (
-        CompactionPublicationTerminalizationScope | None
-    )
+    publication_terminalization_scope: CompactionPublicationTerminalizationScope | None
     status: Literal["not_attempted", "completed", "failed"]
-    not_attempted_reason: Literal[
-        "disabled",
-        "manual_disabled",
-        "auto_disabled",
-        "failure_circuit_open",
-        "below_threshold",
-        "empty_source",
-        "no_plan",
-    ] | None
+    not_attempted_reason: (
+        Literal[
+            "disabled",
+            "manual_disabled",
+            "auto_disabled",
+            "failure_circuit_open",
+            "below_threshold",
+            "empty_source",
+            "no_plan",
+        ]
+        | None
+    )
     core_committed_events: tuple[AgentEvent, ...]
     terminal_event: (
         ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
@@ -180,7 +169,6 @@ class ContextCompactionAttemptResult:
         "failed_after_commit",
     ]
     publication_errors: tuple[EventPublicationError, ...]
-    candidate_projection_receipt: CompactionCandidateProjectionReceipt | None
 
     def __post_init__(self) -> None:
         has_terminal = self.terminal_event is not None
@@ -229,7 +217,6 @@ class _CompactionAttemptCollector:
     event_deadline_budgets: dict[str, RuntimeEventOperationDeadlineBudget] = field(
         default_factory=dict
     )
-    candidate_projection_receipt: CompactionCandidateProjectionReceipt | None = None
 
     def admit_event_candidate(
         self,
@@ -264,7 +251,10 @@ class _CompactionAttemptCollector:
             raise RuntimeError("compaction core receipt identity mismatch")
         if receipt.candidate_deadline_budget != deadline_budget:
             raise RuntimeError("compaction core receipt deadline identity mismatch")
-        if self.receipts and event.sequence <= self.receipts[-1].committed_through_sequence:
+        if (
+            self.receipts
+            and event.sequence <= self.receipts[-1].committed_through_sequence
+        ):
             raise RuntimeError("compaction core receipts are not strictly ordered")
         self.admit_event_candidate(event.id, deadline_budget)
         self.receipts.append(receipt)
@@ -331,13 +321,11 @@ class _CompactionAttemptCollector:
             if any(receipt.publication_errors for receipt in self.receipts):
                 publication_summary = "failed_after_commit"
             elif any(
-                receipt.publication_status == "unavailable"
-                for receipt in self.receipts
+                receipt.publication_status == "unavailable" for receipt in self.receipts
             ):
                 publication_summary = "unavailable"
             elif any(
-                receipt.publication_status == "enqueued"
-                for receipt in self.receipts
+                receipt.publication_status == "enqueued" for receipt in self.receipts
             ):
                 publication_summary = "enqueued"
             else:
@@ -368,18 +356,7 @@ class _CompactionAttemptCollector:
                 for receipt in self.receipts
                 for error in receipt.publication_errors
             ),
-            candidate_projection_receipt=self.candidate_projection_receipt,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedCandidateProjectionAdmission:
-    request_identity: CompactionCandidateProjectionRequestIdentity
-    prepared_input: PreparedCompactionCandidateProjectionInput | None
-    preparation_failure: BoundedRuntimeFailureDiagnosticFact | None
-    raw_summary: str
-    summary: str
-    phase: str | None
 
 
 _CURRENT_COMPACTION_ATTEMPT: ContextVar[_CompactionAttemptCollector | None] = (
@@ -399,9 +376,6 @@ class ContextCompactionPolicy:
     max_summary_chars: int = 12_000
     max_consecutive_failures: int = 3
     summarizer_options: LLMOptions = field(default_factory=LLMOptions)
-    memory_candidates: ContextCompactionMemoryCandidatePolicy = field(
-        default_factory=ContextCompactionMemoryCandidatePolicy
-    )
 
     def __post_init__(self) -> None:
         if not (0 < self.post_compaction_target_ratio < self.auto_trigger_ratio < 1):
@@ -425,6 +399,8 @@ class CompactionPlan:
     tail_events: tuple[AgentEvent, ...]
     window_number: int
     window_id: str
+    previous_keep_after_sequence: int
+    predecessor_completed_event_id: str | None
     previous_summary_artifact_id: str | None = None
     previous_summary_text: str | None = None
 
@@ -447,9 +423,21 @@ class CompactionTerminalizationOwner:
     )
     started_committed: bool = True
     pending_started_commit: PendingCompactionEventCommit | None = None
+    pending_terminal_batch_commit: PendingCompactionEventBatchCommit | None = None
+    terminal_batch_candidates: tuple[AgentEvent, ...] | None = None
+    prepared_extension_batch: (
+        PreparedCompactionPostCompletionExtensionBatch | None
+    ) = None
+    extension_private_handle: (
+        CompactionPostCompletionExtensionPrivateHandle | None
+    ) = None
     deadline_budget: RuntimeEventOperationDeadlineBudget | None = None
     state: Literal[
-        "started_commit_pending", "started", "candidate_frozen", "committing"
+        "started_commit_pending",
+        "started",
+        "candidate_frozen",
+        "terminal_batch_commit_pending",
+        "committing",
     ] = "started"
 
 
@@ -466,25 +454,11 @@ class ContextCompactionService:
     runtime_session: RuntimeSession | None = None
     policy: ContextCompactionPolicy = ContextCompactionPolicy()
     model_role: ModelRole = ModelRole.FLASH
-    candidate_sink: CompactionMemoryCandidateSink | None = None
     event_commit_port: CompactionEventCommitPort | None = None
-    candidate_projection_commit_port: MemoryCandidateProjectionCommitPort | None = None
+    post_completion_extension: CompactionPostCompletionExtensionPort | None = None
     _consecutive_failures: int = 0
     _pending_terminalizations: dict[str, CompactionTerminalizationOwner] = field(
         default_factory=dict,
-        init=False,
-        repr=False,
-    )
-    _candidate_projection_tasks: dict[str, asyncio.Task[None]] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
-    _candidate_projection_receipts: dict[
-        str, CompactionCandidateProjectionReceipt
-    ] = field(default_factory=dict, init=False, repr=False)
-    _candidate_projection_accepting: bool = field(
-        default=True,
         init=False,
         repr=False,
     )
@@ -511,12 +485,6 @@ class ContextCompactionService:
     @property
     def pending_terminalization_count(self) -> int:
         return len(self._pending_terminalizations)
-
-    @property
-    def pending_candidate_projection_count(self) -> int:
-        return sum(
-            not task.done() for task in self._candidate_projection_tasks.values()
-        )
 
     def _recover_pending_terminalization_owners(self) -> None:
         deadline = monotonic() + 30.0
@@ -689,6 +657,58 @@ class ContextCompactionService:
             raise RuntimeError("committed compaction terminal identity mismatch")
         self._pending_terminalizations.pop(started_event_id, None)
 
+    def _freeze_terminal_batch(
+        self,
+        *,
+        started_event_id: str,
+        candidates: tuple[AgentEvent, ...],
+        prepared_extension_batch: PreparedCompactionPostCompletionExtensionBatch,
+        extension_private_handle: CompactionPostCompletionExtensionPrivateHandle,
+    ) -> None:
+        owner = self._pending_terminalizations.get(started_event_id)
+        if owner is None:
+            raise RuntimeError("compaction terminal batch has no Started owner")
+        if not candidates or candidates[0] is not owner.terminal_candidate:
+            raise RuntimeError("compaction terminal batch candidate drifted")
+        if (
+            owner.terminal_batch_candidates is not None
+            and owner.terminal_batch_candidates != candidates
+        ):
+            raise RuntimeError("compaction terminal batch was replaced")
+        owner.terminal_batch_candidates = candidates
+        owner.prepared_extension_batch = prepared_extension_batch
+        owner.extension_private_handle = extension_private_handle
+
+    def _acknowledge_terminal_batch(
+        self,
+        *,
+        started_event_id: str,
+        result: CompactionEventBatchCommitResult,
+    ) -> None:
+        owner = self._pending_terminalizations.get(started_event_id)
+        if owner is None:
+            raise RuntimeError("committed compaction terminal batch lost its owner")
+        if len(result.committed_events) != 2:
+            raise RuntimeError("compaction extension terminal batch shape drifted")
+        completed, request = result.committed_events
+        if not isinstance(completed, ContextCompactionCompletedEvent) or not isinstance(
+            request,
+            ContextCompactionMemoryExtractionRequestedEvent,
+        ):
+            raise RuntimeError("compaction extension terminal batch type drifted")
+        batch = owner.prepared_extension_batch
+        handle = owner.extension_private_handle
+        if batch is None or handle is None:
+            raise RuntimeError("compaction extension terminal batch lacks ownership")
+        handle.confirm_request_batch_full(
+            prepared_batch_fingerprint=batch.identity.prepared_batch_fingerprint,
+            stored_request_reference=event_reference_from_stored(
+                request,
+                runtime_session_id=self.runtime_session_id,
+            ),
+        )
+        self._acknowledge_terminal_candidate(completed)
+
     def _recovery_terminal_candidate(
         self,
         started: ContextCompactionStartedEvent,
@@ -768,6 +788,61 @@ class ContextCompactionService:
                     )
                     continue
                 self._acknowledge_started_commit(committed_started)
+            terminal_batch = owner.terminal_batch_candidates
+            if terminal_batch is not None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                pending_batch = owner.pending_terminal_batch_commit
+                try:
+                    if pending_batch is not None:
+                        batch_result = await pending_batch.resolve(
+                            timeout_seconds=remaining
+                        )
+                        owner.pending_terminal_batch_commit = None
+                    else:
+                        deadline_budget = owner.deadline_budget
+                        if deadline_budget is None:
+                            raise RuntimeError(
+                                "compaction terminal batch lost its write deadline"
+                            )
+                        batch_result = await asyncio.wait_for(
+                            self._commit_event_batch(
+                                terminal_batch,
+                                terminal_event_id=owner.terminal_event_id,
+                                deadline_budget=deadline_budget,
+                            ),
+                            timeout=remaining,
+                        )
+                except CompactionBatchCommitCancelledAfterCommit as exc:
+                    batch_result = exc.result
+                except CompactionBatchCommitPendingAfterCancellation as exc:
+                    owner.pending_terminal_batch_commit = exc.pending
+                    owner.state = "terminal_batch_commit_pending"
+                    errors.append(exc)
+                    continue
+                except CompactionPendingCommitNotDurable as exc:
+                    owner.pending_terminal_batch_commit = None
+                    owner.state = "candidate_frozen"
+                    errors.append(exc)
+                    continue
+                except BaseException as exc:
+                    owner.state = "candidate_frozen"
+                    batch = owner.prepared_extension_batch
+                    handle = owner.extension_private_handle
+                    if batch is not None and handle is not None:
+                        handle.mark_request_batch_reconciliation_required(
+                            prepared_batch_fingerprint=(
+                                batch.identity.prepared_batch_fingerprint
+                            )
+                        )
+                    errors.append(exc)
+                    continue
+                self._acknowledge_terminal_batch(
+                    started_event_id=started_event_id,
+                    result=batch_result,
+                )
+                continue
             candidate = owner.terminal_candidate
             if candidate is None:
                 candidate = self._recovery_terminal_candidate(owner.started_event)
@@ -836,6 +911,116 @@ class ContextCompactionService:
             collector.record(result, deadline_budget=deadline_budget)
         return result.committed_event
 
+    def _prepare_post_completion_batch(
+        self,
+        *,
+        preparation: (
+            PreparedCompactionPostCompletionExtensionIntent
+            | PreparedCompactionPostCompletionExtensionAdmissionFailure
+            | None
+        ),
+        completed: ContextCompactionCompletedEvent,
+    ) -> tuple[
+        ContextCompactionCompletedEvent,
+        ContextCompactionMemoryExtractionRequestedEvent | None,
+        PreparedCompactionPostCompletionExtensionBatch | None,
+    ]:
+        extension = self.post_completion_extension
+        if preparation is None or extension is None:
+            return completed, None, None
+        disposition = extension.prepare_completion_disposition(
+            preparation=preparation,
+            completed_event=completed,
+        )
+        if isinstance(
+            disposition,
+            CompactionPostCompletionExtensionAdmissionFailedFact,
+        ):
+            return (
+                ContextCompactionCompletedEvent.model_validate(
+                    {
+                        **completed.model_dump(mode="python"),
+                        "post_completion_extension_dispositions": (disposition,),
+                    }
+                ),
+                None,
+                None,
+            )
+        request = decode_event_write_candidate(
+            disposition.request_event_candidate,
+            registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+        )
+        if not isinstance(request, ContextCompactionMemoryExtractionRequestedEvent):
+            raise RuntimeError("compaction extension produced another request type")
+        requested = build_frozen_fact(
+            CompactionPostCompletionExtensionRequestedFact,
+            schema_version="compaction_post_completion_extension_requested.v1",
+            disposition_kind="requested",
+            extension_link=disposition.extension_link,
+        )
+        completed_with_disposition = ContextCompactionCompletedEvent.model_validate(
+            {
+                **completed.model_dump(mode="python"),
+                "post_completion_extension_dispositions": (requested,),
+            }
+        )
+        return completed_with_disposition, request, disposition
+
+    async def _commit_event_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        terminal_event_id: str,
+        deadline_budget: RuntimeEventOperationDeadlineBudget,
+    ) -> CompactionEventBatchCommitResult:
+        port = self.event_commit_port
+        if port is None:  # pragma: no cover - guarded by __post_init__
+            raise RuntimeError("compaction event commit port is unavailable")
+        collector = _CURRENT_COMPACTION_ATTEMPT.get()
+        if collector is not None:
+            deadline_budget = collector.admit_event_candidate(
+                terminal_event_id,
+                deadline_budget,
+            )
+        result = await port.commit_events(
+            events,
+            deadline_budget=deadline_budget,
+        )
+        self._record_event_batch_result(
+            result,
+            terminal_event_id=terminal_event_id,
+            deadline_budget=deadline_budget,
+        )
+        return result
+
+    def _record_event_batch_result(
+        self,
+        result: CompactionEventBatchCommitResult,
+        *,
+        terminal_event_id: str,
+        deadline_budget: RuntimeEventOperationDeadlineBudget,
+    ) -> None:
+        collector = _CURRENT_COMPACTION_ATTEMPT.get()
+        if collector is None:
+            return
+        terminal = next(
+            (event for event in result.committed_events if event.id == terminal_event_id),
+            None,
+        )
+        if not isinstance(terminal, ContextCompactionCompletedEvent):
+            raise RuntimeError("compaction batch omitted its completed terminal")
+        collector.record(
+            CompactionEventCommitResult(
+                candidate_event_id=terminal.id,
+                candidate_deadline_budget=deadline_budget,
+                committed_event=terminal,
+                committed_through_sequence=result.committed_through_sequence,
+                publication_status=result.publication_status,
+                publication_errors=result.publication_errors,
+            ),
+            deadline_budget=deadline_budget,
+        )
+
     @staticmethod
     def _new_event_write_deadline_budget() -> RuntimeEventOperationDeadlineBudget:
         return build_runtime_event_deadline_budget(
@@ -893,7 +1078,7 @@ class ContextCompactionService:
         event_metadata: dict[str, object] | None = None,
         host_boundary_id: str | None = None,
         host_boundary_kind: Literal["pre_run"] | None = None,
-        runtime_state: LoopState | None = None,
+        runtime_state: RunActivationWorkingState | None = None,
     ) -> ContextCompactionAttemptResult:
         return await self.compact(
             target_model_target=target_model_target,
@@ -991,17 +1176,20 @@ class ContextCompactionService:
         event_metadata: dict[str, object] | None = None,
         host_boundary_id: str | None = None,
         host_boundary_kind: Literal["pre_run"] | None = None,
-        runtime_state: LoopState | None = None,
+        runtime_state: RunActivationWorkingState | None = None,
     ) -> ContextCompactionAttemptResult:
-        not_attempted_reason: Literal[
-            "disabled",
-            "manual_disabled",
-            "auto_disabled",
-            "failure_circuit_open",
-            "below_threshold",
-            "empty_source",
-            "no_plan",
-        ] | None = None
+        not_attempted_reason: (
+            Literal[
+                "disabled",
+                "manual_disabled",
+                "auto_disabled",
+                "failure_circuit_open",
+                "below_threshold",
+                "empty_source",
+                "no_plan",
+            ]
+            | None
+        ) = None
         if not self.policy.enabled:
             not_attempted_reason = "disabled"
         elif trigger == "manual" and not self.policy.manual_enabled:
@@ -1052,8 +1240,7 @@ class ContextCompactionService:
         result = collector.freeze(
             not_attempted_reason=(
                 "empty_source"
-                if not collector.receipts
-                and self.event_log.next_sequence() == 1
+                if not collector.receipts and self.event_log.next_sequence() == 1
                 else "no_plan"
             )
         )
@@ -1072,21 +1259,23 @@ class ContextCompactionService:
         *,
         trigger: ContextCompactionTrigger,
         event_metadata: dict[str, object] | None,
-        runtime_state: LoopState | None,
+        runtime_state: RunActivationWorkingState | None,
     ) -> CompactionPublicationTerminalizationScope:
         metadata = event_metadata or {}
         mid_turn = runtime_state is not None or metadata.get("phase") == "mid_turn"
         if mid_turn:
             if runtime_state is None or runtime_state.run_working_set is None:
-                raise ValueError("mid-turn compaction requires its active RunWorkingSet")
+                raise ValueError(
+                    "mid-turn compaction requires its active RunWorkingSet"
+                )
             contract = runtime_state.run_working_set.long_horizon_contract
             payload = {
                 "scope_kind": "mid_turn_active_run",
                 "runtime_session_id": self.runtime_session_id,
                 "active_run_id": runtime_state.run_id,
-                "active_context_window_id": runtime_state.scratchpad.get(
-                    "active_context_window_id",
-                    contract.initial_window_id,
+                "active_context_window_id": (
+                    runtime_state.model_tool_progress.active_context_window_id
+                    or contract.initial_window_id
                 ),
                 "active_rollout_account_id": contract.rollout_account_id,
                 "host_state_generation": int(
@@ -1104,9 +1293,7 @@ class ContextCompactionService:
                 "active_run_id": None,
                 "active_context_window_id": None,
                 "active_rollout_account_id": None,
-                "host_state_generation": int(
-                    metadata.get("host_state_generation", 0)
-                ),
+                "host_state_generation": int(metadata.get("host_state_generation", 0)),
             }
         return CompactionPublicationTerminalizationScope(
             **payload,  # type: ignore[arg-type]
@@ -1238,6 +1425,38 @@ class ContextCompactionService:
         phase = (
             str(metadata.get("phase")) if metadata.get("phase") is not None else None
         )
+        extension_preparation: (
+            PreparedCompactionPostCompletionExtensionIntent
+            | PreparedCompactionPostCompletionExtensionAdmissionFailure
+            | None
+        ) = None
+        if self.post_completion_extension is not None:
+            if self.runtime_session is None:
+                raise RuntimeError(
+                    "context compaction extension requires RuntimeSession ownership"
+                )
+            authority_snapshot = self.runtime_session.transcript_projection_state_store.capture_governance_authority_snapshot()
+            events_by_id = {event.id: event for event in events}
+            extension_preparation = (
+                self.post_completion_extension.prepare_intent(
+                    runtime_session_id=self.runtime_session_id,
+                    event_context=context,
+                    compaction_id=compaction_id,
+                    completed_event_id=terminal_event_id,
+                    trigger=trigger,
+                    phase=phase,
+                    previous_keep_after_sequence=(
+                        plan.previous_keep_after_sequence
+                    ),
+                    current_keep_after_sequence=plan.keep_after_sequence,
+                    current_through_sequence=plan.through_sequence,
+                    predecessor_completed_event_id=(
+                        plan.predecessor_completed_event_id
+                    ),
+                    transcript_authority_snapshot=authority_snapshot,
+                    event_lookup=events_by_id.get,
+                )
+            )
         failure_stage = "summarizer_resolution"
         summarizer_target = None
         summarizer_call = None
@@ -1250,7 +1469,6 @@ class ContextCompactionService:
         observed_after_measurement: CompactionObservedAfterMeasurementFact | None = None
         started_committed: ContextCompactionStartedEvent | None = None
         terminal_committed = False
-        projection_admission: _PreparedCandidateProjectionAdmission | None = None
         try:
             summarizer_target = self.llm_runtime.resolve_target(
                 role=self.model_role,
@@ -1377,9 +1595,7 @@ class ContextCompactionService:
                         target_model_target.fact.context_budget.input_budget_tokens
                     ),
                     threshold_tokens=plan.threshold_tokens,
-                    post_compaction_target_tokens=(
-                        plan.post_compaction_target_tokens
-                    ),
+                    post_compaction_target_tokens=(plan.post_compaction_target_tokens),
                     failure_stage="started_publication",
                     target_estimate=plan.target_estimate,
                     summarizer_target=None,
@@ -1395,8 +1611,7 @@ class ContextCompactionService:
                     keep_after_sequence=plan.keep_after_sequence,
                     error_type="CompactionStartedPublicationUnavailable",
                     message=(
-                        "compaction Started committed but publication "
-                        "was not confirmed"
+                        "compaction Started committed but publication was not confirmed"
                     ),
                     started_event_id=started_event_id,
                     termination_kind="failed",
@@ -1537,15 +1752,6 @@ class ContextCompactionService:
                     **(event_metadata or {}),
                 },
             )
-            projection_admission = self._prepare_candidate_projection_admission(
-                compaction_id=compaction_id,
-                expected_completed_event_id=terminal_event_id,
-                raw_summary=raw_summary,
-                summary=summary,
-                summary_artifact_id=artifact_id,
-                trigger=trigger,
-                phase=phase,
-            )
             completed = ContextCompactionCompletedEvent(
                 id=terminal_event_id,
                 **context.event_fields(),
@@ -1583,6 +1789,12 @@ class ContextCompactionService:
                 host_boundary_kind=host_boundary_kind,
                 metadata=metadata,
             )
+            completed, extraction_request, prepared_extension_batch = (
+                self._prepare_post_completion_batch(
+                    preparation=extension_preparation,
+                    completed=completed,
+                )
+            )
             failure_stage = "completed_append"
             completed_deadline_budget = self._new_event_write_deadline_budget()
             self._freeze_terminal_candidate(
@@ -1590,11 +1802,41 @@ class ContextCompactionService:
                 completed,
                 deadline_budget=completed_deadline_budget,
             )
-            try:
-                stored_event = await self._commit_event(
-                    completed,
-                    deadline_budget=completed_deadline_budget,
+            if extraction_request is not None:
+                if prepared_extension_batch is None or not isinstance(
+                    extension_preparation,
+                    PreparedCompactionPostCompletionExtensionIntent,
+                ):
+                    raise RuntimeError(
+                        "compaction extraction request lacks its stable batch owner"
+                    )
+                self._freeze_terminal_batch(
+                    started_event_id=started_event_id,
+                    candidates=(completed, extraction_request),
+                    prepared_extension_batch=prepared_extension_batch,
+                    extension_private_handle=extension_preparation.private_handle,
                 )
+            try:
+                if extraction_request is None:
+                    stored_event = await self._commit_event(
+                        completed,
+                        deadline_budget=completed_deadline_budget,
+                    )
+                    stored_request = None
+                else:
+                    batch_result = await self._commit_event_batch(
+                        (completed, extraction_request),
+                        terminal_event_id=completed.id,
+                        deadline_budget=completed_deadline_budget,
+                    )
+                    stored_event, stored_request = batch_result.committed_events
+                    if not isinstance(
+                        stored_request,
+                        ContextCompactionMemoryExtractionRequestedEvent,
+                    ):
+                        raise RuntimeError(
+                            "compaction extension batch returned wrong request type"
+                        )
             except CompactionCommitCancelledAfterCommit as cancelled_commit:
                 stored_event = cancelled_commit.result.committed_event
                 if not isinstance(stored_event, ContextCompactionCompletedEvent):
@@ -1604,24 +1846,53 @@ class ContextCompactionService:
                 terminal_committed = True
                 self._acknowledge_terminal_candidate(stored_event)
                 raise
+            except CompactionBatchCommitCancelledAfterCommit as cancelled_commit:
+                self._record_event_batch_result(
+                    cancelled_commit.result,
+                    terminal_event_id=completed.id,
+                    deadline_budget=completed_deadline_budget,
+                )
+                self._acknowledge_terminal_batch(
+                    started_event_id=started_event_id,
+                    result=cancelled_commit.result,
+                )
+                terminal_committed = True
+                raise
+            except CompactionBatchCommitPendingAfterCancellation as pending_commit:
+                owner = self._pending_terminalizations[started_event_id]
+                owner.pending_terminal_batch_commit = pending_commit.pending
+                owner.state = "terminal_batch_commit_pending"
+                raise
             if not isinstance(stored_event, ContextCompactionCompletedEvent):
                 raise RuntimeError(
                     "compaction Completed commit returned wrong event type"
                 )
             stored = stored_event
-            terminal_committed = True
-            self._acknowledge_terminal_candidate(stored)
-            collector.candidate_projection_receipt = (
-                self._install_candidate_projection_owner(
-                    admission=projection_admission,
-                    completed=stored,
-                    publication_failed=collector.publication_failed,
+            if stored_request is not None:
+                self._acknowledge_terminal_batch(
+                    started_event_id=started_event_id,
+                    result=batch_result,
                 )
-            )
+            terminal_committed = True
+            if stored_request is None:
+                self._acknowledge_terminal_candidate(stored)
             self._consecutive_failures = 0
             return stored
         except BaseException as exc:
-            if summarizer_provider_input is not None and self.runtime_session is not None:
+            if isinstance(
+                extension_preparation,
+                PreparedCompactionPostCompletionExtensionIntent,
+            ) and extension_preparation.private_handle.active:
+                try:
+                    extension_preparation.private_handle.abandon_before_write(
+                        reason="compaction_failed_before_completed_batch"
+                    )
+                except RuntimeError:
+                    pass
+            if (
+                summarizer_provider_input is not None
+                and self.runtime_session is not None
+            ):
                 await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     summarizer_provider_input.prepared_candidate.preparation_ownership.preparation_id,
                     reason="compaction_failed_before_model_start",
@@ -1756,14 +2027,8 @@ class ContextCompactionService:
         trigger: ContextCompactionTrigger,
         phase: str | None,
     ) -> tuple[LLMContext, int]:
-        prompt = production_compaction_prompt(
-            memory_candidates_enabled=_memory_candidate_extraction_enabled(
-                self.candidate_sink,
-                trigger,
-                phase=phase,
-                policy=self.policy.memory_candidates,
-            )
-        )
+        del trigger, phase
+        prompt = production_compaction_prompt()
 
         def build(input_text: str) -> LLMContext:
             return LLMContext(
@@ -1829,7 +2094,6 @@ class ContextCompactionService:
                 start_bundle=start_bundle,
                 commit_port=RuntimeSessionModelStreamEventCommitPort(
                     runtime_session=self.runtime_session,
-                    state=None,
                 ),
                 execution_registry=(
                     self.runtime_session.model_stream_execution_registry
@@ -1847,543 +2111,16 @@ class ContextCompactionService:
             runtime_session_id=self.runtime_session_id,
         )
 
-    def _prepare_candidate_projection_admission(
-        self,
-        *,
-        compaction_id: str,
-        expected_completed_event_id: str,
-        raw_summary: str,
-        summary: str,
-        summary_artifact_id: str,
-        trigger: ContextCompactionTrigger,
-        phase: str | None,
-    ) -> _PreparedCandidateProjectionAdmission | None:
-        sink = self.candidate_sink
-        policy = self.policy.memory_candidates
-        if not _memory_candidate_extraction_enabled(
-            sink,
-            trigger,
-            phase=phase,
-            policy=policy,
-        ):
-            return None
-        contract = compaction_extractor_contract(policy)
-        policy_fingerprint = context_fingerprint(
-            "compaction-candidate-projection-policy:v1",
-            {
-                "enabled": policy.enabled,
-                "extract_on_manual": policy.extract_on_manual,
-                "extract_on_preflight": policy.extract_on_preflight,
-                "extract_on_mid_turn": policy.extract_on_mid_turn,
-                "missing_candidates_block_policy": (
-                    policy.missing_candidates_block_policy
-                ),
-                "max_candidates_per_compaction": (
-                    policy.max_candidates_per_compaction
-                ),
-                "max_summary_excerpt_chars": policy.max_summary_excerpt_chars,
-                "max_provenance_ids": policy.max_provenance_ids,
-                "extractor_version": policy.extractor_version,
-            },
-        )
-        request_payload = {
-            "request_id": (
-                f"compaction-candidate-projection:{compaction_id}"
-            ),
-            "compaction_id": compaction_id,
-            "expected_completed_event_id": expected_completed_event_id,
-            "extractor_id": contract.extractor_id,
-            "extractor_version": contract.extractor_version,
-            "extractor_contract_fingerprint": contract.contract_fingerprint,
-            "projection_policy_fingerprint": policy_fingerprint,
-        }
-        request = CompactionCandidateProjectionRequestIdentity(
-            **request_payload,
-            request_fingerprint=context_fingerprint(
-                "compaction-candidate-projection-request:v1",
-                request_payload,
-            ),
-        )
-        try:
-            summary_bytes = summary.encode("utf-8")
-            prepared_payload = {
-                "request_identity": request,
-                "owner_id": (
-                    "compaction-candidate-owner:"
-                    + request.request_fingerprint.removeprefix("sha256:")
-                ),
-                "summary_artifact_id": summary_artifact_id,
-                "summary_artifact_content_fingerprint": context_fingerprint(
-                    "compaction-summary-artifact-content:v1",
-                    summary,
-                ),
-                "owned_summary_canonical_utf8_bytes": bytes(summary_bytes),
-            }
-            prepared = PreparedCompactionCandidateProjectionInput(
-                **prepared_payload,
-                prepared_input_fingerprint=context_fingerprint(
-                    "prepared-compaction-candidate-projection-input:v1",
-                    {
-                        "request_identity": request,
-                        "owner_id": prepared_payload["owner_id"],
-                        "summary_artifact_id": summary_artifact_id,
-                        "summary_artifact_content_fingerprint": (
-                            prepared_payload[
-                                "summary_artifact_content_fingerprint"
-                            ]
-                        ),
-                        "owned_summary_canonical_utf8": summary,
-                    },
-                ),
-            )
-        except BaseException as error:
-            return _PreparedCandidateProjectionAdmission(
-                request_identity=request,
-                prepared_input=None,
-                preparation_failure=build_bounded_runtime_failure_diagnostic(
-                    error=error,
-                    redaction_profile_id=(
-                        "compaction_candidate_projection_preparation_error.v1"
-                    ),
-                ),
-                raw_summary=str(raw_summary),
-                summary=str(summary),
-                phase=phase,
-            )
-        return _PreparedCandidateProjectionAdmission(
-            request_identity=request,
-            prepared_input=prepared,
-            preparation_failure=None,
-            raw_summary=str(raw_summary),
-            summary=str(summary),
-            phase=phase,
-        )
-
-    def _install_candidate_projection_owner(
-        self,
-        *,
-        admission: _PreparedCandidateProjectionAdmission | None,
-        completed: ContextCompactionCompletedEvent,
-        publication_failed: bool,
-    ) -> CompactionCandidateProjectionReceipt:
-        completed_reference = event_reference_from_stored(
-            completed,
-            runtime_session_id=self.runtime_session_id,
-        )
-        empty = {
-            "owner_id": None,
-            "prepared_input_fingerprint": None,
-            "failure_stage": None,
-            "failure_diagnostic": None,
-            "producer_event_id": None,
-            "producer_payload_fingerprint": None,
-            "producer_event_reference": None,
-            "outbox_item_accumulator": None,
-            "reconciliation_from_status": None,
-        }
-        if admission is None:
-            return CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=None,
-                status="not_requested",
-                **empty,
-            )
-        if admission.preparation_failure is not None:
-            return CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=admission.request_identity,
-                status="preparation_failed",
-                **{
-                    **empty,
-                    "failure_stage": "prepared_input_factory",
-                    "failure_diagnostic": admission.preparation_failure,
-                },
-            )
-        prepared = admission.prepared_input
-        if prepared is None:
-            raise RuntimeError("candidate projection admission lost prepared input")
-        if publication_failed:
-            return CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=admission.request_identity,
-                status="suppressed_by_publication_latch",
-                **{
-                    **empty,
-                    "prepared_input_fingerprint": (
-                        prepared.prepared_input_fingerprint
-                    ),
-                },
-            )
-        if (
-            not self._candidate_projection_accepting
-            or self.candidate_projection_commit_port is None
-        ):
-            diagnostic = build_bounded_runtime_failure_diagnostic(
-                error=RuntimeError(
-                    "compaction candidate projection owner admission is unavailable"
-                ),
-                redaction_profile_id=(
-                    "compaction_candidate_projection_owner_installation_error.v1"
-                ),
-            )
-            return CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=admission.request_identity,
-                status="owner_installation_failed",
-                **{
-                    **empty,
-                    "prepared_input_fingerprint": (
-                        prepared.prepared_input_fingerprint
-                    ),
-                    "failure_stage": "owner_installation",
-                    "failure_diagnostic": diagnostic,
-                },
-            )
-        owner_id = prepared.owner_id
-        if owner_id in self._candidate_projection_tasks:
-            raise RuntimeError("compaction candidate projection owner already exists")
-        installed = CompactionCandidateProjectionReceipt(
-            completed_compaction_event_reference=completed_reference,
-            request_identity=admission.request_identity,
-            status="owner_installed",
-            **{
-                **empty,
-                "owner_id": owner_id,
-                "prepared_input_fingerprint": prepared.prepared_input_fingerprint,
-            },
-        )
-        self._candidate_projection_receipts[owner_id] = installed
-        task = asyncio.create_task(
-            self._drive_candidate_projection_owner(
-                admission=admission,
-                completed=completed.model_copy(deep=True),
-                completed_reference=completed_reference,
-            ),
-            name=f"pulsara-compaction-candidate-projection:{owner_id}",
-        )
-        self._candidate_projection_tasks[owner_id] = task
-        task.add_done_callback(
-            lambda done, stable_owner_id=owner_id: (
-                self._retire_candidate_projection_owner(
-                    stable_owner_id,
-                    done,
-                )
-            )
-        )
-        return installed
-
-    async def _drive_candidate_projection_owner(
-        self,
-        *,
-        admission: _PreparedCandidateProjectionAdmission,
-        completed: ContextCompactionCompletedEvent,
-        completed_reference: ContextEventReferenceFact,
-    ) -> None:
-        prepared = admission.prepared_input
-        if prepared is None:
-            raise RuntimeError("candidate projection owner has no prepared input")
-        owner_id = prepared.owner_id
-        try:
-            proposal = await self._append_memory_candidate_proposals_if_enabled(
-                raw_summary=admission.raw_summary,
-                summary=admission.summary,
-                completed=completed,
-                summary_artifact_id=prepared.summary_artifact_id,
-                phase=admission.phase,
-            )
-        except BaseException:
-            current = self._candidate_projection_receipts[owner_id]
-            self._candidate_projection_receipts[owner_id] = (
-                CompactionCandidateProjectionReceipt(
-                    completed_compaction_event_reference=completed_reference,
-                    request_identity=admission.request_identity,
-                    status="reconciliation_required",
-                    owner_id=owner_id,
-                    prepared_input_fingerprint=(
-                        prepared.prepared_input_fingerprint
-                    ),
-                    failure_stage=None,
-                    failure_diagnostic=None,
-                    producer_event_id=current.producer_event_id,
-                    producer_payload_fingerprint=(
-                        current.producer_payload_fingerprint
-                    ),
-                    producer_event_reference=current.producer_event_reference,
-                    outbox_item_accumulator=current.outbox_item_accumulator,
-                    reconciliation_from_status=(
-                        "candidate_frozen"
-                        if current.producer_event_id is not None
-                        else "owner_installed"
-                    ),
-                )
-            )
-            raise
-        if proposal is None:
-            return
-        producer, rows = proposal
-        producer_payload_fingerprint = stable_event_identity(
-            producer,
-            runtime_session_id=self.runtime_session_id,
-        ).payload_fingerprint
-        self._candidate_projection_receipts[owner_id] = (
-            CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=admission.request_identity,
-                status="candidate_frozen",
-                owner_id=owner_id,
-                prepared_input_fingerprint=prepared.prepared_input_fingerprint,
-                failure_stage=None,
-                failure_diagnostic=None,
-                producer_event_id=producer.id,
-                producer_payload_fingerprint=producer_payload_fingerprint,
-                producer_event_reference=None,
-                outbox_item_accumulator=None,
-                reconciliation_from_status=None,
-            )
-        )
-        if self.candidate_projection_commit_port is None:
-            raise RuntimeError(
-                "compaction candidate producer requires projection commit ownership"
-            )
-        result = await self.candidate_projection_commit_port.commit_producer_bundle(
-            producer_event=producer,
-            rows=rows,
-        )
-        committed = next(
-            event for event in result.committed_events if event.id == producer.id
-        )
-        producer_reference = event_reference_from_stored(
-            committed,
-            runtime_session_id=self.runtime_session_id,
-        )
-        self._candidate_projection_receipts[owner_id] = (
-            CompactionCandidateProjectionReceipt(
-                completed_compaction_event_reference=completed_reference,
-                request_identity=admission.request_identity,
-                status=(
-                    "producer_bundle_full"
-                    if self.candidate_projection_commit_port is not None
-                    and self.candidate_projection_commit_port.dispatch_retry_required
-                    else "projection_applied"
-                ),
-                owner_id=owner_id,
-                prepared_input_fingerprint=prepared.prepared_input_fingerprint,
-                failure_stage=None,
-                failure_diagnostic=None,
-                producer_event_id=producer.id,
-                producer_payload_fingerprint=producer_payload_fingerprint,
-                producer_event_reference=producer_reference,
-                outbox_item_accumulator=ordered_fingerprint_accumulator(
-                    "compaction-candidate-projection-outbox:v1",
-                    tuple(row.item.item_fingerprint for row in rows),
-                ),
-                reconciliation_from_status=None,
-            )
-        )
-
-    def _retire_candidate_projection_owner(
-        self,
-        owner_id: str,
-        task: asyncio.Task[None],
-    ) -> None:
-        if self._candidate_projection_tasks.get(owner_id) is task:
-            self._candidate_projection_tasks.pop(owner_id, None)
-        if not task.cancelled():
-            task.exception()
-
-    async def stop_candidate_projection_admission_and_drain(
+    async def stop_post_completion_extension_admission_and_drain(
         self,
         *,
         deadline_monotonic: float,
     ) -> None:
-        self._candidate_projection_accepting = False
-        await self.drain_candidate_projection_owners(
-            deadline_monotonic=deadline_monotonic
-        )
-        port = self.candidate_projection_commit_port
-        if port is not None:
-            await port.stop_admission_and_drain(
-                deadline_monotonic=deadline_monotonic,
+        extension = self.post_completion_extension
+        if extension is not None:
+            await extension.stop_admission_and_drain(
+                deadline_monotonic=deadline_monotonic
             )
-
-    async def drain_candidate_projection_owners(
-        self,
-        *,
-        deadline_monotonic: float,
-    ) -> None:
-        """Wait for already-installed process owners without closing admission."""
-
-        tasks = tuple(self._candidate_projection_tasks.values())
-        if tasks:
-            remaining = deadline_monotonic - monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    "compaction candidate projection drain deadline expired"
-                )
-            done, pending = await asyncio.wait(tasks, timeout=remaining)
-            if pending:
-                raise TimeoutError(
-                    "compaction candidate projection owners did not drain"
-                )
-            for task in done:
-                task.result()
-
-    async def _append_memory_candidate_proposals_if_enabled(
-        self,
-        *,
-        raw_summary: str,
-        summary: str,
-        completed: ContextCompactionCompletedEvent,
-        summary_artifact_id: str,
-        phase: str | None,
-    ):
-        sink = self.candidate_sink
-        policy = self.policy.memory_candidates
-        if not _memory_candidate_extraction_enabled(
-            sink,
-            completed.trigger,
-            phase=phase,
-            policy=policy,
-        ):
-            return None
-        assert sink is not None
-        parse_result = parse_compaction_memory_candidates(
-            raw_summary,
-            workspace_scope=sink.workspace_scope,
-            workspace_kind=sink.workspace_kind,
-            policy=policy,
-        )
-        if not _extraction_attempted(parse_result):
-            return None
-        try:
-            append_result = await asyncio.to_thread(
-                sink.prepare_compaction_candidates,
-                completed_event=completed,
-                summary_artifact_id=summary_artifact_id,
-                summary_text=summary,
-                parse_result=parse_result,
-                policy=policy,
-            )
-        except Exception as exc:
-            diagnostic = CompactionCandidateDiagnostic(
-                code="compaction_candidate_preparation_failed",
-                message=type(exc).__name__,
-                redacted=True,
-            )
-            append_result = CompactionCandidateAppendResult(
-                source_event_id=completed.id,
-                source_event_sequence=int(completed.sequence or 0),
-                source_artifact_id=summary_artifact_id,
-                entry_ids=(),
-                diagnostics=(diagnostic,),
-            )
-        # Once the producer candidate is built, its ID and payload are stable.
-        # Durable commit errors must propagate for same-candidate recovery; they
-        # must never be rewritten as a zero-candidate preparation diagnostic.
-        return self._prepare_memory_candidates_proposed_bundle(
-            completed=completed,
-            summary_artifact_id=summary_artifact_id,
-            summary=summary,
-            parse_result=parse_result,
-            append_result=append_result,
-            diagnostics=(),
-        )
-
-    def _prepare_memory_candidates_proposed_bundle(
-        self,
-        *,
-        completed: ContextCompactionCompletedEvent,
-        summary_artifact_id: str,
-        summary: str,
-        parse_result: CompactionCandidateParseResult,
-        append_result: CompactionCandidateAppendResult,
-        diagnostics: tuple[CompactionCandidateDiagnostic, ...],
-    ):
-        all_diagnostics = (
-            *parse_result.diagnostics,
-            *append_result.diagnostics,
-            *_skipped_item_diagnostics(parse_result),
-            *_skipped_item_diagnostics(append_result),
-            *diagnostics,
-        )
-        skipped_count = len(parse_result.skipped) + len(append_result.skipped)
-        error_count = sum(
-            1
-            for diagnostic in all_diagnostics
-            if not diagnostic.code.startswith("compaction_candidate_skipped:")
-            and ("failed" in diagnostic.code or "malformed" in diagnostic.code)
-        )
-        event = ContextCompactionMemoryCandidatesProposedEvent(
-            id=f"context-compaction:{completed.compaction_id}:memory-candidates",
-            **EventContext(
-                run_id=completed.run_id,
-                turn_id=completed.turn_id,
-                reply_id=completed.reply_id,
-            ).event_fields(),
-            compaction_id=completed.compaction_id,
-            source_event_id=append_result.source_event_id,
-            source_event_sequence=append_result.source_event_sequence,
-            summary_artifact_id=summary_artifact_id,
-            candidate_entry_ids=list(append_result.entry_ids),
-            attempted_count=parse_result.attempted_count,
-            proposed_count=len(append_result.entry_ids),
-            skipped_count=skipped_count,
-            duplicate_count=append_result.duplicate_count,
-            error_count=error_count,
-            extractor_version=self.policy.memory_candidates.extractor_version,
-            diagnostics=[
-                _event_diagnostic(diagnostic) for diagnostic in all_diagnostics
-            ],
-            summary_content_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
-            summary_content_bytes=len(summary.encode("utf-8")),
-            extractor_contract=compaction_extractor_contract(
-                self.policy.memory_candidates
-            ),
-            ordered_candidate_attributions=append_result.attributions,
-            completed_compaction_event_identity=stable_event_identity(
-                completed,
-                runtime_session_id=self.runtime_session_id,
-            ),
-        )
-        producer_identity = stable_event_identity(
-            event,
-            runtime_session_id=self.runtime_session_id,
-        )
-        projected_candidates = tuple(
-            candidate.model_copy(
-                update={
-                    "source_event_id": event.id,
-                    "metadata": {
-                        **candidate.metadata,
-                        "source_event_id": event.id,
-                        "compaction_completed_event_id": completed.id,
-                    },
-                }
-            )
-            for candidate in append_result.candidates
-        )
-        rows = tuple(
-            CandidateProjectionOutboxRow(
-                item=build_frozen_fact(
-                    CandidateProjectionOutboxItemFact,
-                    schema_version="candidate_projection_outbox_item.v1",
-                    producer_kind=CandidateProjectionProducerKind.COMPACTION,
-                    producer_event_identity=producer_identity,
-                    candidate_entry_id=candidate.entry_id,
-                    candidate_index=index,
-                    candidate_payload=candidate.payload,
-                    candidate_payload_fingerprint=candidate_payload_fingerprint(
-                        candidate.payload
-                    ),
-                    candidate_attribution_fingerprint=(
-                        append_result.attributions[index].attribution_fingerprint
-                    ),
-                ),
-                candidate=candidate,
-            )
-            for index, candidate in enumerate(projected_candidates)
-        )
-        return event, rows
 
     def _build_plan(
         self,
@@ -2558,6 +2295,10 @@ class ContextCompactionService:
             tail_events=tail,
             window_number=next_window_number,
             window_id=window_id,
+            previous_keep_after_sequence=last_keep_after,
+            predecessor_completed_event_id=(
+                latest_boundary.event.id if latest_boundary is not None else None
+            ),
             previous_summary_artifact_id=(
                 latest_boundary.event.summary_artifact_id
                 if latest_boundary is not None
@@ -2569,94 +2310,11 @@ class ContextCompactionService:
         )
 
 
-def production_compaction_prompt(*, memory_candidates_enabled: bool = True) -> str:
-    prompt = (
+def production_compaction_prompt() -> str:
+    return (
         resources.files(_PRODUCTION_PROMPT_PACKAGE)
         .joinpath(_PRODUCTION_PROMPT_FILE)
         .read_text(encoding="utf-8")
-    )
-    if memory_candidates_enabled:
-        return prompt
-    return _without_memory_candidate_instructions(prompt)
-
-
-def _without_memory_candidate_instructions(prompt: str) -> str:
-    prompt = prompt.replace(
-        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block, plus an optional <memory_candidates_json> block only when durable-memory candidate extraction is useful.",
-        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block.",
-    )
-    prompt = prompt.replace(
-        "   - You may optionally propose durable-memory candidates in <memory_candidates_json>; those proposals are pending observations only and governance decides whether to persist them.\n",
-        "",
-    )
-    optional_start = prompt.find("\nOptional memory-candidate block:")
-    rules_start = prompt.find("\nRules:", optional_start)
-    if optional_start != -1 and rules_start != -1:
-        prompt = prompt[:optional_start] + prompt[rules_start:]
-    return prompt
-
-
-def _memory_candidate_extraction_enabled(
-    sink: CompactionMemoryCandidateSink | None,
-    trigger: ContextCompactionTrigger,
-    *,
-    phase: str | None,
-    policy: ContextCompactionMemoryCandidatePolicy,
-) -> bool:
-    if sink is None:
-        return False
-    if sink.workspace_kind == "transient":
-        return False
-    if not sink.workspace_scope:
-        return False
-    return _should_extract_memory_candidates(trigger, phase=phase, policy=policy)
-
-
-def _should_extract_memory_candidates(
-    trigger: ContextCompactionTrigger,
-    *,
-    phase: str | None,
-    policy: ContextCompactionMemoryCandidatePolicy,
-) -> bool:
-    if not policy.enabled:
-        return False
-    if phase == "mid_turn":
-        return policy.extract_on_mid_turn
-    if trigger == "manual":
-        return policy.extract_on_manual
-    return policy.extract_on_preflight
-
-
-def _extraction_attempted(parse_result: CompactionCandidateParseResult) -> bool:
-    return bool(
-        parse_result.attempted_count
-        or parse_result.candidates
-        or parse_result.skipped
-        or parse_result.diagnostics
-    )
-
-
-def _event_diagnostic(
-    diagnostic: CompactionCandidateDiagnostic,
-) -> CompactionCandidateDiagnosticEvent:
-    return CompactionCandidateDiagnosticEvent(
-        code=diagnostic.code,
-        field=diagnostic.field,
-        message=diagnostic.message,
-        redacted=diagnostic.redacted,
-    )
-
-
-def _skipped_item_diagnostics(
-    result: CompactionCandidateParseResult | CompactionCandidateAppendResult,
-) -> tuple[CompactionCandidateDiagnostic, ...]:
-    return tuple(
-        CompactionCandidateDiagnostic(
-            code=f"compaction_candidate_skipped:{item.code}",
-            message=item.reason,
-            redacted=item.redacted,
-        )
-        for item in result.skipped
     )
 
 

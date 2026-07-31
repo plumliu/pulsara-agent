@@ -9,6 +9,7 @@ from typing import Iterable
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
 from pulsara_agent.event_log.protocol import (
+    CandidateBoundEventLogTransactionCompanion,
     EventBatchConfirmation,
     EventIdConflict,
     EventLogReadSnapshot,
@@ -31,6 +32,7 @@ from pulsara_agent.event_log.protocol import (
     EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
+    rebind_stored_candidate_batch,
     same_event_payload,
     same_event_raw_payload,
 )
@@ -52,7 +54,7 @@ from pulsara_agent.primitives.authority_materialization import (
     PhysicalChargeContractFact,
 )
 from pulsara_agent.message.message import AssistantMsg, Msg
-from pulsara_agent.message.reducer import (
+from pulsara_agent.replay.message_reducer import (
     MessageReducer,
     require_canonical_reply_control,
 )
@@ -103,10 +105,10 @@ class InMemoryEventLog:
         with self._lock:
             high_water = self._next_sequence - 1
             if checkpoint.through_sequence > high_water:
-                raise ValueError("runtime projection checkpoint exceeds ledger high-water")
-            committed_prefix = self._transcript_prefixes[
-                checkpoint.through_sequence
-            ]
+                raise ValueError(
+                    "runtime projection checkpoint exceeds ledger high-water"
+                )
+            committed_prefix = self._transcript_prefixes[checkpoint.through_sequence]
             if checkpoint.ledger_prefix != committed_prefix:
                 raise ValueError(
                     "runtime projection checkpoint ledger prefix is untrusted"
@@ -116,7 +118,9 @@ class InMemoryEventLog:
             )
             if existing is not None:
                 if existing.through_sequence > checkpoint.through_sequence:
-                    raise ValueError("runtime projection checkpoint cannot move backwards")
+                    raise ValueError(
+                        "runtime projection checkpoint cannot move backwards"
+                    )
                 if (
                     existing.through_sequence == checkpoint.through_sequence
                     and existing != checkpoint
@@ -124,16 +128,13 @@ class InMemoryEventLog:
                     raise ValueError(
                         "runtime projection checkpoint conflicts at one high-water"
                     )
-                if (
-                    checkpoint.through_sequence > existing.through_sequence
-                    and (
-                        checkpoint.validation_base_through_sequence
-                        != existing.through_sequence
-                        or checkpoint.validation_base_state_payload
-                        != existing.state_payload
-                        or checkpoint.projection_schema_version
-                        != existing.projection_schema_version
-                    )
+                if checkpoint.through_sequence > existing.through_sequence and (
+                    checkpoint.validation_base_through_sequence
+                    != existing.through_sequence
+                    or checkpoint.validation_base_state_payload
+                    != existing.state_payload
+                    or checkpoint.projection_schema_version
+                    != existing.projection_schema_version
                 ):
                     raise ValueError(
                         "runtime projection checkpoint validation base drifted"
@@ -142,7 +143,9 @@ class InMemoryEventLog:
                 raise ValueError(
                     "initial runtime projection checkpoint must start at ledger genesis"
                 )
-            self._runtime_projection_checkpoints[checkpoint.projection_kind] = checkpoint
+            self._runtime_projection_checkpoints[checkpoint.projection_kind] = (
+                checkpoint
+            )
 
     def bind_runtime_session_id(self, runtime_session_id: str) -> None:
         """Bind the test-double ledger before its first durable write."""
@@ -331,6 +334,17 @@ class InMemoryEventLog:
                 raw_events,
                 physical_charge_contract,
             )
+            if isinstance(
+                transaction_companion,
+                CandidateBoundEventLogTransactionCompanion,
+            ):
+                receipt = rebind_stored_candidate_batch(
+                    transaction_companion.prepared_candidate_batch_identity,
+                    stored_events,
+                )
+                transaction_companion.accept_stored_candidate_rebind_receipt(
+                    receipt
+                )
             if transaction_companion is not None:
                 transaction_companion.apply_in_memory(stored_events)
             self._raw_events.extend(raw_events)

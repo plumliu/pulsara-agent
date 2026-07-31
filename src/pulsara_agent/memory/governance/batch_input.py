@@ -12,7 +12,10 @@ from pulsara_agent.event import (
     EventContext,
     MemoryGovernanceBatchPreparedEvent,
 )
-from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY, RawStoredEventEnvelope
+from pulsara_agent.event_log import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
+    RawStoredEventEnvelope,
+)
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole
 from pulsara_agent.llm.request import LLMContext, llm_context_fingerprint
 from pulsara_agent.llm.user_carrier import (
@@ -23,7 +26,7 @@ from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.memory.governance.claims import (
     MemoryGovernanceCandidateClaimRepository,
 )
@@ -64,9 +67,7 @@ from pulsara_agent.primitives.governance_evidence import (
 from pulsara_agent.primitives.model_call import canonical_json_bytes
 
 
-_BATCH_ARTIFACT_MEDIA_TYPE = (
-    "application/vnd.pulsara.governance-batch-input+json"
-)
+_BATCH_ARTIFACT_MEDIA_TYPE = "application/vnd.pulsara.governance-batch-input+json"
 _GOVERNANCE_SYSTEM_PROMPT = """You are Pulsara's restricted Memory Governance Agent.
 
 Review only the typed candidate evidence supplied by the host and return one JSON
@@ -98,17 +99,21 @@ cannot authorize supersede or contradiction. Use candidate entry IDs exactly as
 supplied. For valid candidates, any decision shape requiring `candidate` MUST
 copy the candidate's `decision_candidate` object exactly. Never copy the outer
 `candidate` evidence object or canonical_candidate_payload wrapper into the
-`candidate` field. For an invalid candidate, construct a correction only when
-the evidence supplies every required typed field.
+`candidate` field. `submit_as_is` and `skip` MUST NOT include a `candidate`
+field; their exact shapes below are complete. For an invalid candidate,
+construct a correction only when the evidence supplies every required typed
+field.
 
 Every decision MUST use the exact tagged shape below. The discriminator is
 `kind`; never emit `decision` or `candidate_entry_id` aliases.
 
 submit_as_is:
 {"kind":"submit_as_is","target_entry_id":"pool:...","reason":"..."}
+This branch has exactly these three fields. Do not echo `decision_candidate`.
 
 skip:
 {"kind":"skip","target_entry_ids":["pool:..."],"reason":"...","skip_reason":"..."}
+This branch has no `candidate` field.
 
 correct_and_submit:
 {"kind":"correct_and_submit","target_entry_id":"pool:...","candidate":<typed candidate>,"reason":"..."}
@@ -146,8 +151,9 @@ class PreparedGovernanceBatchInput:
     llm_context: LLMContext
 
 
-def default_governance_batch_input_artifact_contract(
-) -> GovernanceBatchInputArtifactContractFact:
+def default_governance_batch_input_artifact_contract() -> (
+    GovernanceBatchInputArtifactContractFact
+):
     return build_frozen_fact(
         GovernanceBatchInputArtifactContractFact,
         schema_version="governance_batch_input_artifact_contract.v2",
@@ -342,9 +348,7 @@ def build_governance_batch_input(
         ordered_candidate_snapshots=candidate_snapshots,
         ordered_relatedness_snapshots=relatedness_snapshots,
         allowed_scopes=tuple(sorted(allowed_scopes)),
-        prompt_projection_contract_fingerprint=(
-            prompt_projection_contract_fingerprint
-        ),
+        prompt_projection_contract_fingerprint=(prompt_projection_contract_fingerprint),
         model_input=model_input,
         final_model_visible_input_fingerprint=(
             model_input.provider_neutral_context_fingerprint
@@ -516,9 +520,7 @@ class MemoryGovernanceBatchPreparationCommitPort:
             "source_ledger_through_sequence": (
                 prepared.snapshot.source_ledger_through_sequence
             ),
-            "candidate_entry_ids": tuple(
-                item.candidate_entry_id for item in claims
-            ),
+            "candidate_entry_ids": tuple(item.candidate_entry_id for item in claims),
             "preparing_claims_fingerprint": claims_fingerprint,
             "batch_input_reference": prepared.reference,
             "resolved_model_call_id": (
@@ -614,8 +616,7 @@ def hydrate_governance_batch_input(
     encoded = text.encode("utf-8")
     if (
         len(encoded) != reference.artifact_utf8_bytes
-        or hashlib.sha256(encoded).hexdigest()
-        != reference.artifact_content_sha256
+        or hashlib.sha256(encoded).hexdigest() != reference.artifact_content_sha256
     ):
         raise ValueError("governance batch input artifact identity mismatch")
     snapshot = GovernanceBatchInputSnapshotFact.model_validate_json(text)
@@ -727,21 +728,25 @@ def _freeze_candidate_relatedness(
             relationship_codes=tuple(sorted(item.match_channels)),
             exact_duplicate=item.is_exact_duplicate,
             projection_contract_fingerprint=provider_contract_fingerprint,
-            projected_utf8_bytes=len(_bounded_statement(view.statement).encode("utf-8")),
+            projected_utf8_bytes=len(
+                _bounded_statement(view.statement).encode("utf-8")
+            ),
         )
         content_reference = None
         inline = view.statement if len(view.statement) <= 4_096 else None
         if inline is None:
-            artifact_id = "governance-related-memory:" + hashlib.sha256(
-                encoded
-            ).hexdigest()
+            artifact_id = (
+                "governance-related-memory:" + hashlib.sha256(encoded).hexdigest()
+            )
             archive.put_text_if_absent_or_confirm_identical(
                 artifact_id,
                 view.statement,
                 session_id=runtime_session_id,
                 run_id=None,
                 media_type="text/plain",
-                semantic_metadata={"memory_semantic_fingerprint": semantic.semantic_fingerprint},
+                semantic_metadata={
+                    "memory_semantic_fingerprint": semantic.semantic_fingerprint
+                },
             )
             content_reference = build_frozen_fact(
                 GovernanceEvidenceArtifactReferenceFact,

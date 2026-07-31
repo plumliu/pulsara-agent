@@ -9,12 +9,12 @@ from pulsara_agent.primitives.long_horizon import (
 from pulsara_agent.runtime.long_horizon.coordinator import (
     allowed_action_classes_for_phase,
 )
-from pulsara_agent.runtime.tool_action import (
+from pulsara_agent.capability.tool_action import (
     default_tool_action_classifier_registry,
-    terminal_process_tool_action_policy,
     terminal_tool_action_policy,
 )
-from pulsara_agent.tools import ToolCall
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.ports.tool_execution import ToolCall
 
 
 @pytest.mark.parametrize(
@@ -40,7 +40,9 @@ def test_terminal_invocation_classifier_distinguishes_search_write_and_verificat
     policy = terminal_tool_action_policy()
 
     fact = registry.classify(
-        call=ToolCall(id="call:terminal", name="terminal", arguments={"command": command}),
+        call=ToolCall(
+            id="call:terminal", name="terminal", arguments={"command": command}
+        ),
         descriptor_id="builtin:terminal",
         descriptor_fingerprint="sha256:terminal",
         policy=policy,
@@ -67,7 +69,9 @@ def test_terminal_process_action_classifier_separates_observation_from_control(
     expected: LongHorizonActionClass,
 ) -> None:
     registry = default_tool_action_classifier_registry()
-    policy = terminal_process_tool_action_policy()
+    policy = builtin_tool_catalog_entry(
+        "terminal_process"
+    ).descriptor.long_horizon_policy
 
     fact = registry.classify(
         call=ToolCall(
@@ -83,7 +87,9 @@ def test_terminal_process_action_classifier_separates_observation_from_control(
     assert fact.action_class is expected
 
 
-def test_finalization_action_classes_preserve_hydration_mutation_and_verification() -> None:
+def test_finalization_action_classes_preserve_hydration_mutation_and_verification() -> (
+    None
+):
     allowed = set(allowed_action_classes_for_phase(RolloutPhase.FINALIZATION_ONLY))
 
     assert LongHorizonActionClass.EVIDENCE_HYDRATION in allowed

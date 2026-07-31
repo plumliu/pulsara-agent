@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 from uuid import uuid4
 
 from pulsara_agent.event import (
@@ -96,13 +96,11 @@ from pulsara_agent.llm.segment import (
     MODEL_STREAM_SEGMENT_POLICY,
     ModelStreamSegmentAccumulator,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.provider_input.planner import (
-        PreparedProviderInputStartBundle,
-    )
-    from pulsara_agent.runtime.session import RuntimeSession
-
+from pulsara_agent.ports.artifact import ArtifactContentConflict
+from pulsara_agent.ports.model_lifecycle import (
+    ModelLifecycleRuntimeGateway,
+    PreparedProviderInputStartBundlePort,
+)
 
 class LLMRuntime:
     def __init__(
@@ -132,8 +130,13 @@ class LLMRuntime:
         *,
         target: ResolvedModelTarget,
         purpose: ModelCallPurpose,
+        resolved_model_call_id: str | None = None,
     ) -> ResolvedModelCall:
-        return resolve_model_call(target=target, purpose=purpose)
+        return resolve_model_call(
+            target=target,
+            purpose=purpose,
+            resolved_model_call_id=resolved_model_call_id,
+        )
 
     def rebind_target(self, fact: ResolvedModelTargetFact) -> ResolvedModelTarget:
         return rebind_model_target(
@@ -347,6 +350,9 @@ class LLMRuntime:
                 recovery_plan=recovery_plan,
                 governance_input_attribution=(
                     start_bundle.governance_input_attribution
+                ),
+                compaction_memory_extraction_input_attribution=(
+                    start_bundle.compaction_memory_extraction_input_attribution
                 ),
                 provider_input_reference=provider_input_start.committed_reference,
                 active_run_monitor_delivery=(
@@ -996,7 +1002,7 @@ class LLMRuntime:
         outcome: str,
         provider_dispatch_status: str = "dispatched",
         usage_report: TransportUsageReport | None,
-        runtime_session: "RuntimeSession",
+        runtime_session: "ModelLifecycleRuntimeGateway",
         reservation: RolloutReservationFact | None,
         projection_reducer: ModelTerminalProjectionReducer,
         semantic_commit_measurements: tuple[
@@ -1005,7 +1011,7 @@ class LLMRuntime:
         physical_accounting_mode: Literal[
             "accounted", "unbootstrapped_test"
         ] = "unbootstrapped_test",
-        provider_input_start_bundle: PreparedProviderInputStartBundle | None,
+        provider_input_start_bundle: PreparedProviderInputStartBundlePort | None,
     ) -> tuple[AgentEvent, ...]:
         normalized_usage = usage_report or TransportUsageReport(
             usage_status="missing", usage=None
@@ -1037,10 +1043,6 @@ class LLMRuntime:
                 runtime_session.latch_event_commit_outcome_unknown()
                 raise
             except Exception as exc:
-                from pulsara_agent.memory.foundation.records import (
-                    ArtifactContentConflict,
-                )
-
                 if isinstance(exc, ArtifactContentConflict):
                     runtime_session.latch_event_commit_outcome_unknown()
                     raise
@@ -1081,10 +1083,10 @@ class LLMRuntime:
         outcome: str,
         provider_dispatch_status: str = "dispatched",
         usage_report: TransportUsageReport | None,
-        runtime_session: "RuntimeSession",
+        runtime_session: "ModelLifecycleRuntimeGateway",
         reservation: RolloutReservationFact | None,
         terminal_projection: PreparedModelTerminalProjection,
-        provider_input_start_bundle: PreparedProviderInputStartBundle | None,
+        provider_input_start_bundle: PreparedProviderInputStartBundlePort | None,
     ) -> tuple[AgentEvent, ...]:
         usage_report = usage_report or TransportUsageReport(
             usage_status="missing", usage=None
@@ -1111,12 +1113,8 @@ class LLMRuntime:
             provider_input_start_bundle is not None
             and provider_input_start_bundle.is_one_shot
         ):
-            from pulsara_agent.runtime.provider_input.planner import (
-                build_one_shot_generation_close_event,
-            )
-
             events.append(
-                build_one_shot_generation_close_event(
+                runtime_session.build_one_shot_generation_close_event(
                     bundle=provider_input_start_bundle,
                     event_context=event_context,
                 )
@@ -1145,16 +1143,11 @@ class LLMRuntime:
     def _build_model_settlement_event(
         *,
         event_context: EventContext,
-        runtime_session: "RuntimeSession",
+        runtime_session: "ModelLifecycleRuntimeGateway",
         reservation: RolloutReservationFact,
         model_end: ModelCallEndEvent,
     ) -> RolloutBudgetReservationSettledEvent:
-        from pulsara_agent.runtime.long_horizon.accounting import (
-            resolve_run_rollout_binding,
-        )
-
-        binding = resolve_run_rollout_binding(
-            runtime_session,
+        binding = runtime_session.resolve_run_rollout_binding(
             run_id=event_context.run_id,
         )
         account = binding.account

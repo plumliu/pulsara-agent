@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import monotonic
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,7 +50,10 @@ from pulsara_agent.memory.candidates.pool import (
 from pulsara_agent.memory.candidates.projection_outbox import (
     MemoryCandidateProjectionCommitPort,
 )
-from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.memory.foundation.protocols import (
+    ArtifactStore,
+    MemoryModelRuntimeGateway,
+)
 from pulsara_agent.memory.governance.batch_input import (
     MemoryGovernanceBatchPreparationCommitPort,
     PreparedGovernanceBatchInput,
@@ -113,10 +116,6 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeObservationWireSemanticFact,
 )
 
-if TYPE_CHECKING:
-    from pulsara_agent.runtime.session import RuntimeSession
-
-
 class MemoryGovernanceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -177,7 +176,7 @@ class MemoryGovernanceEngine:
 
     llm_runtime: LLMRuntime
     executor: MemoryGovernanceExecutor
-    runtime_session: "RuntimeSession"
+    runtime_session: MemoryModelRuntimeGateway
     archive: ArtifactStore
     claim_repository: MemoryGovernanceCandidateClaimRepository
     preparation_repository: GovernanceBatchPreparationRepository
@@ -639,6 +638,10 @@ class MemoryGovernanceEngine:
                         decision,
                         governance_batch_id=batch_id,
                         relatedness_context=execution_context,
+                        candidate_snapshots={
+                            item.candidate_attribution.entry_id: item
+                            for item in prepared.snapshot.ordered_candidate_snapshots
+                        },
                         execution_identity=GovernanceDecisionExecutionIdentity(
                             batch_input_fingerprint=(
                                 prepared.snapshot.batch_input_fingerprint
@@ -797,7 +800,6 @@ class MemoryGovernanceEngine:
                 start_bundle=start_bundle,
                 commit_port=RuntimeSessionModelStreamEventCommitPort(
                     runtime_session=self.runtime_session,
-                    state=None,
                 ),
                 execution_registry=(
                     self.runtime_session.model_stream_execution_registry

@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessObservationSemanticFact,
@@ -39,7 +40,28 @@ class TerminalRequest:
     max_output_chars: int = 20_000
     tty: bool = False
     max_lifetime_seconds: int | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalExecutionOwner:
+    """Process-local lifecycle dependencies kept outside public request data."""
+
+    origin_event_context: EventContext | None = None
+    origin_tool_call_id: str | None = None
+    origin_runtime_session_id: str | None = None
+    origin_run_entry_kind: str | None = None
+    output_callback: Callable[[str], None] | None = None
+    record_event: Callable[[AgentEvent], AgentEvent] | None = None
+    require_completion_notification_reservation: bool = False
+
+    def __post_init__(self) -> None:
+        has_event_owner = self.origin_event_context is not None
+        if has_event_owner != (self.origin_tool_call_id is not None):
+            raise ValueError(
+                "terminal execution event context and tool-call identity must coexist"
+            )
+        if self.record_event is not None and not has_event_owner:
+            raise ValueError("terminal event recorder requires exact event authority")
 
 
 @dataclass(frozen=True, slots=True)

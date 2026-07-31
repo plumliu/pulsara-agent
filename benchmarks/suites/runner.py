@@ -22,6 +22,7 @@ from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.ports.run_execution import RunSuspendedOutcome
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.plan import PlanExitResolution, PlanQuestionResolution
@@ -166,13 +167,13 @@ class CoreDogfoodRunner:
                 session_report = await asyncio.to_thread(
                     inspector.inspect_session,
                     runtime_session_id,
-                    limit_events=0,
+                    limit_events=256,
                 )
                 for run_id, final_text in root_run_texts.items():
                     report = await asyncio.to_thread(
                         inspector.inspect_run,
                         run_id,
-                        limit_events=0,
+                        limit_events=256,
                     )
                     root_run_reports.append(report)
                     inspected_texts.append(final_text)
@@ -266,7 +267,7 @@ class CoreDogfoodRunner:
                 execution_state=execution_state,
             )
 
-        core = HostCore(settings=self.settings, durable=True)
+        core = HostCore.production(settings=self.settings)
         session = None
         try:
             session = await self._open_session(
@@ -320,6 +321,11 @@ class CoreDogfoodRunner:
                     root_run_texts,
                     f"{scenario.contract.scenario_id}:post-compaction",
                 )
+                await self._wait_for_compaction_memory_extraction(
+                    runtime_session_id=runtime_session_id,
+                    compaction_id=str(compaction.get("compaction_id")),
+                    scenario_id=scenario.contract.scenario_id,
+                )
             elif isinstance(workflow, SubagentDelegationWorkflow):
                 await self._run_turn(
                     session,
@@ -360,7 +366,7 @@ class CoreDogfoodRunner:
     ) -> str:
         workflow = scenario.contract.workflow
         assert isinstance(workflow, DurableResumeWorkflow)
-        first_core = HostCore(settings=self.settings, durable=True)
+        first_core = HostCore.production(settings=self.settings)
         first_session = None
         runtime_session_id: str | None = None
         try:
@@ -393,7 +399,7 @@ class CoreDogfoodRunner:
         self.progress(
             f"{scenario.contract.scenario_id}: reopening {runtime_session_id} in new HostCore"
         )
-        second_core = HostCore(settings=self.settings, durable=True)
+        second_core = HostCore.production(settings=self.settings)
         resumed = None
         try:
             resumed = await second_core.resume_session(
@@ -435,7 +441,11 @@ class CoreDogfoodRunner:
     ) -> None:
         session.enter_plan(reason=workflow.plan_reason)
         result = await self._run_turn(
-            session, workflow.plan_prompt, root_run_texts, f"{label}:plan"
+            session,
+            workflow.plan_prompt,
+            root_run_texts,
+            f"{label}:plan",
+            allow_suspension=True,
         )
         answer_index = 0
         approved = False
@@ -520,14 +530,100 @@ class CoreDogfoodRunner:
         prompt: str,
         root_run_texts: OrderedDict[str, str],
         label: str,
+        *,
+        allow_suspension: bool = False,
     ):
         self.progress(f"{label}: run START")
         result = await session.run_turn(prompt)
+        if isinstance(result, RunSuspendedOutcome):
+            if not allow_suspension:
+                raise RuntimeError(
+                    f"{label} unexpectedly suspended with "
+                    f"{result.pending_interaction.interaction_kind}"
+                )
+            self.progress(
+                f"{label}: run SUSPENDED "
+                f"run_id={result.owner_identity.run_id}"
+            )
+            return result
         _record_result(result, root_run_texts)
         self.progress(
-            f"{label}: run {result.status.value.upper()} run_id={result.state.run_id}"
+            f"{label}: run {result.status.value.upper()} run_id={result.run_id}"
         )
         return result
+
+    async def _wait_for_compaction_memory_extraction(
+        self,
+        *,
+        runtime_session_id: str,
+        compaction_id: str,
+        scenario_id: str,
+    ) -> None:
+        lease = await asyncio.to_thread(
+            acquire_verified_postgres_access_sync,
+            self.settings.storage.postgres_dsn,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+        deadline = time.monotonic() + 300.0
+        try:
+            inspector = InspectorService(
+                PostgresInspectorStore(lease.connection_provider),
+                oxigraph_url=self.settings.storage.oxigraph_url,
+            )
+            while True:
+                report = await asyncio.to_thread(
+                    inspector.inspect_session,
+                    runtime_session_id,
+                    limit_events=256,
+                )
+                extraction = next(
+                    (
+                        item
+                        for item in report.get(
+                            "compaction_memory_extraction_durable_status", ()
+                        )
+                        if item.get("compaction_id") == compaction_id
+                    ),
+                    None,
+                )
+                status = (
+                    str(extraction.get("status"))
+                    if extraction is not None
+                    else "not_visible"
+                )
+                if (
+                    extraction is not None
+                    and status in {"governed_no_write", "governed_write"}
+                    and extraction.get("candidates")
+                ):
+                    self.progress(
+                        f"{scenario_id}: compaction memory extraction FULL "
+                        f"status={status} candidates={len(extraction['candidates'])}"
+                    )
+                    return
+                if status in {
+                    "background_account_reconciliation_required",
+                    "dead_letter",
+                    "job_or_target_reconciliation_required",
+                    "runtime_session_ledger_reconciliation_required",
+                }:
+                    failure = (
+                        extraction.get("job", {})
+                        .get("state", {})
+                        .get("last_failure")
+                    )
+                    raise RuntimeError(
+                        "compaction memory extraction reached terminal failure "
+                        f"status={status} failure={failure!r}"
+                    )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "compaction memory extraction did not reach governed "
+                        f"candidate status; last_status={status}"
+                    )
+                await asyncio.sleep(0.5)
+        finally:
+            lease.release()
 
 
 def write_suite_summary(
@@ -621,7 +717,14 @@ def _generate_linked_chapter_trail(
 
 
 def _record_result(result, root_run_texts: OrderedDict[str, str]) -> None:
-    root_run_texts[result.state.run_id] = result.final_text
+    if isinstance(result, RunSuspendedOutcome):
+        return
+    if getattr(result, "outcome_kind", None) is not None:
+        raise RuntimeError(
+            "dogfood workflow cannot consume non-terminal activation outcome "
+            f"{result.outcome_kind!r}"
+        )
+    root_run_texts[result.run_id] = result.final_text
 
 
 @contextmanager

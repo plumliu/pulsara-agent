@@ -17,7 +17,10 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    ValidCandidatePayload,
+    memory_candidate_semantic_fingerprint,
+)
 from pulsara_agent.memory.candidates.pool import PooledMemoryCandidate
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
@@ -55,7 +58,12 @@ class MemoryGovernanceRelatednessOptions:
     provider_timeout_seconds: float = 20.0
 
     def __post_init__(self) -> None:
-        for name in ("candidate_limit", "lexical_limit", "vector_limit", "rerank_top_m"):
+        for name in (
+            "candidate_limit",
+            "lexical_limit",
+            "vector_limit",
+            "rerank_top_m",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.max_inline_gap_embeds < 0:
@@ -83,7 +91,9 @@ class RelatedCanonicalMemory:
             "scope": self.view.scope,
             "status": self.view.status.value,
             "verification_status": (
-                self.view.verification_status.value if self.view.verification_status else None
+                self.view.verification_status.value
+                if self.view.verification_status
+                else None
             ),
             "source_authority": (
                 self.view.source_authority.value if self.view.source_authority else None
@@ -121,9 +131,10 @@ class RelatednessExecutionContext:
     )
 
     def allows_lifecycle(self, entry_id: str, memory_id: str) -> bool:
-        return (
-            self.availability.get(entry_id) is RelatednessAvailability.FULL
-            and memory_id in self.allowlists.get(entry_id, frozenset())
+        return self.availability.get(
+            entry_id
+        ) is RelatednessAvailability.FULL and memory_id in self.allowlists.get(
+            entry_id, frozenset()
         )
 
 
@@ -144,10 +155,16 @@ class RelatednessBatchResult:
         return RelatednessExecutionContext(
             governance_batch_id=governance_batch_id,
             allowlists=MappingProxyType(
-                {entry_id: result.allowlist for entry_id, result in self.candidates.items()}
+                {
+                    entry_id: result.allowlist
+                    for entry_id, result in self.candidates.items()
+                }
             ),
             availability=MappingProxyType(
-                {entry_id: result.availability for entry_id, result in self.candidates.items()}
+                {
+                    entry_id: result.availability
+                    for entry_id, result in self.candidates.items()
+                }
             ),
             node_revisions=MappingProxyType(
                 {
@@ -160,9 +177,7 @@ class RelatednessBatchResult:
                     for entry_id, result in self.candidates.items()
                 }
             ),
-            verified_evidence_refs=MappingProxyType(
-                dict(verified_evidence_refs or {})
-            ),
+            verified_evidence_refs=MappingProxyType(dict(verified_evidence_refs or {})),
         )
 
     @classmethod
@@ -183,7 +198,10 @@ class RelatednessBatchResult:
                 }
             ),
             diagnostics=MappingProxyType(
-                {"status": RelatednessAvailability.UNAVAILABLE.value, "warnings": [warning]}
+                {
+                    "status": RelatednessAvailability.UNAVAILABLE.value,
+                    "warnings": [warning],
+                }
             ),
         )
 
@@ -216,7 +234,9 @@ class GovernanceRelatednessService:
         specs = tuple(_candidate_spec(candidate) for candidate in pending)
         valid_specs = tuple(spec for spec in specs if spec is not None)
         if not valid_specs:
-            return RelatednessBatchResult.unavailable(pending, warning="no_valid_candidates")
+            return RelatednessBatchResult.unavailable(
+                pending, warning="no_valid_candidates"
+            )
 
         channel_warnings: list[str] = []
         channel_latency_ms: dict[str, float] = {}
@@ -244,7 +264,9 @@ class GovernanceRelatednessService:
                     self.memory_query.missing_vector_ids,
                     embedding_fingerprint=self.embedding_fingerprint or "",
                     scopes=tuple(dict.fromkeys(spec.scope for spec in valid_specs)),
-                    types=tuple(dict.fromkeys(spec.memory_type for spec in valid_specs)),
+                    types=tuple(
+                        dict.fromkeys(spec.memory_type for spec in valid_specs)
+                    ),
                     limit=self.options.max_inline_gap_embeds + 1,
                     graph_id=graph_id,
                 )
@@ -271,15 +293,15 @@ class GovernanceRelatednessService:
                 channel_warnings.append(f"dense_degraded:{type(exc).__name__}")
                 failed_entries.update(spec.entry_id for spec in valid_specs)
             finally:
-                channel_latency_ms["dense_and_gap"] = (time.perf_counter() - started) * 1000.0
+                channel_latency_ms["dense_and_gap"] = (
+                    time.perf_counter() - started
+                ) * 1000.0
         else:
             inline_truncated = False
 
         all_ids = tuple(
             dict.fromkeys(
-                memory_id
-                for rows in channel_rows.values()
-                for memory_id in rows
+                memory_id for rows in channel_rows.values() for memory_id in rows
             )
         )
         try:
@@ -316,7 +338,9 @@ class GovernanceRelatednessService:
                     warnings=("invalid_candidate_payload",),
                 )
                 continue
-            memories = tuple(per_candidate.get(spec.entry_id, ())[: self.options.candidate_limit])
+            memories = tuple(
+                per_candidate.get(spec.entry_id, ())[: self.options.candidate_limit]
+            )
             failed = spec.entry_id in failed_entries
             availability = (
                 RelatednessAvailability.UNAVAILABLE
@@ -427,7 +451,9 @@ class GovernanceRelatednessService:
                 if score > 0:
                     rows[spec.entry_id][memory_id]["alias"] = score
 
-        outcomes = await asyncio.gather(*(collect(spec) for spec in specs), return_exceptions=True)
+        outcomes = await asyncio.gather(
+            *(collect(spec) for spec in specs), return_exceptions=True
+        )
         failed = {
             spec.entry_id
             for spec, outcome in zip(specs, outcomes, strict=True)
@@ -471,7 +497,9 @@ class GovernanceRelatednessService:
         assert self.vector_query is not None
         fingerprint = self.embedding_fingerprint or ""
 
-        async def indexed(spec: _CandidateSpec) -> tuple[_CandidateSpec, list[tuple[str, float]]]:
+        async def indexed(
+            spec: _CandidateSpec,
+        ) -> tuple[_CandidateSpec, list[tuple[str, float]]]:
             found = await asyncio.to_thread(
                 self.vector_query.candidates,
                 query_vector=vectors[spec.query_text],
@@ -514,22 +542,34 @@ class GovernanceRelatednessService:
                     or view.status is not memory.NodeStatus.ACTIVE
                 ):
                     continue
-                exact = _normalize(view.statement) == _normalize(spec.statement)
+                exact = (
+                    view.candidate_semantic_fingerprint
+                    == spec.candidate_semantic_fingerprint
+                )
+                validated_scores = {
+                    channel: score
+                    for channel, score in scores.items()
+                    if channel != "exact" or exact
+                }
                 channels = tuple(
                     channel
                     for channel in ("exact", "alias", "lexical", "dense", "inline_gap")
-                    if channel in scores
+                    if channel in validated_scores
                 )
+                if not channels:
+                    continue
                 selected.append(
                     RelatedCanonicalMemory(
                         view=view,
                         match_channels=channels,
                         is_exact_duplicate=exact,
-                        internal_scores=MappingProxyType(dict(scores)),
+                        internal_scores=MappingProxyType(validated_scores),
                     )
                 )
             selected.sort(key=_candidate_sort_key)
-            result[spec.entry_id] = selected[: max(self.options.rerank_top_m, self.options.candidate_limit)]
+            result[spec.entry_id] = selected[
+                : max(self.options.rerank_top_m, self.options.candidate_limit)
+            ]
         return result
 
     async def _rerank(
@@ -539,7 +579,9 @@ class GovernanceRelatednessService:
     ) -> set[str]:
         assert self.reranker is not None
 
-        async def rerank(spec: _CandidateSpec) -> tuple[str, list[RelatedCanonicalMemory]]:
+        async def rerank(
+            spec: _CandidateSpec,
+        ) -> tuple[str, list[RelatedCanonicalMemory]]:
             selected = candidates.get(spec.entry_id, ())[: self.options.rerank_top_m]
             if not selected:
                 return spec.entry_id, []
@@ -560,12 +602,17 @@ class GovernanceRelatednessService:
             reranked: list[RelatedCanonicalMemory] = []
             for index, item in enumerate(selected):
                 score = float(by_index.get(index, 0.0))
-                if score < self.options.rerank_candidate_min_score and not item.is_exact_duplicate:
+                if (
+                    score < self.options.rerank_candidate_min_score
+                    and not item.is_exact_duplicate
+                ):
                     continue
                 reranked.append(
                     RelatedCanonicalMemory(
                         view=item.view,
-                        match_channels=tuple(dict.fromkeys((*item.match_channels, "rerank"))),
+                        match_channels=tuple(
+                            dict.fromkeys((*item.match_channels, "rerank"))
+                        ),
                         is_exact_duplicate=item.is_exact_duplicate,
                         internal_scores=MappingProxyType(
                             {**dict(item.internal_scores), "rerank": score}
@@ -575,7 +622,9 @@ class GovernanceRelatednessService:
             reranked.sort(key=_candidate_sort_key)
             return spec.entry_id, reranked
 
-        outcomes = await asyncio.gather(*(rerank(spec) for spec in specs), return_exceptions=True)
+        outcomes = await asyncio.gather(
+            *(rerank(spec) for spec in specs), return_exceptions=True
+        )
         failed: set[str] = set()
         for spec, outcome in zip(specs, outcomes, strict=True):
             if isinstance(outcome, Exception):
@@ -594,14 +643,28 @@ class _CandidateSpec:
     lexical_text: str
     scope: str
     memory_type: str
+    candidate_semantic_fingerprint: str
 
 
 def _candidate_spec(candidate: PooledMemoryCandidate) -> _CandidateSpec | None:
     if not isinstance(candidate.payload, ValidCandidatePayload):
         return None
     value = candidate.payload.candidate
+    expected_semantic_fingerprint = memory_candidate_semantic_fingerprint(
+        kind=value.kind,
+        scope=value.scope,
+        statement=value.statement,
+    )
+    if (
+        candidate.candidate_semantic is None
+        or candidate.candidate_semantic.semantic_fingerprint
+        != expected_semantic_fingerprint
+    ):
+        raise ValueError("relatedness candidate shared semantic identity drifted")
     context = [value.statement]
-    if candidate.user_quote and _normalize(candidate.user_quote) != _normalize(value.statement):
+    if candidate.user_quote and _normalize_discovery_text(
+        candidate.user_quote
+    ) != _normalize_discovery_text(value.statement):
         context.append(candidate.user_quote)
     applies_when = getattr(value, "applies_when", None)
     do_not_apply_when = getattr(value, "do_not_apply_when", None)
@@ -614,12 +677,11 @@ def _candidate_spec(candidate: PooledMemoryCandidate) -> _CandidateSpec | None:
         statement=value.statement,
         query_text="\n".join(context),
         lexical_text="\n".join(
-            text
-            for text in (value.statement, candidate.user_quote)
-            if text
+            text for text in (value.statement, candidate.user_quote) if text
         ),
         scope=value.scope,
         memory_type=value.kind,
+        candidate_semantic_fingerprint=expected_semantic_fingerprint,
     )
 
 
@@ -665,7 +727,7 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-def _normalize(value: str) -> str:
+def _normalize_discovery_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
@@ -698,7 +760,7 @@ def _alias_expansions(
     text: str,
     groups: Sequence[Sequence[str]],
 ) -> tuple[str, ...]:
-    normalized = _normalize(text)
+    normalized = _normalize_discovery_text(text)
     expanded: list[str] = []
     for group in groups:
         matched = [alias for alias in group if _contains_alias(normalized, alias)]
@@ -709,7 +771,7 @@ def _alias_expansions(
 
 
 def _contains_alias(text: str, alias: str) -> bool:
-    normalized_alias = _normalize(alias)
+    normalized_alias = _normalize_discovery_text(alias)
     if not normalized_alias:
         return False
     if any("\u4e00" <= character <= "\u9fff" for character in normalized_alias):

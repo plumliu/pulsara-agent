@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurfaceDeliveryIdentityFact,
     CanonicalMutationSurfaceDeliveryStateFact,
     DurableProjectionAppliedResultReceiptFact,
@@ -46,9 +46,7 @@ class DurableProjectionInspectionStore(Protocol):
         self, **kwargs: object
     ) -> list[dict[str, Any]]: ...
 
-    def durable_projection_cutovers(
-        self, session_id: str
-    ) -> list[dict[str, Any]]: ...
+    def durable_projection_cutovers(self, session_id: str) -> list[dict[str, Any]]: ...
 
     def durable_projection_coverage_receipts(
         self, session_id: str, **kwargs: object
@@ -58,9 +56,7 @@ class DurableProjectionInspectionStore(Protocol):
         self, **kwargs: object
     ) -> list[dict[str, Any]]: ...
 
-    def durable_surface_deliveries(
-        self, **kwargs: object
-    ) -> list[dict[str, Any]]: ...
+    def durable_surface_deliveries(self, **kwargs: object) -> list[dict[str, Any]]: ...
 
     def runtime_write_admission_epoch(self) -> dict[str, Any] | None: ...
 
@@ -89,10 +85,7 @@ def inspect_durable_projection_state(
     )
     jobs_truncated = len(raw_jobs) > limit
     raw_jobs = raw_jobs[:limit]
-    jobs = [
-        _validated_job(row, diagnostics=diagnostics)
-        for row in raw_jobs
-    ]
+    jobs = [_validated_job(row, diagnostics=diagnostics) for row in raw_jobs]
     job_ids = tuple(str(row["job_id"]) for row in raw_jobs)
 
     raw_receipts = store.durable_projection_receipts_for_jobs(
@@ -118,9 +111,7 @@ def inspect_durable_projection_state(
             {
                 reference.mutation_id
                 for receipt in receipts
-                if isinstance(
-                    receipt, DurableProjectionAppliedResultReceiptFact
-                )
+                if isinstance(receipt, DurableProjectionAppliedResultReceiptFact)
                 for reference in receipt.canonical_mutation_references
             }
         )
@@ -220,14 +211,15 @@ def inspect_durable_projection_state(
     ]
 
     raw_surfaces = store.durable_surface_deliveries(
-        mutation_ids=mutation_ids if session_id is not None or run_id is not None else None,
+        mutation_ids=mutation_ids
+        if session_id is not None or run_id is not None
+        else None,
         after_key=after_surface_key,
         limit=limit,
     )
     surfaces_truncated = len(raw_surfaces) > limit
     surfaces = [
-        _validated_surface(row, diagnostics=diagnostics)
-        for row in raw_surfaces[:limit]
+        _validated_surface(row, diagnostics=diagnostics) for row in raw_surfaces[:limit]
     ]
 
     raw_epoch = store.runtime_write_admission_epoch()
@@ -269,9 +261,7 @@ def inspect_durable_projection_state(
         "target_authority_conflicts": [_dump(item) for item in conflicts],
         "target_authority_conflicts_truncated": conflicts_truncated,
         "cutovers": [_dump(item) for item in cutovers],
-        "pre_activation_coverage_receipts": [
-            _dump(item) for item in coverage_receipts
-        ],
+        "pre_activation_coverage_receipts": [_dump(item) for item in coverage_receipts],
         "repair_actions": [_dump(item) for item in repairs],
         "repair_actions_truncated": repairs_truncated,
         "surface_deliveries": [_dump(item) for item in surfaces],
@@ -320,14 +310,17 @@ def _validated_job(
                 "state_revision": row["state_revision"],
                 "repair_generation": row["repair_generation"],
                 "attempt_count": row["attempt_count"],
+                "dispatch_attempt_count": row["dispatch_attempt_count"],
+                "settlement_generation": row["settlement_generation"],
                 "lease_generation": row["lease_generation"],
                 "lease_owner_id": row["lease_owner_id"],
                 "lease_expires_at": row["lease_expires_at"],
                 "next_attempt_at": row["next_attempt_at"],
                 "last_failure": row["last_failure"],
-                "result_receipt_reference": row[
-                    "result_receipt_reference"
+                "compaction_memory_deferral": row[
+                    "compaction_memory_deferral"
                 ],
+                "result_receipt_reference": row["result_receipt_reference"],
                 "state_fingerprint": row["state_fingerprint"],
             }
         )
@@ -337,8 +330,7 @@ def _validated_job(
             or source.event_type != row["source_event_type"]
             or horizon.through_sequence != source.sequence
             or source.runtime_session_id != row["runtime_session_id"]
-            or handler.contract_fingerprint
-            != row["handler_contract_fingerprint"]
+            or handler.contract_fingerprint != row["handler_contract_fingerprint"]
             or delivery.delivery_policy_fingerprint
             != row["delivery_policy_fingerprint"]
         ):
@@ -431,9 +423,7 @@ def _validated_payload(
             raise ValueError("outer fingerprint differs from nested fact")
         return fact
     except (TypeError, ValueError, ValidationError) as exc:
-        diagnostics.append(
-            _authority_diagnostic(durable_kind, durable_id, exc)
-        )
+        diagnostics.append(_authority_diagnostic(durable_kind, durable_id, exc))
         return {
             "durable_id": durable_id,
             "authority_status": "authority_untrusted",

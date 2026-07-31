@@ -8,7 +8,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal
+from threading import RLock
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, TypeAlias
 from uuid import uuid4
 
 from pulsara_agent.event import (
@@ -31,7 +32,6 @@ from pulsara_agent.event import (
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
     RunInteractionResumeBoundaryEvent,
-    RunEndEvent,
     RunStartEvent,
     RolloutBudgetAccountOpenedEvent,
     TerminalProcessCompletedEvent,
@@ -42,25 +42,20 @@ from pulsara_agent.event import (
     utc_now,
 )
 from pulsara_agent.host.run_boundary import (
-    BoundaryExecutionHandles,
     CapabilityResolveBasis,
-    CommittedInteractionResumeBoundary,
-    CommittedRunExecutionOwner,
     HostBoundaryStopResult,
     HostBoundaryStopUncertain,
     HostBoundaryStoppedBeforeCommit,
     HostRunBoundaryAttempt,
     HostRunBoundaryAttemptOutcome,
-    InteractionResumeBoundaryInput,
     NewRunBoundaryInput,
-    PreparedInteractionResumeBoundary,
     PreparedNewRunBoundary,
-    RunExecutionOwnerRegistry,
-    RunExecutionSegmentOwner,
-    RunExecutionSegmentResult,
-    RunSegmentInstallBlocked,
-    RunTerminationIntent,
+    PreparedNewRunBoundaryAuthority,
     derive_continuation_basis,
+)
+from pulsara_agent.runtime.run_execution.continuation import (
+    CommittedInteractionResumeBoundary,
+    PreparedInteractionResumeBoundary,
 )
 from pulsara_agent.primitives.mcp import (
     MAX_MCP_DIAGNOSTIC_CODE_CHARS,
@@ -74,29 +69,28 @@ from pulsara_agent.primitives.mcp import (
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredResolutionAttemptFact,
     McpInputRequiredSourceAuthorityFact,
-    PreparedMcpInputRequiredResolution,
     build_runtime_event_deadline_budget,
-    prepare_mcp_input_required_resolution,
-    stable_runtime_event_id,
 )
+from pulsara_agent.ports.mcp import PreparedMcpInputRequiredResolution
+from pulsara_agent.ports.mcp_secret import McpElicitationAction
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
-    RunTerminationIntentAttributionFact,
     sha256_fingerprint,
 )
-from pulsara_agent.llm.control import RunModelCallControlOwner
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.user_carrier import encode_human_input, encode_runtime_request
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.host.ingress import (
-    ActiveRunMonitorSafePointLease,
-    HostIngressAdmissionStale,
     HostIngressAttemptOwner,
     HostIngressCapacityError,
     HostIngressClosedError,
     HostIngressCoordinator,
     default_permission_policy_fingerprint,
+)
+from pulsara_agent.ports.host_ingress import (
+    ActiveRunMonitorSafePointLease,
+    HostIngressAdmissionStale,
 )
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.primitives.permission import (
@@ -112,7 +106,6 @@ from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
     NewRunBoundaryFact,
     PlanWorkflowStateFact,
-    RunExecutionActivationFact,
     resume_gate_policy_for,
 )
 from pulsara_agent.primitives.run_lifecycle import RunStopReason
@@ -136,13 +129,53 @@ from pulsara_agent.primitives.terminal_observation import TerminalAutonomousDeli
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages_bounded
 from pulsara_agent.message import SystemMsg
+from pulsara_agent.ports.model_lifecycle import (
+    BackgroundModelCallAdmissionLeaseIdentity,
+    BackgroundModelCallAdmissionProof,
+    CompactionMemoryExtractionSessionDriverHandle,
+    DriverRegistrationLease,
+)
 from pulsara_agent.runtime.approval import (
     ApprovalResolution,
     PendingApproval,
-    pending_approval_from_state,
 )
 from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
-from pulsara_agent.runtime.agent import AgentRunResult
+from pulsara_agent.runtime.agent import (
+    AgentRunResult,
+    agent_run_result_from_terminal_outcome,
+)
+from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet
+from pulsara_agent.ports.run_execution import (
+    RunActivationOutcome,
+    RunReconciliationRequired,
+    RunSegmentInstallBlocked,
+    RunSuspendedOutcome,
+    RunTerminalOutcome,
+    RunTerminalOutputPending,
+    RunTerminalizationPending,
+    RunTerminationIntent,
+)
+from pulsara_agent.runtime.run_execution.interaction_transition import (
+    InteractionTransitionCommitReceipt,
+    InteractionTransitionNotCommitted,
+    InteractionTransitionReconciliationRequired,
+    PreparedInteractionResumeAttempt,
+    RuntimeInteractionTransitionService,
+)
+from pulsara_agent.ports.interaction_transition import (
+    InteractionTransitionFull,
+    InteractionTransitionNone,
+    InteractionTransitionUntrusted,
+)
+from pulsara_agent.runtime.run_execution.service import (
+    RunActivationDispatch,
+    RunActivationService,
+)
+from pulsara_agent.runtime.run_execution.prepared import PreparedRunActivationOwner
+from pulsara_agent.ports.run_execution import (
+    PreparedRunOwnerReservationKey,
+    build_prepared_run_owner_reservation_key,
+)
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -167,23 +200,18 @@ from pulsara_agent.runtime.plan import (
     PlanInteractionResolution,
     PlanWorkflowState,
     plan_workflow_state_fact,
-    pending_plan_interaction_from_state,
-    pending_mcp_input_required_from_state,
     reduce_plan_workflow_state,
 )
-from pulsara_agent.runtime.recovery import AbortKind, StopRequest
+from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.run_entry import (
     AgentRunDraft,
     CommittedHostRunEntry,
-    install_run_working_set,
-    prepare_agent_run_draft,
 )
 from pulsara_agent.runtime.session import EventPublicationAfterCommitError
 from pulsara_agent.runtime.terminal.notification import (
     TerminalNotificationAdmissionStale,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.long_horizon.run_contract import (
     empty_projection_state_fingerprint,
     prepare_root_long_horizon_run,
@@ -204,11 +232,8 @@ from pulsara_agent.runtime.mcp.types import (
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.terminal.ui_stream import TerminalMonitorUISubscription
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
-from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityProvider,
-    build_mcp_installation,
-)
-from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.providers.mcp import McpCapabilityProvider
+from pulsara_agent.runtime.mcp.installation import build_mcp_installation
 from pulsara_agent.capability.runtime import (
     CapabilityRuntime,
     FrozenCapabilityExecutionSurface,
@@ -217,11 +242,18 @@ from pulsara_agent.capability.types import (
     CapabilityExecutionSurfaceSnapshotContext,
     CapabilityProjectionResolveContext,
 )
-from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
-from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionInvocationFailed,
     ContextCompactionPublicationFailedAfterCommit,
+)
+
+
+HostActivationResult: TypeAlias = (
+    AgentRunResult
+    | RunSuspendedOutcome
+    | RunTerminalizationPending
+    | RunTerminalOutputPending
+    | RunReconciliationRequired
 )
 
 
@@ -257,16 +289,100 @@ class HostSessionLifecycle(StrEnum):
     CLOSED = "closed"
 
 
+class _HostBackgroundModelCallAdmissionLease:
+    """Borrower-scoped idle-Host reservation held through ModelCallStart FULL."""
+
+    def __init__(
+        self,
+        *,
+        identity: BackgroundModelCallAdmissionLeaseIdentity,
+        proof: BackgroundModelCallAdmissionProof,
+        validator: Callable[[BackgroundModelCallAdmissionProof], None],
+        releaser: Callable[[BackgroundModelCallAdmissionLeaseIdentity], None],
+    ) -> None:
+        self._identity = identity
+        self._proof = proof
+        self._validator = validator
+        self._releaser = releaser
+        self._state: Literal[
+            "issued",
+            "in_flight",
+            "consumed",
+            "released",
+            "reconciliation_required",
+        ] = "issued"
+        self._resolved_model_call_id: str | None = None
+        self._released_lock = False
+        self._lock = RLock()
+
+    @property
+    def identity(self) -> BackgroundModelCallAdmissionLeaseIdentity:
+        return self._identity
+
+    @property
+    def proof(self) -> BackgroundModelCallAdmissionProof:
+        return self._proof
+
+    @property
+    def state(
+        self,
+    ) -> Literal[
+        "issued",
+        "in_flight",
+        "consumed",
+        "released",
+        "reconciliation_required",
+    ]:
+        with self._lock:
+            return self._state
+
+    def begin_model_start(self) -> None:
+        with self._lock:
+            if self._state != "issued":
+                raise RuntimeError("background model admission is not issuable")
+            self._validator(self._proof)
+            self._state = "in_flight"
+
+    def validate_model_start(self, *, resolved_model_call_id: str) -> None:
+        with self._lock:
+            if self._state != "in_flight":
+                raise RuntimeError("background model admission is not in flight")
+            if self._resolved_model_call_id not in {None, resolved_model_call_id}:
+                raise RuntimeError("background model-call identity drifted")
+            self._validator(self._proof)
+            self._resolved_model_call_id = resolved_model_call_id
+
+    def confirm_model_start_full(self) -> None:
+        with self._lock:
+            if self._state == "consumed":
+                return
+            if self._state != "in_flight":
+                raise RuntimeError("background model admission cannot confirm FULL")
+            self._state = "consumed"
+        self._release_host_lock_once()
+
+    def mark_reconciliation_required(self) -> None:
+        with self._lock:
+            if self._state in {"consumed", "released"}:
+                return
+            self._state = "reconciliation_required"
+        self._release_host_lock_once()
+
+    def release(self) -> None:
+        with self._lock:
+            if self._state not in {"consumed", "reconciliation_required"}:
+                self._state = "released"
+        self._release_host_lock_once()
+
+    def _release_host_lock_once(self) -> None:
+        with self._lock:
+            if self._released_lock:
+                return
+            self._released_lock = True
+        self._releaser(self._identity)
+
+
 _STREAM_QUEUE_MAX_ITEMS = 128
-
-
-def _replace_mcp_tool_bindings(
-    current: tuple[object, ...], mcp_tools: tuple[object, ...]
-) -> tuple[object, ...]:
-    return (
-        *(tool for tool in current if not isinstance(tool, McpCapabilityTool)),
-        *mcp_tools,
-    )
 
 
 def _replace_mcp_capability_provider(
@@ -353,6 +469,17 @@ def _mcp_pending_audit(
         timing = snapshot.timing
         if timing is None:
             raise ValueError("MCP installed snapshot requires lifecycle timing")
+        authority = snapshot.authority
+        protocol_semantic = (
+            authority.surface_semantic.protocol_semantic
+            if authority is not None
+            else None
+        )
+        negotiation = (
+            authority.discovery_attribution.negotiation
+            if authority is not None
+            else None
+        )
         server_facts.append(
             McpInstalledServerSnapshotFact(
                 server_id=snapshot.server_id,
@@ -365,6 +492,16 @@ def _mcp_pending_audit(
                 event_safe_config_fingerprint=snapshot.event_safe_config_fingerprint,
                 snapshot_semantic_fingerprint=snapshot.snapshot_semantic_fingerprint,
                 protocol_version=snapshot.protocol_version,
+                protocol_behavior_era=(
+                    protocol_semantic.behavior_era.value
+                    if protocol_semantic is not None
+                    else None
+                ),
+                negotiation_wire_receipt_fingerprint=(
+                    negotiation.negotiation_wire_receipt_fingerprint
+                    if negotiation is not None
+                    else None
+                ),
                 tool_count=len(snapshot.tools),
                 resource_count=len(snapshot.resources),
                 resource_template_count=len(snapshot.resource_templates),
@@ -394,7 +531,7 @@ def _mcp_pending_audit(
         coalesced_attempt_summaries=(),
         coalesced_attempt_summaries_omitted=0,
         server_snapshots=tuple(server_facts),
-        total_installed_tool_count=len(new.tools),
+        total_installed_tool_count=len(new.ordered_binding_installations),
         added_tool_count=len(new_names.difference(old_names)),
         revoked_tool_count=len(old_names.difference(new_names)),
         changed_tool_names_bounded=bounded_names,
@@ -446,6 +583,11 @@ def _permission_mode_rank(mode: PermissionMode | None) -> int:
         PermissionMode.ACCEPT_EDITS: 3,
         PermissionMode.BYPASS_PERMISSIONS: 4,
     }[mode]
+
+
+def _consume_background_task_outcome(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 class _StreamObserver:
@@ -510,21 +652,9 @@ class HostSession:
     reopen_deadline_monotonic: float | None = None
     created_at: float = field(default_factory=time.monotonic)
     last_active_at: float = field(default_factory=time.monotonic)
-    active_run_id: str | None = None
-    stopping_run_id: str | None = None
-    suspended_run_id: str | None = None
-    pending_interaction: PendingInteraction | None = None
     plan_state: PlanWorkflowState = field(default_factory=PlanWorkflowState)
     _lifecycle: HostSessionLifecycle = field(default=HostSessionLifecycle.OPEN)
-    _suspended_state: LoopState | None = None
-    _active_state: LoopState | None = None
-    _active_task: asyncio.Task[Any] | None = None
-    _boundary_task: asyncio.Task[Any] | None = None
-    _boundary_execution_task: asyncio.Task[Any] | None = None
     _boundary_attempt: HostRunBoundaryAttempt | None = None
-    _boundary_observer: _StreamObserver | None = None
-    _preparing_state: LoopState | None = None
-    _preparing_identity: HostRunBoundaryIdentityFact | None = None
     _boundary_stop_requested_run_ids: set[str] = field(
         default_factory=set, init=False, repr=False
     )
@@ -543,10 +673,9 @@ class HostSession:
         init=False,
         repr=False,
     )
-    _run_execution_owners: RunExecutionOwnerRegistry = field(
-        default_factory=RunExecutionOwnerRegistry,
-        init=False,
-        repr=False,
+    _run_activation_service: RunActivationService = field(init=False, repr=False)
+    _interaction_transition_port: RuntimeInteractionTransitionService = field(
+        init=False, repr=False
     )
     _ingress_coordinator: HostIngressCoordinator = field(init=False, repr=False)
     _host_event_loop: asyncio.AbstractEventLoop | None = field(
@@ -574,10 +703,34 @@ class HostSession:
     )
     _stop_intent_revision: int = field(default=0, init=False, repr=False)
     _termination_intent_revision: int = field(default=0, init=False, repr=False)
+    _background_model_call_admission_generation: int = field(
+        default=0, init=False, repr=False
+    )
+    _background_model_call_admission_lease: (
+        _HostBackgroundModelCallAdmissionLease | None
+    ) = field(default=None, init=False, repr=False)
+    _compaction_memory_extraction_driver: (
+        CompactionMemoryExtractionSessionDriverHandle | None
+    ) = field(default=None, init=False, repr=False)
+    _compaction_memory_extraction_registration: DriverRegistrationLease | None = field(
+        default=None, init=False, repr=False
+    )
     _host_open_deadline_monotonic: float = field(init=False, repr=False)
+    _subagent_dangling_repair_done: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         runtime_session = self.wiring.runtime_wiring.runtime_session
+        activation_service = self.wiring.run_activation_service
+        if activation_service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        self._run_activation_service = activation_service
+        self._interaction_transition_port = (
+            activation_service.build_interaction_transition_service(
+                runtime_session_id=runtime_session.runtime_session_id,
+                commit_resume_boundary=self._commit_interaction_transition_attempt,
+                classify_write_failure=self._classify_interaction_transition_failure,
+            )
+        )
         runtime_deadline = runtime_session.runtime_open_deadline_monotonic
         self._host_open_deadline_monotonic = (
             runtime_deadline
@@ -640,10 +793,253 @@ class HostSession:
         """Synchronously close the mutation gate before async teardown starts."""
         if self._lifecycle is HostSessionLifecycle.OPEN:
             self._lifecycle = HostSessionLifecycle.CLOSING
+        lease = self._background_model_call_admission_lease
+        if lease is not None:
+            lease.release()
 
     @property
     def runtime_session_id(self) -> str:
         return self.wiring.runtime_wiring.runtime_session.runtime_session_id
+
+    async def repair_dangling_children_once(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        if self._subagent_dangling_repair_done:
+            return
+        subagent_runtime = self.wiring.subagent_runtime
+        if subagent_runtime is not None:
+            await subagent_runtime.repair_dangling_children(
+                deadline_monotonic=deadline_monotonic
+            )
+        self._subagent_dangling_repair_done = True
+
+    @property
+    def active_run_id(self) -> str | None:
+        view = self._run_activation_service.active_host_run_view()
+        return view.run_id if view is not None else None
+
+    @property
+    def suspended_run_id(self) -> str | None:
+        if self._lifecycle is HostSessionLifecycle.CLOSED:
+            return None
+        view = self._run_activation_service.suspended_host_run_view()
+        return view.run_id if view is not None else None
+
+    @property
+    def stopping_run_id(self) -> str | None:
+        view = self._run_activation_service.stopping_host_run_view()
+        if view is not None:
+            return view.run_id
+        attempt = self._boundary_attempt
+        if (
+            attempt is not None
+            and attempt.prepared_activation is not None
+            and attempt.prepared_activation.run_id
+            in self._boundary_stop_requested_run_ids
+        ):
+            return attempt.prepared_activation.run_id
+        return None
+
+    @property
+    def pending_interaction(self) -> PendingInteraction | None:
+        if self._lifecycle is HostSessionLifecycle.CLOSED:
+            return None
+        owner = self._run_activation_service.suspended_host_run_view()
+        view = owner.pending_interaction_view if owner is not None else None
+        return view if isinstance(view, PendingInteraction) else None
+
+    def _current_boundary_task(self) -> asyncio.Task[object] | None:
+        attempt = self._boundary_attempt
+        return attempt.owner_task if attempt is not None else None
+
+    def _current_boundary_observer(self) -> _StreamObserver | None:
+        attempt = self._boundary_attempt
+        observer = attempt.observer if attempt is not None else None
+        return observer if isinstance(observer, _StreamObserver) else None
+
+    def _take_boundary_execution_ownership(self) -> HostRunBoundaryAttempt:
+        attempt = self._boundary_attempt
+        incoming = asyncio.current_task()
+        if attempt is None or incoming is None:
+            raise RuntimeError("Host ingress lost its boundary execution owner")
+        previous = attempt.owner_task
+        if previous is incoming:
+            return attempt
+        if previous.done():
+            raise RuntimeError("completed boundary owner cannot transfer execution")
+        prepared = attempt.prepared_activation
+        if prepared is not None:
+            prepared.transfer_owner_task(expected=previous, incoming=incoming)
+        attempt.owner_task = incoming
+        return attempt
+
+    def _finish_ingress_owned_boundary(self, attempt: HostRunBoundaryAttempt) -> None:
+        if self._boundary_attempt is not attempt:
+            return
+        if attempt.owner_task is not asyncio.current_task():
+            return
+        self._finish_boundary_attempt_safely(attempt)
+        self._boundary_attempt = None
+
+    async def acquire_compaction_memory_model_safe_point(
+        self,
+        operation_id: str,
+        deadline_monotonic: float,
+    ) -> _HostBackgroundModelCallAdmissionLease | None:
+        """Reserve an idle Host only until the background ModelStart is durable."""
+
+        if deadline_monotonic <= time.monotonic() or self._run_lock.locked():
+            return None
+        timeout = min(0.1, max(0.0, deadline_monotonic - time.monotonic()))
+        try:
+            await asyncio.wait_for(self._run_lock.acquire(), timeout=timeout)
+        except TimeoutError:
+            return None
+        try:
+            runtime_session = self.wiring.runtime_wiring.runtime_session
+            host_state = self._ingress_coordinator.state_fact()
+            if (
+                self._lifecycle is not HostSessionLifecycle.OPEN
+                or not self._ingress_coordinator.can_borrow_background_model_call()
+                or self.active_run_id is not None
+                or self.stopping_run_id is not None
+                or self.pending_interaction is not None
+                or self._boundary_attempt is not None
+                and not self._boundary_attempt.owner_task.done()
+                or runtime_session.reconciliation_required
+                or runtime_session.model_stream_execution_registry.active_handle_count()
+                != 0
+                or self._background_model_call_admission_lease is not None
+            ):
+                self._run_lock.release()
+                return None
+            runtime_session.require_mutation_allowed()
+            self._background_model_call_admission_generation += 1
+            generation = self._background_model_call_admission_generation
+            lease_id = "background-model-admission:" + context_fingerprint(
+                "background-model-call-admission-id:v1",
+                (self.runtime_session_id, operation_id, generation),
+            ).removeprefix("sha256:")
+            expires_at = min(deadline_monotonic, time.monotonic() + 10.0)
+            proof_payload = {
+                "lease_id": lease_id,
+                "lease_generation": generation,
+                "runtime_session_id": self.runtime_session_id,
+                "operation_id": operation_id,
+                "host_state_generation": host_state.state_generation,
+                "active_run_frontier_fingerprint": context_fingerprint(
+                    "background-model-call-active-run-frontier:v1", ()
+                ),
+                "permission_policy_revision": host_state.permission_policy_revision,
+                "permission_policy_fingerprint": (
+                    host_state.permission_policy_fingerprint
+                ),
+                "stop_intent_revision": self._stop_intent_revision,
+                "close_intent_revision": host_state.close_intent_revision,
+                "expected_provider_input_generation_revision": (
+                    runtime_session.provider_input_generation_store.through_sequence
+                ),
+                "expires_at_monotonic": expires_at,
+            }
+            proof = BackgroundModelCallAdmissionProof(
+                **proof_payload,
+                proof_fingerprint=context_fingerprint(
+                    "background-model-call-admission-proof:v1", proof_payload
+                ),
+            )
+            identity_payload = {
+                "lease_id": lease_id,
+                "lease_generation": generation,
+                "runtime_session_id": self.runtime_session_id,
+                "operation_id": operation_id,
+                "admission_proof_fingerprint": proof.proof_fingerprint,
+            }
+            identity = BackgroundModelCallAdmissionLeaseIdentity(
+                **identity_payload,
+                identity_fingerprint=context_fingerprint(
+                    "background-model-call-admission-lease-identity:v1",
+                    identity_payload,
+                ),
+            )
+            lease = _HostBackgroundModelCallAdmissionLease(
+                identity=identity,
+                proof=proof,
+                validator=self._validate_background_model_call_admission,
+                releaser=self._release_background_model_call_admission,
+            )
+            self._background_model_call_admission_lease = lease
+            return lease
+        except BaseException:
+            if self._run_lock.locked():
+                self._run_lock.release()
+            raise
+
+    def _validate_background_model_call_admission(
+        self,
+        proof: BackgroundModelCallAdmissionProof,
+    ) -> None:
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        host_state = self._ingress_coordinator.state_fact()
+        lease = self._background_model_call_admission_lease
+        if (
+            lease is None
+            or lease.proof != proof
+            or not self._run_lock.locked()
+            or self._lifecycle is not HostSessionLifecycle.OPEN
+            or not self._ingress_coordinator.can_borrow_background_model_call()
+            or self.active_run_id is not None
+            or self.stopping_run_id is not None
+            or self.pending_interaction is not None
+            or self._boundary_attempt is not None
+            and not self._boundary_attempt.owner_task.done()
+            or host_state.state_generation != proof.host_state_generation
+            or host_state.permission_policy_revision != proof.permission_policy_revision
+            or host_state.permission_policy_fingerprint
+            != proof.permission_policy_fingerprint
+            or host_state.close_intent_revision != proof.close_intent_revision
+            or self._stop_intent_revision != proof.stop_intent_revision
+            or runtime_session.provider_input_generation_store.through_sequence
+            != proof.expected_provider_input_generation_revision
+            or time.monotonic() >= proof.expires_at_monotonic
+        ):
+            raise HostIngressAdmissionStale(
+                "background model-call Host authority became stale"
+            )
+        runtime_session.require_mutation_allowed()
+
+    def _release_background_model_call_admission(
+        self,
+        identity: BackgroundModelCallAdmissionLeaseIdentity,
+    ) -> None:
+        lease = self._background_model_call_admission_lease
+        if lease is not None and lease.identity == identity:
+            self._background_model_call_admission_lease = None
+            if self._run_lock.locked():
+                self._run_lock.release()
+
+    def install_compaction_memory_extraction_driver(
+        self,
+        *,
+        projection_service: object,
+        connection_provider: object,
+    ) -> None:
+        """Register the one live session driver after Host ownership exists."""
+
+        if self._compaction_memory_extraction_registration is not None:
+            raise RuntimeError(
+                "compaction memory extraction driver is already installed"
+            )
+        driver, registration = self.wiring.build_compaction_memory_extraction_driver(
+            projection_service=projection_service,
+            connection_provider=connection_provider,
+            safe_point_acquirer=self.acquire_compaction_memory_model_safe_point,
+            on_result_full=self._notify_governance,
+        )
+        self._compaction_memory_extraction_driver = driver
+        self._compaction_memory_extraction_registration = registration
+        projection_service.wake(self.runtime_session_id)
 
     @property
     def has_live_processes(self) -> bool:
@@ -784,27 +1180,26 @@ class HostSession:
             supervisor.reject_candidates(tuple(latest_candidates.values()))
             return
 
-        installation_id = f"mcp_installation:{uuid4().hex}"
         stale_discard_counts = supervisor.stale_discard_counts()
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        execution_port = runtime_session.mcp_tool_execution_port
+        if execution_port is None:
+            raise RuntimeError("MCP execution port is unavailable during installation")
         try:
             new_installation = build_mcp_installation(
-                supervisor=supervisor,
+                execution_port=execution_port,
+                artifact_options=runtime_session.artifact_service.options,
                 config_epoch=ticket.config_epoch,
                 event_safe_config_set_fingerprint=ticket.event_safe_config_set_fingerprint,
                 snapshots=new_snapshots,
                 configs_by_server=configs_by_server,
                 slots_by_server=slots_by_server,
-                installation_id=installation_id,
+                installation_id=None,
                 previous_installation=old_installation,
             )
             new_capability_runtime = _replace_mcp_capability_provider(
                 self.wiring.agent_runtime.capability_runtime,
                 new_installation,
-            )
-            runtime_session = self.wiring.runtime_wiring.runtime_session
-            new_extra_bindings = _replace_mcp_tool_bindings(
-                runtime_session.extra_tool_bindings,
-                tuple(new_installation.tools),
             )
             pending_audit = _mcp_pending_audit(
                 old=old_installation,
@@ -844,7 +1239,9 @@ class HostSession:
                 candidates=tuple(latest_candidates.values()),
                 retiring_slot_ids=tuple(retiring_slot_ids),
             )
-            runtime_session.extra_tool_bindings = new_extra_bindings
+            runtime_session.dynamic_tool_installations = (
+                new_installation.ordered_binding_installations
+            )
             self.wiring = replace(
                 self.wiring,
                 runtime_wiring=replace(
@@ -868,7 +1265,7 @@ class HostSession:
                 new_installation.ready_server_ids
             )
         )
-        subagent_runtime = getattr(runtime_session, "subagent_runtime", None)
+        subagent_runtime = self.wiring.subagent_runtime
         if (revoked_servers or retiring_slot_ids) and subagent_runtime is not None:
             retiring_identity_set = frozenset(
                 identity
@@ -890,20 +1287,23 @@ class HostSession:
         self,
         supervisor: McpServerSupervisor,
     ) -> str | None:
-        state = self._suspended_state
-        if state is None or state.pending_interaction_kind != "mcp_input_required":
-            return None
-        identity = state.pending_interaction_payload.get("mcp_binding_identity")
-        if not isinstance(identity, dict):
+        run_id = self.suspended_run_id
+        view = (
+            self._run_activation_service.run_view(run_id)
+            if run_id is not None
+            else None
+        )
+        binding = view.pending_mcp_binding_identity if view is not None else None
+        if binding is None:
             return None
         try:
             binding_identity = McpBindingIdentity(
-                server_id=str(identity["server_id"]),
-                slot_id=str(identity["slot_id"]),
-                snapshot_id=str(identity["snapshot_id"]),
-                discovery_generation=int(identity["discovery_generation"]),
+                server_id=binding.server_id,
+                slot_id=binding.slot_id,
+                snapshot_id=binding.snapshot_id,
+                discovery_generation=binding.discovery_generation,
             )
-        except (KeyError, TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             return None
         if supervisor.binding_matches_current_desired_runtime(binding_identity):
             return None
@@ -923,9 +1323,65 @@ class HostSession:
                 prepared_ticket=ticket,
             )
 
+    async def recover_deferred_mcp_runs(
+        self,
+        run_ids: tuple[str, ...],
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Rebind restart-safe stateless MCP continuations after discovery."""
+
+        if not run_ids:
+            return
+        if len(run_ids) != 1:
+            raise RuntimeError("Host reopen cannot own multiple deferred MCP runs")
+        from pulsara_agent.host.mcp_recovery import recover_host_mcp_run
+
+        recovered = await recover_host_mcp_run(
+            self,
+            run_id=run_ids[0],
+            deadline_monotonic=deadline_monotonic,
+        )
+        if recovered.recovery_state == "awaiting_client_input":
+            await self._sync_ingress_waiting_state()
+            return
+        if not isinstance(
+            recovered.prepared_resolution,
+            PreparedMcpInputRequiredResolution,
+        ):
+            raise RuntimeError("replay-ready MCP recovery lost its resolution")
+        await self._ingress_coordinator.adopt_recovered_active_run(
+            run_start_event_id=recovered.run_start_event_id
+        )
+
+        async def on_settled(outcome: RunActivationOutcome) -> None:
+            self._on_activation_settled(outcome)
+            pending = self.pending_interaction
+            await self._ingress_coordinator.settle_recovered_active_run(
+                resume_match_key=(
+                    _pending_interaction_match_key(pending)
+                    if pending is not None
+                    else None
+                )
+            )
+
+        dispatch = self._run_activation_service.start_resume_result_activation(
+            run_id=recovered.run_id,
+            host_session_id=self.host_session_id,
+            interaction_kind="mcp_input_required",
+            resolution=recovered.prepared_resolution,
+            on_activation_settled=on_settled,
+        )
+        if isinstance(dispatch, RunSegmentInstallBlocked):
+            await self._ingress_coordinator.settle_recovered_active_run(
+                resume_match_key=None
+            )
+            raise RuntimeError(
+                f"recovered MCP continuation activation was blocked: {dispatch.reason}"
+            )
+
     def _new_run_boundary_identity(
         self,
-        state: LoopState,
         *,
         kind: str = "pre_run",
         attempt_number: int = 1,
@@ -934,55 +1390,119 @@ class HostSession:
             boundary_id=f"run_boundary:{uuid4().hex}",
             kind=kind,
             runtime_session_id=self.runtime_session_id,
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
+            run_id=f"run:{uuid4().hex}",
+            turn_id=f"turn:{uuid4().hex}",
+            reply_id=f"reply:{uuid4().hex}",
             attempt_number=attempt_number,
             observed_at_utc=utc_now(),
         )
-        if self._preparing_state is state:
-            self._preparing_identity = identity
         return identity
 
-    def _new_resume_boundary_identity(
+    def _prepare_interaction_resume_attempt(
         self,
-        state: LoopState,
         *,
-        interaction_id: str,
-    ) -> HostRunBoundaryIdentityFact:
-        counters = state.scratchpad.setdefault("resume_boundary_attempts", {})
-        if not isinstance(counters, dict):
-            raise RuntimeError("resume boundary attempt registry is invalid")
-        attempt_number = int(counters.get(interaction_id, 0)) + 1
-        counters[interaction_id] = attempt_number
-        return self._new_run_boundary_identity(
-            state,
-            kind="pre_interaction_resume",
-            attempt_number=attempt_number,
+        pending: PendingInteraction,
+        interaction_kind: Literal["approval", "plan", "mcp_input_required"],
+        resolution: object,
+    ) -> PreparedInteractionResumeAttempt:
+        if isinstance(pending, PendingApproval):
+            interaction_id = pending.approval_id
+            resolution_kind = "approval"
+        elif isinstance(pending, PendingMcpInputRequired):
+            interaction_id = pending.interaction_id
+            resolution_kind = "mcp_input_required"
+        else:
+            if pending.kind == "question":
+                interaction_id = pending.question_id
+                resolution_kind = "plan_question"
+            else:
+                interaction_id = pending.exit_request_id
+                resolution_kind = "plan_exit"
+            if not isinstance(interaction_id, str) or not interaction_id:
+                raise RuntimeError("plan suspension lost its durable interaction id")
+        return self._interaction_transition_port.prepare_resume(
+            run_id=pending.run_id,
+            interaction_id=interaction_id,
+            interaction_kind=interaction_kind,
+            resolution_kind=resolution_kind,
+            resolution=resolution,
         )
 
-    def _new_interaction_boundary_input(
+    async def _commit_interaction_transition_attempt(
         self,
-        state: LoopState,
-        *,
-        interaction_id: str,
-        interaction_kind: str,
-        resolution: object,
-    ) -> InteractionResumeBoundaryInput:
-        suspended_token = state.scratchpad.get("suspended_state_token")
-        if not isinstance(suspended_token, str):
-            raise RuntimeError("suspended run lost its ABA state token")
-        identity = self._new_resume_boundary_identity(
-            state,
-            interaction_id=interaction_id,
+        prepared: PreparedInteractionResumeAttempt,
+    ) -> tuple[CommittedInteractionResumeBoundary, tuple[AgentEvent, ...]]:
+        committed, stored = await self._prepare_and_commit_resume_boundary(
+            prepared_attempt=prepared,
+            pending=prepared.pending_public_view,  # type: ignore[arg-type]
+            interaction_kind=prepared.interaction_kind,
+            identity=prepared.boundary_identity,
+            resolution=prepared.resolution,
         )
-        return InteractionResumeBoundaryInput(
-            identity=identity,
-            interaction_id=interaction_id,
-            interaction_kind=interaction_kind,  # type: ignore[arg-type]
-            resolution=resolution,
-            suspended_state_token=suspended_token,
-        )
+        return committed, stored
+
+    def _classify_interaction_transition_failure(
+        self, exc: BaseException
+    ) -> Literal["none", "unknown", "other"]:
+        if isinstance(
+            exc,
+            (HostIngressAdmissionStale, TerminalNotificationAdmissionStale),
+        ):
+            return "none"
+        attempt = self._boundary_attempt
+        confirmation = attempt.commit_confirmation if attempt is not None else None
+        if (
+            confirmation is not None
+            and confirmation.status is BoundaryBatchCommitStatus.NONE
+        ):
+            return "none"
+        if (
+            confirmation is not None
+            and confirmation.status is BoundaryBatchCommitStatus.UNKNOWN
+        ):
+            return "unknown"
+        if attempt is not None and attempt.commit_state == "not_started":
+            # Contract resolution and preparation failures happen before any
+            # stable transition candidate reaches the RuntimeSession writer.
+            # They are ordinary deterministic errors, not uncertain commits.
+            return "other"
+        if (
+            confirmation is not None
+            and confirmation.status is BoundaryBatchCommitStatus.FULL
+        ):
+            # The ledger transition is already FULL. A later fold or
+            # terminalization error is not an uncertain write outcome and the
+            # original typed failure must remain observable to the caller.
+            return "other"
+        try:
+            outcome = (
+                self.wiring.runtime_wiring.runtime_session.resolved_event_write_outcome(
+                    exc
+                )
+            )
+        except BaseException:
+            return "other"
+        if outcome.status == "none":
+            return "none"
+        if outcome.status == "unknown":
+            return "unknown"
+        return "other"
+
+    @staticmethod
+    def _require_full_interaction_transition(
+        receipt: InteractionTransitionCommitReceipt,
+    ) -> tuple[AgentEvent, ...]:
+        if isinstance(receipt.outcome, InteractionTransitionNone):
+            raise InteractionTransitionNotCommitted(
+                "interaction resume candidate was not committed"
+            )
+        if isinstance(receipt.outcome, InteractionTransitionUntrusted):
+            raise InteractionTransitionReconciliationRequired(
+                "interaction resume requires durable reconciliation"
+            )
+        if not isinstance(receipt.outcome, InteractionTransitionFull):
+            raise RuntimeError("interaction transition returned an invalid outcome")
+        return receipt.committed_events
 
     def _resolve_new_run_permission_snapshot(
         self,
@@ -1160,7 +1680,6 @@ class HostSession:
         self,
         *,
         ingress_owner: HostIngressAttemptOwner,
-        state: LoopState,
         identity: HostRunBoundaryIdentityFact,
         user_input: str,
         active_skill_names: frozenset[str],
@@ -1172,7 +1691,7 @@ class HostSession:
         transcript_source_through_sequence: int,
         transcript_source_event_count: int,
         frozen_surface,
-    ) -> None:
+    ) -> PreparedNewRunBoundaryAuthority:
         transcript_fact = self._transcript_snapshot_fact(
             preflight_terminal=preflight_terminal,
             checkpoint_terminal=checkpoint_terminal,
@@ -1199,20 +1718,8 @@ class HostSession:
             ingress_owner,
             ingress_fact_fingerprint=host_run_ingress.fact_fingerprint,
         )
-        state.permission_snapshot = permission_snapshot
-        state.run_model_target = run_model_target
-        state.scratchpad["host_run_boundary_identity"] = identity
-        state.scratchpad["host_run_boundary_transcript"] = transcript_fact
-        state.scratchpad["host_run_boundary_mcp"] = (
-            self._mcp_installation_reference_fact()
-        )
-        state.scratchpad["host_run_boundary_plan"] = self._plan_workflow_state_fact()
-        state.scratchpad["capability_resolve_basis"] = basis
-        state.scratchpad["frozen_capability_execution_surface"] = frozen_surface
-        state.scratchpad["host_run_ingress"] = host_run_ingress
-        state.scratchpad["host_ingress_admission_proof"] = host_ingress_admission_proof
-        state.scratchpad["current_user_message_fact"] = CurrentUserMessageFact(
-            message_id=f"user-message:{state.run_id}",
+        current_user_message = CurrentUserMessageFact(
+            message_id=f"user-message:{identity.run_id}",
             source_kind=(
                 "host_runtime_request"
                 if isinstance(host_run_ingress, RuntimeRequestRunIngressFact)
@@ -1223,8 +1730,8 @@ class HostSession:
             content_sha256=text_sha256(user_input),
             source_artifact_id=None,
         )
-        state.scratchpad["terminal_run_end_event_id"] = f"run_end:{uuid4().hex}"
-        state.scratchpad["new_run_boundary_fact"] = NewRunBoundaryFact(
+        terminal_run_end_event_id = f"run_end:{uuid4().hex}"
+        new_run_boundary = NewRunBoundaryFact(
             identity=identity,
             transcript=transcript_fact,
             model_target_fingerprint=run_model_target.fact.target_fingerprint,
@@ -1233,6 +1740,24 @@ class HostSession:
             capability_basis=basis.fact,
             degraded_reason_codes=(),
         )
+        authority = PreparedNewRunBoundaryAuthority(
+            identity=identity,
+            transcript=transcript_fact,
+            mcp_installation=self._mcp_installation_reference_fact(),
+            plan=self._plan_workflow_state_fact(),
+            capability_basis=basis,
+            frozen_execution_surface=frozen_surface,
+            host_run_ingress=host_run_ingress,
+            host_ingress_admission_proof=host_ingress_admission_proof,
+            current_user_message=current_user_message,
+            terminal_run_end_event_id=terminal_run_end_event_id,
+            new_run_boundary=new_run_boundary,
+        )
+        attempt = self._boundary_attempt
+        if attempt is None:
+            raise RuntimeError("new-run boundary lost its process owner")
+        attempt.prepared_authority = authority
+        return authority
 
     def _build_host_run_ingress(
         self,
@@ -1450,12 +1975,14 @@ class HostSession:
     async def _commit_new_run_entry(
         self,
         *,
-        state: LoopState,
+        prepared_activation: PreparedRunActivationOwner,
         prepared: PreparedNewRunBoundary,
     ) -> tuple[AgentRunDraft, CommittedHostRunEntry, tuple[AgentEvent, ...]]:
-        draft = await prepare_agent_run_draft(
-            self.wiring.agent_runtime,
-            state,
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        draft = await service.prepare_run_draft(
+            prepared_activation,
             run_model_target=prepared.run_model_target,
             permission_snapshot=prepared.permission_snapshot,
             current_user_message=prepared.current_user_message,
@@ -1474,9 +2001,9 @@ class HostSession:
         runtime_session = self.wiring.runtime_wiring.runtime_session
         pending_audits = prepared.pending_mcp_audits
         event_context = EventContext(
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
+            run_id=prepared.identity.run_id,
+            turn_id=prepared.identity.turn_id,
+            reply_id=prepared.identity.reply_id,
         )
         window_open = ContextWindowOpenedEvent(
             id=prepared.long_horizon.contract.initial_window_open_event_id,
@@ -1507,7 +2034,7 @@ class HostSession:
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
         try:
-            stored = tuple(await runtime_session.emit_many(candidates, state=state))
+            stored = tuple(await runtime_session.emit_many(candidates))
         except BaseException as exc:
             if isinstance(
                 exc,
@@ -1518,7 +2045,7 @@ class HostSession:
                 )
                 self._set_boundary_commit_state("not_started")
                 runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
-                    state.run_id
+                    prepared.identity.run_id
                 )
                 if isinstance(exc, HostIngressAdmissionStale):
                     raise
@@ -1537,7 +2064,7 @@ class HostSession:
                 if outcome.status != "full":
                     if outcome.status == "none":
                         runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
-                            state.run_id
+                            prepared.identity.run_id
                         )
                     self._set_boundary_commit_confirmation(
                         BoundaryBatchCommitStatus.UNKNOWN
@@ -1573,23 +2100,23 @@ class HostSession:
                 run_start_event_id=committed.run_start_event.id,
             )
             await self._adopt_committed_host_run(
-                state=state,
                 committed=committed,
                 prepared=prepared,
             )
             if isinstance(exc, asyncio.CancelledError):
                 _clear_current_task_cancellation()
-            if state.stop_request is not None:
-                await self._install_run_termination_intent(
-                    state, state.stop_request.reason
+            stop_request = service.pending_stop_request(prepared.identity.run_id)
+            if stop_request is not None:
+                await self._install_run_termination_intent_for_run(
+                    prepared.identity.run_id, stop_request.reason
                 )
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
-                    abort_reason=state.stop_request.reason,
+                    run_id=prepared.identity.run_id,
+                    abort_reason=stop_request.reason,
                 )
             else:
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
+                    run_id=prepared.identity.run_id,
                     stop_reason=(
                         RunStopReason.RUNTIME_PUBLICATION_FAILURE
                         if isinstance(exc, EventPublicationAfterCommitError)
@@ -1616,7 +2143,6 @@ class HostSession:
             run_start_event_id=committed.run_start_event.id,
         )
         await self._adopt_committed_host_run(
-            state=state,
             committed=committed,
             prepared=prepared,
         )
@@ -1865,7 +2391,7 @@ class HostSession:
 
     async def _borrow_active_run_monitor_safe_point(
         self,
-        state: LoopState,
+        run_id: str,
         next_model_call_index: int,
     ) -> ActiveRunMonitorSafePointLease | None:
         """Borrow one confirmed notification set before context preparation."""
@@ -1882,32 +2408,31 @@ class HostSession:
             self._ingress_coordinator.authority_guard(),
             runtime_session.write_coordinator.lock,
         ):
+            service = self.wiring.run_activation_service
+            if service is None:
+                raise RuntimeError("runtime composition lacks its activation service")
+            active_state = service.active_safe_point_state(run_id)
             if (
-                self._active_state is not state
-                or self.active_run_id != state.run_id
+                active_state is None
+                or self.active_run_id != run_id
                 or not self._ingress_coordinator.can_borrow_active_run_notifications()
-                or state.pending_interaction_kind is not None
-                or bool(state.pending_tool_calls)
+                or active_state.has_pending_interaction
+                or active_state.has_pending_tool_calls
             ):
                 return None
             existing = self._active_run_monitor_safe_point_lease
             if existing is not None:
                 if (
-                    existing.run_id == state.run_id
+                    existing.run_id == run_id
                     and existing.next_model_call_index == next_model_call_index
                 ):
                     return existing
                 raise HostIngressAdmissionStale(
                     "another active-run monitor safe point still owns notifications"
                 )
-            run_owner = self._run_execution_owners.get(state.run_id)
-            segment = run_owner.active_segment if run_owner is not None else None
             if (
-                run_owner is None
-                or run_owner.terminal_state != "open"
-                or run_owner.termination_intent is not None
-                or segment is None
-                or segment.segment_state != "active"
+                not active_state.terminal_open
+                or not active_state.termination_intent_absent
             ):
                 return None
             selected_all = (
@@ -1945,11 +2470,11 @@ class HostSession:
                 ).total_seconds() < policy.minimum_automatic_delivery_interval_seconds:
                     return None
             previous_index = next_model_call_index - 1
-            disposition_event_id = state.scratchpad.get(
-                "latest_model_control_disposition_event_id"
+            disposition_event_id = (
+                active_state.latest_model_control_disposition_event_id
             )
-            disposition_index = state.scratchpad.get(
-                "latest_model_control_disposition_model_call_index"
+            disposition_index = (
+                active_state.latest_model_control_disposition_model_call_index
             )
             disposition = (
                 runtime_session.event_log.get_by_id(disposition_event_id)
@@ -1960,17 +2485,14 @@ class HostSession:
                 not isinstance(disposition, ModelCallControlDispositionResolvedEvent)
                 or disposition_index != previous_index
                 or disposition.model_call_index != previous_index
-                or disposition.run_id != state.run_id
+                or disposition.run_id != run_id
                 or disposition.disposition is not ModelCallControlDisposition.ACCEPTED
             ):
                 return None
             previous_end = runtime_session.event_log.get_by_id(
                 disposition.model_call_end_event_id
             )
-            working_set = state.run_working_set
-            if working_set is None:
-                return None
-            run_start_id = working_set.run_start_event_id
+            run_start_id = active_state.run_start_event_id
             run_start = runtime_session.event_log.get_by_id(run_start_id)
             if (
                 not isinstance(previous_end, ModelCallEndEvent)
@@ -1990,7 +2512,7 @@ class HostSession:
             lease_id = context_fingerprint(
                 "active-run-monitor-safe-point-lease:v1",
                 (
-                    state.run_id,
+                    run_id,
                     next_model_call_index,
                     tuple(item.source_event.id for item in selected),
                     host_state.state_fingerprint,
@@ -2001,7 +2523,7 @@ class HostSession:
             lease = ActiveRunMonitorSafePointLease(
                 lease_id=lease_id,
                 runtime_session_id=self.runtime_session_id,
-                run_id=state.run_id,
+                run_id=run_id,
                 next_model_call_index=next_model_call_index,
                 source_events=tuple(item.source_event for item in selected),
                 attachments=tuple(item.attachment for item in selected),
@@ -2025,8 +2547,8 @@ class HostSession:
                 close_intent_revision=host_state.close_intent_revision,
                 stop_intent_revision=self._stop_intent_revision,
                 termination_intent_revision=self._termination_intent_revision,
-                active_segment_id=segment.segment_id,
-                active_segment_generation=segment.segment_generation,
+                active_segment_id=active_state.segment_id,
+                active_segment_generation=active_state.segment_generation,
                 llm_lifecycle_generation=(
                     runtime_session.model_stream_execution_registry.generation + 1
                 ),
@@ -2078,32 +2600,32 @@ class HostSession:
         start_event: ModelCallStartEvent,
         candidate_events: tuple[AgentEvent, ...],
         guard,
-        state: LoopState,
+        run_id: str,
     ) -> None:
         """Revalidate the borrowed authority under RuntimeSession's writer lock."""
 
         lease = self._active_run_monitor_safe_point_lease
-        if lease is None or lease.run_id != state.run_id:
+        if lease is None or lease.run_id != run_id:
             raise HostIngressAdmissionStale(
                 "active-run monitor safe-point lease is unavailable"
             )
         runtime_session = self.wiring.runtime_wiring.runtime_session
         host_state = self._ingress_coordinator.state_fact()
-        run_owner = self._run_execution_owners.get(state.run_id)
-        segment = run_owner.active_segment if run_owner is not None else None
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        active_state = service.active_safe_point_state(run_id)
         if (
             self._lifecycle is not HostSessionLifecycle.OPEN
-            or self._active_state is not state
-            or self.active_run_id != state.run_id
+            or active_state is None
+            or self.active_run_id != run_id
             or not self._ingress_coordinator.can_borrow_active_run_notifications()
-            or state.pending_interaction_kind is not None
-            or bool(state.pending_tool_calls)
-            or run_owner is None
-            or run_owner.terminal_state != "open"
-            or run_owner.termination_intent is not None
-            or segment is None
-            or segment.segment_id != lease.active_segment_id
-            or segment.segment_generation != lease.active_segment_generation
+            or active_state.has_pending_interaction
+            or active_state.has_pending_tool_calls
+            or not active_state.terminal_open
+            or not active_state.termination_intent_absent
+            or active_state.segment_id != lease.active_segment_id
+            or active_state.segment_generation != lease.active_segment_generation
             or self._stop_intent_revision != lease.stop_intent_revision
             or self._termination_intent_revision != lease.termination_intent_revision
             or host_state.state_generation != lease.host_state_generation
@@ -2295,15 +2817,15 @@ class HostSession:
     def _new_execution_handles(
         self,
         *,
-        owner_id: str,
+        owner: PreparedRunOwnerReservationKey,
         generation: int,
         frozen_execution_surface: FrozenCapabilityExecutionSurface,
-        state: str = "attempt_owned",
-    ) -> BoundaryExecutionHandles:
-        return BoundaryExecutionHandles(
+        state: str = "boundary_owned",
+    ) -> RunExecutionHandleSet:
+        return RunExecutionHandleSet(
             handle_id=f"run_execution_handles:{uuid4().hex}",
             handle_generation=generation,
-            owner_id=owner_id,
+            owner=owner,
             state=state,  # type: ignore[arg-type]
             mcp_installation=self.wiring.runtime_wiring.mcp_installation,
             capability_runtime=self.wiring.agent_runtime.capability_runtime,
@@ -2314,52 +2836,53 @@ class HostSession:
     def _register_committed_host_run_owner(
         self,
         *,
-        state: LoopState,
         committed: CommittedHostRunEntry,
         prepared: PreparedNewRunBoundary,
     ) -> None:
         self.wiring.runtime_wiring.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
             committed.run_start_event
         )
-        install_run_working_set(
-            state,
-            committed,
+        attempt = self._boundary_attempt
+        if attempt is None or attempt.prepared_activation is None:
+            raise RuntimeError("committed run lost its prepared activation owner")
+        prepared_activation = attempt.prepared_activation
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        service.initialize_committed_state(
+            prepared_activation=prepared_activation,
+            committed=committed,
             plan_snapshot=prepared.plan_snapshot,
             capability_resolve_basis=prepared.capability_basis,
             frozen_execution_surface=prepared.frozen_execution_surface,
         )
-        attempt = self._boundary_attempt
         if attempt is None or attempt.execution_handles is None:
             raise RuntimeError("committed run lost its attempt-owned execution handles")
         handles = attempt.execution_handles
         if handles.frozen_execution_surface is not prepared.frozen_execution_surface:
             raise RuntimeError("committed run execution surface drifted after freeze")
-        handles.transfer_to_run(state.run_id)
-        owner = CommittedRunExecutionOwner(
-            entry=committed,
-            execution_handles=handles,
-            retiring_execution_handles={},
-            terminal_event_id=committed.run_start_event.terminal_run_end_event_id,
-            terminal_candidate=None,
-            terminal_state="open",
-            terminalization_task=None,
-            termination_intent=None,
-            run_completion=asyncio.get_running_loop().create_future(),
-            next_segment_generation=0,
-            active_segment=None,
-            latest_activation_owner_kind="host_run_boundary",
-            latest_activation_owner_id=committed.boundary_id,
+        reservation_key = attempt.run_owner_reservation_key
+        if reservation_key is None:
+            raise RuntimeError("committed run lost its prepared owner reservation")
+        promoted_handles = self._run_activation_service.promote_committed_owner(
+            reservation_key=reservation_key,
+            committed=committed,
+            prepared_activation=prepared_activation,
         )
-        self._run_execution_owners.register(state.run_id, owner)
-        state.scratchpad["run_execution_handle_id"] = handles.handle_id
-        state.scratchpad["capability_execution_borrow_authority"] = (
-            handles.borrow_authority
+        if promoted_handles is not handles:
+            raise RuntimeError("committed run promotion changed execution handles")
+        attempt.run_owner_reservation_key = None
+        attempt.execution_handles = None
+        attempt.prepared_activation = None
+        service.install_committed_execution_handle(
+            run_id=committed.run_start_event.run_id,
+            handle_id=handles.handle_id,
+            borrow_authority=handles.borrow_authority,
         )
 
     async def _adopt_committed_host_run(
         self,
         *,
-        state: LoopState,
         committed: CommittedHostRunEntry,
         prepared: PreparedNewRunBoundary,
     ) -> None:
@@ -2367,7 +2890,6 @@ class HostSession:
 
         try:
             self._register_committed_host_run_owner(
-                state=state,
                 committed=committed,
                 prepared=prepared,
             )
@@ -2378,23 +2900,65 @@ class HostSession:
                 # RunStart is already canonical. Even if process-owner
                 # installation failed before it installed the working set, the
                 # stable RunEnd builder still needs the committed run contract.
-                if state.run_working_set is None:
-                    install_run_working_set(
-                        state,
-                        committed,
+                attempt = self._boundary_attempt
+                if attempt is None or attempt.prepared_activation is None:
+                    raise RuntimeError(
+                        "committed RunStart owner recovery lost its prepared activation"
+                    ) from ownership_error
+                service = self.wiring.run_activation_service
+                if service is None:
+                    raise RuntimeError(
+                        "runtime composition lacks its activation service"
+                    ) from ownership_error
+                prepared_activation = attempt.prepared_activation
+                try:
+                    service.initialize_committed_state(
+                        prepared_activation=prepared_activation,
+                        committed=committed,
                         plan_snapshot=prepared.plan_snapshot,
                         capability_resolve_basis=prepared.capability_basis,
                         frozen_execution_surface=prepared.frozen_execution_surface,
                     )
-                stop_request = state.stop_request
+                except RuntimeError as initialization_error:
+                    if "committed RunWorkingSet" not in str(initialization_error):
+                        raise
+                # RunStart is already durable. If the boundary-to-registry
+                # handoff itself failed before promotion, recover that exact
+                # prepared reservation into the stable owner before running
+                # terminal maintenance. No terminal path may fall back to an
+                # unowned working state.
+                run_id = committed.run_start_event.run_id
+                if not self._run_activation_service.has_run_owner(run_id):
+                    if (
+                        attempt is None
+                        or attempt.run_owner_reservation_key is None
+                        or attempt.execution_handles is None
+                    ):
+                        raise RuntimeError(
+                            "committed RunStart owner recovery lost its prepared authority"
+                        ) from ownership_error
+                    handles = self._run_activation_service.promote_committed_owner(
+                        reservation_key=attempt.run_owner_reservation_key,
+                        committed=committed,
+                        prepared_activation=prepared_activation,
+                    )
+                    attempt.run_owner_reservation_key = None
+                    attempt.execution_handles = None
+                    attempt.prepared_activation = None
+                    service.install_committed_execution_handle(
+                        run_id=run_id,
+                        handle_id=handles.handle_id,
+                        borrow_authority=handles.borrow_authority,
+                    )
+                stop_request = service.pending_stop_request(run_id)
                 if stop_request is not None:
-                    await self.wiring.agent_runtime.abort_run(
-                        state,
+                    await service.abort_pending_run(
+                        run_id,
                         reason=stop_request.reason,
                     )
                 else:
-                    await self.wiring.agent_runtime.fail_committed_run(
-                        state,
+                    await service.fail_pending_run(
+                        run_id,
                         stop_reason=RunStopReason.RUNTIME_EXECUTION_ERROR,
                         error_message=(
                             "committed RunStart owner installation failed: "
@@ -2409,30 +2973,31 @@ class HostSession:
     async def _terminalize_committed_run_after_boundary_failure(
         self,
         *,
-        state: LoopState,
+        run_id: str,
         stop_reason: RunStopReason | None = None,
         error_message: str | None = None,
         abort_reason: AbortKind | None = None,
     ) -> AgentRunResult:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
         try:
             if abort_reason is not None:
-                result = await self.wiring.agent_runtime.abort_run(
-                    state,
-                    reason=abort_reason,
-                )
+                result = await service.abort_pending_run(run_id, reason=abort_reason)
             else:
                 if stop_reason is None or error_message is None:
                     raise ValueError("failure terminalization requires typed reason")
-                result = await self.wiring.agent_runtime.fail_committed_run(
-                    state,
+                result = await service.fail_pending_run(
+                    run_id,
                     stop_reason=stop_reason,
                     error_message=error_message,
                 )
         except EventPublicationAfterCommitError:
-            if not state.finalized:
+            if not service.is_finalized(run_id):
                 raise
-            result = self.wiring.agent_runtime._run_result(state)
-        self._fold_run_owner_terminal(result)
+            result = agent_run_result_from_terminal_outcome(
+                await service.wait_run_completion(run_id)
+            )
         return result
 
     async def _prepare_and_commit_new_run_boundary(
@@ -2441,27 +3006,20 @@ class HostSession:
         ingress_owner: HostIngressAttemptOwner,
         user_input: str,
         active_skill_names: frozenset[str],
-        state: LoopState,
         identity: HostRunBoundaryIdentityFact,
     ) -> tuple[AgentRunDraft, CommittedHostRunEntry, tuple[AgentEvent, ...]]:
         """The sole PRE_RUN coordinator, called with ``_run_lock`` held."""
 
         self._set_boundary_phase(HostRunBoundaryPhase.ADMISSION)
         self._require_new_run_admission("starting a new turn")
-        agent = self.wiring.agent_runtime
-        if (
-            agent._subagent_parent_features_enabled
-            and agent.subagent_runtime is not None
-            and not agent._subagent_dangling_repair_done
-        ):
+        if not self._subagent_dangling_repair_done:
             # Repair can append parent-graph facts, so it must complete before
             # transcript/watermark freeze rather than inside the draft builder.
-            await agent.subagent_runtime.repair_dangling_children()
-            agent._subagent_dangling_repair_done = True
+            await self.repair_dangling_children_once()
         self._set_boundary_phase(HostRunBoundaryPhase.CONTRACT_RESOLUTION)
         run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
         permission_snapshot = self._resolve_new_run_permission_snapshot(
-            run_id=state.run_id
+            run_id=identity.run_id
         )
         await self._ingress_coordinator.update_permission_policy(
             context_fingerprint(
@@ -2504,9 +3062,8 @@ class HostSession:
         )
         prior_messages.extend(self._plan_runtime_messages())
         self._set_boundary_phase(HostRunBoundaryPhase.FINAL_FREEZE)
-        self._freeze_new_run_boundary_inputs(
+        authority = self._freeze_new_run_boundary_inputs(
             ingress_owner=ingress_owner,
-            state=state,
             identity=identity,
             user_input=user_input,
             active_skill_names=active_skill_names,
@@ -2519,21 +3076,15 @@ class HostSession:
             transcript_source_event_count=transcript_source_event_count,
             frozen_surface=frozen_surface,
         )
-        plan_snapshot = state.scratchpad.get("host_run_boundary_plan")
-        transcript_fact = state.scratchpad.get("host_run_boundary_transcript")
-        capability_basis = state.scratchpad.get("capability_resolve_basis")
-        if not isinstance(plan_snapshot, PlanWorkflowStateFact):
-            raise RuntimeError("new-run boundary lost its plan snapshot")
-        if not isinstance(transcript_fact, BoundaryTranscriptSnapshotFact):
-            raise RuntimeError("new-run boundary lost its transcript fact")
-        if not isinstance(capability_basis, CapabilityResolveBasis):
-            raise RuntimeError("new-run boundary lost its capability basis")
+        plan_snapshot = authority.plan
+        transcript_fact = authority.transcript
+        capability_basis = authority.capability_basis
         pending_audits = tuple(
             self.wiring.runtime_wiring.runtime_session.pending_mcp_installation_audit_events(
                 EventContext(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
+                    run_id=identity.run_id,
+                    turn_id=identity.turn_id,
+                    reply_id=identity.reply_id,
                 )
             )
         )
@@ -2549,7 +3100,7 @@ class HostSession:
         )
         long_horizon = prepare_root_long_horizon_run(
             runtime_session_id=self.runtime_session_id,
-            run_id=state.run_id,
+            run_id=identity.run_id,
             run_start_event_id=run_start_event_id,
             primary_target=run_model_target.fact,
             summarizer_target=summarizer_target.fact,
@@ -2565,21 +3116,19 @@ class HostSession:
             run_model_target=run_model_target,
             permission_snapshot=permission_snapshot,
             plan_snapshot=plan_snapshot,
-            mcp_installation_fact=self._mcp_installation_reference_fact(),
+            mcp_installation_fact=authority.mcp_installation,
             owned_transcript_messages=tuple(
                 message.model_copy(deep=True) for message in prior_messages
             ),
             transcript_fact=transcript_fact,
             capability_basis=capability_basis,
-            current_user_message=state.scratchpad["current_user_message_fact"],
-            host_run_ingress=state.scratchpad["host_run_ingress"],
-            host_ingress_admission_proof=(
-                state.scratchpad["host_ingress_admission_proof"]
-            ),
+            current_user_message=authority.current_user_message,
+            host_run_ingress=authority.host_run_ingress,
+            host_ingress_admission_proof=authority.host_ingress_admission_proof,
             ingress_owner=ingress_owner,
             run_start_event_id=run_start_event_id,
-            terminal_run_end_event_id=state.scratchpad["terminal_run_end_event_id"],
-            new_run_boundary=state.scratchpad["new_run_boundary_fact"],
+            terminal_run_end_event_id=authority.terminal_run_end_event_id,
+            new_run_boundary=authority.new_run_boundary,
             frozen_execution_surface=frozen_surface,
             pending_mcp_audits=pending_audits,
             long_horizon=long_horizon,
@@ -2589,12 +3138,26 @@ class HostSession:
         if attempt is None:
             raise RuntimeError("new-run boundary lost its process owner")
         attempt.execution_handles = self._new_execution_handles(
-            owner_id=identity.boundary_id,
+            owner=(
+                reservation_key := build_prepared_run_owner_reservation_key(
+                    runtime_session_id=self.runtime_session_id,
+                    run_id=identity.run_id,
+                    run_start_event_id=run_start_event_id,
+                )
+            ),
             generation=1,
             frozen_execution_surface=frozen_surface,
         )
+        attempt.run_owner_reservation_key = reservation_key
+        self._run_activation_service.reserve_prepared_owner(
+            key=reservation_key,
+            execution_handles=attempt.execution_handles,
+            reservation_generation=1,
+        )
+        if attempt.prepared_activation is None:
+            raise RuntimeError("new-run boundary lost its prepared activation owner")
         draft, committed, stored = await self._commit_new_run_entry(
-            state=state,
+            prepared_activation=attempt.prepared_activation,
             prepared=prepared,
         )
         self._set_boundary_phase(HostRunBoundaryPhase.ACTIVATION)
@@ -2605,7 +3168,7 @@ class HostSession:
         user_input: str,
         *,
         active_skill_names: frozenset[str] | None = None,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._host_event_loop = asyncio.get_running_loop()
         self._terminal_notification_dispatch_enabled = True
         self._raise_if_not_open("starting a new turn")
@@ -2634,15 +3197,13 @@ class HostSession:
         *,
         user_input: str,
         active_skill_names: frozenset[str],
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_open("starting an admitted turn")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
-        state = self.wiring.agent_runtime.new_state()
         identity = self._new_run_boundary_identity(
-            state,
             kind=(
                 "pre_runtime_request" if ingress_owner.kind == "runtime" else "pre_run"
             ),
@@ -2658,10 +3219,9 @@ class HostSession:
         task = self._create_owned_boundary_task(
             lambda: self._run_turn_pipeline(
                 boundary_input=boundary_input,
-                state=state,
             ),
-            preparing_state=state,
             preparing_identity=identity,
+            prepare_initial_activation=True,
         )
         try:
             try:
@@ -2676,24 +3236,28 @@ class HostSession:
             except asyncio.CancelledError:
                 if (
                     not task.cancelled()
-                    or state.run_id not in self._boundary_stop_requested_run_ids
+                    or identity.run_id not in self._boundary_stop_requested_run_ids
                 ):
                     raise
-                if state.finalized:
-                    return self.wiring.agent_runtime._run_result(state)
-                owner = self._run_execution_owners.get(state.run_id)
-                if owner is None:
+                service = self.wiring.run_activation_service
+                if service is None:
+                    raise RuntimeError(
+                        "runtime composition lacks its activation service"
+                    )
+                if not self._run_activation_service.has_run_owner(identity.run_id):
                     raise
-                return await asyncio.shield(owner.run_completion)
+                terminal = await self._run_activation_service.wait_run_completion(
+                    identity.run_id
+                )
+                return agent_run_result_from_terminal_outcome(terminal)
         finally:
-            self._boundary_stop_requested_run_ids.discard(state.run_id)
+            self._boundary_stop_requested_run_ids.discard(identity.run_id)
 
     async def _run_turn_pipeline(
         self,
         *,
         boundary_input: NewRunBoundaryInput,
-        state: LoopState,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         async with self._run_lock:
             try:
                 for attempt_index in range(_MAX_RUN_SEED_REFREEZE_ATTEMPTS):
@@ -2706,7 +3270,6 @@ class HostSession:
                             ingress_owner=boundary_input.ingress_owner,
                             user_input=boundary_input.user_input,
                             active_skill_names=boundary_input.active_skill_names,
-                            state=state,
                             identity=boundary_input.identity,
                         )
                     except BaseException as exc:
@@ -2720,18 +3283,21 @@ class HostSession:
                     break
                 else:  # pragma: no cover - bounded loop always breaks or raises.
                     raise AssertionError("run-seed re-freeze loop exhausted")
-                self._activate_committed_state(state, committed)
+                self._prepare_committed_host_activation(
+                    boundary_input.identity.run_id,
+                    committed,
+                )
                 self._complete_boundary_attempt_after_activation()
-                return await self._run_owned(
-                    state,
-                    lambda: self.wiring.agent_runtime.run_committed_entry(
-                        draft,
-                        committed,
-                        active_skill_names=boundary_input.active_skill_names,
-                    ),
+                return await self._run_initial_owned(
+                    run_id=boundary_input.identity.run_id,
+                    draft=draft,
+                    committed=committed,
+                    active_skill_names=boundary_input.active_skill_names,
                 )
             except BaseException as exc:
-                await self._terminalize_post_commit_pipeline_failure(state, exc)
+                await self._terminalize_post_commit_pipeline_failure(
+                    boundary_input.identity.run_id, exc
+                )
                 raise
 
     def _reset_boundary_after_run_seed_source_stale(self) -> None:
@@ -2745,7 +3311,26 @@ class HostSession:
             raise RuntimeError(
                 "run-seed source retry requires a confirmed-NONE boundary batch"
             )
+        if attempt.run_owner_reservation_key is not None:
+            self._run_activation_service.release_prepared_owner(
+                attempt.run_owner_reservation_key,
+                outcome="none",
+            )
+        authority = attempt.prepared_authority
+        prepared_activation = attempt.prepared_activation
+        service = self.wiring.run_activation_service
+        if authority is None or prepared_activation is None or service is None:
+            raise RuntimeError("run-seed source retry lost its prepared owner")
+        next_generation = prepared_activation.generation + 1
+        prepared_activation.release()
+        attempt.prepared_activation = service.prepare_boundary_activation(
+            identity=authority.identity,
+            owner_task=attempt.owner_task,
+            generation=next_generation,
+        )
         attempt.phase = HostRunBoundaryPhase.ADMISSION
+        attempt.prepared_authority = None
+        attempt.run_owner_reservation_key = None
         attempt.execution_handles = None
         attempt.candidate_events = ()
         attempt.candidate_event_ids = ()
@@ -2764,8 +3349,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         observer = _StreamObserver()
         ingress_id = f"host_ingress:{uuid4().hex}"
-        state = self.wiring.agent_runtime.new_state()
-        identity = self._new_run_boundary_identity(state)
+        identity = self._new_run_boundary_identity()
 
         async def _submit() -> None:
             try:
@@ -2779,7 +3363,6 @@ class HostSession:
                         observer=observer,
                         user_input=user_input,
                         active_skill_names=active_skill_names or frozenset(),
-                        state=state,
                         identity=identity,
                     ),
                 )
@@ -2790,8 +3373,8 @@ class HostSession:
 
         task = self._create_owned_boundary_task(
             _submit,
-            preparing_state=state,
             preparing_identity=identity,
+            prepare_initial_activation=True,
             observer=observer,
         )
         return _OwnedBoundaryStreamObserver(
@@ -2806,50 +3389,46 @@ class HostSession:
         observer: _StreamObserver,
         user_input: str,
         active_skill_names: frozenset[str],
-        state: LoopState,
         identity: HostRunBoundaryIdentityFact,
     ) -> None:
-        execution_task = asyncio.current_task()
-        if execution_task is None:
-            raise RuntimeError("stream ingress requires an asyncio task owner")
-        self._boundary_execution_task = execution_task
-        self._raise_if_not_open("starting an admitted stream turn")
-        if self.stopping_run_id is not None:
-            raise HostSessionBusyError("host session is stopping an active run")
-        self._raise_if_pending_interaction("starting a new turn")
-        task = self._active_task
-        if (
-            self._run_lock.locked()
-            or self.active_run_id is not None
-            or (task is not None and not task.done())
-        ):
-            raise HostSessionBusyError("host session already has an active run")
-        boundary_input = NewRunBoundaryInput(
-            identity=identity,
-            user_input=user_input,
-            active_skill_names=active_skill_names or frozenset(),
-            host_session_id=self.host_session_id,
-            conversation_id=self.conversation_id,
-            ingress_owner=ingress_owner,
-        )
-
-        async for event in self._stream_turn_pipeline(
-            boundary_input,
-            state=state,
-        ):
-            await observer.emit(event)
-        if self.pending_interaction is not None:
-            await self._ingress_coordinator.mark_waiting_user(
-                resume_match_key=_pending_interaction_match_key(
-                    self.pending_interaction
-                )
+        attempt = self._take_boundary_execution_ownership()
+        try:
+            self._raise_if_not_open("starting an admitted stream turn")
+            if self.stopping_run_id is not None:
+                raise HostSessionBusyError("host session is stopping an active run")
+            self._raise_if_pending_interaction("starting a new turn")
+            active_view = self._run_activation_service.active_host_run_view()
+            if (
+                self._run_lock.locked()
+                or self.active_run_id is not None
+                or (active_view is not None and active_view.active_driver_running)
+            ):
+                raise HostSessionBusyError("host session already has an active run")
+            boundary_input = NewRunBoundaryInput(
+                identity=identity,
+                user_input=user_input,
+                active_skill_names=active_skill_names or frozenset(),
+                host_session_id=self.host_session_id,
+                conversation_id=self.conversation_id,
+                ingress_owner=ingress_owner,
             )
+
+            async for event in self._stream_turn_pipeline(
+                boundary_input,
+            ):
+                await observer.emit(event)
+            if self.pending_interaction is not None:
+                await self._ingress_coordinator.mark_waiting_user(
+                    resume_match_key=_pending_interaction_match_key(
+                        self.pending_interaction
+                    )
+                )
+        finally:
+            self._finish_ingress_owned_boundary(attempt)
 
     async def _stream_turn_pipeline(
         self,
         boundary_input: NewRunBoundaryInput,
-        *,
-        state: LoopState,
     ) -> AsyncIterator[AgentEvent]:
         async with self._run_lock:
             try:
@@ -2861,38 +3440,50 @@ class HostSession:
                     ingress_owner=boundary_input.ingress_owner,
                     user_input=boundary_input.user_input,
                     active_skill_names=boundary_input.active_skill_names,
-                    state=state,
                     identity=boundary_input.identity,
                 )
-                self._activate_committed_state(state, committed)
+                self._prepare_committed_host_activation(
+                    boundary_input.identity.run_id,
+                    committed,
+                )
                 self._complete_boundary_attempt_after_activation()
                 for event in stored:
                     yield event
-                async for event in self._stream_events_in_boundary_driver(
-                    state,
-                    lambda: self.wiring.agent_runtime.stream_committed_entry(
-                        draft,
-                        committed,
-                        active_skill_names=boundary_input.active_skill_names,
-                    ),
+                async for event in self._stream_initial_owned(
+                    run_id=boundary_input.identity.run_id,
+                    draft=draft,
+                    committed=committed,
+                    active_skill_names=boundary_input.active_skill_names,
                 ):
                     yield event
             except BaseException as exc:
-                await self._terminalize_post_commit_pipeline_failure(state, exc)
+                await self._terminalize_post_commit_pipeline_failure(
+                    boundary_input.identity.run_id, exc
+                )
                 raise
 
     async def _terminalize_post_commit_pipeline_failure(
         self,
-        state: LoopState,
+        run_id: str,
         exc: BaseException,
     ) -> None:
-        owner = self._run_execution_owners.get(state.run_id)
-        if owner is None or state.finalized:
+        service = self._run_activation_service
+        view = service.run_view(run_id)
+        if view is None or service.is_finalized(run_id):
+            return
+        # The activation driver may already have frozen the stable RunEnd
+        # candidate before surfacing its write error.  That candidate and its
+        # finalization carrier remain the unique retry owner; a boundary-level
+        # failure handler must not start a second terminalization attempt.
+        if view.terminal_state != "open" or view.lifecycle in {
+            "terminalizing",
+            "reconciliation_required",
+        }:
             return
         if isinstance(exc, asyncio.CancelledError):
             _clear_current_task_cancellation()
         await self._terminalize_committed_run_after_boundary_failure(
-            state=state,
+            run_id=run_id,
             stop_reason=(
                 RunStopReason.RUNTIME_PUBLICATION_FAILURE
                 if isinstance(exc, EventPublicationAfterCommitError)
@@ -2900,8 +3491,8 @@ class HostSession:
             ),
             error_message=(f"committed Host run pipeline failed: {type(exc).__name__}"),
         )
-        if state.finalized:
-            self._finish_active_run()
+        if service.is_finalized(run_id):
+            self._finish_active_run(run_id)
 
     def get_pending_approval(self) -> PendingApproval | None:
         return (
@@ -2963,12 +3554,19 @@ class HostSession:
         self.last_active_at = time.monotonic()
         return policy
 
-    async def resolve_approval(self, resolution: ApprovalResolution) -> AgentRunResult:
+    async def resolve_approval(
+        self, resolution: ApprovalResolution
+    ) -> HostActivationResult:
         self._raise_if_not_open("resolving an approval")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
+        prepared = self._prepare_interaction_resume_attempt(
+            pending=pending,
+            interaction_kind="approval",
+            resolution=resolution,
+        )
         return await self._ingress_coordinator.submit(
             kind="resume",
             payload=resolution,
@@ -2976,13 +3574,7 @@ class HostSession:
             resume_match_key=resolution.approval_id,
             runner=lambda owner: self._run_resume_ingress(
                 owner,
-                pending=pending,
-                interaction_id=resolution.approval_id,
-                interaction_kind="approval",
-                resolution=resolution,
-                router=lambda state: self.wiring.agent_runtime.resume_after_approval(
-                    state, resolution
-                ),
+                prepared=prepared,
             ),
         )
 
@@ -2990,67 +3582,62 @@ class HostSession:
         self,
         _ingress_owner: HostIngressAttemptOwner,
         *,
-        pending: PendingInteraction,
-        interaction_id: str,
-        interaction_kind: Literal["approval", "plan", "mcp_input_required"],
-        resolution: object,
-        router: Callable[[LoopState], Awaitable[AgentRunResult]],
+        prepared: PreparedInteractionResumeAttempt,
         prepare_plan_state: bool = False,
         recover_pending_on_publication_failure: bool = False,
-    ) -> AgentRunResult:
-        state = self._require_suspended_state(pending)
-        boundary_input = self._new_interaction_boundary_input(
-            state,
-            interaction_id=interaction_id,
-            interaction_kind=interaction_kind,
-            resolution=resolution,
-        )
+    ) -> HostActivationResult:
         task = self._create_owned_boundary_task(
             lambda: self._resolve_interaction_pipeline(
-                pending=pending,
-                boundary_input=boundary_input,
-                router=router,
+                prepared=prepared,
                 prepare_plan_state=prepare_plan_state,
                 recover_pending_on_publication_failure=(
                     recover_pending_on_publication_failure
                 ),
             ),
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
+            preparing_identity=prepared.boundary_identity,
         )
         return await asyncio.shield(task)
 
     async def _resolve_interaction_pipeline(
         self,
         *,
-        pending: PendingInteraction,
-        boundary_input: InteractionResumeBoundaryInput,
-        router: Callable[[LoopState], Awaitable[AgentRunResult]],
+        prepared: PreparedInteractionResumeAttempt,
         prepare_plan_state: bool = False,
         recover_pending_on_publication_failure: bool = False,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         async with self._run_lock:
             self._require_resume_admission(
-                interaction_id=boundary_input.interaction_id,
-                interaction_kind=boundary_input.interaction_kind,
+                interaction_id=_pending_interaction_match_key(
+                    prepared.pending_public_view  # type: ignore[arg-type]
+                ),
+                interaction_kind=prepared.interaction_kind,
             )
-            await self._prepare_and_commit_resume_boundary(
-                pending=pending,
-                interaction_kind=boundary_input.interaction_kind,
-                identity=boundary_input.identity,
-                resolution=boundary_input.resolution,
+            transition = await self._interaction_transition_port.commit_resume(
+                prepared.request,
+                deadline_monotonic=time.monotonic() + 30.0,
             )
-            state = self._resume_active_state(pending)
+            if isinstance(transition.outcome, InteractionTransitionNone):
+                raise InteractionTransitionNotCommitted(
+                    "interaction resume candidate was not committed"
+                )
+            if isinstance(transition.outcome, InteractionTransitionUntrusted):
+                raise InteractionTransitionReconciliationRequired(
+                    "interaction resume requires durable reconciliation"
+                )
+            if not isinstance(transition.outcome, InteractionTransitionFull):
+                raise RuntimeError("interaction transition returned an invalid outcome")
+            self._interaction_transition_port.prepare_resume_activation(prepared)
             self._complete_boundary_attempt_after_activation()
             if prepare_plan_state:
-                self._prepare_state_for_plan(state)
+                self._configure_pending_host_plan(
+                    prepared.request.owner_identity.run_id
+                )
             try:
-                result = await self._run_owned(state, lambda: router(state))
+                result = await self._run_resume_owned(prepared=prepared)
                 await self._sync_ingress_waiting_state()
                 return result
             except EventPublicationAfterCommitError:
                 if recover_pending_on_publication_failure:
-                    self._capture_pending_interaction(state)
                     await self._sync_ingress_waiting_state()
                 raise
 
@@ -3063,10 +3650,8 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
-        state = self._require_suspended_state(pending)
-        boundary_input = self._new_interaction_boundary_input(
-            state,
-            interaction_id=resolution.approval_id,
+        prepared = self._prepare_interaction_resume_attempt(
+            pending=pending,
             interaction_kind="approval",
             resolution=resolution,
         )
@@ -3082,17 +3667,15 @@ class HostSession:
                     owner,
                     observer=observer,
                     pipeline=self._stream_approval_resolution_pipeline(
-                        pending=pending,
+                        prepared=prepared,
                         resolution=resolution,
-                        boundary_input=boundary_input,
                     ),
                 ),
             )
 
         task = self._create_owned_boundary_task(
             _submit,
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
+            preparing_identity=prepared.boundary_identity,
             observer=observer,
         )
         return _OwnedBoundaryStreamObserver(
@@ -3107,56 +3690,51 @@ class HostSession:
         observer: _StreamObserver,
         pipeline: AsyncIterator[AgentEvent],
     ) -> None:
-        execution_task = asyncio.current_task()
-        if execution_task is None:
-            raise RuntimeError("stream resume requires an asyncio task owner")
-        self._boundary_execution_task = execution_task
-        async for event in pipeline:
-            await observer.emit(event)
-        await self._sync_ingress_waiting_state()
+        attempt = self._take_boundary_execution_ownership()
+        try:
+            async for event in pipeline:
+                await observer.emit(event)
+            await self._sync_ingress_waiting_state()
+        finally:
+            self._finish_ingress_owned_boundary(attempt)
 
     async def _stream_approval_resolution_pipeline(
         self,
         *,
-        pending: PendingApproval,
+        prepared: PreparedInteractionResumeAttempt,
         resolution: ApprovalResolution,
-        boundary_input: InteractionResumeBoundaryInput,
     ) -> AsyncIterator[AgentEvent]:
         async with self._run_lock:
             self._require_resume_admission(
                 interaction_id=resolution.approval_id,
                 interaction_kind="approval",
             )
-            (
-                _state,
-                _committed,
-                boundary_events,
-            ) = await self._prepare_and_commit_resume_boundary(
-                pending=pending,
-                interaction_kind="approval",
-                identity=boundary_input.identity,
+            transition = await self._interaction_transition_port.commit_resume(
+                prepared.request,
+                deadline_monotonic=time.monotonic() + 30.0,
             )
-            state = self._resume_active_state(pending)
+            boundary_events = self._require_full_interaction_transition(transition)
+            self._interaction_transition_port.prepare_resume_activation(prepared)
             self._complete_boundary_attempt_after_activation()
             for event in boundary_events:
                 yield event
-            async for event in self._stream_events_in_boundary_driver(
-                state,
-                lambda: self.wiring.agent_runtime.stream_after_approval(
-                    state, resolution
-                ),
-            ):
+            async for event in self._stream_resume_owned(prepared=prepared):
                 yield event
 
     async def resolve_plan_interaction(
         self,
         resolution: PlanInteractionResolution,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_open("resolving a plan interaction")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
+        prepared = self._prepare_interaction_resume_attempt(
+            pending=pending,
+            interaction_kind="plan",
+            resolution=resolution,
+        )
         return await self._ingress_coordinator.submit(
             kind="resume",
             payload=resolution,
@@ -3164,15 +3742,7 @@ class HostSession:
             resume_match_key=resolution.interaction_id,
             runner=lambda owner: self._run_resume_ingress(
                 owner,
-                pending=pending,
-                interaction_id=resolution.interaction_id,
-                interaction_kind="plan",
-                resolution=resolution,
-                router=lambda state: (
-                    self.wiring.agent_runtime.resume_after_plan_interaction(
-                        state, resolution
-                    )
-                ),
+                prepared=prepared,
                 prepare_plan_state=True,
             ),
         )
@@ -3180,22 +3750,94 @@ class HostSession:
     async def resolve_mcp_input_required(
         self,
         resolution: McpInputRequiredInteractionResolution,
-    ) -> AgentRunResult:
+    ) -> HostActivationResult:
         self._raise_if_not_open("resolving MCP input-required")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_mcp_input_required(resolution.interaction_id)
         self._raise_if_active_run()
-        prepared_resolution = prepare_mcp_input_required_resolution(
-            source_suspension_event_reference=(
-                pending.source_suspension_event_reference
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        mcp_port = runtime_session.mcp_tool_execution_port
+        if mcp_port is None:
+            raise RuntimeError("MCP resolution requires its execution port")
+        pending_handle = mcp_port.handle_for_interaction(resolution.interaction_id)
+        if pending_handle is None:
+            raise RuntimeError("MCP resolution lost its process-local pending owner")
+        batch_owner = pending_handle.elicitation_batch_owner
+        expected_keys = tuple(slot.request.key for slot in batch_owner.item_slots)
+        supplied_keys = tuple(sorted(resolution.responses))
+        if not resolution.cancelled and supplied_keys != expected_keys:
+            raise ValueError("MCP resolution response key set is not exact")
+        if resolution.cancelled and resolution.responses:
+            raise ValueError("cancelled MCP resolution cannot carry responses")
+        for slot in batch_owner.item_slots:
+            request_key = slot.request.key
+            response = resolution.responses.get(request_key, {})
+            if resolution.cancelled:
+                action = McpElicitationAction.CANCEL
+            else:
+                try:
+                    action = McpElicitationAction(response.get("action", "accept"))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid MCP elicitation action for {request_key!r}"
+                    ) from exc
+            if slot.request.mode == "form":
+                legacy_content = {
+                    key: value for key, value in response.items() if key != "action"
+                }
+                explicit_content = response.get("content")
+                if explicit_content is not None and not isinstance(
+                    explicit_content, dict
+                ):
+                    raise TypeError("MCP form response content must be an object")
+                content = (
+                    explicit_content
+                    if isinstance(explicit_content, dict)
+                    else legacy_content
+                )
+                batch_owner.submit_form(
+                    request_key=request_key,
+                    action=action,
+                    content_present=action is McpElicitationAction.ACCEPT,
+                    content=(
+                        content if action is McpElicitationAction.ACCEPT else None
+                    ),
+                )
+            elif action is McpElicitationAction.ACCEPT:
+                batch_owner.confirm_url_retry(request_key=request_key)
+            else:
+                batch_owner.decline_or_cancel_url(
+                    request_key=request_key,
+                    action=action,
+                )
+        lifecycle = runtime_session.mcp_input_required_lifecycle_store.record(
+            resolution.interaction_id
+        )
+        if lifecycle is None:
+            raise RuntimeError("MCP resolution lacks its durable lifecycle")
+        attempt_ordinal = 1
+        if lifecycle.latest_resume_failed_event_reference is not None:
+            previous_reference = lifecycle.latest_resolution_submitted_event_reference
+            if previous_reference is None:
+                raise RuntimeError("MCP retry lifecycle lost its prior resolution")
+            previous = runtime_session.event_log.get_by_id(previous_reference.event_id)
+            if not isinstance(previous, McpInputRequiredResolutionSubmittedEvent):
+                raise RuntimeError("MCP prior resolution authority is not exact")
+            attempt_ordinal = previous.attempt.attempt_ordinal + 1
+        prepared_resolution = mcp_port.prepare_resolution(
+            pending_handle=pending_handle,
+            source_suspension_event_reference=pending.source_suspension_event_reference,
+            source_suspension=pending.suspension_fact,
+            attempt_ordinal=attempt_ordinal,
+            submitted_at_utc=(
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             ),
-            source_suspension_fact_fingerprint=(
-                pending.suspension_fact.suspension_fact_fingerprint
-            ),
-            interaction_id=resolution.interaction_id,
-            responses=resolution.responses,
-            cancelled=resolution.cancelled,
+        )
+        prepared = self._prepare_interaction_resume_attempt(
+            pending=pending,
+            interaction_kind="mcp_input_required",
+            resolution=prepared_resolution,
         )
         return await self._ingress_coordinator.submit(
             kind="resume",
@@ -3204,17 +3846,36 @@ class HostSession:
             resume_match_key=resolution.interaction_id,
             runner=lambda owner: self._run_resume_ingress(
                 owner,
-                pending=pending,
-                interaction_id=resolution.interaction_id,
-                interaction_kind="mcp_input_required",
-                resolution=prepared_resolution,
-                router=lambda state: (
-                    self.wiring.agent_runtime.resume_after_mcp_input_required(
-                        state, prepared_resolution
-                    )
-                ),
+                prepared=prepared,
                 recover_pending_on_publication_failure=True,
             ),
+        )
+
+    async def launch_mcp_elicitation_url(
+        self,
+        *,
+        interaction_id: str,
+        request_key: str,
+        consent_receipt_fingerprint: str,
+    ):
+        """Launch the exact private URL owned by one pending MCP request."""
+
+        self._raise_if_not_open("launching an MCP elicitation URL")
+        pending = self._require_pending_mcp_input_required(interaction_id)
+        if request_key not in {
+            item.key
+            for item in pending.suspension_fact.request_envelope.ordered_user_visible_input_requests
+        }:
+            raise KeyError("unknown MCP elicitation request key")
+        mcp_port = self.wiring.runtime_wiring.runtime_session.mcp_tool_execution_port
+        if mcp_port is None:
+            raise RuntimeError("MCP URL launch requires its execution port")
+        handle = mcp_port.handle_for_interaction(interaction_id)
+        if handle is None:
+            raise RuntimeError("MCP URL launch lost its pending owner")
+        return await handle.elicitation_batch_owner.launch_url(
+            request_key=request_key,
+            consent_receipt_fingerprint=consent_receipt_fingerprint,
         )
 
     async def exit_plan_workflow(
@@ -3241,19 +3902,18 @@ class HostSession:
                 raise HostSessionPendingInteractionError(
                     "host session has a pending plan question; answer it or use force-exit before cancelling plan"
                 )
-            state = self._require_suspended_state(pending)
-            boundary_input = self._new_interaction_boundary_input(
-                state,
-                interaction_id=pending.interaction_id,
+            resolution_payload = {
+                "source": source,
+                "user_feedback": user_feedback,
+            }
+            prepared = self._prepare_interaction_resume_attempt(
+                pending=pending,
                 interaction_kind="plan",
-                resolution={
-                    "source": source,
-                    "user_feedback": user_feedback,
-                },
+                resolution=resolution_payload,
             )
             await self._ingress_coordinator.submit(
                 kind="resume",
-                payload=boundary_input.resolution,
+                payload=resolution_payload,
                 ingress_id=f"host_ingress_resume:{uuid4().hex}",
                 resume_match_key=pending.interaction_id,
                 runner=lambda owner: self._run_exit_plan_resume_ingress(
@@ -3261,8 +3921,7 @@ class HostSession:
                     pending=pending,
                     source=source,
                     user_feedback=user_feedback,
-                    boundary_input=boundary_input,
-                    state=state,
+                    prepared=prepared,
                 ),
             )
             return
@@ -3278,7 +3937,6 @@ class HostSession:
                     "host plan workflow exit requires durable entry attribution"
                 )
             await self._emit_plan_mode_exited(
-                None,
                 source=source,
                 exit_request_id=None,
                 event_context=EventContext(
@@ -3296,50 +3954,52 @@ class HostSession:
         pending: PendingPlanInteraction,
         source: str,
         user_feedback: str,
-        boundary_input: InteractionResumeBoundaryInput,
+        prepared: PreparedInteractionResumeAttempt,
     ) -> None:
         async with self._run_lock:
+            view = self._interaction_transition_port.suspended_boundary_view(prepared)
             self._require_resume_admission(
                 interaction_id=pending.interaction_id,
                 interaction_kind="plan",
             )
-            await self._prepare_and_commit_resume_boundary(
-                pending=pending,
-                interaction_kind="plan",
-                identity=boundary_input.identity,
+            transition = await self._interaction_transition_port.commit_resume(
+                prepared.request,
+                deadline_monotonic=time.monotonic() + 30.0,
             )
-            state = self._resume_active_state(pending)
+            self._require_full_interaction_transition(transition)
+            self._interaction_transition_port.prepare_resume_activation(prepared)
             self._complete_boundary_attempt_after_activation()
             if pending.kind == "exit":
                 await self.wiring.runtime_wiring.runtime_session.emit(
                     PlanExitResolvedEvent(
-                        run_id=state.run_id,
-                        turn_id=state.turn_id,
-                        reply_id=state.reply_id,
+                        run_id=view.run_id,
+                        turn_id=view.turn_id,
+                        reply_id=view.reply_id,
                         exit_request_id=pending.exit_request_id or "",
                         tool_call_id=pending.tool_call_id,
                         decision="cancel",
                         user_feedback=user_feedback,
-                    ),
-                    state=state,
+                    )
                 )
             await self._emit_plan_mode_exited(
-                state,
                 source=source,
                 exit_request_id=pending.exit_request_id,
-                event_context=None,
+                event_context=EventContext(
+                    run_id=view.run_id,
+                    turn_id=view.turn_id,
+                    reply_id=view.reply_id,
+                ),
                 transition_owner="agent_run",
                 host_workflow_operation_id=None,
             )
-            await self._install_run_termination_intent(state, AbortKind.USER_STOP)
-            result = await self.wiring.agent_runtime.abort_run(
-                state, reason=AbortKind.USER_STOP
+            await self._install_run_termination_intent_for_run(
+                view.run_id, AbortKind.USER_STOP
             )
-            self._fold_run_owner_terminal(result)
-            self._suspended_state = None
-            self.suspended_run_id = None
-            self.pending_interaction = None
-            self._finish_active_run()
+            service = self.wiring.run_activation_service
+            if service is None:
+                raise RuntimeError("runtime composition lacks its activation service")
+            await service.abort_pending_run(view.run_id, reason=AbortKind.USER_STOP)
+            self._finish_active_run(view.run_id)
             await self._ingress_coordinator.clear_waiting_user()
 
     async def _run_exit_plan_resume_ingress(
@@ -3349,18 +4009,16 @@ class HostSession:
         pending: PendingPlanInteraction,
         source: str,
         user_feedback: str,
-        boundary_input: InteractionResumeBoundaryInput,
-        state: LoopState,
+        prepared: PreparedInteractionResumeAttempt,
     ) -> None:
         task = self._create_owned_boundary_task(
             lambda: self._exit_pending_plan_workflow_pipeline(
                 pending=pending,
                 source=source,
                 user_feedback=user_feedback,
-                boundary_input=boundary_input,
+                prepared=prepared,
             ),
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
+            preparing_identity=prepared.boundary_identity,
         )
         await asyncio.shield(task)
 
@@ -3373,10 +4031,8 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
-        state = self._require_suspended_state(pending)
-        boundary_input = self._new_interaction_boundary_input(
-            state,
-            interaction_id=resolution.interaction_id,
+        prepared = self._prepare_interaction_resume_attempt(
+            pending=pending,
             interaction_kind="plan",
             resolution=resolution,
         )
@@ -3392,17 +4048,15 @@ class HostSession:
                     owner,
                     observer=observer,
                     pipeline=self._stream_plan_interaction_resolution_pipeline(
-                        pending=pending,
+                        prepared=prepared,
                         resolution=resolution,
-                        boundary_input=boundary_input,
                     ),
                 ),
             )
 
         task = self._create_owned_boundary_task(
             _submit,
-            preparing_state=state,
-            preparing_identity=boundary_input.identity,
+            preparing_identity=prepared.boundary_identity,
             observer=observer,
         )
         return _OwnedBoundaryStreamObserver(
@@ -3413,35 +4067,25 @@ class HostSession:
     async def _stream_plan_interaction_resolution_pipeline(
         self,
         *,
-        pending: PendingPlanInteraction,
+        prepared: PreparedInteractionResumeAttempt,
         resolution: PlanInteractionResolution,
-        boundary_input: InteractionResumeBoundaryInput,
     ) -> AsyncIterator[AgentEvent]:
         async with self._run_lock:
             self._require_resume_admission(
                 interaction_id=resolution.interaction_id,
                 interaction_kind="plan",
             )
-            (
-                _state,
-                _committed,
-                boundary_events,
-            ) = await self._prepare_and_commit_resume_boundary(
-                pending=pending,
-                interaction_kind="plan",
-                identity=boundary_input.identity,
+            transition = await self._interaction_transition_port.commit_resume(
+                prepared.request,
+                deadline_monotonic=time.monotonic() + 30.0,
             )
-            state = self._resume_active_state(pending)
+            boundary_events = self._require_full_interaction_transition(transition)
+            self._interaction_transition_port.prepare_resume_activation(prepared)
             self._complete_boundary_attempt_after_activation()
-            self._prepare_state_for_plan(state)
+            self._configure_pending_host_plan(prepared.request.owner_identity.run_id)
             for event in boundary_events:
                 yield event
-            async for event in self._stream_events_in_boundary_driver(
-                state,
-                lambda: self.wiring.agent_runtime.stream_after_plan_interaction(
-                    state, resolution
-                ),
-            ):
+            async for event in self._stream_resume_owned(prepared=prepared):
                 yield event
 
     async def stop_current_turn(
@@ -3454,23 +4098,44 @@ class HostSession:
         async with self._stop_lock:
             with self.wiring.runtime_wiring.runtime_session.write_coordinator.lock:
                 self._stop_intent_revision += 1
-            task = self._active_task
-            state = self._active_state
-            boundary_task = self._boundary_task
-            preparing_state = self._preparing_state
+            active_view = self._run_activation_service.run_view(
+                self.active_run_id
+                or self.stopping_run_id
+                or self.suspended_run_id
+                or ""
+            )
+            active_driver_running = bool(
+                active_view is not None and active_view.active_driver_running
+            )
+            active_run_id = active_view.run_id if active_view is not None else None
+            service = self._run_activation_service
+            boundary_attempt = self._boundary_attempt
+            boundary_task = (
+                boundary_attempt.owner_task if boundary_attempt is not None else None
+            )
             if (
                 boundary_task is not None
                 and not boundary_task.done()
-                and (task is None or task.done())
+                and not active_driver_running
             ):
-                boundary_attempt = self._boundary_attempt
-                observer = self._boundary_observer
+                committed_run_id = (
+                    boundary_attempt.draft_run_id
+                    if boundary_attempt is not None
+                    else None
+                )
+                observer = self._current_boundary_observer()
                 if observer is not None:
                     observer.detach()
-                if preparing_state is not None:
-                    preparing_state.stop_request = StopRequest(reason=reason)
-                    self.stopping_run_id = preparing_state.run_id
-                    self._boundary_stop_requested_run_ids.add(preparing_state.run_id)
+                prepared_activation = (
+                    boundary_attempt.prepared_activation
+                    if boundary_attempt is not None
+                    else None
+                )
+                if prepared_activation is not None:
+                    prepared_activation.request_stop(reason)
+                    self._boundary_stop_requested_run_ids.add(
+                        prepared_activation.run_id
+                    )
                 commit_started = boundary_attempt is not None and (
                     boundary_attempt.phase
                     in {
@@ -3486,8 +4151,9 @@ class HostSession:
                     )
                 if not commit_started and not cancelled_owner:
                     boundary_task.cancel()
+                boundary_public_result: object | None = None
                 try:
-                    await asyncio.wait_for(
+                    boundary_public_result = await asyncio.wait_for(
                         asyncio.shield(boundary_task), timeout=timeout
                     )
                 except asyncio.CancelledError:
@@ -3496,33 +4162,32 @@ class HostSession:
                     return None
                 except Exception:
                     pass
-                finally:
-                    self.stopping_run_id = None
                 boundary_outcome = (
                     await asyncio.shield(boundary_attempt.completion)
                     if boundary_attempt is not None
                     else None
                 )
-                if preparing_state is not None:
-                    if preparing_state.finalized:
-                        return self.wiring.agent_runtime._run_result(preparing_state)
-                    if (
-                        self._run_execution_owners.get(preparing_state.run_id)
-                        is not None
-                    ):
-                        await self._install_run_termination_intent(
-                            preparing_state, reason
-                        )
-                        result = await self.wiring.agent_runtime.abort_run(
-                            preparing_state, reason=reason
-                        )
-                        self._fold_run_owner_terminal(result)
-                        self._complete_pending_mcp_lease_for_state(preparing_state)
-                        if self._suspended_state is preparing_state:
-                            self._suspended_state = None
-                            self.suspended_run_id = None
-                            self.pending_interaction = None
-                        return result
+                if (
+                    isinstance(boundary_public_result, AgentRunResult)
+                    and boundary_public_result.finalized
+                ):
+                    return boundary_public_result
+                if committed_run_id is not None and service.is_finalized(
+                    committed_run_id
+                ):
+                    return agent_run_result_from_terminal_outcome(
+                        await service.wait_run_completion(committed_run_id)
+                    )
+                if committed_run_id is not None and service.has_run_owner(
+                    committed_run_id
+                ):
+                    await self._install_run_termination_intent_for_run(
+                        committed_run_id, reason
+                    )
+                    result = await service.terminalize_resident_run(
+                        committed_run_id, reason=reason
+                    )
+                    return result
                 if boundary_attempt is None or boundary_outcome is None:
                     return None
                 if boundary_outcome.durable_run_existence is DurableRunExistence.NONE:
@@ -3556,161 +4221,90 @@ class HostSession:
                         diagnostics=boundary_outcome.diagnostics,
                     )
                 raise RuntimeError("committed boundary stop lost its durable run owner")
-            if self.pending_interaction is not None and (task is None or task.done()):
+            if self.pending_interaction is not None and not active_driver_running:
                 if self._run_lock.locked():
                     raise HostSessionBusyError("host session already has an active run")
                 async with self._run_lock:
                     pending = self.pending_interaction
                     if pending is None:
                         return None
-                    state = self._require_suspended_state(pending)
-                    await self._install_run_termination_intent(state, reason)
-                    self.active_run_id = state.run_id
-                    self.stopping_run_id = state.run_id
+                    await self._install_run_termination_intent_for_run(
+                        pending.run_id, reason
+                    )
                     self.last_active_at = time.monotonic()
                     try:
-                        result = await self.wiring.agent_runtime.abort_run(
-                            state, reason=reason
+                        result = await service.terminalize_resident_run(
+                            pending.run_id, reason=reason
                         )
-                        self._fold_run_owner_terminal(result)
-                        self._complete_pending_mcp_lease_for_state(state)
-                        self._capture_pending_interaction(result.state)
-                        if result.state.finalized:
-                            self._retire_confirmed_run_owner(state.run_id)
+                        if result.finalized:
+                            self._retire_confirmed_run_owner(pending.run_id)
                             await self._ingress_coordinator.clear_waiting_user()
                         return result
                     finally:
-                        self.active_run_id = None
-                        self.stopping_run_id = None
                         self.last_active_at = time.monotonic()
 
-            if task is None or state is None:
+            if active_run_id is None:
                 return None
-            if task.done():
-                owner = self._run_execution_owners.get(state.run_id)
-                if owner is None or owner.terminal_state == "confirmed":
+            if not active_driver_running:
+                view = service.run_view(active_run_id)
+                if view is None or view.terminal_state == "confirmed":
                     return None
-                result = await self.wiring.agent_runtime.retry_run_terminalization(
-                    state
+                result = await service.terminalize_resident_run(
+                    active_run_id, reason=reason
                 )
-                self._fold_run_owner_terminal(result)
-                if not state.finalized:
+                if not result.finalized:
                     raise RuntimeError("RunEnd retry did not reach durable commit")
-                self._finish_active_run()
+                self._finish_active_run(active_run_id)
                 return result
-            self.stopping_run_id = state.run_id
-            self._boundary_stop_requested_run_ids.add(state.run_id)
-            await self._install_run_termination_intent(state, reason)
-            state.stop_request = StopRequest(reason=reason)
-            runtime_session = self.wiring.runtime_wiring.runtime_session
-            cancel_reason = _model_stream_cancel_reason(reason)
-            active_model_handles = await runtime_session.model_stream_execution_registry.request_cancel_run(
-                state.run_id,
-                reason=cancel_reason,
+            self._boundary_stop_requested_run_ids.add(active_run_id)
+            await self._install_run_termination_intent_for_run(active_run_id, reason)
+            stop_status = await service.request_active_stop_and_wait(
+                active_run_id,
+                reason,
+                timeout_seconds=timeout,
             )
-            if active_model_handles == 0:
-                task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-            except asyncio.CancelledError:
-                pass
-            except TimeoutError:
+            if stop_status == "timed_out":
                 return None
-            except Exception:
-                pass
             # The owned task (streaming drive or run coroutine) finalizes itself
             # on a stop_request; abort_run is idempotent and yields the result.
-            result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
-            self._fold_run_owner_terminal(result)
-            self._complete_pending_mcp_lease_for_state(state)
+            result = agent_run_result_from_terminal_outcome(
+                await service.wait_run_completion(active_run_id)
+            )
+            if not result.finalized:
+                result = await service.terminalize_resident_run(
+                    active_run_id, reason=reason
+                )
             return result
 
-    def _complete_pending_mcp_lease_for_state(self, state: LoopState) -> None:
-        if (
-            state.pending_interaction_kind != "mcp_input_required"
-            or self.mcp_supervisor is None
-        ):
-            return
-        interaction_id = state.pending_interaction_payload.get("interaction_id")
-        if isinstance(interaction_id, str) and interaction_id:
-            self.mcp_supervisor.complete_pending_lease(interaction_id)
-
-    async def _install_run_termination_intent(
+    async def _install_run_termination_intent_for_run(
         self,
-        state: LoopState,
+        run_id: str,
         reason: AbortKind,
     ) -> RunTerminationIntent | None:
         with self.wiring.runtime_wiring.runtime_session.write_coordinator.lock:
-            owner = self._run_execution_owners.get(state.run_id)
-            if owner is None:
+            view = self._run_activation_service.run_view(run_id)
+            if view is None:
                 return None
-            segment = owner.active_segment
             intent = RunTerminationIntent(
                 intent_id=f"run_termination_intent:{uuid4().hex}",
                 kind=reason.value,  # type: ignore[arg-type]
                 requested_at_utc=utc_now(),
                 requester_id=self.host_session_id,
-                target_segment_id=(segment.segment_id if segment is not None else None),
-                target_segment_generation=(
-                    segment.segment_generation if segment is not None else None
-                ),
+                target_segment_id=view.active_segment_id,
+                target_segment_generation=view.active_segment_generation,
             )
-            status, installed = self._run_execution_owners.install_termination_intent(
-                state.run_id,
+            status, installed = self._run_activation_service.install_termination_intent(
+                run_id,
                 intent,
             )
             if status == "installed":
                 self._termination_intent_revision += 1
-        working_set = state.run_working_set
-        control_owner = (
-            working_set.model_call_control_owner if working_set is not None else None
-        )
-        activation = (
-            working_set.run_execution_activation if working_set is not None else None
-        )
-        if installed is not None and control_owner is not None:
-            if activation is None:
-                raise RuntimeError("active model control owner lacks run activation")
-            attribution_payload = {
-                "schema_version": "run_termination_intent_attribution.v1",
-                "intent_id": installed.intent_id,
-                "kind": installed.kind,
-                "requested_at_utc": installed.requested_at_utc,
-                "requester_id": installed.requester_id,
-                "target_run_execution_activation_fingerprint": (
-                    activation.activation_fingerprint
-                ),
-            }
-            attribution = RunTerminationIntentAttributionFact(
-                **attribution_payload,
-                attribution_fingerprint=sha256_fingerprint(
-                    "run-termination-intent-attribution:v1",
-                    attribution_payload,
-                ),
-            )
-            await control_owner.install_termination_intent(attribution)
+        if installed is not None:
+            service = self.wiring.run_activation_service
+            if service is None:
+                raise RuntimeError("runtime composition lacks its activation service")
+            await service.propagate_termination_intent(run_id, installed)
         return installed
-
-    def _fold_run_owner_terminal(self, result: AgentRunResult) -> None:
-        owner = self._run_execution_owners.get(result.state.run_id)
-        if owner is None:
-            return
-        if not result.state.finalized:
-            candidate = result.state.scratchpad.get("pending_run_end_candidate")
-            if isinstance(candidate, RunEndEvent):
-                owner.terminal_candidate = candidate
-            owner.terminal_state = (
-                "commit_outcome_unknown"
-                if self.wiring.runtime_wiring.runtime_session.reconciliation_required
-                else "candidate_frozen"
-            )
-            return
-        stored = self.wiring.runtime_wiring.event_log.get_by_id(owner.terminal_event_id)
-        if isinstance(stored, RunEndEvent):
-            owner.terminal_candidate = stored
-        owner.terminal_state = "confirmed"
-        if not owner.run_completion.done():
-            owner.run_completion.set_result(result)
 
     def replay_events(self, *, after_sequence: int | None = None) -> list[AgentEvent]:
         return self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
@@ -3799,23 +4393,16 @@ class HostSession:
         """
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
+        attempt = self._boundary_attempt
+        if attempt is not None and not attempt.owner_task.done():
+            raise RuntimeError("cannot close HostSession with a live boundary owner")
         self._lifecycle = HostSessionLifecycle.CLOSED
-        self.pending_interaction = None
-        self._suspended_state = None
-        self._active_state = None
-        self._active_task = None
-        self._boundary_task = None
         self._boundary_attempt = None
-        self._boundary_observer = None
-        self._preparing_state = None
-        self._preparing_identity = None
-        self.stopping_run_id = None
-        self.suspended_run_id = None
         self.wiring.runtime_wiring.runtime_session.bind_terminal_notification_listener(
             None
         )
         self.wiring.runtime_wiring.runtime_session.terminal_monitor_event_channel.close()
-        self.wiring.agent_runtime.close()
+        self.wiring.close()
 
     async def aclose(
         self,
@@ -3834,6 +4421,12 @@ class HostSession:
         self.begin_close()
         close_deadline = time.monotonic() + drain_timeout_seconds
         runtime_session = self.wiring.runtime_wiring.runtime_session
+        extraction_registration = self._compaction_memory_extraction_registration
+        extraction_driver = self._compaction_memory_extraction_driver
+        if extraction_driver is not None:
+            extraction_driver.stop_admission()
+        if extraction_registration is not None and extraction_registration.active:
+            extraction_registration.revoke()
         await self._ingress_coordinator.begin_close()
         dispatch_task = self._terminal_notification_dispatch_task
         if dispatch_task is not None and not dispatch_task.done():
@@ -3842,10 +4435,26 @@ class HostSession:
         await self.drain_active_run(
             reason=reason, timeout_seconds=drain_timeout_seconds
         )
+        await self._interaction_transition_port.aclose(
+            deadline_monotonic=close_deadline
+        )
+        # A suspended run has no live activation to finalize itself. Install
+        # its stable terminal owner before closing finalization admission.
+        await self._finalize_suspended_run(reason)
+        activation_service = self.wiring.run_activation_service
+        if activation_service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        await activation_service.drain_reconciliations(
+            deadline_monotonic=close_deadline
+        )
+        await self.wiring.agent_runtime.drain_run_finalizations(
+            deadline_monotonic=close_deadline
+        )
         await runtime_session.model_stream_execution_registry.drain_all(
             deadline_monotonic=close_deadline
         )
-        await self._finalize_suspended_run(reason)
+        if extraction_driver is not None:
+            await extraction_driver.close(deadline_monotonic=close_deadline)
         await runtime_session.mandatory_runtime_audit_owner.drain(
             deadline_monotonic=close_deadline
         )
@@ -3881,8 +4490,8 @@ class HostSession:
         )
         compaction_service = self.wiring.runtime_wiring.compaction_service
         if compaction_service is not None:
-            await compaction_service.stop_candidate_projection_admission_and_drain(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            await compaction_service.stop_post_completion_extension_admission_and_drain(
+                deadline_monotonic=close_deadline
             )
         candidate_projection_port = (
             self.wiring.runtime_wiring.candidate_projection_commit_port
@@ -3919,15 +4528,18 @@ class HostSession:
             await compaction_service.drain_pending_terminalizations(
                 timeout_seconds=drain_timeout_seconds
             )
-        subagent_runtime = getattr(
-            self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None
-        )
+        subagent_runtime = self.wiring.subagent_runtime
         if subagent_runtime is not None:
             await subagent_runtime.cancel_active_children(
                 reason_code="subagent_host_session_close",
                 reason_message="HostSession is closing; active child runtimes are cancelled.",
                 cancelled_by="host_shutdown",
                 timeout_seconds=drain_timeout_seconds,
+            )
+        mcp_tool_execution_port = runtime_session.mcp_tool_execution_port
+        if mcp_tool_execution_port is not None:
+            await mcp_tool_execution_port.stop_admission_and_drain(
+                deadline_monotonic=close_deadline,
             )
         runtime_session.require_mutation_allowed()
         if self.mcp_supervisor is not None:
@@ -4009,36 +4621,35 @@ class HostSession:
         outcome (a stop_request the owned task converts into a RunEnd); without a
         reason it is a best-effort cancel only.
         """
-        boundary_task = self._boundary_task
-        boundary_observer = self._boundary_observer
-        preparing_state = self._preparing_state
+        boundary_attempt = self._boundary_attempt
+        boundary_task = (
+            boundary_attempt.owner_task if boundary_attempt is not None else None
+        )
+        boundary_observer = self._current_boundary_observer()
         if boundary_observer is not None:
             boundary_observer.detach()
-        task = self._active_task
-        state = self._active_state
-        drain_state = state
-        if task is not None and not task.done() and task is not asyncio.current_task():
-            active_model_handles = 0
-            if reason is not None and state is not None and state.stop_request is None:
-                await self._install_run_termination_intent(state, reason)
-                state.stop_request = StopRequest(reason=reason)
-                self.stopping_run_id = state.run_id
-                active_model_handles = await self.wiring.runtime_wiring.runtime_session.model_stream_execution_registry.request_cancel_run(
-                    state.run_id,
-                    reason=_model_stream_cancel_reason(reason),
+        view = self._run_activation_service.run_view(
+            self.active_run_id or self.stopping_run_id or self.suspended_run_id or ""
+        )
+        run_id = view.run_id if view is not None else None
+        service = self._run_activation_service
+        if view is not None and view.active_driver_running:
+            if reason is not None and run_id is not None:
+                await self._install_run_termination_intent_for_run(run_id, reason)
+                drain_status = await service.request_active_stop_and_wait(
+                    run_id,
+                    reason,
+                    timeout_seconds=timeout_seconds,
                 )
-            if active_model_handles == 0:
-                task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
-            except asyncio.CancelledError:
-                pass
-            except TimeoutError as exc:
+            else:
+                drain_status = await service.cancel_active_driver_and_wait(
+                    run_id,
+                    timeout_seconds=timeout_seconds,
+                )
+            if drain_status == "timed_out":
                 raise HostSessionBusyError(
                     "active run did not drain before close deadline"
-                ) from exc
-            except Exception:
-                pass
+                )
         if (
             boundary_task is not None
             and not boundary_task.done()
@@ -4046,12 +4657,11 @@ class HostSession:
         ):
             if (
                 reason is not None
-                and preparing_state is not None
-                and preparing_state.stop_request is None
+                and boundary_attempt is not None
+                and boundary_attempt.prepared_activation is not None
             ):
-                preparing_state.stop_request = StopRequest(reason=reason)
-                self.stopping_run_id = preparing_state.run_id
-            boundary_attempt = self._boundary_attempt
+                boundary_attempt.prepared_activation.request_stop(reason)
+                self._boundary_stop_requested_run_ids.add(boundary_attempt.draft_run_id)
             commit_started = boundary_attempt is not None and (
                 boundary_attempt.phase
                 in {
@@ -4079,32 +4689,52 @@ class HostSession:
                 ) from exc
             except Exception:
                 pass
-        state = self._active_state or drain_state
-        if state is not None:
-            owner = self._run_execution_owners.get(state.run_id)
-            if owner is not None and owner.terminal_state != "confirmed":
+        run_id = (
+            self.active_run_id
+            or self.stopping_run_id
+            or self.suspended_run_id
+            or (
+                boundary_attempt.draft_run_id
+                if boundary_attempt is not None
+                and service.has_run_owner(boundary_attempt.draft_run_id)
+                else None
+            )
+        )
+        if run_id is not None:
+            view = service.run_view(run_id)
+            suspended_without_terminal_candidate = (
+                view is not None
+                and view.lifecycle == "suspended"
+                and view.terminal_state == "open"
+            )
+            if (
+                view is not None
+                and view.terminal_state != "confirmed"
+                and not suspended_without_terminal_candidate
+            ):
                 try:
+                    if reason is None:
+                        return
                     result = await asyncio.wait_for(
-                        self.wiring.agent_runtime.retry_run_terminalization(state),
+                        service.terminalize_resident_run(run_id, reason=reason),
                         timeout=timeout_seconds,
                     )
                 except BaseException:
                     # A durable RunStart cannot lose its only retry owner during
                     # close.  Propagate so HostCore preserves the session/lease.
                     raise
-                self._fold_run_owner_terminal(result)
-                if not state.finalized:
+                if not result.finalized:
                     raise RuntimeError(
                         "active run terminalization drain ended without RunEnd"
                     )
-                self._finish_active_run()
-                owner = self._run_execution_owners.get(state.run_id)
-            if owner is not None and owner.terminal_state == "confirmed":
-                self._run_execution_owners.retire_confirmed(state.run_id)
-                if self._run_execution_owners.get(state.run_id) is not None:
+                self._finish_active_run(run_id)
+                view = service.run_view(run_id)
+            if view is not None and view.terminal_state == "confirmed":
+                service.retire_confirmed(run_id)
+                if service.has_run_owner(run_id):
                     try:
-                        await self._run_execution_owners.wait_until_retired(
-                            state.run_id,
+                        await service.wait_until_retired(
+                            run_id,
                             timeout_seconds=timeout_seconds,
                         )
                     except TimeoutError as exc:
@@ -4113,25 +4743,21 @@ class HostSession:
                         ) from exc
 
     async def _finalize_suspended_run(self, reason: AbortKind) -> None:
-        state = self._suspended_state
-        if state is None:
+        run_id = self.suspended_run_id
+        if run_id is None:
             return
-        interaction_id = (
-            str(state.pending_interaction_payload.get("interaction_id"))
-            if state.pending_interaction_kind == "mcp_input_required"
-            and state.pending_interaction_payload.get("interaction_id") is not None
-            else None
-        )
-        await self._install_run_termination_intent(state, reason)
-        result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
-        self._fold_run_owner_terminal(result)
-        if interaction_id is not None and self.mcp_supervisor is not None:
-            self.mcp_supervisor.complete_pending_lease(interaction_id)
-        if result.state.finalized:
-            self._retire_confirmed_run_owner(state.run_id)
-        self._suspended_state = None
-        self.pending_interaction = None
-        self.suspended_run_id = None
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        if not service.has_run_owner(run_id):
+            # The closed activation outcome may already have retired the
+            # owner while Host's pending-interaction projection is clearing.
+            self._finish_active_run(run_id)
+            return
+        await self._install_run_termination_intent_for_run(run_id, reason)
+        result = await service.terminalize_resident_run(run_id, reason=reason)
+        if result.finalized:
+            self._retire_confirmed_run_owner(run_id)
 
     def summary(self) -> dict[str, object]:
         installation = self.wiring.runtime_wiring.mcp_installation
@@ -4203,15 +4829,20 @@ class HostSession:
         }
 
     def _live_long_horizon_projection(self) -> dict[str, object] | None:
-        state = self._active_state or self._suspended_state or self._preparing_state
-        if state is None or state.run_working_set is None:
+        run_id = self.active_run_id or self.suspended_run_id or self.stopping_run_id
+        view = (
+            self._run_activation_service.run_view(run_id)
+            if run_id is not None
+            else None
+        )
+        if view is None:
             return None
         runtime_session = self.wiring.runtime_wiring.runtime_session
-        contract = state.run_working_set.long_horizon_contract
+        contract = view.genesis_long_horizon
         store = runtime_session.long_horizon_state_store
         account = store.rollout_account(contract.rollout_account_id)
         rollout = store.rollout_state(contract.rollout_account_id)
-        window_chain = store.window_state(state.run_id)
+        window_chain = store.window_state(view.run_id)
         if account is None or rollout is None or window_chain is None:
             return {
                 "status": "unavailable",
@@ -4236,7 +4867,7 @@ class HostSession:
 
         event_slice = runtime_session.context_authority_slice_cache.latest_for_basis(
             runtime_session_id=self.runtime_session_id,
-            basis_id=state.run_working_set.run_start_event_id,
+            basis_id=view.run_start_event_id,
         )
         try:
             if event_slice is None:
@@ -4258,7 +4889,7 @@ class HostSession:
                 EventType.CONTEXT_COMPILED.value,
                 EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED.value,
             ),
-            run_ids=(state.run_id,),
+            run_ids=(view.run_id,),
             max_events=512,
             max_payload_bytes=8 * 1024 * 1024,
         )
@@ -4285,9 +4916,10 @@ class HostSession:
         input_budget = (
             latest_context.budget.input_budget_tokens
             if latest_context is not None
-            else state.run_model_target.context_budget.input_budget_tokens
-            if state.run_model_target is not None
-            else None
+            else getattr(
+                view.effective_model_target,
+                "context_budget",
+            ).input_budget_tokens
         )
         input_estimate = (
             latest_context.budget.final_payload_estimated_tokens
@@ -4314,7 +4946,7 @@ class HostSession:
         ) // account.exploration_allowance_milliunits
         return {
             "status": "available",
-            "run_id": state.run_id,
+            "run_id": view.run_id,
             "window_id": window_id,
             "window_generation": len(window_chain.ordered_window_ids),
             "projection_generation": (
@@ -4355,35 +4987,39 @@ class HostSession:
         }
 
     def _live_boundary_projection(self) -> dict[str, object]:
-        state = self._active_state or self._suspended_state or self._preparing_state
-        run_owner = (
-            self._run_execution_owners.get(state.run_id) if state is not None else None
+        boundary_attempt = self._boundary_attempt
+        run_id = self.active_run_id or self.suspended_run_id or self.stopping_run_id
+        run_view = (
+            self._run_activation_service.run_view(run_id)
+            if run_id is not None
+            else None
         )
-        segment = run_owner.active_segment if run_owner is not None else None
         latest_boundary = (
-            state.run_working_set.latest_committed_resume_boundary
-            if state is not None and state.run_working_set is not None
-            else None
-        )
-        initial_identity = (
-            state.scratchpad.get("host_run_boundary_identity")
-            if state is not None
-            else None
+            run_view.latest_resume_boundary if run_view is not None else None
         )
         boundary_task_live = (
-            self._boundary_task is not None and not self._boundary_task.done()
+            boundary_attempt is not None and not boundary_attempt.owner_task.done()
         )
-        boundary_attempt = self._boundary_attempt
+        initial_identity = (
+            run_view.initial_boundary_identity
+            if run_view is not None
+            else boundary_attempt.prepared_authority.identity
+            if boundary_attempt is not None
+            and boundary_attempt.prepared_authority is not None
+            else None
+        )
         identity = (
-            self._preparing_identity
-            if boundary_task_live and self._preparing_identity is not None
+            boundary_attempt.prepared_authority.identity
+            if boundary_task_live
+            and boundary_attempt is not None
+            and boundary_attempt.prepared_authority is not None
             else latest_boundary.identity
             if isinstance(latest_boundary, InteractionResumeBoundaryFact)
             else initial_identity
             if isinstance(initial_identity, HostRunBoundaryIdentityFact)
             else None
         )
-        if run_owner is not None:
+        if run_view is not None:
             live_state = "committed"
             durable_existence = "full"
         elif boundary_task_live and boundary_attempt is not None:
@@ -4413,7 +5049,7 @@ class HostSession:
         else:
             live_state = "idle"
             durable_existence = "none"
-        observer = self._boundary_observer
+        observer = self._current_boundary_observer()
         if observer is None:
             observer_state = "detached"
         elif not observer.attached:
@@ -4454,20 +5090,38 @@ class HostSession:
         }
         return {
             "state": live_state,
-            "boundary_id": identity.boundary_id if identity is not None else None,
-            "kind": identity.kind.value if identity is not None else None,
+            "boundary_id": (
+                identity.boundary_id
+                if identity is not None
+                else boundary_attempt.boundary_id
+                if boundary_task_live and boundary_attempt is not None
+                else None
+            ),
+            "kind": (
+                identity.kind.value
+                if identity is not None
+                else boundary_attempt.kind.value
+                if boundary_task_live and boundary_attempt is not None
+                else None
+            ),
             "phase": (
                 boundary_attempt.phase.value
                 if boundary_task_live and boundary_attempt is not None
                 else "activation"
-                if segment is not None
+                if run_view is not None and run_view.active_segment_id is not None
                 else "durable_commit"
-                if run_owner is not None
+                if run_view is not None
                 else "ingress"
                 if boundary_task_live
                 else None
             ),
-            "draft_run_id": state.run_id if state is not None else None,
+            "draft_run_id": (
+                run_view.run_id
+                if run_view is not None
+                else boundary_attempt.draft_run_id
+                if boundary_attempt is not None
+                else None
+            ),
             "started_at_utc": (
                 identity.observed_at_utc if identity is not None else None
             ),
@@ -4481,23 +5135,23 @@ class HostSession:
                 started.difference(terminal_started)
             ),
             "observer_state": observer_state,
-            "active_segment_id": segment.segment_id if segment is not None else None,
+            "active_segment_id": (
+                run_view.active_segment_id if run_view is not None else None
+            ),
             "active_segment_generation": (
-                segment.segment_generation if segment is not None else None
+                run_view.active_segment_generation if run_view is not None else None
             ),
             "active_segment_owner_kind": (
-                segment.activation_owner_kind if segment is not None else None
+                run_view.active_segment_owner_kind if run_view is not None else None
             ),
             "active_segment_owner_id": (
-                segment.activation_owner_id if segment is not None else None
+                run_view.active_segment_owner_id if run_view is not None else None
             ),
             "current_execution_handle_id": (
-                run_owner.execution_handles.handle_id if run_owner is not None else None
+                run_view.current_execution_handle_id if run_view is not None else None
             ),
             "retiring_execution_handle_count": (
-                len(run_owner.retiring_execution_handles)
-                if run_owner is not None
-                else 0
+                run_view.retiring_execution_handle_count if run_view is not None else 0
             ),
         }
 
@@ -4573,21 +5227,44 @@ class HostSession:
         self,
         attempt: HostRunBoundaryAttempt,
     ) -> HostRunBoundaryAttemptOutcome:
-        owner = self._run_execution_owners.get(attempt.draft_run_id)
-        if owner is None and attempt.execution_handles is not None:
-            handles = attempt.execution_handles
-            if handles.state == "attempt_owned":
-                handles.mark_retiring()
-            if handles.state == "retiring" and handles.borrow_tracker.can_retire():
-                handles.mark_closed()
+        run_view = self._run_activation_service.run_view(attempt.draft_run_id)
         confirmation = (
             self._boundary_batch_confirmation(attempt)
-            if owner is None
+            if run_view is None
             and attempt.candidate_events
             and attempt.commit_state != "not_started"
             else None
         )
-        if owner is not None:
+        if run_view is None and attempt.run_owner_reservation_key is not None:
+            self._run_activation_service.release_prepared_owner(
+                attempt.run_owner_reservation_key,
+                outcome=(
+                    "unknown"
+                    if confirmation is not None
+                    and confirmation.status is not BoundaryBatchCommitStatus.NONE
+                    else "none"
+                ),
+            )
+            attempt.run_owner_reservation_key = None
+            attempt.execution_handles = None
+        elif run_view is None and attempt.execution_handles is not None:
+            handles = attempt.execution_handles
+            if handles.state == "boundary_owned":
+                handles.mark_retiring()
+            if handles.state == "retiring" and handles.borrow_tracker.can_retire():
+                handles.mark_closed()
+        prepared_activation = attempt.prepared_activation
+        if run_view is None and prepared_activation is not None:
+            if prepared_activation.state == "prepared":
+                prepared_activation.release()
+            attempt.prepared_activation = None
+        elif (
+            run_view is not None
+            and prepared_activation is not None
+            and prepared_activation.state == "promoted"
+        ):
+            attempt.prepared_activation = None
+        if run_view is not None:
             durable_existence = DurableRunExistence.FULL
         elif (
             confirmation is None
@@ -4611,18 +5288,18 @@ class HostSession:
         elif attempt.commit_state == "publication_failed":
             disposition = HostRunBoundaryDisposition.COMMITTED_BUT_PUBLICATION_FAILED
         elif (
-            owner is not None
-            and owner.run_completion.done()
-            and owner.run_completion.result().status is LoopStatus.FAILED
+            run_view is not None
+            and run_view.run_completion_done
+            and run_view.run_completion_failed
         ):
             disposition = HostRunBoundaryDisposition.COMMITTED_EXECUTION_FAILED
         else:
             disposition = HostRunBoundaryDisposition.PROCEED
         terminal_event_id = (
-            owner.terminal_candidate.id
-            if owner is not None and owner.terminal_candidate is not None
-            else owner.terminal_event_id
-            if owner is not None and owner.terminal_state == "confirmed"
+            run_view.terminal_candidate_id
+            if run_view is not None and run_view.terminal_candidate_id is not None
+            else run_view.terminal_event_id
+            if run_view is not None and run_view.terminal_state == "confirmed"
             else None
         )
         outcome = HostRunBoundaryAttemptOutcome(
@@ -4636,11 +5313,11 @@ class HostSession:
         if not attempt.completion.done():
             attempt.completion.set_result(outcome)
         if (
-            owner is not None
-            and owner.terminal_state == "confirmed"
-            and owner.active_segment is None
+            run_view is not None
+            and run_view.terminal_state == "confirmed"
+            and run_view.active_segment_id is None
         ):
-            self._run_execution_owners.retire_confirmed(attempt.draft_run_id)
+            self._run_activation_service.retire_confirmed(attempt.draft_run_id)
         return outcome
 
     def _finish_boundary_attempt_safely(
@@ -4686,15 +5363,13 @@ class HostSession:
         self._finish_boundary_attempt_safely(attempt)
         if self._boundary_attempt is attempt:
             self._boundary_attempt = None
-            self._preparing_state = None
-            self._preparing_identity = None
 
     def _create_owned_boundary_task(
         self,
         make_awaitable: Callable[[], Awaitable[Any]],
         *,
-        preparing_state: LoopState | None,
         preparing_identity: HostRunBoundaryIdentityFact,
+        prepare_initial_activation: bool = False,
         observer: _StreamObserver | None = None,
     ) -> asyncio.Task[Any]:
         """Install PREPARING ownership before boundary code can execute."""
@@ -4705,7 +5380,8 @@ class HostSession:
             raise RuntimeError(
                 "HostSession boundary APIs require a running event loop"
             ) from exc
-        if self._boundary_task is not None and not self._boundary_task.done():
+        current_attempt = self._boundary_attempt
+        if current_attempt is not None and not current_attempt.owner_task.done():
             raise HostSessionBusyError("host session already has a preparing boundary")
         activation_gate = asyncio.Event()
 
@@ -4715,16 +5391,10 @@ class HostSession:
                 return await make_awaitable()
             finally:
                 current = asyncio.current_task()
-                if self._boundary_task is current:
-                    attempt = self._boundary_attempt
-                    if attempt is not None and attempt.owner_task is current:
-                        self._finish_boundary_attempt_safely(attempt)
-                        self._boundary_attempt = None
-                    self._boundary_task = None
-                    self._boundary_execution_task = None
-                    self._boundary_observer = None
-                    self._preparing_state = None
-                    self._preparing_identity = None
+                attempt = self._boundary_attempt
+                if attempt is not None and attempt.owner_task is current:
+                    self._finish_boundary_attempt_safely(attempt)
+                    self._boundary_attempt = None
 
         coroutine = _drive()
         try:
@@ -4732,25 +5402,35 @@ class HostSession:
         except BaseException:
             coroutine.close()
             raise
-        self._boundary_task = task
-        self._boundary_execution_task = task
+        prepared_activation = None
+        if prepare_initial_activation:
+            if self._run_activation_service.has_run_owner(preparing_identity.run_id):
+                task.cancel()
+                raise RuntimeError("boundary run is already committed")
+            prepared_activation = (
+                self._run_activation_service.prepare_boundary_activation(
+                    identity=preparing_identity,
+                    owner_task=task,
+                )
+            )
         attempt = HostRunBoundaryAttempt(
             boundary_id=preparing_identity.boundary_id,
             kind=preparing_identity.kind,
             phase=HostRunBoundaryPhase.INGRESS,
             owner_task=task,
             draft_run_id=preparing_identity.run_id,
+            prepared_authority=None,
+            run_owner_reservation_key=None,
             execution_handles=None,
             candidate_events=(),
             candidate_event_ids=(),
             candidate_payload_fingerprints=(),
             commit_state="not_started",
             completion=loop.create_future(),
+            prepared_activation=prepared_activation,
+            observer=observer,
         )
         self._boundary_attempt = attempt
-        self._boundary_observer = observer
-        self._preparing_state = preparing_state
-        self._preparing_identity = preparing_identity
         activation_gate.set()
         return task
 
@@ -4758,8 +5438,8 @@ class HostSession:
         self,
         make_stream: Callable[[], AsyncIterator[AgentEvent]],
         *,
-        preparing_state: LoopState | None,
         preparing_identity: HostRunBoundaryIdentityFact,
+        prepare_initial_activation: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Start a Host-owned stream driver before returning its observer."""
         observer = _StreamObserver()
@@ -4770,8 +5450,8 @@ class HostSession:
 
         task = self._create_owned_boundary_task(
             _drive,
-            preparing_state=preparing_state,
             preparing_identity=preparing_identity,
+            prepare_initial_activation=prepare_initial_activation,
             observer=observer,
         )
         return _OwnedBoundaryStreamObserver(
@@ -4814,89 +5494,65 @@ class HostSession:
         finally:
             observer.detach()
 
-    def _activate_committed_state(
+    def _prepare_committed_host_activation(
         self,
-        state: LoopState,
+        run_id: str,
         committed: CommittedHostRunEntry,
-    ) -> LoopState:
-        if state.run_working_set is None:
-            raise RuntimeError("ACTIVE transition requires a committed RunWorkingSet")
-        if (
-            state.run_working_set.run_start_event_id != committed.run_start_event.id
-            or state.run_working_set.run_start_sequence != committed.run_start_sequence
-        ):
-            raise RuntimeError("ACTIVE transition run-entry identity mismatch")
-        self._run_execution_owners.require(state.run_id)
-        self._prepare_state_for_plan(state)
-        self.active_run_id = state.run_id
-        self._active_state = state
-        self.last_active_at = time.monotonic()
-        return state
-
-    def _resume_active_state(self, pending: PendingInteraction) -> LoopState:
-        state = self._require_suspended_state(pending)
-        working_set = state.run_working_set
-        if working_set is None or not isinstance(
-            working_set.latest_committed_resume_boundary,
-            InteractionResumeBoundaryFact,
-        ):
-            raise RuntimeError(
-                "suspended run must commit a typed continuation boundary before activation"
-            )
-        if not isinstance(
-            working_set.effective_exposure_plan, CapabilityExposurePlan
-        ) or not isinstance(
-            working_set.effective_exposure_fact, CapabilityExposureSnapshotFact
-        ):
-            raise RuntimeError(
-                "suspended run must install a typed continuation exposure before activation"
-            )
-        self.active_run_id = state.run_id
-        self._active_state = state
-        self.last_active_at = time.monotonic()
-        return state
-
-    def _original_run_start_for_resume(self, state: LoopState) -> RunStartEvent:
-        working_set = state.run_working_set
-        if working_set is None:
-            raise RuntimeError("suspended run lost its typed RunWorkingSet")
-        started = self.wiring.runtime_wiring.event_log.get_by_id(
-            working_set.run_start_event_id
+    ) -> None:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        service.prepare_pending_host_activation(
+            run_id=run_id,
+            committed=committed,
+            host_session_id=self.host_session_id,
+            workflow_state=self.plan_state,
+            pending_entry_audit=self.plan_state.pending_entry_audit,
+            previous_permission_mode=self.plan_state.pre_plan_permission_mode,
+            previous_permission_policy=(
+                self.plan_state.pre_plan_permission_policy or {}
+            ),
+            entry_reason=self.plan_state.entry_reason,
         )
-        if not isinstance(started, RunStartEvent) or started.sequence is None:
-            raise RuntimeError(
-                "suspended run requires exactly one sequenced durable RunStart"
-            )
-        if started.run_id != state.run_id:
-            raise RuntimeError("suspended RunStart owner drifted")
-        if started.run_entry_kind.value != "host":
-            raise RuntimeError("suspended state does not match its Host RunStart")
-        return started
+        self.last_active_at = time.monotonic()
+
+    def _configure_pending_host_plan(self, run_id: str) -> None:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        service.configure_pending_host_plan(
+            run_id=run_id,
+            host_session_id=self.host_session_id,
+            workflow_state=self.plan_state,
+            pending_entry_audit=self.plan_state.pending_entry_audit,
+            previous_permission_mode=self.plan_state.pre_plan_permission_mode,
+            previous_permission_policy=(
+                self.plan_state.pre_plan_permission_policy or {}
+            ),
+            entry_reason=self.plan_state.entry_reason,
+        )
+        self.last_active_at = time.monotonic()
 
     async def _prepare_and_commit_resume_boundary(
         self,
         *,
+        prepared_attempt: PreparedInteractionResumeAttempt,
         pending: PendingInteraction,
         interaction_kind: str,
         identity: HostRunBoundaryIdentityFact,
         resolution: object | None = None,
-    ) -> tuple[
-        LoopState,
-        CommittedInteractionResumeBoundary,
-        tuple[AgentEvent, ...],
-    ]:
+    ) -> tuple[CommittedInteractionResumeBoundary, tuple[AgentEvent, ...]]:
         self._set_boundary_phase(HostRunBoundaryPhase.ADMISSION)
         deadline_budget = build_runtime_event_deadline_budget(
             admitted_at_monotonic=time.monotonic(),
             total_timeout_seconds=30.0,
             terminal_reserve_seconds=10.0,
         )
-        state = self._require_suspended_state(pending)
+        view = self._interaction_transition_port.suspended_boundary_view(
+            prepared_attempt
+        )
         self._set_boundary_phase(HostRunBoundaryPhase.CONTRACT_RESOLUTION)
-        started = self._original_run_start_for_resume(state)
-        working_set = state.run_working_set
-        if working_set is None:
-            raise RuntimeError("suspended run lost its typed RunWorkingSet")
+        started = view.original_run_start_event
         rebound_target = self.wiring.agent_runtime.rebind_run_model_target(
             started.model_target
         )
@@ -4904,32 +5560,22 @@ class HostSession:
             started,
             runtime_session_id=self.runtime_session_id,
         )
-        if state.permission_snapshot != permission_snapshot:
+        if view.resident_permission_snapshot != permission_snapshot:
             raise RuntimeError(
                 "suspended permission snapshot differs from durable RunStart"
             )
         if (
-            state.run_model_target is not None
-            and state.run_model_target.fact.target_fingerprint
+            view.resident_model_target_fingerprint is not None
+            and view.resident_model_target_fingerprint
             != rebound_target.fact.target_fingerprint
         ):
             raise RuntimeError("suspended model target differs from durable RunStart")
 
-        original_basis = working_set.capability_resolve_basis
-        source_plan = working_set.effective_exposure_plan
-        source_fact = working_set.effective_exposure_fact
-        source_event_ref = working_set.effective_exposure_event_ref
-        suspended_token = state.scratchpad.get("suspended_state_token")
-        if not isinstance(original_basis, CapabilityResolveBasis):
-            raise RuntimeError("suspended run lost its original capability basis")
-        if (
-            not isinstance(source_plan, CapabilityExposurePlan)
-            or not isinstance(source_fact, CapabilityExposureSnapshotFact)
-            or source_event_ref is None
-        ):
-            raise RuntimeError("suspended run lost its source capability exposure")
-        if not isinstance(suspended_token, str):
-            raise RuntimeError("suspended run lost its ABA state token")
+        original_basis = view.capability_resolve_basis
+        source_plan = view.source_exposure_plan
+        source_fact = view.source_exposure_fact
+        source_event_ref = view.source_exposure_event_reference
+        suspended_token = view.suspended_state_token
 
         self._set_boundary_phase(HostRunBoundaryPhase.MCP_REQUIRED_WAIT)
         await self._apply_mcp_safe_point(trigger="config_change")
@@ -4989,9 +5635,9 @@ class HostSession:
         )
         runtime_session = self.wiring.runtime_wiring.runtime_session
         event_context = EventContext(
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
+            run_id=view.run_id,
+            turn_id=view.turn_id,
+            reply_id=view.reply_id,
         )
         pending_audits = tuple(
             runtime_session.pending_mcp_installation_audit_events(event_context)
@@ -5087,27 +5733,32 @@ class HostSession:
             ):
                 raise RuntimeError("prepared MCP resolution source authority drifted")
             source_fact = pending.suspension_fact
+            durable_continuation = source_fact.durable_continuation
             source_authority = build_frozen_fact(
                 McpInputRequiredSourceAuthorityFact,
-                schema_version="mcp_input_required_source_authority.v1",
+                schema_version="mcp_input_required_source_authority.v2",
                 interaction=source_fact.interaction,
                 binding_identity=source_fact.binding_identity,
                 pending_lease_reservation=source_fact.pending_lease_reservation,
                 request_envelope_semantic_fingerprint=(
-                    source_fact.request_envelope
-                    .request_envelope_semantic_fingerprint
+                    source_fact.request_envelope.request_envelope_semantic_fingerprint
                 ),
+                request_set_fingerprint=(
+                    source_fact.request_envelope.request_set_fingerprint
+                ),
+                continuation_carrier_id=(durable_continuation.continuation_carrier_id),
+                continuation_fact_fingerprint=(
+                    durable_continuation.continuation_fact_fingerprint
+                ),
+                operation_expires_at_utc=(
+                    durable_continuation.expiry.operation_expires_at_utc
+                ),
+                expiry_fingerprint=durable_continuation.expiry.expiry_fingerprint,
                 rollout_reservation_id=source_fact.rollout_reservation_id,
                 rollout_reservation_fingerprint=(
                     source_fact.rollout_reservation_fingerprint
                 ),
-                source_mcp_installation_id=(
-                    source_fact.source_mcp_installation_id
-                ),
-                durable_deadline_utc=source_fact.durable_deadline_utc,
-                deadline_policy_fingerprint=(
-                    source_fact.deadline_policy_fingerprint
-                ),
+                source_mcp_installation_id=(source_fact.source_mcp_installation_id),
                 predecessor_resolution_submitted_event_reference=(
                     source_fact.predecessor_resolution_submitted_event_reference
                 ),
@@ -5122,12 +5773,8 @@ class HostSession:
                     runtime_session_id=self.runtime_session_id,
                 ),
             )
-            predecessor_resolution = (
-                working_set.latest_mcp_input_required_resolution_ref
-            )
-            predecessor_failure = (
-                working_set.latest_mcp_resume_failure_event_ref
-            )
+            predecessor_resolution = view.latest_mcp_resolution_reference
+            predecessor_failure = view.latest_mcp_resume_failure_reference
             if predecessor_failure is None:
                 attempt = build_frozen_fact(
                     McpInputRequiredResolutionAttemptFact,
@@ -5142,10 +5789,8 @@ class HostSession:
                     raise RuntimeError(
                         "MCP resume-failed state lost its predecessor resolution"
                     )
-                previous_resolution = (
-                    self.wiring.runtime_wiring.event_log.get_by_id(
-                        predecessor_resolution.event_id
-                    )
+                previous_resolution = self.wiring.runtime_wiring.event_log.get_by_id(
+                    predecessor_resolution.event_id
                 )
                 previous_failure = self.wiring.runtime_wiring.event_log.get_by_id(
                     predecessor_failure.event_id
@@ -5177,19 +5822,11 @@ class HostSession:
                 )
             prepared_mcp_resolution = resolution
             mcp_resolution_event = McpInputRequiredResolutionSubmittedEvent(
-                id=(
-                    "mcp_resolution:"
-                    + stable_runtime_event_id(
-                        "mcp-input-required-resolution-submitted-event:v1",
-                        identity.boundary_id,
-                        source_fact.interaction.round_count,
-                        attempt.attempt_ordinal,
-                        resolution.prepared_resolution_fingerprint,
-                    )
-                ),
+                id=resolution.resolution_carrier.resolution_event_id,
                 **event_context.event_fields(),
                 source=source_authority,
                 resolution=resolution.resolution_semantic,
+                continuation=resolution.resolution_carrier,
                 attempt=attempt,
                 resume_boundary_event_identity=stable_event_identity(
                     boundary_event,
@@ -5198,10 +5835,14 @@ class HostSession:
             )
         elif interaction_kind == "mcp_input_required":
             raise RuntimeError("MCP resume boundary lost its pending interaction")
-        run_owner = self._run_execution_owners.require(state.run_id)
+        predecessor_fingerprint = view.predecessor_authority_fingerprint
         incoming_execution_handles = self._new_execution_handles(
-            owner_id=identity.boundary_id,
-            generation=run_owner.execution_handles.handle_generation + 1,
+            owner=build_prepared_run_owner_reservation_key(
+                runtime_session_id=self.runtime_session_id,
+                run_id=view.run_id,
+                run_start_event_id=started.id,
+            ),
+            generation=view.next_execution_handle_generation,
             frozen_execution_surface=frozen_surface,
         )
         prepared = PreparedInteractionResumeBoundary(
@@ -5221,6 +5862,9 @@ class HostSession:
             deadline_budget=deadline_budget,
             gate_policy=resume_gate_policy_for(interaction_kind),  # type: ignore[arg-type]
             diagnostics=(),
+            predecessor_authority_fingerprint=predecessor_fingerprint,
+            expected_termination_revision=view.expected_termination_revision,
+            expected_current_handle_id=view.current_execution_handle_id,
             prepared_mcp_input_required_resolution=prepared_mcp_resolution,
             mcp_input_required_resolution_event_id=(
                 mcp_resolution_event.id if mcp_resolution_event is not None else None
@@ -5238,8 +5882,32 @@ class HostSession:
         self._set_boundary_candidates(candidates)
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
+        mcp_resolution_confirmed = False
+
+        def confirm_mcp_resolution(outcome: str) -> None:
+            nonlocal mcp_resolution_confirmed
+            if prepared_mcp_resolution is None or mcp_resolution_confirmed:
+                return
+            execution_port = runtime_session.mcp_tool_execution_port
+            if execution_port is None:
+                raise RuntimeError("MCP resolution lost its execution port")
+            execution_port.confirm_resolution_commit(
+                prepared_resolution=prepared_mcp_resolution,
+                outcome=outcome,
+            )
+            mcp_resolution_confirmed = True
+
         try:
-            stored = tuple(await runtime_session.emit_many(candidates, state=state))
+            stored = tuple(
+                await runtime_session.emit_many(
+                    candidates,
+                    transaction_companion=(
+                        prepared_mcp_resolution.transaction_companion
+                        if prepared_mcp_resolution is not None
+                        else None
+                    ),
+                )
+            )
         except BaseException as exc:
             if isinstance(
                 exc,
@@ -5249,6 +5917,7 @@ class HostSession:
                     BoundaryBatchCommitStatus.NONE,
                 )
                 self._set_boundary_commit_state("not_started")
+                confirm_mcp_resolution("none")
                 if isinstance(exc, HostIngressAdmissionStale):
                     raise
                 raise HostIngressAdmissionStale(
@@ -5261,6 +5930,7 @@ class HostSession:
                     BoundaryBatchCommitStatus.FULL,
                     committed_events=committed_events,
                 )
+                confirm_mcp_resolution("full")
             else:
                 outcome = runtime_session.resolved_event_write_outcome(exc)
                 if outcome.status != "full":
@@ -5274,6 +5944,9 @@ class HostSession:
                         if outcome.status == "unknown"
                         else "not_started"
                     )
+                    confirm_mcp_resolution(
+                        "unknown" if outcome.status == "unknown" else "none"
+                    )
                     raise
                 self._set_boundary_commit_state("committed")
                 committed_events = tuple(outcome.committed_events)
@@ -5281,11 +5954,12 @@ class HostSession:
                     BoundaryBatchCommitStatus.FULL,
                     committed_events=committed_events,
                 )
+                confirm_mcp_resolution("full")
             runtime_session.acknowledge_committed_mcp_installation_audits(
                 committed_events
             )
             await self._fold_resume_boundary_or_terminalize(
-                state=state,
+                prepared_attempt=prepared_attempt,
                 prepared=prepared,
                 stored=committed_events,
                 publication_status=(
@@ -5302,30 +5976,38 @@ class HostSession:
                 and interaction_kind == "mcp_input_required"
             )
             if mcp_boundary_publication_failed:
-                state.scratchpad[
-                    "mcp_input_required_publication_closure_reason"
-                ] = "resume_boundary_publication_unavailable"
-                state.scratchpad["publication_terminal_deadline_budget"] = (
-                    prepared.deadline_budget
+                service = self.wiring.run_activation_service
+                if service is None:
+                    raise RuntimeError(
+                        "runtime composition lacks its activation service"
+                    )
+                service.configure_mcp_publication_closure(
+                    run_id=view.run_id,
+                    reason="resume_boundary_publication_unavailable",
+                    deadline_budget=prepared.deadline_budget,
                 )
             if isinstance(exc, asyncio.CancelledError):
                 _clear_current_task_cancellation()
-            if state.stop_request is not None:
-                await self._install_run_termination_intent(
-                    state, state.stop_request.reason
+            service = self.wiring.run_activation_service
+            if service is None:
+                raise RuntimeError("runtime composition lacks its activation service")
+            stop_request = service.pending_stop_request(view.run_id)
+            if stop_request is not None:
+                await self._install_run_termination_intent_for_run(
+                    view.run_id, stop_request.reason
                 )
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
-                    abort_reason=state.stop_request.reason,
+                    run_id=view.run_id,
+                    abort_reason=stop_request.reason,
                 )
             elif mcp_boundary_publication_failed:
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
+                    run_id=view.run_id,
                     abort_reason=AbortKind.HOST_TEARDOWN,
                 )
             else:
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
+                    run_id=view.run_id,
                     stop_reason=(
                         RunStopReason.RUNTIME_PUBLICATION_FAILURE
                         if isinstance(exc, EventPublicationAfterCommitError)
@@ -5336,10 +6018,8 @@ class HostSession:
                         f"{type(exc).__name__}"
                     ),
                 )
-            self.pending_interaction = None
-            self._suspended_state = None
-            self.suspended_run_id = None
             raise exc
+        confirm_mcp_resolution("full")
         self._set_boundary_commit_confirmation(
             BoundaryBatchCommitStatus.FULL,
             committed_events=stored,
@@ -5347,189 +6027,26 @@ class HostSession:
         runtime_session.acknowledge_committed_mcp_installation_audits(stored)
         self._set_boundary_commit_state("committed")
         committed = await self._fold_resume_boundary_or_terminalize(
-            state=state,
+            prepared_attempt=prepared_attempt,
             prepared=prepared,
             stored=stored,
             publication_status="completed",
         )
         self._set_boundary_phase(HostRunBoundaryPhase.ACTIVATION)
-        return state, committed, stored
-
-    def _fold_committed_resume_boundary(
-        self,
-        *,
-        state: LoopState,
-        prepared: PreparedInteractionResumeBoundary,
-        stored: tuple[AgentEvent, ...],
-        publication_status: Literal["completed", "failed_after_commit", "unavailable"],
-    ) -> CommittedInteractionResumeBoundary:
-        exposure_event = next(
-            (
-                event
-                for event in stored
-                if isinstance(event, CapabilityExposureResolvedEvent)
-                and event.id
-                and event.exposure.exposure_id
-                == prepared.continuation_exposure_fact.exposure_id
-            ),
-            None,
-        )
-        boundary_event = next(
-            (
-                event
-                for event in stored
-                if isinstance(event, RunInteractionResumeBoundaryEvent)
-                and event.boundary.identity.boundary_id == prepared.identity.boundary_id
-            ),
-            None,
-        )
-        resolution_event = next(
-            (
-                event
-                for event in stored
-                if isinstance(event, McpInputRequiredResolutionSubmittedEvent)
-                and event.id == prepared.mcp_input_required_resolution_event_id
-            ),
-            None,
-        )
-        if (
-            exposure_event is None
-            or exposure_event.sequence is None
-            or boundary_event is None
-            or boundary_event.sequence is None
-            or (
-                prepared.mcp_input_required_resolution_event_id is not None
-                and (
-                    resolution_event is None
-                    or resolution_event.sequence is None
-                )
-            )
-        ):
-            raise RuntimeError("resume boundary batch was not fully committed")
-        resolution_ref = (
-            event_reference_from_stored(
-                resolution_event,
-                runtime_session_id=self.runtime_session_id,
-            )
-            if resolution_event is not None
-            else None
-        )
-        through_sequence = stored[-1].sequence
-        if through_sequence is None:
-            raise RuntimeError("resume boundary batch ended with an unsequenced event")
-        run_owner = self._run_execution_owners.require(state.run_id)
-        current_handles = run_owner.execution_handles
-        activation_blocked = (
-            run_owner.terminal_state != "open"
-            or run_owner.termination_intent is not None
-        )
-        incoming = prepared.incoming_execution_handles
-        if incoming.frozen_execution_surface is not prepared.frozen_execution_surface:
-            raise RuntimeError(
-                "committed resume execution surface drifted after freeze"
-            )
-        current_runtime_handles_unchanged = (
-            current_handles.mcp_installation is incoming.mcp_installation
-            and current_handles.capability_runtime is incoming.capability_runtime
-            and current_handles.tool_registry is incoming.tool_registry
-            and current_handles.frozen_execution_surface.identity
-            == incoming.frozen_execution_surface.identity
-        )
-        if activation_blocked:
-            incoming.mark_retiring()
-            if incoming.borrow_tracker.can_retire():
-                incoming.mark_closed()
-            state.scratchpad["resume_activation_blocked"] = True
-        elif current_runtime_handles_unchanged:
-            incoming.mark_retiring()
-            if incoming.borrow_tracker.can_retire():
-                incoming.mark_closed()
-            self._run_execution_owners.set_latest_activation_owner(
-                state.run_id,
-                owner_kind="host_resume_boundary",
-                owner_id=boundary_event.id,
-            )
-        else:
-            swap = self._run_execution_owners.swap_execution_handles_after_continuation_commit(
-                state.run_id,
-                expected_current_handle_id=current_handles.handle_id,
-                incoming=incoming,
-                committed_continuation_event_id=boundary_event.id,
-            )
-            if swap.status == "swap_skipped_terminating":
-                incoming.mark_retiring()
-                if incoming.borrow_tracker.can_retire():
-                    incoming.mark_closed()
-                state.scratchpad["resume_activation_blocked"] = True
-                activation_blocked = True
-            else:
-                state.scratchpad["run_execution_handle_id"] = swap.current_handle_id
-                state.scratchpad["capability_execution_borrow_authority"] = (
-                    incoming.borrow_authority
-                )
-        if not activation_blocked:
-            state.run_model_target = prepared.rebound_model_target
-            state.permission_snapshot = prepared.permission_snapshot
-            working_set = state.run_working_set
-            if working_set is None:
-                raise RuntimeError("committed continuation lost RunWorkingSet")
-            working_set.install_continuation(
-                run_model_target=prepared.rebound_model_target,
-                permission_snapshot=prepared.permission_snapshot,
-                plan=prepared.owned_continuation_exposure_plan,
-                fact=prepared.continuation_exposure_fact,
-                event_ref=event_reference_from_stored(
-                    exposure_event,
-                    runtime_session_id=(
-                        self.wiring.runtime_wiring.runtime_session.runtime_session_id
-                    ),
-                ),
-                boundary=boundary_event.boundary,
-                boundary_ref=event_reference_from_stored(
-                    boundary_event,
-                    runtime_session_id=(
-                        self.wiring.runtime_wiring.runtime_session.runtime_session_id
-                    ),
-                ),
-                frozen_execution_surface=prepared.frozen_execution_surface,
-                validated_suspended_state_token_fingerprint=(
-                    boundary_event.boundary.suspended_state_token_fingerprint
-                ),
-                mcp_input_required_resolution_ref=resolution_ref,
-            )
-            if resolution_ref is not None:
-                state.scratchpad[
-                    "latest_mcp_input_required_resolution_reference"
-                ] = resolution_ref
-        state.scratchpad.pop("suspended_state_token", None)
-        return CommittedInteractionResumeBoundary(
-            prepared=prepared,
-            exposure_event_id=exposure_event.id,
-            exposure_event_sequence=exposure_event.sequence,
-            boundary_event_id=boundary_event.id,
-            boundary_event_sequence=boundary_event.sequence,
-            committed_audit_event_ids=tuple(
-                event.id
-                for event in stored
-                if event.id in {audit.id for audit in prepared.pending_mcp_audits}
-            ),
-            committed_through_sequence=through_sequence,
-            publication_status=publication_status,
-            mcp_input_required_resolution_event_reference=resolution_ref,
-        )
+        return committed, stored
 
     async def _fold_resume_boundary_or_terminalize(
         self,
         *,
-        state: LoopState,
+        prepared_attempt: PreparedInteractionResumeAttempt,
         prepared: PreparedInteractionResumeBoundary,
         stored: tuple[AgentEvent, ...],
         publication_status: Literal["completed", "failed_after_commit", "unavailable"],
     ) -> CommittedInteractionResumeBoundary:
         try:
-            return self._fold_committed_resume_boundary(
-                state=state,
-                prepared=prepared,
+            return self._interaction_transition_port.fold_committed_resume_boundary(
+                prepared_attempt=prepared_attempt,
+                prepared_boundary=prepared,
                 stored=stored,
                 publication_status=publication_status,
             )
@@ -5538,7 +6055,7 @@ class HostSession:
                 _clear_current_task_cancellation()
             try:
                 await self._terminalize_committed_run_after_boundary_failure(
-                    state=state,
+                    run_id=prepared_attempt.request.owner_identity.run_id,
                     stop_reason=RunStopReason.RUNTIME_EXECUTION_ERROR,
                     error_message=(
                         f"committed resume fold failed: {type(fold_error).__name__}"
@@ -5549,266 +6066,147 @@ class HostSession:
                 raise
             raise fold_error
 
-    async def _run_owned(
+    async def _run_initial_owned(
         self,
-        state: LoopState,
-        make_result: Callable[[], Awaitable[AgentRunResult]],
-    ) -> AgentRunResult:
-        async def _drive() -> AgentRunResult:
-            try:
-                result = await make_result()
-            except asyncio.CancelledError:
-                request = state.stop_request
-                if request is None:
-                    raise
-                result = await self.wiring.agent_runtime.abort_run(
-                    state, reason=request.reason
-                )
-            self._capture_pending_interaction(result.state)
-            self._clear_plan_entry_audit_if_emitted(result.state)
-            return result
-
-        async def _drive_and_finalize() -> AgentRunResult:
-            installed = self._run_execution_owners.require(state.run_id).active_segment
-            if installed is None:
-                raise RuntimeError("run driver started before segment ownership")
-            self._install_working_set_activation(state, installed)
-            result: AgentRunResult | None = None
-            try:
-                result = await _drive()
-                return result
-            finally:
-                folded_result = result or self.wiring.agent_runtime._run_result(state)
-                working_set = state.run_working_set
-                if (
-                    working_set is not None
-                    and working_set.model_call_control_owner is not None
-                ):
-                    await working_set.model_call_control_owner.retire()
-                    working_set.model_call_control_owner = None
-                self._run_execution_owners.complete_segment(
-                    state.run_id,
-                    segment_id=installed.segment_id,
-                    segment_generation=installed.segment_generation,
-                    result=RunExecutionSegmentResult(
-                        segment_id=installed.segment_id,
-                        segment_generation=installed.segment_generation,
-                        disposition=(
-                            "waiting_user"
-                            if folded_result.status is LoopStatus.WAITING_USER
-                            else "run_terminal"
-                            if folded_result.state.finalized
-                            else "terminalization_pending"
-                        ),
-                        run_result=folded_result,
-                    ),
-                )
-                if folded_result.status is not LoopStatus.WAITING_USER:
-                    self._fold_run_owner_terminal(folded_result)
-                    if folded_result.state.finalized:
-                        self._finish_active_run()
-                else:
-                    self._finish_active_run()
-
-        owner = self._run_execution_owners.require(state.run_id)
-        activation_kind = (
-            "interaction_resume"
-            if owner.latest_activation_owner_kind == "host_resume_boundary"
-            else "initial"
+        *,
+        run_id: str,
+        draft: AgentRunDraft,
+        committed: CommittedHostRunEntry,
+        active_skill_names: frozenset[str],
+    ) -> HostActivationResult:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        dispatch = service.start_initial_result_activation(
+            run_id=run_id,
+            host_session_id=self.host_session_id,
+            draft=draft,
+            committed=committed,
+            active_skill_names=active_skill_names,
+            on_plan_entry_audit_emitted=self._mark_plan_entry_audit_emitted,
+            on_activation_settled=self._on_activation_settled,
         )
-        segment = self._run_execution_owners.install_segment(
-            state.run_id,
-            activation_kind=activation_kind,
-            activation_owner_kind=owner.latest_activation_owner_kind,
-            activation_owner_id=owner.latest_activation_owner_id,
-            driver_factory=_drive_and_finalize,
-            observer=None,
-        )
-        if isinstance(segment, RunSegmentInstallBlocked):
+        if isinstance(dispatch, RunSegmentInstallBlocked):
             raise HostSessionBusyError(
-                f"run segment activation blocked: {segment.reason}"
+                f"run segment activation blocked: {dispatch.reason}"
             )
-        task = segment.driver_task
-        if task is None:
-            raise RuntimeError("installed run segment has no driver task")
-        self._active_task = None if task.done() else task
-        return await asyncio.shield(task)
+        return await self._await_dispatch_outcome(dispatch)
 
-    async def _stream_events_in_boundary_driver(
+    async def _stream_initial_owned(
         self,
-        state: LoopState,
-        make_stream: Callable[[], AsyncIterator[AgentEvent]],
+        *,
+        run_id: str,
+        draft: AgentRunDraft,
+        committed: CommittedHostRunEntry,
+        active_skill_names: frozenset[str],
     ) -> AsyncIterator[AgentEvent]:
-        boundary_task = asyncio.current_task()
-        if boundary_task is None or boundary_task is not self._boundary_execution_task:
-            raise RuntimeError("stream execution must run in the Host boundary driver")
-        queue: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=1)
-
-        async def _drive_segment() -> AgentRunResult:
-            installed = self._run_execution_owners.require(state.run_id).active_segment
-            if installed is None:
-                raise RuntimeError("stream driver started before segment ownership")
-            self._install_working_set_activation(state, installed)
-            try:
-                async for event in make_stream():
-                    await queue.put(event)
-            except asyncio.CancelledError:
-                request = state.stop_request
-                if request is None:
-                    raise
-                _clear_current_task_cancellation()
-                async for event in self.wiring.agent_runtime.stream_abort_run(
-                    state, reason=request.reason
-                ):
-                    await queue.put(event)
-            self._capture_pending_interaction(state)
-            self._clear_plan_entry_audit_if_emitted(state)
-            return self.wiring.agent_runtime._run_result(state)
-
-        owner = self._run_execution_owners.require(state.run_id)
-        activation_kind = (
-            "interaction_resume"
-            if owner.latest_activation_owner_kind == "host_resume_boundary"
-            else "initial"
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        dispatch = service.start_initial_stream_activation(
+            run_id=run_id,
+            host_session_id=self.host_session_id,
+            draft=draft,
+            committed=committed,
+            active_skill_names=active_skill_names,
+            on_plan_entry_audit_emitted=self._mark_plan_entry_audit_emitted,
+            on_activation_settled=self._on_activation_settled,
         )
-        segment = self._run_execution_owners.install_segment(
-            state.run_id,
-            activation_kind=activation_kind,
-            activation_owner_kind=owner.latest_activation_owner_kind,
-            activation_owner_id=owner.latest_activation_owner_id,
-            driver_factory=_drive_segment,
-            observer=None,
-        )
-        if isinstance(segment, RunSegmentInstallBlocked):
+        if isinstance(dispatch, RunSegmentInstallBlocked):
             raise HostSessionBusyError(
-                f"run segment activation blocked: {segment.reason}"
+                f"run segment activation blocked: {dispatch.reason}"
             )
-        task = segment.driver_task
-        if task is None:
-            raise RuntimeError("installed streaming segment has no driver task")
-        self._active_task = task
-        result: AgentRunResult | None = None
+        if not isinstance(dispatch, RunActivationDispatch) or dispatch.observer is None:
+            raise RuntimeError("stream activation did not install its observer")
+        observer = dispatch.observer
         try:
-            while True:
-                if task.done() and queue.empty():
-                    result = await task
-                    break
-                item_task = asyncio.create_task(queue.get())
-                try:
-                    done, _pending = await asyncio.wait(
-                        (item_task, task),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if item_task in done:
-                        yield item_task.result()
-                        continue
-                    item_task.cancel()
-                    try:
-                        await item_task
-                    except asyncio.CancelledError:
-                        pass
-                    if queue.empty():
-                        result = await task
-                        break
-                finally:
-                    if not item_task.done():
-                        item_task.cancel()
+            async for event in observer:
+                if not isinstance(event, AgentEvent):
+                    raise RuntimeError("run observer emitted a non-event payload")
+                yield event
+            await self._await_dispatch_outcome(dispatch)
         finally:
-            if not task.done():
-                task.cancel()
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    pass
-            folded_result = result or self.wiring.agent_runtime._run_result(state)
-            working_set = state.run_working_set
-            if (
-                working_set is not None
-                and working_set.model_call_control_owner is not None
-            ):
-                await working_set.model_call_control_owner.retire()
-                working_set.model_call_control_owner = None
-            self._run_execution_owners.complete_segment(
-                state.run_id,
-                segment_id=segment.segment_id,
-                segment_generation=segment.segment_generation,
-                result=RunExecutionSegmentResult(
-                    segment_id=segment.segment_id,
-                    segment_generation=segment.segment_generation,
-                    disposition=(
-                        "waiting_user"
-                        if folded_result.status is LoopStatus.WAITING_USER
-                        else "run_terminal"
-                        if folded_result.state.finalized
-                        else "terminalization_pending"
-                    ),
-                    run_result=folded_result,
-                ),
+            await observer.aclose()
+
+    async def _run_resume_owned(
+        self,
+        *,
+        prepared: PreparedInteractionResumeAttempt,
+    ) -> HostActivationResult:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        dispatch = service.start_resume_result_activation(
+            run_id=prepared.request.owner_identity.run_id,
+            host_session_id=self.host_session_id,
+            interaction_kind=prepared.interaction_kind,
+            resolution=prepared.resolution,
+            on_plan_entry_audit_emitted=self._mark_plan_entry_audit_emitted,
+            on_activation_settled=self._on_activation_settled,
+        )
+        if isinstance(dispatch, RunSegmentInstallBlocked):
+            raise HostSessionBusyError(
+                f"run segment activation blocked: {dispatch.reason}"
             )
-            if folded_result.status is not LoopStatus.WAITING_USER:
-                self._fold_run_owner_terminal(folded_result)
-                if folded_result.state.finalized:
-                    self._finish_active_run()
-            else:
-                self._finish_active_run()
+        return await self._await_dispatch_outcome(dispatch)
 
-    @staticmethod
-    def _install_working_set_activation(
-        state: LoopState,
-        segment: RunExecutionSegmentOwner,
-    ) -> None:
-        working_set = state.run_working_set
-        if working_set is None:
-            raise RuntimeError("run segment activation requires a working set")
-        payload = {
-            "schema_version": "run_execution_activation.v1",
-            "activation_owner_kind": segment.activation_owner_kind,
-            "activation_owner_id": segment.activation_owner_id,
-            "segment_generation": segment.segment_generation,
-        }
-        activation = RunExecutionActivationFact(
-            **payload,
-            activation_fingerprint=sha256_fingerprint(
-                "run-execution-activation:v1", payload
-            ),
+    async def _stream_resume_owned(
+        self,
+        *,
+        prepared: PreparedInteractionResumeAttempt,
+    ) -> AsyncIterator[AgentEvent]:
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        dispatch = service.start_resume_stream_activation(
+            run_id=prepared.request.owner_identity.run_id,
+            host_session_id=self.host_session_id,
+            interaction_kind=prepared.interaction_kind,
+            resolution=prepared.resolution,
+            on_plan_entry_audit_emitted=self._mark_plan_entry_audit_emitted,
+            on_activation_settled=self._on_activation_settled,
         )
-        current = working_set.run_execution_activation
-        if working_set.model_call_control_owner is not None:
-            raise RuntimeError("run working-set segment already has a control owner")
-        if current is not None and current != activation:
-            if activation.segment_generation <= current.segment_generation:
-                raise RuntimeError("run working-set activation generation regressed")
-            if working_set.process_segment_id == segment.segment_id:
-                raise RuntimeError("run segment identity reused with a new activation")
-        working_set.run_execution_activation = activation
-        working_set.process_segment_id = segment.segment_id
-        working_set.model_call_control_owner = RunModelCallControlOwner(
-            run_id=state.run_id,
-            activation=activation,
-            segment_id=segment.segment_id,
-            segment_generation=segment.segment_generation,
-        )
+        if isinstance(dispatch, RunSegmentInstallBlocked):
+            raise HostSessionBusyError(
+                f"run segment activation blocked: {dispatch.reason}"
+            )
+        if not isinstance(dispatch, RunActivationDispatch) or dispatch.observer is None:
+            raise RuntimeError("stream activation did not install its observer")
+        observer = dispatch.observer
+        try:
+            async for event in observer:
+                if not isinstance(event, AgentEvent):
+                    raise RuntimeError("run observer emitted a non-event payload")
+                yield event
+            await self._await_dispatch_outcome(dispatch)
+        finally:
+            await observer.aclose()
 
-    def _finish_active_run(self) -> None:
-        run_id = (
-            self._active_state.run_id
-            if self._active_state is not None
-            else self.active_run_id
-        )
+    async def _await_dispatch_outcome(
+        self,
+        dispatch: RunActivationDispatch,
+    ) -> HostActivationResult:
+        outcome = await dispatch.wait_activation()
+        if isinstance(outcome, RunTerminalOutcome):
+            return agent_run_result_from_terminal_outcome(outcome)
+        return outcome
+
+    def _on_activation_settled(self, outcome: RunActivationOutcome) -> None:
+        if isinstance(outcome, (RunTerminalOutcome, RunSuspendedOutcome)):
+            self._finish_active_run(outcome.owner_identity.run_id)
+
+    def _finish_active_run(self, settled_run_id: str | None = None) -> None:
+        run_id = settled_run_id or self.active_run_id or self.stopping_run_id
         if run_id is not None:
             self._retire_confirmed_run_owner(run_id)
         self._notify_governance()
-        self._active_task = None
-        self._active_state = None
-        self.active_run_id = None
-        self.stopping_run_id = None
         self.last_active_at = time.monotonic()
         self._ensure_terminal_notification_dispatch()
 
     def _retire_confirmed_run_owner(self, run_id: str) -> None:
-        owner = self._run_execution_owners.get(run_id)
-        if owner is not None and owner.terminal_state == "confirmed":
-            self._run_execution_owners.retire_confirmed(run_id)
+        view = self._run_activation_service.run_view(run_id)
+        if view is not None and view.terminal_state == "confirmed":
+            self._run_activation_service.retire_confirmed(run_id)
 
     async def _prepare_prior_messages_for_turn(
         self,
@@ -5886,34 +6284,6 @@ class HostSession:
             except Exception:
                 continue
 
-    def _capture_pending_interaction(self, state: LoopState) -> None:
-        if state.status is LoopStatus.WAITING_USER:
-            # Process-local ABA token: stable for retries of this pending
-            # interaction, rotated only after a committed continuation consumes it.
-            if not isinstance(state.scratchpad.get("suspended_state_token"), str):
-                state.scratchpad["suspended_state_token"] = (
-                    f"suspended_state:{uuid4().hex}"
-                )
-            if state.pending_interaction_kind == "plan":
-                self.pending_interaction = pending_plan_interaction_from_state(
-                    state, self.host_session_id
-                )
-            elif state.pending_interaction_kind == "mcp_input_required":
-                self.pending_interaction = pending_mcp_input_required_from_state(
-                    state, self.host_session_id
-                )
-            else:
-                self.pending_interaction = pending_approval_from_state(
-                    state, self.host_session_id
-                )
-            self._suspended_state = state
-            self.suspended_run_id = state.run_id
-            return
-        self.pending_interaction = None
-        self._suspended_state = None
-        self.suspended_run_id = None
-        state.scratchpad.pop("suspended_state_token", None)
-
     async def _sync_ingress_waiting_state(self) -> None:
         pending = self.pending_interaction
         if pending is None:
@@ -5962,13 +6332,6 @@ class HostSession:
                 "MCP input-required id does not match the pending interaction"
             )
         return pending
-
-    def _require_suspended_state(self, pending: PendingInteraction) -> LoopState:
-        if self._suspended_state is None:
-            raise ValueError("host session has no suspended state")
-        if self._suspended_state.run_id != pending.run_id:
-            raise ValueError("suspended state does not match pending interaction")
-        return self._suspended_state
 
     def enter_plan(self, *, reason: str = "") -> EffectivePermissionPolicy:
         """Host/user entry point for Plan mode.
@@ -6037,23 +6400,8 @@ class HostSession:
             )
         ]
 
-    def _prepare_state_for_plan(self, state: LoopState) -> None:
-        state.scratchpad["host_session_id"] = self.host_session_id
-        state.scratchpad["plan_state"] = self.plan_state
-        if self.plan_state.active:
-            state.scratchpad["plan_active"] = True
-        if self.plan_state.pending_entry_audit:
-            state.scratchpad["plan_entry_audit"] = {
-                "source": "user",
-                "previous_permission_mode": self.plan_state.pre_plan_permission_mode,
-                "previous_permission_policy": self.plan_state.pre_plan_permission_policy
-                or {},
-                "reason": self.plan_state.entry_reason,
-            }
-
-    def _clear_plan_entry_audit_if_emitted(self, state: LoopState) -> None:
-        if state.scratchpad.get("plan_entry_audit_emitted"):
-            self.plan_state.pending_entry_audit = False
+    def _mark_plan_entry_audit_emitted(self) -> None:
+        self.plan_state.pending_entry_audit = False
 
     def _pre_plan_policy(self) -> EffectivePermissionPolicy:
         payload = self.plan_state.pre_plan_permission_policy or {}
@@ -6076,7 +6424,6 @@ class HostSession:
 
     async def _emit_plan_mode_exited(
         self,
-        state: LoopState | None,
         *,
         source: str,
         exit_request_id: str | None = None,
@@ -6087,26 +6434,18 @@ class HostSession:
         restored_mode = self.plan_state.pre_plan_permission_mode
         restored_policy = self._pre_plan_policy()
         restored_mode_value = parse_permission_mode(restored_mode).value
-        context = event_context or (
-            EventContext(
-                run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
-            )
-            if state is not None
-            else None
-        )
-        if context is None:
+        if event_context is None:
             raise RuntimeError("plan mode exit requires event attribution")
         stored_exit = await self.wiring.runtime_wiring.runtime_session.emit(
             PlanModeExitedEvent(
-                **context.event_fields(),
+                **event_context.event_fields(),
                 source=source,  # type: ignore[arg-type]
                 exit_request_id=exit_request_id,
                 restored_permission_mode=restored_mode_value,
                 restored_permission_policy=restored_policy.to_dict(),
                 transition_owner=transition_owner,  # type: ignore[arg-type]
                 host_workflow_operation_id=host_workflow_operation_id,
-            ),
-            state=state,
+            )
         )
         self.plan_state.apply_durable_event(stored_exit)
 
@@ -6126,8 +6465,10 @@ class HostSession:
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction(action)
-        task = self._active_task
-        if self.active_run_id is not None or (task is not None and not task.done()):
+        active_view = self._run_activation_service.active_host_run_view()
+        if self.active_run_id is not None or (
+            active_view is not None and active_view.active_driver_running
+        ):
             raise HostSessionBusyError("host session already has an active run")
 
     def _require_resume_admission(
@@ -6142,8 +6483,10 @@ class HostSession:
         self.wiring.runtime_wiring.runtime_session.require_mutation_allowed()
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
-        task = self._active_task
-        if self.active_run_id is not None or (task is not None and not task.done()):
+        active_view = self._run_activation_service.active_host_run_view()
+        if self.active_run_id is not None or (
+            active_view is not None and active_view.active_driver_running
+        ):
             raise HostSessionBusyError("host session already has an active run")
         pending = self.pending_interaction
         if pending is None:
@@ -6182,11 +6525,11 @@ class HostSession:
         )
 
     def _raise_if_active_run(self) -> None:
-        task = self._active_task
-        boundary_task = self._boundary_task
+        active_view = self._run_activation_service.active_host_run_view()
+        boundary_task = self._current_boundary_task()
         if (
             self._run_lock.locked()
-            or (task is not None and not task.done())
+            or (active_view is not None and active_view.active_driver_running)
             or (boundary_task is not None and not boundary_task.done())
         ):
             raise HostSessionBusyError("host session already has an active run")

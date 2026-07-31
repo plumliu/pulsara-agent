@@ -9,6 +9,7 @@ from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder
 from pulsara_agent.runtime.terminal.guard import CommandGuard
 from pulsara_agent.runtime.terminal.models import (
     TerminalRequest,
+    TerminalExecutionOwner,
     TerminalResult,
     TerminalSessionState,
     TerminalStatus,
@@ -37,7 +38,12 @@ class TerminalSession:
     def current_cwd(self) -> Path:
         return self.state.current_cwd
 
-    def execute(self, request: TerminalRequest) -> TerminalResult:
+    def execute(
+        self,
+        request: TerminalRequest,
+        *,
+        execution_owner: TerminalExecutionOwner | None = None,
+    ) -> TerminalResult:
         guard = CommandGuard(self.state.workspace_root)
         decision = guard.validate(request, current_cwd=self.state.current_cwd)
         if not decision.allowed:
@@ -54,12 +60,7 @@ class TerminalSession:
                 },
             )
         assert decision.effective_cwd is not None
-        output_callback = request.metadata.get("output_callback")
-        if not callable(output_callback):
-            output_callback = None
-        record_event = request.metadata.get("record_event")
-        if not callable(record_event):
-            record_event = None
+        owner = execution_owner or TerminalExecutionOwner()
         env_result = self.env_builder.build(
             cwd=decision.effective_cwd,
             workspace_root=self.state.workspace_root,
@@ -75,21 +76,19 @@ class TerminalSession:
                 backend_type=self.state.backend_type,
                 tty=request.tty,
                 max_lifetime_seconds=request.max_lifetime_seconds,
-                output_callback=output_callback,
+                output_callback=owner.output_callback,
                 shell=self.shell,
                 env=env_result.env,
                 env_diagnostics=env_result.diagnostics,
                 owner_host_session_id=self.state.owner_host_session_id,
                 owner_conversation_id=self.state.owner_conversation_id,
-                origin_event_context=request.metadata.get("origin_event_context"),
-                origin_tool_call_id=request.metadata.get("tool_call_id"),
-                origin_runtime_session_id=request.metadata.get("runtime_session_id"),
-                origin_run_entry_kind=request.metadata.get("run_entry_kind"),
-                record_event=record_event,
-                require_completion_notification_reservation=bool(
-                    request.metadata.get(
-                        "require_completion_notification_reservation", False
-                    )
+                origin_event_context=owner.origin_event_context,
+                origin_tool_call_id=owner.origin_tool_call_id,
+                origin_runtime_session_id=owner.origin_runtime_session_id,
+                origin_run_entry_kind=owner.origin_run_entry_kind,
+                record_event=owner.record_event,
+                require_completion_notification_reservation=(
+                    owner.require_completion_notification_reservation
                 ),
             )
         except ProcessLimitError as exc:

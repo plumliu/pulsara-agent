@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.memory.candidates.pool import (
     GovernanceDecision,
     GovernanceWriteOutcome,
@@ -78,9 +78,7 @@ def make_test_governance_decision_record(
         decision_id=decision_id,
         governance_batch_id=governance_batch_id,
         batch_input_fingerprint=identity.batch_input_fingerprint,
-        batch_input_reference_fingerprint=(
-            identity.batch_input_reference_fingerprint
-        ),
+        batch_input_reference_fingerprint=(identity.batch_input_reference_fingerprint),
         governance_model_call_id=identity.governance_model_call_id,
         decision_index=decision_index,
         requested_decision_payload_fingerprint=requested_fingerprint,

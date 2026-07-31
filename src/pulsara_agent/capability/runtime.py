@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
 
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
-from pulsara_agent.capability.exposure import CapabilityExposurePlan, build_exposure_plan
+from pulsara_agent.capability.exposure import (
+    CapabilityExposurePlan,
+    build_exposure_plan,
+)
 from pulsara_agent.capability.facts import (
     ProviderProjectionResult,
     build_capability_projection_fact,
@@ -38,9 +40,7 @@ from pulsara_agent.primitives.capability import (
 )
 from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
 from pulsara_agent.primitives.model_call import canonical_json_bytes, sha256_fingerprint
-
-if TYPE_CHECKING:
-    from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.ports.tool_registry import ToolRegistryReadPort
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +72,7 @@ class CapabilityRuntime:
         self,
         context: CapabilityExecutionSurfaceSnapshotContext,
         *,
-        tool_registry: ToolRegistry,
+        tool_registry: ToolRegistryReadPort,
         archive: ArtifactStore,
         runtime_session_id: str,
         owner_id: str,
@@ -221,9 +221,7 @@ class CapabilityRuntime:
             )
             for name in sorted(surface_by_name)
         )
-        authorization_fp = capability_authorization_fingerprint(
-            authorization_entries
-        )
+        authorization_fp = capability_authorization_fingerprint(authorization_entries)
         semantic = build_capability_exposure_semantic(
             execution_surface=frozen_surface.identity,
             catalog_projection=catalog_fact,
@@ -375,8 +373,7 @@ class CapabilityRuntime:
             for entry in original_fact.semantic.execution_surface.entries
         }
         current_surface = {
-            entry.capability_name: entry
-            for entry in frozen_surface.identity.entries
+            entry.capability_name: entry for entry in frozen_surface.identity.entries
         }
         rank = {"hidden": 0, "deferred": 1, "direct": 2}
         authorization_entries: list[CapabilityAuthorizationEntryFact] = []
@@ -430,8 +427,7 @@ class CapabilityRuntime:
                 original_fact.semantic.execution_surface.surface_contract_version
             ),
             entries=tuple(
-                current_surface[name]
-                for name in sorted(retained_surface_names)
+                current_surface[name] for name in sorted(retained_surface_names)
             ),
             mcp_installation_id=frozen_surface.identity.mcp_installation_id,
         )

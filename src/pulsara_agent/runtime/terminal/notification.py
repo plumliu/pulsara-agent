@@ -58,6 +58,7 @@ from pulsara_agent.primitives.terminal_observation import (
     UnavailableRecoveredTerminalOutputDeltaFact,
     terminal_receipt_dominates_observation,
 )
+from pulsara_agent.ports.terminal import PreparedTerminalNotificationReservation
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 
 if TYPE_CHECKING:
@@ -95,13 +96,6 @@ class TerminalNotificationCapacityError(RuntimeError):
     def __init__(self, message: str, *, reason_code: str) -> None:
         self.reason_code = reason_code
         super().__init__(message)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedTerminalNotificationReservation:
-    reservation: TerminalNotificationReservationFact
-    expected_account_revision: int
-    expected_account_state_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -2435,7 +2429,6 @@ def _completion_content(event: TerminalProcessCompletedEvent) -> str:
 __all__ = [
     "HostIngressNotificationProjectionStore",
     "NOTIFICATION_REDUCER_CONTRACT_FINGERPRINT",
-    "PreparedTerminalNotificationReservation",
     "PendingTerminalNotification",
     "TerminalNotificationAccountCoordinator",
     "TerminalNotificationAdmissionStale",

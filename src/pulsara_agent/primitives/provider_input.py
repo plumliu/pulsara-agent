@@ -222,7 +222,10 @@ class OneShotGenerationScopeFact(FrozenFactBase):
     )
     scope_kind: Literal["one_shot"] = "one_shot"
     operation_kind: Literal[
-        "direct_model_call", "window_summarizer", "governance_model_call"
+        "direct_model_call",
+        "window_summarizer",
+        "governance_model_call",
+        "compaction_memory_extraction_model_call",
     ]
     operation_id: str = Field(min_length=1)
     attempt_index: int = Field(ge=0)
@@ -250,6 +253,7 @@ class ProviderInputGenerationFact(FrozenFactBase):
         "direct_one_shot",
         "window_summarizer",
         "governance_one_shot",
+        "compaction_memory_extraction_one_shot",
     ]
     scope: ProviderInputGenerationScopeFact
     compatibility: ProviderInputGenerationCompatibilityFact

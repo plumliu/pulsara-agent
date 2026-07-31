@@ -323,7 +323,7 @@ def capture_benchmark_environment(
     from pulsara_agent.event_log.postgres_pool import (
         postgres_event_pool_capacity,
     )
-    from pulsara_agent.runtime.blocking_executor import (
+    from pulsara_agent.blocking_executor import (
         blocking_executor_capacity,
     )
 

@@ -13,10 +13,12 @@ from pulsara_agent.event import (
     AgentEvent,
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
+    RunStartEvent,
 )
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
-from pulsara_agent.graph import GraphStore
+from pulsara_agent.graph import GraphStore, normalize_jsonld_document
+from pulsara_agent.jsonld import NodeRef, jsonld_value
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
@@ -36,6 +38,7 @@ from pulsara_agent.memory.candidates.pool import (
     new_governance_batch_id,
 )
 from pulsara_agent.memory.governance.dedupe import already_exists
+from pulsara_agent.memory.compaction.sanitizer import sanitize_compaction_evidence
 from pulsara_agent.memory.governance.relatedness import (
     RelatednessAvailability,
     RelatednessExecutionContext,
@@ -50,13 +53,16 @@ from pulsara_agent.memory.canonical.write_service import (
     MemoryWriteService,
 )
 from pulsara_agent.memory.scope import CTX_USER
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as runtime_ontology
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.governance_evidence import (
+    CompactionExtractionGovernanceSourceSemanticFact,
     GovernanceDerivedWriteAttributionFact,
+    ImmutableGovernanceCandidateSnapshotFact,
 )
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
 )
 
@@ -138,6 +144,10 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
+        candidate_snapshots: Mapping[
+            str, ImmutableGovernanceCandidateSnapshotFact
+        ]
+        | None = None,
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         batch_id = governance_batch_id or new_governance_batch_id()
@@ -152,6 +162,7 @@ class MemoryGovernanceExecutor:
             governance_batch_id=batch_id,
             relatedness_context=relatedness_context,
             target_entries=target_entries,
+            candidate_snapshots=candidate_snapshots or {},
             execution_identity=execution_identity,
         )
 
@@ -161,6 +172,10 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
+        candidate_snapshots: Mapping[
+            str, ImmutableGovernanceCandidateSnapshotFact
+        ]
+        | None = None,
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         operation = partial(
@@ -168,6 +183,7 @@ class MemoryGovernanceExecutor:
             decision,
             governance_batch_id=governance_batch_id,
             relatedness_context=relatedness_context,
+            candidate_snapshots=candidate_snapshots,
             execution_identity=execution_identity,
         )
         return await self._run_auxiliary_operation(
@@ -210,6 +226,9 @@ class MemoryGovernanceExecutor:
         governance_batch_id: str,
         relatedness_context: RelatednessExecutionContext | None,
         target_entries: tuple[PooledMemoryCandidate, ...],
+        candidate_snapshots: Mapping[
+            str, ImmutableGovernanceCandidateSnapshotFact
+        ],
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         if isinstance(decision, SkipDecision):
@@ -292,6 +311,13 @@ class MemoryGovernanceExecutor:
                 )
                 uow.decisions.append_decision(record)
                 return MemoryGovernanceApplyResult(decision_record=record, events=[])
+
+            self._materialize_compaction_evidence(
+                candidate=candidate,
+                target_entries=target_entries,
+                candidate_snapshots=candidate_snapshots,
+                uow=uow,
+            )
 
             valid_old_ids: tuple[str, ...] = ()
             supersede_blocked_reason: str | None = None
@@ -454,6 +480,122 @@ class MemoryGovernanceExecutor:
             diagnostics=tuple(diagnostics),
         )
 
+    def _materialize_compaction_evidence(
+        self,
+        *,
+        candidate,
+        target_entries: tuple[PooledMemoryCandidate, ...],
+        candidate_snapshots: Mapping[
+            str, ImmutableGovernanceCandidateSnapshotFact
+        ],
+        uow: GovernanceWriteUnitOfWork,
+    ) -> None:
+        compaction_targets = tuple(
+            item for item in target_entries if item.origin is CandidateOrigin.COMPACTION
+        )
+        if not compaction_targets:
+            return
+
+        evidence_documents: dict[str, dict[str, Any]] = {}
+        for target in compaction_targets:
+            snapshot = candidate_snapshots.get(target.entry_id)
+            if snapshot is None:
+                raise ValueError(
+                    "compaction governance write requires its frozen evidence snapshot"
+                )
+            if (
+                snapshot.candidate_attribution.entry_id != target.entry_id
+                or snapshot.candidate_attribution.canonical_candidate_payload
+                != target.payload
+            ):
+                raise ValueError("compaction governance evidence snapshot drifted")
+            source = snapshot.source_evidence_semantic
+            attribution = snapshot.source_evidence_attribution
+            if not isinstance(
+                source, CompactionExtractionGovernanceSourceSemanticFact
+            ):
+                raise ValueError("compaction candidate lost compaction evidence")
+            payload = target.payload
+            if not isinstance(payload, ValidCandidatePayload):
+                raise ValueError("compaction governance target is not a valid candidate")
+            node_ids = payload.candidate.evidence_ids
+            quote_semantics = source.ordered_evidence_semantics
+            quote_attributions = attribution.quoted_evidence_attributions
+            if not (
+                len(node_ids) == len(quote_semantics) == len(quote_attributions)
+            ):
+                raise ValueError("compaction evidence node cardinality drifted")
+            for node_id, semantic, occurrence in zip(
+                node_ids,
+                quote_semantics,
+                quote_attributions,
+                strict=True,
+            ):
+                source_ref = occurrence.producer_event_reference
+                if source_ref is None:
+                    raise ValueError("compaction evidence lost its source event")
+                source_event = self.event_log.get_by_id(
+                    source_ref.stable_identity.event_id
+                )
+                if (
+                    not isinstance(source_event, RunStartEvent)
+                    or source_event.sequence != source_ref.sequence
+                    or source_event.id != source_ref.stable_identity.event_id
+                    or source_event.type.value
+                    != source_ref.stable_identity.event_type
+                ):
+                    raise ValueError("compaction evidence source event drifted")
+                sanitized = sanitize_compaction_evidence(
+                    source_event.current_user_message.text
+                )
+                if (
+                    sanitized.text != semantic.text
+                    or sanitized.text_sha256 != semantic.text_sha256
+                    or semantic.quote_kind != "canonical_sanitized_user_message"
+                    or semantic.verification_status
+                    != "canonical_sanitized_match"
+                ):
+                    raise ValueError("compaction evidence sanitizer projection drifted")
+                document = normalize_jsonld_document(
+                    jsonld_value(
+                        {
+                            "@context": CORE_CONTEXT,
+                            "@id": node_id,
+                            "@type": [runtime_ontology.EVIDENCE],
+                            runtime_ontology.STATEMENT: semantic.text,
+                            runtime_ontology.SOURCE_TYPE: (
+                                runtime_ontology.EvidenceSourceType.HUMAN_INPUT
+                            ),
+                            runtime_ontology.STATUS: memory.NodeStatus.ACTIVE,
+                            runtime_ontology.OBSERVED_AT: source_event.created_at,
+                            runtime_ontology.SCOPE: payload.candidate.scope,
+                            runtime_ontology.CREATED_FROM: NodeRef(source_event.id),
+                        }
+                    )
+                )
+                previous = evidence_documents.setdefault(node_id, document)
+                if previous != document:
+                    raise ValueError("compaction evidence node identity conflict")
+
+        candidate_evidence_ids = tuple(candidate.evidence_ids)
+        if not candidate_evidence_ids or any(
+            node_id not in evidence_documents for node_id in candidate_evidence_ids
+        ):
+            raise ValueError(
+                "compaction governance output does not cite verified evidence"
+            )
+        for node_id in candidate_evidence_ids:
+            expected = evidence_documents[node_id]
+            if not uow.graph.has_jsonld(node_id, graph_id=uow.resolved_graph_id):
+                uow.graph.put_jsonld(expected, graph_id=uow.resolved_graph_id)
+                continue
+            existing = uow.graph.get_jsonld(node_id, graph_id=uow.resolved_graph_id)
+            extra_keys = set(existing) - set(expected)
+            if extra_keys - {memory.SUPPORTS.name} or any(
+                existing.get(key) != value for key, value in expected.items()
+            ):
+                raise ValueError("compaction evidence graph document conflict")
+
     def _dispatch_event_ticket(
         self,
         ticket: GovernanceEventDispatchTicket,
@@ -474,7 +616,7 @@ class MemoryGovernanceExecutor:
         if self.async_operation_port is not None:
             return await self.async_operation_port(name, operation, deadline)
         loop = asyncio.get_running_loop()
-        from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+        from pulsara_agent.blocking_executor import auxiliary_io_executor
 
         return await loop.run_in_executor(auxiliary_io_executor(), operation)
 

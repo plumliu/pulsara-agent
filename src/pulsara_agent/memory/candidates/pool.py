@@ -15,9 +15,14 @@ from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from pulsara_agent.event.candidates import CandidatePayload, MemoryCandidate
+from pulsara_agent.primitives.memory_candidate import (
+    CandidatePayload,
+    MemoryCandidate,
+    MemoryCandidateSemanticFact,
+    candidate_payload_semantic,
+)
 from pulsara_agent.event.events import utc_now
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.governance_evidence import (
@@ -42,6 +47,7 @@ class PooledMemoryCandidate(BaseModel):
 
     entry_id: str = Field(default_factory=lambda: f"pool:{uuid4().hex}")
     payload: CandidatePayload
+    candidate_semantic: MemoryCandidateSemanticFact | None = None
     origin: CandidateOrigin
     source_session_id: str
     source_run_id: str
@@ -55,6 +61,15 @@ class PooledMemoryCandidate(BaseModel):
     intent_fingerprint: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _shared_semantic(self) -> "PooledMemoryCandidate":
+        expected = candidate_payload_semantic(self.payload)
+        if self.candidate_semantic is None:
+            self.candidate_semantic = expected
+        elif self.candidate_semantic != expected:
+            raise ValueError("pooled candidate shared semantic identity drifted")
+        return self
 
 
 class CandidatePoolProposal(BaseModel):
@@ -71,7 +86,14 @@ class CandidatePoolProposal(BaseModel):
     intent_fingerprint: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    def to_pooled(self, *, source_session_id: str, source_run_id: str, source_turn_id: str, source_reply_id: str) -> PooledMemoryCandidate:
+    def to_pooled(
+        self,
+        *,
+        source_session_id: str,
+        source_run_id: str,
+        source_turn_id: str,
+        source_reply_id: str,
+    ) -> PooledMemoryCandidate:
         return PooledMemoryCandidate(
             **({"entry_id": self.entry_id} if self.entry_id is not None else {}),
             payload=self.payload,
@@ -210,13 +232,17 @@ class MemoryGovernanceDecisionRecord(BaseModel):
 
 
 class CandidatePool(Protocol):
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate: ...
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate: ...
 
     def get_candidate(self, entry_id: str) -> PooledMemoryCandidate: ...
 
     def list_candidates(self) -> list[PooledMemoryCandidate]: ...
 
-    def list_pending(self, *, limit: int | None = None) -> list[PooledMemoryCandidate]: ...
+    def list_pending(
+        self, *, limit: int | None = None
+    ) -> list[PooledMemoryCandidate]: ...
 
     def evidence_rejection_event_id(self, entry_id: str) -> str | None: ...
 
@@ -227,7 +253,9 @@ class CandidatePool(Protocol):
         rejection_event_id: str,
     ) -> None: ...
 
-    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord: ...
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord: ...
 
     def list_decisions(self) -> list[MemoryGovernanceDecisionRecord]: ...
 
@@ -238,9 +266,13 @@ class InMemoryCandidatePool:
     _decisions: list[MemoryGovernanceDecisionRecord] = field(default_factory=list)
     _evidence_rejections: dict[str, str] = field(default_factory=dict)
 
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate:
         if candidate.entry_id in self._candidates:
-            raise ValueError(f"candidate pool entry already exists: {candidate.entry_id}")
+            raise ValueError(
+                f"candidate pool entry already exists: {candidate.entry_id}"
+            )
         self._candidates[candidate.entry_id] = candidate.model_copy(deep=True)
         return candidate
 
@@ -251,7 +283,9 @@ class InMemoryCandidatePool:
             raise KeyError(entry_id) from exc
 
     def list_candidates(self) -> list[PooledMemoryCandidate]:
-        return [candidate.model_copy(deep=True) for candidate in self._candidates.values()]
+        return [
+            candidate.model_copy(deep=True) for candidate in self._candidates.values()
+        ]
 
     def list_pending(self, *, limit: int | None = None) -> list[PooledMemoryCandidate]:
         terminal = _terminal_entry_ids(self._decisions)
@@ -284,9 +318,15 @@ class InMemoryCandidatePool:
             raise ValueError("candidate evidence rejection identity conflict")
         self._evidence_rejections[entry_id] = rejection_event_id
 
-    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
-        if any(existing.decision_id == record.decision_id for existing in self._decisions):
-            raise ValueError(f"governance decision already exists: {record.decision_id}")
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord:
+        if any(
+            existing.decision_id == record.decision_id for existing in self._decisions
+        ):
+            raise ValueError(
+                f"governance decision already exists: {record.decision_id}"
+            )
         _validate_decision_targets(record, self._candidates.keys())
         self._decisions.append(record.model_copy(deep=True))
         return record
@@ -306,7 +346,9 @@ class PostgresCandidatePool:
             deadline_monotonic=monotonic() + 30.0,
         )
 
-    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
+    def append_candidate(
+        self, candidate: PooledMemoryCandidate
+    ) -> PooledMemoryCandidate:
         with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -314,6 +356,7 @@ class PostgresCandidatePool:
                     insert into memory_candidates (
                         entry_id,
                         payload,
+                        candidate_semantic_fingerprint,
                         origin,
                         source_session_id,
                         source_run_id,
@@ -328,11 +371,18 @@ class PostgresCandidatePool:
                         metadata,
                         created_at
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                     """,
                     (
                         candidate.entry_id,
-                        Jsonb(_payload_adapter.dump_python(candidate.payload, mode="json")),
+                        Jsonb(
+                            _payload_adapter.dump_python(candidate.payload, mode="json")
+                        ),
+                        (
+                            candidate.candidate_semantic.semantic_fingerprint
+                            if candidate.candidate_semantic is not None
+                            else None
+                        ),
                         candidate.origin.value,
                         candidate.source_session_id,
                         candidate.source_run_id,
@@ -440,7 +490,9 @@ class PostgresCandidatePool:
                     rejection_event_id=rejection_event_id,
                 )
 
-    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord:
         candidate_ids = {candidate.entry_id for candidate in self.list_candidates()}
         _validate_decision_targets(record, candidate_ids)
         with self._connection() as connection:
@@ -471,8 +523,14 @@ class PostgresCandidatePool:
                         record.decision_index,
                         record.requested_decision_payload_fingerprint,
                         record.decision_payload_fingerprint,
-                        Jsonb(_decision_adapter.dump_python(record.decision, mode="json")),
-                        Jsonb(_outcome_adapter.dump_python(record.write_outcome, mode="json")),
+                        Jsonb(
+                            _decision_adapter.dump_python(record.decision, mode="json")
+                        ),
+                        Jsonb(
+                            _outcome_adapter.dump_python(
+                                record.write_outcome, mode="json"
+                            )
+                        ),
                         record.created_at,
                     ),
                 )
@@ -529,7 +587,9 @@ def candidate_payload_fingerprint(payload: CandidatePayload) -> str:
     )
 
 
-def _terminal_entry_ids(decisions: Sequence[MemoryGovernanceDecisionRecord]) -> set[str]:
+def _terminal_entry_ids(
+    decisions: Sequence[MemoryGovernanceDecisionRecord],
+) -> set[str]:
     terminal: set[str] = set()
     for record in decisions:
         decision = record.decision
@@ -546,14 +606,20 @@ def _validate_decision_targets(
     candidate_ids: Iterable[str],
 ) -> None:
     existing = set(candidate_ids)
-    missing = [entry_id for entry_id in decision_target_entry_ids(record.decision) if entry_id not in existing]
+    missing = [
+        entry_id
+        for entry_id in decision_target_entry_ids(record.decision)
+        if entry_id not in existing
+    ]
     if missing:
-        raise KeyError(f"governance decision references missing candidate entries: {missing}")
+        raise KeyError(
+            f"governance decision references missing candidate entries: {missing}"
+        )
 
 
 def candidate_from_storage_row(row: dict[str, Any]) -> PooledMemoryCandidate:
     created_at = row["created_at"]
-    return PooledMemoryCandidate(
+    candidate = PooledMemoryCandidate(
         entry_id=row["entry_id"],
         payload=_payload_adapter.validate_python(row["payload"]),
         origin=CandidateOrigin(row["origin"]),
@@ -574,8 +640,19 @@ def candidate_from_storage_row(row: dict[str, Any]) -> PooledMemoryCandidate:
         source_artifact_id=row.get("source_artifact_id"),
         intent_fingerprint=row.get("intent_fingerprint"),
         metadata=dict(row.get("metadata") or {}),
-        created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        created_at=created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at),
     )
+    stored_semantic = row.get("candidate_semantic_fingerprint")
+    expected_semantic = (
+        candidate.candidate_semantic.semantic_fingerprint
+        if candidate.candidate_semantic is not None
+        else None
+    )
+    if stored_semantic != expected_semantic:
+        raise ValueError("stored candidate shared semantic identity drifted")
+    return candidate
 
 
 def decision_from_storage_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRecord:
@@ -584,9 +661,7 @@ def decision_from_storage_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRe
         decision_id=row["decision_id"],
         governance_batch_id=row["governance_batch_id"],
         batch_input_fingerprint=row["batch_input_fingerprint"],
-        batch_input_reference_fingerprint=row[
-            "batch_input_reference_fingerprint"
-        ],
+        batch_input_reference_fingerprint=row["batch_input_reference_fingerprint"],
         governance_model_call_id=row["governance_model_call_id"],
         decision_index=row["decision_index"],
         requested_decision_payload_fingerprint=row[
@@ -595,7 +670,9 @@ def decision_from_storage_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRe
         decision_payload_fingerprint=row["decision_payload_fingerprint"],
         decision=_decision_adapter.validate_python(row["decision"]),
         write_outcome=_outcome_adapter.validate_python(row["write_outcome"]),
-        created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        created_at=created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at),
     )
 
 

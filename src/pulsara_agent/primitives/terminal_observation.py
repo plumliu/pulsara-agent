@@ -22,6 +22,14 @@ from pulsara_agent.primitives.frozen import (
 
 
 Fingerprint = str
+TerminalMonitorLifecycleState: TypeAlias = Literal[
+    "active_ready",
+    "active_pending_delivery",
+    "active_completion_only",
+    "terminal_pending_delivery",
+    "terminated",
+    "reconciliation_required",
+]
 MAXIMUM_TERMINAL_MONITOR_DURATION_SECONDS = 10 * 60 * 60
 
 
@@ -805,14 +813,7 @@ class TerminalProcessMonitorCoreStateFact(FrozenFactBase):
     )
     monitor_id: str = Field(min_length=1)
     state_revision: int = Field(ge=0)
-    lifecycle_state: Literal[
-        "active_ready",
-        "active_pending_delivery",
-        "active_completion_only",
-        "terminal_pending_delivery",
-        "terminated",
-        "reconciliation_required",
-    ]
+    lifecycle_state: TerminalMonitorLifecycleState
     last_observation_cursor: TerminalOutputCursorFact
     last_consumed_cursor: TerminalOutputCursorFact
     last_committed_observation_ordinal: int = Field(ge=0)

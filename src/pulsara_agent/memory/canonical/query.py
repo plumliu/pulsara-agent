@@ -14,6 +14,9 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.memory_candidate import (
+    memory_candidate_semantic_fingerprint,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -39,6 +42,14 @@ class CanonicalNodeView:
     evidence_ids: tuple[str, ...]
     outgoing: tuple[tuple[str, str], ...]
     incoming: tuple[tuple[str, str], ...]
+
+    @property
+    def candidate_semantic_fingerprint(self) -> str:
+        return memory_candidate_semantic_fingerprint(
+            kind=self.memory_type,
+            scope=self.scope,
+            statement=self.statement,
+        )
 
 
 @dataclass(frozen=True, slots=True)

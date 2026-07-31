@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
-from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
+from pulsara_agent.primitives.capability_owner import CapabilityExposureOwnerFact
 
 
 MAX_CAPABILITY_AUTHORIZATION_ENTRIES = 512
@@ -702,3 +702,15 @@ __all__ = [
     "build_capability_resolve_basis",
     "empty_capability_projection",
 ]
+
+
+def _complete_run_entry_forward_reference() -> None:
+    """Bind the deliberate cross-module Pydantic forward reference once."""
+
+    from pulsara_agent.primitives.run_entry import _rebuild_subagent_run_entry_fact
+
+    _rebuild_subagent_run_entry_fact(CapabilityResolveBasisFact)
+
+
+_complete_run_entry_forward_reference()
+del _complete_run_entry_forward_reference

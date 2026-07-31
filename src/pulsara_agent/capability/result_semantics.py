@@ -12,7 +12,6 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.context import CapabilityDescriptorRenderAttributionFact
 from pulsara_agent.primitives.context import (
-    canonical_utc_timestamp,
     context_fingerprint,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
@@ -53,27 +52,16 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
     validate_tool_result_profile_contract,
 )
+from pulsara_agent.ports.tool_result_semantics import (
+    FrozenToolResultSemanticsRuntimeInput,
+    ToolResultSemanticsRuntimeInput,
+    build_terminal_payload_timing,
+    unbounded_error_preview,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.capability.descriptor import CapabilityDescriptor
-    from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
-
-
-class ToolResultSemanticsRuntimeInput(Protocol):
-    semantics_input_kind: ToolResultRenderVariantCode
-
-    def to_frozen_domain_submission(self) -> ToolResultDomainSubmissionFact | None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenToolResultSemanticsRuntimeInput:
-    """Typed execution-boundary input; never inferred from serialized output."""
-
-    semantics_input_kind: ToolResultRenderVariantCode
-    domain_submission: ToolResultDomainSubmissionFact | None
-
-    def to_frozen_domain_submission(self) -> ToolResultDomainSubmissionFact | None:
-        return self.domain_submission
+    from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 
 
 class ToolResultSemanticsBuilder(Protocol):
@@ -404,14 +392,6 @@ def _fallback_runtime_input(
     return FrozenToolResultSemanticsRuntimeInput(
         semantics_input_kind=ToolResultRenderVariantCode.GENERIC_RESULT,
         domain_submission=None,
-    )
-
-
-def unbounded_error_preview(value: str) -> ToolResultErrorPreviewFact:
-    return ToolResultErrorPreviewFact(
-        text=value,
-        original_chars=len(value),
-        truncated=False,
     )
 
 
@@ -862,47 +842,6 @@ def tool_origin_for_descriptor_variant(
     return _tool_origin_for_profile(
         descriptor,
         _variant(contract, variant_code),
-    )
-
-
-def build_terminal_payload_timing(
-    *,
-    observed_at_utc: str,
-    duration_seconds: float | None,
-    freshness: str,
-    clock_source: str,
-    command_started_at_utc: str | None = None,
-    process_started_at_utc: str | None = None,
-    last_output_at_utc: str | None = None,
-) -> TerminalPayloadTimingFact:
-    timing_payload = {
-        "observed_at_utc": canonical_utc_timestamp(observed_at_utc),
-        "duration_seconds": (
-            float(duration_seconds) if duration_seconds is not None else None
-        ),
-        "freshness": freshness,
-        "clock_source": clock_source,
-        "command_started_at_utc": (
-            canonical_utc_timestamp(command_started_at_utc)
-            if command_started_at_utc is not None
-            else None
-        ),
-        "process_started_at_utc": (
-            canonical_utc_timestamp(process_started_at_utc)
-            if process_started_at_utc is not None
-            else None
-        ),
-        "last_output_at_utc": (
-            canonical_utc_timestamp(last_output_at_utc)
-            if last_output_at_utc is not None
-            else None
-        ),
-    }
-    return TerminalPayloadTimingFact(
-        **timing_payload,
-        timing_fingerprint=context_fingerprint(
-            "terminal-payload-timing:v1", timing_payload
-        ),
     )
 
 

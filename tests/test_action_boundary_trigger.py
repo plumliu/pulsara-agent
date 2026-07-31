@@ -17,7 +17,7 @@ from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.settings import StorageConfig
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.memory import RememberActionBoundaryTool
 
 

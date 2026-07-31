@@ -8,6 +8,7 @@ SDK into the runtime core.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -28,6 +29,15 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileTriggerValue,
     McpServerLifecycleTimingFact,
 )
+from pulsara_agent.primitives.mcp_protocol import (
+    McpPromptSemanticFact,
+    McpProviderSchemaProjectionFact,
+    McpResourceSemanticFact,
+    McpResourceTemplateSemanticFact,
+    McpServerSnapshotAuthorityFact,
+    McpToolDiscoveryAttributionFact,
+    McpToolSemanticFact,
+)
 
 
 class McpServerTransportKind(StrEnum):
@@ -46,38 +56,55 @@ class McpServerStatus(StrEnum):
     CLOSED = "closed"
 
 
-class McpRequestSourceMethod(StrEnum):
-    TOOL_CALL = "tools/call"
-    RESOURCE_READ = "resources/read"
-    PROMPT_GET = "prompts/get"
-
-
 MAX_MCP_INPUT_REQUIRED_ROUNDS = 3
 MAX_MCP_SERVERS_PER_SESSION = 64
+_PROCESS_RUNTIME_COMMITMENT_KEY = os.urandom(32)
+_MCP_MANAGED_HTTP_HEADERS = frozenset(
+    {
+        "accept",
+        "baggage",
+        "content-length",
+        "content-type",
+        "host",
+        "traceparent",
+        "tracestate",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class McpStdioConfig:
     command: str
-    args: tuple[str, ...] = ()
-    env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    args: tuple[str, ...] = field(default=(), repr=False)
+    env: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}),
+        repr=False,
+    )
     cwd: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.command.strip():
             raise ValueError("MCP stdio command is required")
         object.__setattr__(self, "args", tuple(str(arg) for arg in self.args))
-        object.__setattr__(self, "env", MappingProxyType({str(k): str(v) for k, v in self.env.items()}))
+        object.__setattr__(
+            self, "env", MappingProxyType({str(k): str(v) for k, v in self.env.items()})
+        )
         if self.cwd is not None:
             object.__setattr__(self, "cwd", self.cwd.expanduser())
 
 
 @dataclass(frozen=True, slots=True)
 class McpStreamableHttpConfig:
-    url: str
+    url: str = field(repr=False)
     bearer_token_env_var: str | None = None
-    headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
-    env_headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    headers: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}),
+        repr=False,
+    )
+    env_headers: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}),
+        repr=False,
+    )
     follow_redirects: bool = False
 
     def __post_init__(self) -> None:
@@ -86,14 +113,36 @@ class McpStreamableHttpConfig:
         object.__setattr__(self, "url", self.url.strip())
         if not (self.url.startswith("http://") or self.url.startswith("https://")):
             raise ValueError("MCP streamable HTTP URL must use http:// or https://")
-        object.__setattr__(self, "headers", MappingProxyType({str(k): str(v) for k, v in self.headers.items()}))
+        object.__setattr__(
+            self,
+            "headers",
+            MappingProxyType({str(k): str(v) for k, v in self.headers.items()}),
+        )
         object.__setattr__(
             self,
             "env_headers",
             MappingProxyType({str(k): str(v) for k, v in self.env_headers.items()}),
         )
-        if self.bearer_token_env_var is not None and not self.bearer_token_env_var.strip():
+        for header, value in self.headers.items():
+            _validate_static_http_header(header, value=value)
+        for header, env_name in self.env_headers.items():
+            _validate_static_http_header(header, value=None)
+            if not env_name or any(char in env_name for char in "\r\n"):
+                raise ValueError("MCP HTTP header env binding is invalid")
+        if (
+            self.bearer_token_env_var is not None
+            and not self.bearer_token_env_var.strip()
+        ):
             raise ValueError("bearer_token_env_var cannot be empty")
+        if self.bearer_token_env_var is not None and any(
+            header.casefold() == "authorization"
+            for header in (*self.headers, *self.env_headers)
+        ):
+            raise ValueError("MCP bearer auth cannot have a second Authorization owner")
+        if self.follow_redirects:
+            raise ValueError(
+                "MCP2 streamable HTTP redirects require an owned same-origin policy"
+            )
 
 
 McpTransportConfig = McpStdioConfig | McpStreamableHttpConfig
@@ -110,6 +159,7 @@ class McpServerConfig:
     startup_deadline_ms: int = 30_000
     refresh_ttl_ms: int = 300_000
     tool_timeout_ms: int = 30_000
+    stateless_max_in_flight: int = 4
     supports_parallel_tool_calls: bool = False
     enabled_tools: tuple[str, ...] | None = None
     disabled_tools: tuple[str, ...] = ()
@@ -125,6 +175,7 @@ class McpServerConfig:
             "startup_deadline_ms": self.startup_deadline_ms,
             "refresh_ttl_ms": self.refresh_ttl_ms,
             "tool_timeout_ms": self.tool_timeout_ms,
+            "stateless_max_in_flight": self.stateless_max_in_flight,
         }
         for name, value in timeout_values.items():
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -133,8 +184,12 @@ class McpServerConfig:
             raise ValueError("startup_deadline_ms must be >= connect_timeout_ms")
         object.__setattr__(self, "server_id", normalized_id)
         if self.enabled_tools is not None:
-            object.__setattr__(self, "enabled_tools", tuple(dict.fromkeys(self.enabled_tools)))
-        object.__setattr__(self, "disabled_tools", tuple(dict.fromkeys(self.disabled_tools)))
+            object.__setattr__(
+                self, "enabled_tools", tuple(dict.fromkeys(self.enabled_tools))
+            )
+        object.__setattr__(
+            self, "disabled_tools", tuple(dict.fromkeys(self.disabled_tools))
+        )
 
     @property
     def transport_kind(self) -> McpServerTransportKind:
@@ -155,9 +210,15 @@ class McpToolAnnotations:
         if not payload:
             return cls()
         return cls(
-            read_only_hint=_optional_bool(payload.get("readOnlyHint") or payload.get("read_only_hint")),
-            destructive_hint=_optional_bool(payload.get("destructiveHint") or payload.get("destructive_hint")),
-            open_world_hint=_optional_bool(payload.get("openWorldHint") or payload.get("open_world_hint")),
+            read_only_hint=_optional_bool(
+                payload.get("readOnlyHint") or payload.get("read_only_hint")
+            ),
+            destructive_hint=_optional_bool(
+                payload.get("destructiveHint") or payload.get("destructive_hint")
+            ),
+            open_world_hint=_optional_bool(
+                payload.get("openWorldHint") or payload.get("open_world_hint")
+            ),
             title=_optional_str(payload.get("title")),
         )
 
@@ -177,6 +238,11 @@ class McpDiscoveredTool:
     description: str
     input_schema: dict[str, Any]
     annotations: McpToolAnnotations = field(default_factory=McpToolAnnotations)
+    title: str | None = None
+    output_schema: dict[str, Any] | None = None
+    semantic: McpToolSemanticFact | None = None
+    discovery_attribution: McpToolDiscoveryAttributionFact | None = None
+    provider_projection: McpProviderSchemaProjectionFact | None = None
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
@@ -185,12 +251,32 @@ class McpDiscoveredTool:
             raise ValueError("MCP discovered tool requires name")
         object.__setattr__(self, "server_id", normalize_mcp_identifier(self.server_id))
         object.__setattr__(self, "name", self.name.strip())
-        object.__setattr__(self, "description", self.description.strip() or f"MCP tool {self.name}")
+        object.__setattr__(
+            self, "description", self.description.strip() or f"MCP tool {self.name}"
+        )
         schema = dict(self.input_schema or {})
         if schema.get("type") != "object":
-            schema.setdefault("type", "object")
-        schema.setdefault("properties", {})
+            raise ValueError('MCP inputSchema must declare root type "object"')
         object.__setattr__(self, "input_schema", freeze_mcp_json_value(schema))
+        if self.output_schema is not None:
+            object.__setattr__(
+                self,
+                "output_schema",
+                freeze_mcp_json_value(dict(self.output_schema)),
+            )
+        if self.semantic is not None:
+            if self.semantic.server_id != self.server_id or self.semantic.name != self.name:
+                raise ValueError("MCP tool semantic identity mismatch")
+            if self.discovery_attribution is None or self.provider_projection is None:
+                raise ValueError("MCP tool semantic requires attribution and projection")
+            semantic_fingerprint = self.semantic.tool_semantic_fingerprint
+            if (
+                self.discovery_attribution.tool_semantic_fingerprint
+                != semantic_fingerprint
+                or self.provider_projection.tool_semantic_fingerprint
+                != semantic_fingerprint
+            ):
+                raise ValueError("MCP tool authority fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +287,7 @@ class McpDiscoveredResource:
     description: str = ""
     mime_type: str | None = None
     size: int | None = None
+    semantic: McpResourceSemanticFact | None = None
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
@@ -211,6 +298,11 @@ class McpDiscoveredResource:
         object.__setattr__(self, "uri", self.uri.strip())
         object.__setattr__(self, "name", self.name.strip() or self.uri.strip())
         object.__setattr__(self, "description", self.description.strip())
+        if self.semantic is not None and (
+            self.semantic.server_id != self.server_id
+            or self.semantic.uri != self.uri
+        ):
+            raise ValueError("MCP resource semantic identity mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +312,7 @@ class McpDiscoveredResourceTemplate:
     name: str
     description: str = ""
     mime_type: str | None = None
+    semantic: McpResourceTemplateSemanticFact | None = None
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
@@ -230,6 +323,11 @@ class McpDiscoveredResourceTemplate:
         object.__setattr__(self, "uri_template", self.uri_template.strip())
         object.__setattr__(self, "name", self.name.strip() or self.uri_template.strip())
         object.__setattr__(self, "description", self.description.strip())
+        if self.semantic is not None and (
+            self.semantic.server_id != self.server_id
+            or self.semantic.uri_template != self.uri_template
+        ):
+            raise ValueError("MCP resource-template semantic identity mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +336,7 @@ class McpDiscoveredPrompt:
     name: str
     description: str = ""
     arguments: tuple[dict[str, Any], ...] = ()
+    semantic: McpPromptSemanticFact | None = None
 
     def __post_init__(self) -> None:
         if not self.server_id.strip():
@@ -252,6 +351,11 @@ class McpDiscoveredPrompt:
             "arguments",
             tuple(freeze_mcp_json_value(argument) for argument in self.arguments),
         )
+        if self.semantic is not None and (
+            self.semantic.server_id != self.server_id
+            or self.semantic.name != self.name
+        ):
+            raise ValueError("MCP prompt semantic identity mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +379,7 @@ class McpServerSnapshot:
     instructions: str | None = None
     diagnostics: tuple[dict[str, Any], ...] = ()
     timing: McpServerLifecycleTimingFact | None = None
+    authority: McpServerSnapshotAuthorityFact | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -293,7 +398,9 @@ class McpServerSnapshot:
         if self.status is not McpServerStatus.READY and (
             self.tools or self.resources or self.resource_templates or self.prompts
         ):
-            raise ValueError("non-ready MCP snapshots cannot expose discovered collections")
+            raise ValueError(
+                "non-ready MCP snapshots cannot expose discovered collections"
+            )
         discovered_items = (
             *self.tools,
             *self.resources,
@@ -313,7 +420,17 @@ class McpServerSnapshot:
             self.timing.connect_ended_at_utc is None
             or self.timing.discovery_ended_at_utc is None
         ):
-            raise ValueError("ready MCP snapshot requires completed connect/discovery timing")
+            raise ValueError(
+                "ready MCP snapshot requires completed connect/discovery timing"
+            )
+        if self.authority is not None:
+            if self.authority.discovery_attribution.snapshot_id != self.snapshot_id:
+                raise ValueError("MCP snapshot authority identity mismatch")
+            if (
+                self.snapshot_semantic_fingerprint
+                != self.authority.surface_semantic_fingerprint
+            ):
+                raise ValueError("MCP snapshot semantic authority mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,10 +606,7 @@ class McpServerCandidate:
             raise ValueError("MCP candidate discovery generation mismatch")
         if spec.config.server_id != snapshot.server_id:
             raise ValueError("MCP candidate server identity mismatch")
-        if (
-            spec.event_safe_config_fingerprint
-            != snapshot.event_safe_config_fingerprint
-        ):
+        if spec.event_safe_config_fingerprint != snapshot.event_safe_config_fingerprint:
             raise ValueError("MCP candidate event-safe config identity mismatch")
         counts = (self.retry_attempt, self.request_count, self.page_count)
         if any(value < 0 for value in counts) or self.page_count > self.request_count:
@@ -536,8 +650,7 @@ class McpCandidateBatch:
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
         if self.config_epoch < 0 or any(
-            candidate.config_epoch != self.config_epoch
-            for candidate in self.candidates
+            candidate.config_epoch != self.config_epoch for candidate in self.candidates
         ):
             raise ValueError("MCP candidate batch epoch mismatch")
 
@@ -581,7 +694,7 @@ class McpInstalledCapabilitySnapshot:
     installed_at_utc: str
     snapshots: tuple[McpServerSnapshot, ...]
     descriptors: tuple[object, ...]
-    tools: tuple[object, ...]
+    ordered_binding_installations: tuple[object, ...]
     diagnostics: tuple[object, ...]
     ready_server_ids: frozenset[str]
     binding_identities: frozenset[McpBindingIdentity]
@@ -589,7 +702,11 @@ class McpInstalledCapabilitySnapshot:
     def __post_init__(self) -> None:
         object.__setattr__(self, "snapshots", tuple(self.snapshots))
         object.__setattr__(self, "descriptors", tuple(self.descriptors))
-        object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(
+            self,
+            "ordered_binding_installations",
+            tuple(self.ordered_binding_installations),
+        )
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "ready_server_ids", frozenset(self.ready_server_ids))
         object.__setattr__(
@@ -612,17 +729,34 @@ class McpInstalledCapabilitySnapshot:
         descriptor_names = {
             str(getattr(descriptor, "name", "")) for descriptor in self.descriptors
         }
-        tool_names = {str(getattr(tool, "name", "")) for tool in self.tools}
+        tool_names = {
+            str(getattr(getattr(item, "tool", None), "name", ""))
+            for item in self.ordered_binding_installations
+        }
         if descriptor_names != tool_names:
             raise ValueError("MCP installation descriptor/tool name mismatch")
         tool_identities = frozenset(
             identity
             for identity in (
-                getattr(tool, "binding_identity", None) for tool in self.tools
+                getattr(
+                    getattr(item, "binding_contract", None),
+                    "binding_identity",
+                    None,
+                )
+                for item in self.ordered_binding_installations
             )
-            if isinstance(identity, McpBindingIdentity)
+            if identity is not None
         )
-        if tool_identities != self.binding_identities:
+        normalized_identities = frozenset(
+            McpBindingIdentity(
+                server_id=str(identity.server_id),
+                slot_id=str(identity.slot_id),
+                snapshot_id=str(identity.snapshot_id),
+                discovery_generation=int(identity.discovery_generation),
+            )
+            for identity in tool_identities
+        )
+        if normalized_identities != self.binding_identities:
             raise ValueError("MCP installation binding identity projection mismatch")
 
 
@@ -646,13 +780,6 @@ class McpPendingInstallationAudit:
     diagnostics: tuple[McpDiagnosticFact, ...]
     baseline_tool_names: frozenset[str]
     current_tool_names: frozenset[str]
-
-
-@dataclass(frozen=True, slots=True)
-class McpCapabilityExecutionSurface:
-    installation: McpInstalledCapabilitySnapshot
-    capability_runtime: object
-    extra_tool_bindings: tuple[object, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -696,78 +823,6 @@ def new_mcp_slot(
 
 
 @dataclass(frozen=True, slots=True)
-class McpOriginalRequest:
-    source_method: McpRequestSourceMethod
-    tool_name: str | None = None
-    arguments: dict[str, Any] | None = None
-    resource_uri: str | None = None
-    prompt_name: str | None = None
-    prompt_arguments: dict[str, str] | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {"source_method": self.source_method.value}
-        if self.tool_name is not None:
-            payload["tool_name"] = self.tool_name
-        if self.arguments is not None:
-            payload["arguments"] = dict(self.arguments)
-        if self.resource_uri is not None:
-            payload["resource_uri"] = self.resource_uri
-        if self.prompt_name is not None:
-            payload["prompt_name"] = self.prompt_name
-        if self.prompt_arguments is not None:
-            payload["prompt_arguments"] = dict(self.prompt_arguments)
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
-class McpInputRequestDTO:
-    key: str
-    method: str
-    params: dict[str, Any]
-
-    def to_dict(self) -> dict[str, object]:
-        return {"key": self.key, "method": self.method, "params": dict(self.params)}
-
-
-@dataclass(frozen=True, slots=True)
-class McpInputRequired:
-    interaction_id: str
-    server_id: str
-    protocol_version: str | None
-    request_state: str | None
-    input_requests: tuple[McpInputRequestDTO, ...]
-    original_request: McpOriginalRequest
-    round_count: int = 1
-    deadline_monotonic: float | None = None
-
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "interaction_id": self.interaction_id,
-            "kind": "mcp_input_required",
-            "server_id": self.server_id,
-            "protocol_version": self.protocol_version,
-            "request_state": self.request_state,
-            "input_requests": [request.to_dict() for request in self.input_requests],
-            "original_request": self.original_request.to_dict(),
-            "round_count": self.round_count,
-        }
-        if self.deadline_monotonic is not None:
-            payload["deadline_monotonic"] = self.deadline_monotonic
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
-class McpInputRequiredResolution:
-    interaction_id: str
-    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
-    cancelled: bool = False
-    tool_call_id: str | None = None
-    input_requests: tuple[McpInputRequestDTO, ...] = ()
-    round_count: int = 1
-    deadline_monotonic: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class McpContentArtifact:
     role: str
     media_type: str
@@ -795,14 +850,14 @@ _MCP_TOOL_NAME_OVERHEAD = len("mcp__") + len("__") + len("__")
 _HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _SECRET_KEY_PATTERN = r"x-api-key|api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|password|secret|token"
-_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization\s*:\s*)((?:Bearer|Basic)\s+)?([^\s,;}]+)")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(authorization\s*:\s*)((?:Bearer|Basic)\s+)?([^\s,;}]+)"
+)
 _SECRET_QUOTED_VALUE_RE = re.compile(
     rf"(?i)([\"']?(?:{_SECRET_KEY_PATTERN})[\"']?\s*:\s*)([\"'])([^\r\n\"']*)([\"'])"
 )
 _SECRET_COLON_RE = re.compile(rf"(?i)\b({_SECRET_KEY_PATTERN})\s*:\s*([^\s,;}}]+)")
-_SECRET_ASSIGNMENT_RE = re.compile(
-    rf"(?i)\b({_SECRET_KEY_PATTERN})=([^\s&]+)"
-)
+_SECRET_ASSIGNMENT_RE = re.compile(rf"(?i)\b({_SECRET_KEY_PATTERN})=([^\s&]+)")
 
 
 def normalize_mcp_identifier(value: str) -> str:
@@ -915,23 +970,59 @@ def _runtime_config_payload(config: McpServerConfig) -> dict[str, object]:
             "kind": "stdio",
             "command": transport.command,
             "args": list(transport.args),
-            "env": dict(transport.env),
+            "env_keys": sorted(transport.env),
+            "env_value_commitments": {
+                key: runtime_mcp_secret_commitment(
+                    f"mcp-stdio-env:{key.casefold()}:v1",
+                    value,
+                )
+                for key, value in sorted(transport.env.items())
+            },
             "cwd": str(transport.cwd) if transport.cwd is not None else None,
         }
     else:
+        split = urlsplit(transport.url)
+        runtime_host = (split.hostname or "").lower()
+        if split.port is not None:
+            runtime_host = f"{runtime_host}:{split.port}"
+        private_url_parts = "\0".join(
+            (
+                split.username or "",
+                split.password or "",
+                split.query,
+                split.fragment,
+            )
+        )
         transport_payload = {
             "kind": "streamable_http",
-            "url": transport.url,
+            "endpoint": urlunsplit(
+                (split.scheme.lower(), runtime_host, split.path or "/", "", "")
+            ),
+            "private_url_components_commitment": runtime_mcp_secret_commitment(
+                "mcp-http-private-url-components:v1",
+                private_url_parts if private_url_parts.strip("\0") else None,
+            ),
             "bearer_token_env_var": transport.bearer_token_env_var,
-            "bearer_token_value_fingerprint": _runtime_secret_fingerprint(
+            "bearer_token_value_commitment": runtime_mcp_secret_commitment(
+                "mcp-http-bearer:v1",
                 os.getenv(transport.bearer_token_env_var)
                 if transport.bearer_token_env_var
                 else None
             ),
-            "headers": dict(transport.headers),
+            "header_keys": sorted(transport.headers),
+            "header_value_commitments": {
+                header: runtime_mcp_secret_commitment(
+                    f"mcp-http-header:{header.casefold()}:v1",
+                    value,
+                )
+                for header, value in sorted(transport.headers.items())
+            },
             "env_headers": dict(transport.env_headers),
-            "env_header_value_fingerprints": {
-                header: _runtime_secret_fingerprint(os.getenv(env_name))
+            "env_header_value_commitments": {
+                header: runtime_mcp_secret_commitment(
+                    f"mcp-http-header:{header.casefold()}:v1",
+                    os.getenv(env_name),
+                )
                 for header, env_name in sorted(transport.env_headers.items())
             },
             "follow_redirects": transport.follow_redirects,
@@ -960,7 +1051,9 @@ def _event_safe_config_payload(config: McpServerConfig) -> dict[str, object]:
             host = f"{host}:{port}"
         transport_payload = {
             "kind": "streamable_http",
-            "endpoint": urlunsplit((split.scheme.lower(), host, split.path or "/", "", "")),
+            "endpoint": urlunsplit(
+                (split.scheme.lower(), host, split.path or "/", "", "")
+            ),
             "bearer_token_env_var": transport.bearer_token_env_var,
             "bearer_token_present": bool(
                 transport.bearer_token_env_var
@@ -987,6 +1080,7 @@ def _common_config_payload(config: McpServerConfig) -> dict[str, object]:
         "startup_deadline_ms": config.startup_deadline_ms,
         "refresh_ttl_ms": config.refresh_ttl_ms,
         "tool_timeout_ms": config.tool_timeout_ms,
+        "stateless_max_in_flight": config.stateless_max_in_flight,
         "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
         "enabled_tools": config.enabled_tools,
         "disabled_tools": config.disabled_tools,
@@ -994,24 +1088,46 @@ def _common_config_payload(config: McpServerConfig) -> dict[str, object]:
     }
 
 
-def _runtime_secret_fingerprint(value: str | None) -> str | None:
+def runtime_mcp_secret_commitment(domain: str, value: str | None) -> str | None:
     if value is None:
         return None
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    configured = os.getenv("PULSARA_MCP_COMMITMENT_KEY")
+    key = configured.encode("utf-8") if configured else _PROCESS_RUNTIME_COMMITMENT_KEY
+    return "hmac-sha256:" + hmac.new(
+        key,
+        domain.encode("utf-8") + b"\0" + value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _validate_static_http_header(header: str, *, value: str | None) -> None:
+    normalized = header.strip().casefold()
+    if not normalized or any(char in header for char in "\r\n"):
+        raise ValueError("MCP HTTP header name is invalid")
+    if normalized in _MCP_MANAGED_HTTP_HEADERS or normalized.startswith("mcp-"):
+        raise ValueError(f"MCP protocol-managed HTTP header is not configurable: {header}")
+    if value is not None and any(char in value for char in "\r\n"):
+        raise ValueError("MCP HTTP header value is invalid")
 
 
 def _sha256_json(payload: object) -> str:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    text = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
-def mangle_mcp_tool_name(server_id: str, tool_name: str, *, max_length: int = MAX_MCP_MODEL_TOOL_NAME_CHARS) -> str:
+def mangle_mcp_tool_name(
+    server_id: str, tool_name: str, *, max_length: int = MAX_MCP_MODEL_TOOL_NAME_CHARS
+) -> str:
     safe_server = normalize_mcp_identifier(server_id) or "server"
     safe_tool = normalize_mcp_identifier(tool_name) or "tool"
     full = f"mcp__{safe_server}__{safe_tool}"
     if len(full) <= max_length:
         return full
-    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[
+        :10
+    ]
     budget = max_length - _MCP_TOOL_NAME_OVERHEAD - len(digest)
     if budget < 2:
         return f"mcp__{digest}"[:max_length]
@@ -1052,15 +1168,18 @@ def _redact_url_text(url: str) -> str:
         netloc = f"[redacted]@{netloc.rsplit('@', 1)[1]}"
     query = "[redacted]" if split.query else ""
     fragment = "[redacted]" if split.fragment else ""
-    return urlunsplit(
-        SplitResult(
-            scheme=split.scheme,
-            netloc=netloc,
-            path=split.path,
-            query=query,
-            fragment=fragment,
+    return (
+        urlunsplit(
+            SplitResult(
+                scheme=split.scheme,
+                netloc=netloc,
+                path=split.path,
+                query=query,
+                fragment=fragment,
+            )
         )
-    ) + trailing
+        + trailing
+    )
 
 
 def _optional_bool(value: Any) -> bool | None:

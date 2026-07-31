@@ -30,6 +30,7 @@ from pulsara_agent.event_log.postgres_pool import (
     postgres_event_connection,
 )
 from pulsara_agent.event_log.protocol import (
+    CandidateBoundEventLogTransactionCompanion,
     EventBatchConfirmation,
     EventIdConflict,
     EventLogReadSnapshot,
@@ -52,6 +53,7 @@ from pulsara_agent.event_log.protocol import (
     EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
+    rebind_stored_candidate_batch,
     same_event_payload,
     same_event_raw_payload,
 )
@@ -78,7 +80,7 @@ from pulsara_agent.storage.session_bootstrap import (
     PostgresRuntimeSessionOwnerBootstrapPort,
 )
 from pulsara_agent.message.message import AssistantMsg, Msg
-from pulsara_agent.message.reducer import (
+from pulsara_agent.replay.message_reducer import (
     MessageReducer,
     require_canonical_reply_control,
 )
@@ -525,6 +527,17 @@ class PostgresEventLog:
                             event, next_sequence
                         )
                         stored_events.append(stored)
+                    if isinstance(
+                        transaction_companion,
+                        CandidateBoundEventLogTransactionCompanion,
+                    ):
+                        receipt = rebind_stored_candidate_batch(
+                            transaction_companion.prepared_candidate_batch_identity,
+                            stored_events,
+                        )
+                        transaction_companion.accept_stored_candidate_rebind_receipt(
+                            receipt
+                        )
                     self._validate_materialization_envelope_charge_bounds(
                         stored_events,
                         physical_charge_contract,
@@ -534,6 +547,25 @@ class PostgresEventLog:
                         self._sync_run_projection(cursor, stored)
 
                     generation = resulting_account_state.generation
+                    active_reservations = resulting_account_state.active_reservations
+                    companion_reserved_bytes = sum(
+                        item.companion_payload_reserved_bytes_total
+                        for item in active_reservations
+                    )
+                    companion_charged_bytes = sum(
+                        item.companion_payload_charged_bytes_lifetime
+                        for item in active_reservations
+                    )
+                    companion_contracts = {
+                        item.companion_charge_contract_fingerprint
+                        for item in active_reservations
+                        if item.companion_charge_contract_fingerprint is not None
+                    }
+                    if len(companion_contracts) > 1:
+                        raise ValueError(
+                            "materialization account has multiple companion charge contracts"
+                        )
+                    companion_contract = next(iter(companion_contracts), None)
                     cursor.execute(
                         """
                         insert into ledger_materialization_accounts (
@@ -542,9 +574,12 @@ class PostgresEventLog:
                             ledger_materialization_generation,
                             consumer_horizon_revision,
                             ledger_through_sequence,
+                            companion_payload_reserved_bytes_total,
+                            companion_payload_charged_bytes_lifetime,
+                            companion_charge_contract_fingerprint,
                             state_payload,
                             updated_at
-                        ) values (%s, %s, %s, %s, %s, %s, now())
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         on conflict (session_id) do update set
                             account_state_fingerprint = excluded.account_state_fingerprint,
                             ledger_materialization_generation =
@@ -552,6 +587,12 @@ class PostgresEventLog:
                             consumer_horizon_revision =
                                 excluded.consumer_horizon_revision,
                             ledger_through_sequence = excluded.ledger_through_sequence,
+                            companion_payload_reserved_bytes_total =
+                                excluded.companion_payload_reserved_bytes_total,
+                            companion_payload_charged_bytes_lifetime =
+                                excluded.companion_payload_charged_bytes_lifetime,
+                            companion_charge_contract_fingerprint =
+                                excluded.companion_charge_contract_fingerprint,
                             state_payload = excluded.state_payload,
                             updated_at = now()
                         """,
@@ -561,6 +602,9 @@ class PostgresEventLog:
                             generation.ledger_materialization_generation,
                             generation.consumer_horizon_revision,
                             resulting_account_state.ledger_through_sequence,
+                            companion_reserved_bytes,
+                            companion_charged_bytes,
+                            companion_contract,
                             Jsonb(resulting_account_state.model_dump(mode="json")),
                         ),
                     )

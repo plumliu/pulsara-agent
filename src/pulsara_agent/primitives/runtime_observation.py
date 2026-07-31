@@ -71,6 +71,7 @@ RuntimeRequestKind = Literal[
     "governance_request",
     "reflection_request",
     "summarizer_request",
+    "compaction_memory_extraction_request",
 ]
 
 
@@ -302,6 +303,7 @@ class RuntimeRequestKindContractFact(FrozenFactBase):
             "governance_batch",
             "reflection_job",
             "summarizer_operation",
+            "compaction_memory_extraction_job",
         ],
         ...,
     ]
@@ -375,7 +377,12 @@ class RuntimeOperationRequestPayloadFact(FrozenFactBase):
     )
     payload_kind: Literal["operation"] = "operation"
     operation_kind: Literal[
-        "compaction", "window_compaction", "governance", "reflection", "summarizer"
+        "compaction",
+        "window_compaction",
+        "governance",
+        "reflection",
+        "summarizer",
+        "compaction_memory_extraction",
     ]
     objective_contract_fingerprint: Fingerprint
     ordered_model_visible_fragments: tuple[ProviderInputTypedFragmentFact, ...]
@@ -771,6 +778,7 @@ class OneShotRuntimeRequestOwnerFact(FrozenFactBase):
         "governance_batch",
         "reflection_job",
         "summarizer_operation",
+        "compaction_memory_extraction_job",
     ]
     runtime_session_id: str
     operation_semantic_id: Fingerprint

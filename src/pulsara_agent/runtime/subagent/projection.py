@@ -8,8 +8,8 @@ from typing import Protocol, cast
 
 from pulsara_agent.event_log import EventLog, PostgresEventLog
 from pulsara_agent.runtime.subagent.facts import SubagentGraphState
-from pulsara_agent.runtime.subagent.immutable import thaw_json_value
-from pulsara_agent.runtime.subagent.types import (
+from pulsara_agent.primitives.subagent_json import thaw_json_value
+from pulsara_agent.primitives.subagent import (
     SubagentEdge,
     SubagentGraphNode,
     SubagentGraphProjection,
@@ -40,7 +40,9 @@ class InMemoryEventLogLocator:
         try:
             return self._logs[runtime_session_id]
         except KeyError as exc:
-            raise KeyError(f"Unknown runtime session event log: {runtime_session_id}") from exc
+            raise KeyError(
+                f"Unknown runtime session event log: {runtime_session_id}"
+            ) from exc
 
 
 class PostgresEventLogLocator:
@@ -58,7 +60,10 @@ class PostgresEventLogLocator:
         self._logs: dict[str, EventLog] = {}
 
     def register(self, runtime_session_id: str, event_log: EventLog) -> None:
-        if getattr(event_log, "runtime_session_id", runtime_session_id) != runtime_session_id:
+        if (
+            getattr(event_log, "runtime_session_id", runtime_session_id)
+            != runtime_session_id
+        ):
             raise ValueError("EventLog runtime session identity mismatch")
         with self._lock:
             self._logs[runtime_session_id] = event_log
@@ -85,7 +90,9 @@ def project_subagent_graph(
     """Render list/inspect DTOs without re-interpreting the event stream."""
 
     consumed_result_ids = {
-        item.result_id for item in state.consumptions.values() if item.result_id is not None
+        item.result_id
+        for item in state.consumptions.values()
+        if item.result_id is not None
     }
     consumed_task_ids = {
         item.task_id for item in state.consumptions.values() if item.task_id is not None
@@ -108,7 +115,9 @@ def project_subagent_graph(
                     result.final_message_artifact_id if result is not None else None
                 ),
                 delivered=bool(run.result_id and run.result_id in delivered_result_ids),
-                consumed_by_wait=bool(run.result_id and run.result_id in consumed_result_ids),
+                consumed_by_wait=bool(
+                    run.result_id and run.result_id in consumed_result_ids
+                ),
             )
         )
 
@@ -134,7 +143,9 @@ def project_subagent_graph(
             result_artifact_id=edge.result_artifact_id,
             returned_to_tool_call_id=edge.returned_to_tool_call_id,
         )
-        for edge in sorted(state.edges.values(), key=lambda item: item.provenance.created_sequence)
+        for edge in sorted(
+            state.edges.values(), key=lambda item: item.provenance.created_sequence
+        )
     )
 
     tasks: list[SubagentTaskProjection] = []
@@ -144,7 +155,9 @@ def project_subagent_graph(
         pending_state = (
             task.status
             if task.status in {"waiting_dependency", "blocked_dependency_failed"}
-            else run.pending_kind if run is not None and run.status == "suspended" else None
+            else run.pending_kind
+            if run is not None and run.status == "suspended"
+            else None
         )
         tasks.append(
             SubagentTaskProjection(
@@ -169,7 +182,9 @@ def project_subagent_graph(
                 primary_result_artifact_id=(
                     result.final_message_artifact_id if result is not None else None
                 ),
-                delivered=bool(task.result_id and task.result_id in delivered_result_ids),
+                delivered=bool(
+                    task.result_id and task.result_id in delivered_result_ids
+                ),
                 consumed_by_wait=(
                     task.task_id in consumed_task_ids
                     or bool(task.result_id and task.result_id in consumed_result_ids)

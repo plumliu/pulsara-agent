@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pulsara_agent.message import Msg, TextBlock
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.runtime.tool_loop import _tool_call_blocks
 
 
-def _accumulate_usage(state: LoopState, message: Msg) -> None:
+def _accumulate_usage(state: RunActivationWorkingState, message: Msg) -> None:
     if message.usage is None:
         return
     state.token_usage.input_tokens += message.usage.input_tokens

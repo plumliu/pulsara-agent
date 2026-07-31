@@ -29,7 +29,7 @@ from pulsara_agent.primitives.provider_input import (
 )
 from pulsara_agent.runtime.context_engine.types import CompiledContext
 from pulsara_agent.runtime.context_input.live import PreparedLiveContextSnapshot
-from pulsara_agent.runtime.provider_input.materialization import hydrate_carrier
+from pulsara_agent.llm.provider_input_materialization import hydrate_carrier
 from pulsara_agent.runtime.provider_input.continuation import (
     PreparedProviderInputContinuationMaterialization,
     prepare_provider_input_continuation,

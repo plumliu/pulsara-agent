@@ -261,6 +261,149 @@ def grade_durable_evidence(
                 f"actual={actual}, tools={selected_tools}",
             )
 
+    child_tool_gate = gate.subagent_child_tools
+    if child_tool_gate is not None:
+        child_completions = tuple(
+            event
+            for event in session_report.get("events") or ()
+            if event.get("type") == "SUBAGENT_RUN_COMPLETED"
+        )
+        child_tool_counts = tuple(
+            int(event.get("tool_call_count") or 0) for event in child_completions
+        )
+        check(
+            "subagent_completed_child_count",
+            len(child_completions) == child_tool_gate.expected_completed_children,
+            f"completed_children={len(child_completions)}, "
+            f"expected={child_tool_gate.expected_completed_children}",
+        )
+        check(
+            "subagent_child_tool_call_minimum",
+            len(child_tool_counts) == child_tool_gate.expected_completed_children
+            and all(
+                count >= child_tool_gate.minimum_tool_calls_per_child
+                for count in child_tool_counts
+            ),
+            f"child_tool_counts={child_tool_counts}, "
+            f"minimum={child_tool_gate.minimum_tool_calls_per_child}",
+        )
+
+    extraction_gate = gate.compaction_memory_extraction
+    if extraction_gate is not None:
+        extraction_rows = tuple(
+            session_report.get("compaction_memory_extraction_durable_status") or ()
+        )
+        check(
+            "compaction_memory_extraction_present",
+            len(extraction_rows) == 1,
+            f"extraction_count={len(extraction_rows)}",
+        )
+        extraction = extraction_rows[0] if len(extraction_rows) == 1 else {}
+        status = str(extraction.get("status") or "missing")
+        check(
+            "compaction_memory_extraction_terminal",
+            status in extraction_gate.allowed_terminal_statuses,
+            f"status={status}, allowed={extraction_gate.allowed_terminal_statuses}",
+        )
+        candidates = tuple(extraction.get("candidates") or ())
+        check(
+            "compaction_memory_candidate_produced",
+            len(candidates) >= extraction_gate.minimum_candidate_count,
+            f"candidate_count={len(candidates)}, "
+            f"minimum={extraction_gate.minimum_candidate_count}",
+        )
+        lifecycle = tuple(extraction.get("model_lifecycle") or ())
+        complete_lifecycle = tuple(
+            item
+            for item in lifecycle
+            if item.get("start") is not None and item.get("end") is not None
+        )
+        check(
+            "compaction_memory_model_lifecycle_complete",
+            bool(complete_lifecycle),
+            f"lifecycle_count={len(lifecycle)}, complete={len(complete_lifecycle)}",
+        )
+        model_call = complete_lifecycle[-1] if complete_lifecycle else {}
+        model_start = model_call.get("start") or {}
+        model_end = model_call.get("end") or {}
+        request = extraction.get("request") or {}
+        result = extraction.get("result") or {}
+        ordered_sequences = (
+            extraction.get("completed_sequence"),
+            request.get("sequence"),
+            model_start.get("sequence"),
+            model_end.get("sequence"),
+            result.get("sequence"),
+        )
+        sequence_chain_is_valid = all(
+            isinstance(item, int) for item in ordered_sequences
+        ) and tuple(ordered_sequences) == tuple(sorted(set(ordered_sequences)))
+        check(
+            "compaction_summary_precedes_extraction_terminal",
+            sequence_chain_is_valid,
+            f"ordered_sequences={ordered_sequences}",
+        )
+        input_projection = model_call.get("input") or {}
+        nodes = tuple(input_projection.get("nodes") or ())
+        human_only = (
+            input_projection.get("status") == "full"
+            and input_projection.get("all_sources_direct_human") is True
+            and bool(nodes)
+            and all(
+                item.get("projection_kind") == "full"
+                and item.get("source_event_type") == "RUN_START"
+                and item.get("source_ingress_kind") == "human"
+                for item in nodes
+            )
+        )
+        check(
+            "compaction_memory_input_is_canonical_human_only",
+            human_only,
+            f"input_status={input_projection.get('status')}, nodes={len(nodes)}, "
+            f"all_sources_direct_human={input_projection.get('all_sources_direct_human')}",
+        )
+        final_run_events = (
+            tuple(root_run_reports[-1].get("events") or ())
+            if root_run_reports
+            else ()
+        )
+        continuation_start = next(
+            (
+                item.get("sequence")
+                for item in final_run_events
+                if item.get("type") == "RUN_START"
+            ),
+            None,
+        )
+        model_end_sequence = model_end.get("sequence")
+        check(
+            "main_continuation_started_before_extraction_terminal",
+            isinstance(continuation_start, int)
+            and isinstance(model_end_sequence, int)
+            and continuation_start < model_end_sequence,
+            f"continuation_start={continuation_start}, "
+            f"extraction_model_end={model_end_sequence}",
+        )
+        job = extraction.get("job") or {}
+        result_candidate = extraction.get("result_candidate") or {}
+        outbox = tuple(extraction.get("outbox") or ())
+        job_id = job.get("job_id")
+        result_event_id = result.get("event_id")
+        exact_join = (
+            bool(job_id)
+            and result_candidate.get("job_id") == job_id
+            and result_candidate.get("completed_event_id") == result_event_id
+            and bool(outbox)
+            and all(item.get("producer_event_id") == result_event_id for item in outbox)
+            and all(item.get("status") == "applied" for item in outbox)
+        )
+        check(
+            "compaction_memory_candidate_job_outbox_exact_join",
+            exact_join,
+            f"job_id={job_id}, result_event_id={result_event_id}, "
+            f"outbox_count={len(outbox)}",
+        )
+
     check(
         "hidden_workspace_verifier",
         verifier.passed,

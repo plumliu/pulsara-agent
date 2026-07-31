@@ -20,12 +20,11 @@ from shutil import which
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import (
     bool_arg,
     int_arg,
     json_text,
-    object_schema,
     required_str_arg,
     str_arg,
 )
@@ -133,40 +132,19 @@ def _state_for_workspace(workspace_root: Path) -> _WorkspaceFileState:
 @dataclass(slots=True)
 class ReadFileTool(WorkspaceTool):
     name: str = "read_file"
-    description: str = (
-        "Read a UTF-8 text file with line numbers and pagination. Relative paths "
-        "resolve from workspace_root; absolute paths and ~ may read host-local ordinary text files."
-    )
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "path": {
-                "type": "string",
-                "description": "Relative paths resolve from workspace_root; absolute paths and ~ are allowed for text reads.",
-            },
-            "offset": {
-                "type": "integer",
-                "description": "1-indexed line number to start reading from.",
-                "default": 1,
-            },
-            "limit": {
-                "type": "integer",
-                "description": f"Maximum number of lines to read, capped at {MAX_READ_LINES}.",
-                "default": DEFAULT_READ_LINES,
-            },
-        },
-        required=["path"],
-    ))
-    is_read_only: bool = True
-    is_concurrency_safe: bool = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         path = self._resolve_read_path(str_arg(call.arguments, "path"))
         access_scope = _path_access_scope(path, self.workspace_root)
         workspace_relative = access_scope == "workspace"
         offset = _normalize_offset(int_arg(call.arguments, "offset", 1))
-        limit = _normalize_limit(int_arg(call.arguments, "limit", DEFAULT_READ_LINES), MAX_READ_LINES)
+        limit = _normalize_limit(
+            int_arg(call.arguments, "limit", DEFAULT_READ_LINES), MAX_READ_LINES
+        )
         if _is_blocked_device(path):
-            raise ValueError(f"cannot read device path that may block or produce infinite output: {path}")
+            raise ValueError(
+                f"cannot read device path that may block or produce infinite output: {path}"
+            )
         if _has_binary_extension(path):
             raise ValueError(f"cannot read binary file as text: {path.suffix.lower()}")
         if not path.exists():
@@ -185,16 +163,18 @@ class ReadFileTool(WorkspaceTool):
                     return self._result(
                         call,
                         status=ToolResultState.ERROR,
-                        output=json_text({
-                            "error": (
-                                "Repeated read blocked: this exact file region has already "
-                                "been returned and the file has not changed."
-                            ),
-                            "path": _relpath(path, self.workspace_root),
-                            "access_scope": access_scope,
-                            "workspace_relative": workspace_relative,
-                            "already_read": record.dedup_hits + 1,
-                        }),
+                        output=json_text(
+                            {
+                                "error": (
+                                    "Repeated read blocked: this exact file region has already "
+                                    "been returned and the file has not changed."
+                                ),
+                                "path": _relpath(path, self.workspace_root),
+                                "access_scope": access_scope,
+                                "workspace_relative": workspace_relative,
+                                "already_read": record.dedup_hits + 1,
+                            }
+                        ),
                         metadata={
                             "path": str(path),
                             "dedup": True,
@@ -205,15 +185,17 @@ class ReadFileTool(WorkspaceTool):
                 return self._result(
                     call,
                     status=ToolResultState.SUCCESS,
-                    output=json_text({
-                        "status": "unchanged",
-                        "message": READ_DEDUP_MESSAGE,
-                        "path": _relpath(path, self.workspace_root),
-                        "access_scope": access_scope,
-                        "workspace_relative": workspace_relative,
-                        "content_returned": False,
-                        "dedup": True,
-                    }),
+                    output=json_text(
+                        {
+                            "status": "unchanged",
+                            "message": READ_DEDUP_MESSAGE,
+                            "path": _relpath(path, self.workspace_root),
+                            "access_scope": access_scope,
+                            "workspace_relative": workspace_relative,
+                            "content_returned": False,
+                            "dedup": True,
+                        }
+                    ),
                     metadata={
                         "path": str(path),
                         "dedup": True,
@@ -237,16 +219,18 @@ class ReadFileTool(WorkspaceTool):
             return self._result(
                 call,
                 status=ToolResultState.ERROR,
-                output=json_text({
-                    "error": (
-                        f"Read produced {len(content):,} characters, exceeding "
-                        f"the safety limit of {MAX_READ_CHARS:,}. Use a smaller limit."
-                    ),
-                    "path": _relpath(path, self.workspace_root),
-                    "access_scope": access_scope,
-                    "workspace_relative": workspace_relative,
-                    "total_lines": total_lines,
-                }),
+                output=json_text(
+                    {
+                        "error": (
+                            f"Read produced {len(content):,} characters, exceeding "
+                            f"the safety limit of {MAX_READ_CHARS:,}. Use a smaller limit."
+                        ),
+                        "path": _relpath(path, self.workspace_root),
+                        "access_scope": access_scope,
+                        "workspace_relative": workspace_relative,
+                        "total_lines": total_lines,
+                    }
+                ),
                 metadata={
                     "path": str(path),
                     "chars": len(content),
@@ -277,7 +261,9 @@ class ReadFileTool(WorkspaceTool):
         if had_bom:
             payload["had_utf8_bom"] = True
         if truncated:
-            payload["_hint"] = f"More lines are available. Continue with offset={end_index + 1}."
+            payload["_hint"] = (
+                f"More lines are available. Continue with offset={end_index + 1}."
+            )
         if consecutive >= 3:
             payload["_warning"] = (
                 f"You have read this exact file region {consecutive} times consecutively. "
@@ -300,38 +286,6 @@ class ReadFileTool(WorkspaceTool):
 @dataclass(slots=True)
 class SearchFilesTool(WorkspaceTool):
     name: str = "search_files"
-    description: str = (
-        "Search text files or find files by name. Relative paths resolve from workspace_root; "
-        "absolute paths and ~ are allowed, but broad host roots are rejected outside the workspace."
-    )
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "pattern": {"type": "string", "description": "Regex pattern or file glob/name pattern."},
-            "target": {
-                "type": "string",
-                "enum": ["content", "files"],
-                "description": "'content' searches text; 'files' finds paths.",
-                "default": "content",
-            },
-            "path": {
-                "type": "string",
-                "default": ".",
-                "description": "Relative paths resolve from workspace_root. Outside workspace, use a specific file or subdirectory, not broad roots like ~, /, /Users, or /tmp.",
-            },
-            "file_glob": {"type": "string", "description": "Optional file glob for content search."},
-            "limit": {"type": "integer", "default": DEFAULT_SEARCH_LIMIT},
-            "offset": {"type": "integer", "default": 0},
-            "output_mode": {
-                "type": "string",
-                "enum": ["content", "files_only", "count"],
-                "default": "content",
-            },
-            "context": {"type": "integer", "default": 0},
-        },
-        required=[],
-    ))
-    is_read_only: bool = True
-    is_concurrency_safe: bool = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         pattern = str_arg(call.arguments, "pattern")
@@ -361,7 +315,17 @@ class SearchFilesTool(WorkspaceTool):
             )
 
         state = _state_for_workspace(self.workspace_root)
-        search_key = ("search", pattern, target, path, file_glob or "", limit, offset, output_mode, context)
+        search_key = (
+            "search",
+            pattern,
+            target,
+            path,
+            file_glob or "",
+            limit,
+            offset,
+            output_mode,
+            context,
+        )
         with state.lock:
             _track_lookup(state, search_key)
             consecutive = state.consecutive_lookup_count
@@ -369,13 +333,15 @@ class SearchFilesTool(WorkspaceTool):
             return self._result(
                 call,
                 status=ToolResultState.ERROR,
-                output=json_text({
-                    "error": "Repeated search blocked: this exact search has already been returned.",
-                    "pattern": pattern,
-                    "access_scope": access_scope,
-                    "workspace_relative": workspace_relative,
-                    "already_searched": consecutive,
-                }),
+                output=json_text(
+                    {
+                        "error": "Repeated search blocked: this exact search has already been returned.",
+                        "pattern": pattern,
+                        "access_scope": access_scope,
+                        "workspace_relative": workspace_relative,
+                        "already_searched": consecutive,
+                    }
+                ),
                 metadata={
                     "path": str(path),
                     "pattern": pattern,
@@ -402,7 +368,9 @@ class SearchFilesTool(WorkspaceTool):
                 "Use the information you already have."
             )
         if payload.get("truncated"):
-            payload["_hint"] = f"Results truncated. Continue with offset={offset + limit}."
+            payload["_hint"] = (
+                f"Results truncated. Continue with offset={offset + limit}."
+            )
         payload["access_scope"] = access_scope
         payload["workspace_relative"] = workspace_relative
         return self._result(
@@ -418,10 +386,16 @@ class SearchFilesTool(WorkspaceTool):
             },
         )
 
-    def _search_files(self, pattern: str, *, path: Path, limit: int, offset: int) -> dict[str, Any]:
-        files = _rg_files(pattern, path) if which("rg") else _python_find_files(pattern, path)
+    def _search_files(
+        self, pattern: str, *, path: Path, limit: int, offset: int
+    ) -> dict[str, Any]:
+        files = (
+            _rg_files(pattern, path)
+            if which("rg")
+            else _python_find_files(pattern, path)
+        )
         files = _sort_paths_by_mtime(files)
-        page = files[offset:offset + limit]
+        page = files[offset : offset + limit]
         return {
             "status": "ok",
             "target": "files",
@@ -472,7 +446,14 @@ class SearchFilesTool(WorkspaceTool):
         output_mode: str,
         context: int,
     ) -> dict[str, Any]:
-        cmd = ["rg", "--line-number", "--no-heading", "--with-filename", "--color", "never"]
+        cmd = [
+            "rg",
+            "--line-number",
+            "--no-heading",
+            "--with-filename",
+            "--color",
+            "never",
+        ]
         if context > 0:
             cmd.extend(["-C", str(context)])
         if file_glob:
@@ -492,7 +473,9 @@ class SearchFilesTool(WorkspaceTool):
         )
         if completed.returncode not in {0, 1}:
             raise RuntimeError((completed.stderr or completed.stdout).strip())
-        lines = [line for line in completed.stdout.splitlines() if line and line != "--"]
+        lines = [
+            line for line in completed.stdout.splitlines() if line and line != "--"
+        ]
         if output_mode == "files_only":
             files = [Path(line).resolve() for line in lines]
             return {
@@ -501,14 +484,19 @@ class SearchFilesTool(WorkspaceTool):
                 "output_mode": "files_only",
                 "total_count": len(files),
                 "truncated": offset + limit < len(files),
-                "files": [_relpath(file, self.workspace_root) for file in files[offset:offset + limit]],
+                "files": [
+                    _relpath(file, self.workspace_root)
+                    for file in files[offset : offset + limit]
+                ],
             }
         if output_mode == "count":
             counts: dict[str, int] = {}
             for line in lines:
                 path_part, _, count_part = line.rpartition(":")
                 try:
-                    counts[_relpath(Path(path_part).resolve(), self.workspace_root)] = int(count_part)
+                    counts[_relpath(Path(path_part).resolve(), self.workspace_root)] = (
+                        int(count_part)
+                    )
                 except ValueError:
                     continue
             return {
@@ -520,7 +508,7 @@ class SearchFilesTool(WorkspaceTool):
             }
         matches = [_parse_rg_match_line(line, self.workspace_root) for line in lines]
         matches = [match for match in matches if match is not None]
-        page = matches[offset:offset + limit]
+        page = matches[offset : offset + limit]
         return {
             "status": "ok",
             "target": "content",
@@ -543,7 +531,9 @@ class SearchFilesTool(WorkspaceTool):
     ) -> dict[str, Any]:
         del context
         regex = re.compile(pattern)
-        files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+        files = (
+            [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+        )
         if file_glob:
             files = [p for p in files if fnmatch.fnmatch(p.name, file_glob)]
         matches: list[dict[str, Any]] = []
@@ -553,7 +543,9 @@ class SearchFilesTool(WorkspaceTool):
             if _has_binary_extension(file_path):
                 continue
             try:
-                lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = file_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
             except OSError:
                 continue
             for line_number, line in enumerate(lines, start=1):
@@ -561,9 +553,13 @@ class SearchFilesTool(WorkspaceTool):
                     rel = _relpath(file_path, self.workspace_root)
                     counts[rel] = counts.get(rel, 0) + 1
                     matching_files.add(file_path)
-                    matches.append({"path": rel, "line": line_number, "content": line[:500]})
+                    matches.append(
+                        {"path": rel, "line": line_number, "content": line[:500]}
+                    )
         if output_mode == "files_only":
-            files_page = _sort_paths_by_mtime(list(matching_files))[offset:offset + limit]
+            files_page = _sort_paths_by_mtime(list(matching_files))[
+                offset : offset + limit
+            ]
             return {
                 "status": "ok",
                 "target": "content",
@@ -586,31 +582,13 @@ class SearchFilesTool(WorkspaceTool):
             "output_mode": "content",
             "total_count": len(matches),
             "truncated": offset + limit < len(matches),
-            "matches": matches[offset:offset + limit],
+            "matches": matches[offset : offset + limit],
         }
 
 
 @dataclass(slots=True)
 class EditFileTool(WorkspaceTool):
     name: str = "edit_file"
-    description: str = (
-        "Targeted find-and-replace edit. Uses exact and fuzzy matching, returns "
-        "a unified diff, and verifies the write landed."
-    )
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "path": {"type": "string"},
-            "old_text": {
-                "type": "string",
-                "description": "Text to replace. Include surrounding context to make it unique.",
-            },
-            "new_text": {"type": "string", "description": "Replacement text. Empty string deletes."},
-            "replace_all": {"type": "boolean", "default": False},
-        },
-        required=["path", "old_text", "new_text"],
-    ))
-    is_read_only: bool = False
-    is_concurrency_safe: bool = False
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         path = self._resolve_path(str_arg(call.arguments, "path"))
@@ -628,47 +606,59 @@ class EditFileTool(WorkspaceTool):
         with path_lock:
             before_raw = path.read_text(encoding="utf-8", errors="replace")
             before, had_bom = _strip_bom(before_raw)
-            updated, count, strategy, error = _fuzzy_replace(before, old_text, new_text, replace_all)
+            updated, count, strategy, error = _fuzzy_replace(
+                before, old_text, new_text, replace_all
+            )
             if error or count == 0:
                 return self._result(
                     call,
                     status=ToolResultState.ERROR,
-                    output=json_text({
-                        "error": error or "old_text was not found",
-                        "path": _relpath(path, self.workspace_root),
-                        "_hint": "Re-read the file or use search_files to locate the current text.",
-                    }),
+                    output=json_text(
+                        {
+                            "error": error or "old_text was not found",
+                            "path": _relpath(path, self.workspace_root),
+                            "_hint": "Re-read the file or use search_files to locate the current text.",
+                        }
+                    ),
                     metadata={"path": str(path), "replacements": 0},
                 )
             line_ending = _detect_line_ending(before_raw)
             if line_ending:
                 updated = _normalize_line_endings(updated, line_ending)
-            write_text = (UTF8_BOM if had_bom and not updated.startswith(UTF8_BOM) else "") + updated
+            write_text = (
+                UTF8_BOM if had_bom and not updated.startswith(UTF8_BOM) else ""
+            ) + updated
             diff = _unified_diff(before, updated, _relpath(path, self.workspace_root))
             _atomic_write_text(path, write_text)
             verified, _ = _strip_bom(path.read_text(encoding="utf-8", errors="replace"))
-            if _normalize_line_endings(verified, "\n") != _normalize_line_endings(updated, "\n"):
+            if _normalize_line_endings(verified, "\n") != _normalize_line_endings(
+                updated, "\n"
+            ):
                 return self._result(
                     call,
                     status=ToolResultState.ERROR,
-                    output=json_text({
-                        "error": "post-write verification failed; on-disk content differs from intended edit",
-                        "path": _relpath(path, self.workspace_root),
-                    }),
+                    output=json_text(
+                        {
+                            "error": "post-write verification failed; on-disk content differs from intended edit",
+                            "path": _relpath(path, self.workspace_root),
+                        }
+                    ),
                     metadata={"path": str(path)},
                 )
             _note_write(state, path)
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
-            output=json_text({
-                "status": "ok",
-                "path": _relpath(path, self.workspace_root),
-                "replacements": count,
-                "strategy": strategy,
-                "diff": diff,
-                "files_modified": [_relpath(path, self.workspace_root)],
-            }),
+            output=json_text(
+                {
+                    "status": "ok",
+                    "path": _relpath(path, self.workspace_root),
+                    "replacements": count,
+                    "strategy": strategy,
+                    "diff": diff,
+                    "files_modified": [_relpath(path, self.workspace_root)],
+                }
+            ),
             metadata={"path": str(path), "replacements": count, "strategy": strategy},
         )
 
@@ -676,20 +666,6 @@ class EditFileTool(WorkspaceTool):
 @dataclass(slots=True)
 class WriteFileTool(WorkspaceTool):
     name: str = "write_file"
-    description: str = (
-        "Write complete UTF-8 content to a workspace file, replacing existing "
-        "content atomically. Use edit_file for targeted edits."
-    )
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "create_dirs": {"type": "boolean", "default": True},
-        },
-        required=["path", "content"],
-    ))
-    is_read_only: bool = False
-    is_concurrency_safe: bool = False
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         path = self._resolve_path(str_arg(call.arguments, "path"))
@@ -703,7 +679,11 @@ class WriteFileTool(WorkspaceTool):
         path_lock = state.lock_for_path(path)
         with path_lock:
             stale_warning = _stale_warning(state, path)
-            before = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            before = (
+                path.read_text(encoding="utf-8", errors="replace")
+                if path.exists()
+                else ""
+            )
             if path.exists():
                 line_ending = _detect_line_ending(before)
                 if line_ending:
@@ -763,7 +743,7 @@ def _has_binary_extension(path: Path) -> bool:
 
 def _strip_bom(text: str) -> tuple[str, bool]:
     if text.startswith(UTF8_BOM):
-        return text[len(UTF8_BOM):], True
+        return text[len(UTF8_BOM) :], True
     return text, False
 
 
@@ -805,7 +785,10 @@ def _path_access_scope(path: Path, workspace_root: Path) -> str:
     if resolved == home or home in resolved.parents:
         return "home"
     temp_roots = _temp_roots()
-    if any(resolved == temp_root or temp_root in resolved.parents for temp_root in temp_roots):
+    if any(
+        resolved == temp_root or temp_root in resolved.parents
+        for temp_root in temp_roots
+    ):
         return "temp"
     return "external_absolute"
 
@@ -824,7 +807,18 @@ def _broad_search_roots(workspace_root: Path) -> set[Path]:
     roots = {Path("/").resolve()}
     home = Path.home().resolve()
     roots.add(home)
-    for candidate in ("/Users", "/home", "/System", "/Library", "/Applications", "/var", "/usr", "/bin", "/sbin", "/etc"):
+    for candidate in (
+        "/Users",
+        "/home",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/var",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/etc",
+    ):
         candidate_path = Path(candidate)
         if candidate_path.exists():
             roots.add(candidate_path.resolve())
@@ -845,7 +839,11 @@ def _temp_roots() -> set[Path]:
 
 
 def _sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
-    return sorted(paths, key=lambda path: path.stat().st_mtime_ns if path.exists() else 0, reverse=True)
+    return sorted(
+        paths,
+        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
+        reverse=True,
+    )
 
 
 def _rg_files(pattern: str, path: Path) -> list[Path]:
@@ -885,7 +883,9 @@ def _parse_rg_match_line(line: str, root: Path) -> dict[str, Any] | None:
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode if path.exists() else None
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
@@ -994,9 +994,11 @@ def _match_line_trimmed(content: str, old_text: str) -> list[tuple[int, int]]:
         cursor += len(line)
     window = len(target)
     for index in range(0, len(lines) - window + 1):
-        if [line.strip() for line in lines[index:index + window]] == target:
+        if [line.strip() for line in lines[index : index + window]] == target:
             start = starts[index]
-            end = starts[index + window] if index + window < len(starts) else len(content)
+            end = (
+                starts[index + window] if index + window < len(starts) else len(content)
+            )
             spans.append((start, end))
     return spans
 
@@ -1006,7 +1008,10 @@ def _match_whitespace_normalized(content: str, old_text: str) -> list[tuple[int,
     if len(parts) <= 1:
         return []
     pattern = r"\s+".join(re.escape(part) for part in parts)
-    return [(match.start(), match.end()) for match in re.finditer(pattern, content, flags=re.MULTILINE)]
+    return [
+        (match.start(), match.end())
+        for match in re.finditer(pattern, content, flags=re.MULTILINE)
+    ]
 
 
 def _find_literal_spans(content: str, needle: str) -> list[tuple[int, int]]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import cast
 
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionAppliedResultReceiptFact,
     DurableProjectionArtifactResultDocumentReferenceFact,
     DurableProjectionCanonicalMutationReferenceFact,
@@ -49,8 +49,7 @@ def validate_prepared_job_result(
         lease.job != job
         or lease.job_candidate_fingerprint != candidate.candidate_fingerprint
         or lease.activation_fingerprint != candidate.activation_fingerprint
-        or lease.seed_contract_fingerprint
-        != candidate.seed_contract_fingerprint
+        or lease.seed_contract_fingerprint != candidate.seed_contract_fingerprint
         or owner.job_id != job.job_id
         or owner.job_semantic_fingerprint != job.job_semantic_fingerprint
         or owner.job_candidate_fingerprint != candidate.candidate_fingerprint
@@ -60,8 +59,7 @@ def validate_prepared_job_result(
     ):
         raise ValueError("prepared projection result owner drifted")
     document_semantics = tuple(
-        document_semantic_fingerprint(item)
-        for item in prepared.ordered_documents
+        document_semantic_fingerprint(item) for item in prepared.ordered_documents
     )
     mutation_semantics = tuple(
         item.mutation_semantic.mutation_semantic_fingerprint
@@ -141,8 +139,7 @@ def durable_document_reference(
 ) -> DurableProjectionResultDocumentReferenceFact:
     if isinstance(document, PreparedDurableProjectionArtifactDocumentFact):
         if (
-            document.content_sha256
-            != document.artifact_reference.content_sha256
+            document.content_sha256 != document.artifact_reference.content_sha256
             or document.content_utf8_bytes
             != document.artifact_reference.content_utf8_bytes
         ):
@@ -156,16 +153,12 @@ def durable_document_reference(
                 ),
                 document_kind="artifact",
                 semantic_document_id=document.semantic_document_id,
-                document_semantic_fingerprint=(
-                    document.document_semantic_fingerprint
-                ),
+                document_semantic_fingerprint=(document.document_semantic_fingerprint),
                 media_type=document.media_type,
                 content_codec_contract_fingerprint=(
                     document.content_codec_contract_fingerprint
                 ),
-                metadata_contract_fingerprint=(
-                    document.metadata_contract_fingerprint
-                ),
+                metadata_contract_fingerprint=(document.metadata_contract_fingerprint),
                 artifact_reference=document.artifact_reference,
             ),
         )
@@ -181,9 +174,7 @@ def durable_document_reference(
                 graph_id=document.graph_id,
                 semantic_document_id=document.semantic_document_id,
                 graph_document_type=document.graph_document_type,
-                document_semantic_fingerprint=(
-                    document.document_semantic_fingerprint
-                ),
+                document_semantic_fingerprint=(document.document_semantic_fingerprint),
                 canonical_json_sha256=document.canonical_json_sha256,
                 canonical_json_utf8_bytes=document.canonical_json_utf8_bytes,
                 jsonld_codec_contract_fingerprint=(
@@ -202,9 +193,7 @@ def canonical_mutation_references(
             DurableProjectionCanonicalMutationReferenceFact,
             build_projection_fact(
                 DurableProjectionCanonicalMutationReferenceFact,
-                schema_version=(
-                    "durable_projection_canonical_mutation_reference.v1"
-                ),
+                schema_version=("durable_projection_canonical_mutation_reference.v1"),
                 mutation_id=item.mutation_id,
                 mutation_semantic_fingerprint=(
                     item.mutation_semantic.mutation_semantic_fingerprint
@@ -215,9 +204,7 @@ def canonical_mutation_references(
                         {
                             "mutation_id": item.mutation_id,
                             "surface": surface.value,
-                            "surface_plan_fingerprint": (
-                                item.surface_plan_fingerprint
-                            ),
+                            "surface_plan_fingerprint": (item.surface_plan_fingerprint),
                         },
                     )
                     for surface in item.requested_surfaces
@@ -255,9 +242,7 @@ def applied_result_receipt_for_source(
     receipt_id = "projection-result-receipt:" + context_fingerprint(
         "durable-projection-applied-result-receipt-id:v1",
         {
-            "projection_kind": (
-                prepared.result_semantic.projection_kind.value
-            ),
+            "projection_kind": (prepared.result_semantic.projection_kind.value),
             "target_key": target_key,
             "source_event_reference_fingerprint": (
                 source_event_reference.reference_fingerprint
@@ -283,12 +268,9 @@ def applied_result_receipt_for_source(
             source_sequence=source_event_reference.sequence,
             target_head_revision=target_head_revision,
             result_document_references=tuple(
-                durable_document_reference(item)
-                for item in prepared.ordered_documents
+                durable_document_reference(item) for item in prepared.ordered_documents
             ),
-            canonical_mutation_references=canonical_mutation_references(
-                prepared
-            ),
+            canonical_mutation_references=canonical_mutation_references(prepared),
         ),
     )
 
@@ -324,9 +306,7 @@ def superseded_result_receipt_for_source(
 ) -> DurableProjectionSupersededResultReceiptFact:
     """Build a full-replacement supersession receipt for either owner."""
 
-    if (
-        prepared.result_semantic.projection_kind is not projection_kind
-    ):
+    if prepared.result_semantic.projection_kind is not projection_kind:
         raise ValueError("projection result cannot be superseded")
     return superseded_result_receipt_for_owner(
         candidate_result_owner=prepared.result_owner,
@@ -370,24 +350,18 @@ def superseded_result_receipt_for_owner(
         {
             "projection_kind": projection_kind.value,
             "target_key": target_key,
-            "candidate_owner_fingerprint": (
-                candidate_result_owner.owner_fingerprint
-            ),
+            "candidate_owner_fingerprint": (candidate_result_owner.owner_fingerprint),
             "candidate_source_event_reference_fingerprint": (
                 source_event_reference.reference_fingerprint
             ),
-            "effective_applied_receipt_fingerprint": (
-                effective.receipt_fingerprint
-            ),
+            "effective_applied_receipt_fingerprint": (effective.receipt_fingerprint),
         },
     )
     return cast(
         DurableProjectionSupersededResultReceiptFact,
         build_projection_fact(
             DurableProjectionSupersededResultReceiptFact,
-            schema_version=(
-                "durable_projection_superseded_result_receipt.v1"
-            ),
+            schema_version=("durable_projection_superseded_result_receipt.v1"),
             receipt_kind="superseded",
             receipt_id=receipt_id,
             candidate_result_owner=candidate_result_owner,

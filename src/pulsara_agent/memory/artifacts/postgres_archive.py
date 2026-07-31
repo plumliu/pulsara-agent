@@ -12,12 +12,13 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.memory.artifacts.archive import canonical_artifact_semantic_metadata
 from pulsara_agent.memory.foundation.records import (
-    ArtifactContentConflict,
     ArtifactPutConfirmation,
     ArtifactRecord,
     ArtifactTextSlice,
     ArtifactWriteResult,
 )
+from pulsara_agent.ports.artifact import ArtifactContentConflict
+from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -39,6 +40,7 @@ class PostgresArtifactStore:
         media_type: str = "text/plain",
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
+        assert_not_mcp_secret(metadata, sink="ArtifactStore")
         if run_id is not None and session_id is None:
             raise ValueError(
                 "PostgresArtifactStore.put_text requires session_id when run_id is provided"
@@ -109,6 +111,7 @@ class PostgresArtifactStore:
         media_type: str,
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
+        assert_not_mcp_secret(metadata, sink="ArtifactStore")
         if run_id is not None and session_id is None:
             raise ValueError(
                 "PostgresArtifactStore.put_bytes requires session_id when run_id is provided"

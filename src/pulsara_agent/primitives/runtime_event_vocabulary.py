@@ -7,21 +7,15 @@ live here; process-local prepared carriers are marked with
 
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, TypeAlias
+from typing import Literal, Mapping
 
 from pydantic import Field, field_validator, model_validator
 
-from pulsara_agent.message.blocks import ToolResultBlock
 from pulsara_agent.primitives._context_base import (
     ContextEventReferenceFact,
-    FrozenJsonObjectFact,
     canonical_json_bytes,
     context_fingerprint,
-    freeze_json,
-    thaw_json,
 )
 from pulsara_agent.primitives.frozen import (
     FrozenFactBase,
@@ -29,16 +23,20 @@ from pulsara_agent.primitives.frozen import (
     register_durable_fact,
 )
 from pulsara_agent.primitives.mcp import McpBindingIdentityFact
+from pulsara_agent.primitives.mcp_continuation import (
+    McpElicitationRequestFact,
+    McpInputRequiredDurableContinuationFact,
+    McpInputRequiredResolutionSemanticFact,
+)
+from pulsara_agent.primitives.mcp_protocol import McpClientInputMethod
 
 
 MAX_RUNTIME_IDENTIFIER_BYTES = 512
 MAX_RUNTIME_NAME_BYTES = 256
 MAX_RUNTIME_ERROR_TYPE_BYTES = 128
 MAX_RUNTIME_DIAGNOSTIC_BYTES = 1_024
-MAX_MCP_RESPONSE_KEYS = 64
 MAX_MCP_INPUT_REQUESTS = 64
 MAX_MCP_INPUT_REQUEST_BYTES = 64 * 1_024
-MAX_MCP_PREPARED_RESPONSE_BYTES = 64 * 1_024
 MAX_TOOL_RESULT_RECEIPT_ITEMS = 128
 MAX_PUBLICATION_TERMINATION_REFS = 16
 
@@ -113,18 +111,17 @@ class McpInputRequiredInteractionSemanticFact(FrozenFactBase):
 
 
 @_fact(
-    "mcp_user_visible_input_request.v1",
+    "mcp_user_visible_input_request.v2",
     "request_fingerprint",
-    "mcp-user-visible-input-request:v1",
+    "mcp-user-visible-input-request:v2",
 )
 class McpUserVisibleInputRequestFact(FrozenFactBase):
-    schema_version: Literal["mcp_user_visible_input_request.v1"] = (
-        "mcp_user_visible_input_request.v1"
+    schema_version: Literal["mcp_user_visible_input_request.v2"] = (
+        "mcp_user_visible_input_request.v2"
     )
     key: str
-    method: str
-    user_visible_params: FrozenJsonObjectFact
-    params_semantic_fingerprint: str
+    method: McpClientInputMethod
+    request: McpElicitationRequestFact
     request_fingerprint: str
 
     @field_validator("key")
@@ -136,41 +133,27 @@ class McpUserVisibleInputRequestFact(FrozenFactBase):
             label="MCP input request key",
         )
 
-    @field_validator("method")
-    @classmethod
-    def _method_bound(cls, value: str) -> str:
-        return _bounded_utf8(
-            value,
-            maximum=MAX_RUNTIME_NAME_BYTES,
-            label="MCP input request method",
-        )
-
     @model_validator(mode="after")
-    def _params_fingerprint(self) -> "McpUserVisibleInputRequestFact":
-        expected = context_fingerprint(
-            "mcp-user-visible-input-request-params:v1",
-            self.user_visible_params,
-        )
-        if self.params_semantic_fingerprint != expected:
-            raise ValueError("MCP input request params fingerprint mismatch")
+    def _request_join(self) -> "McpUserVisibleInputRequestFact":
+        if self.key != self.request.key or self.method is not self.request.method:
+            raise ValueError("MCP user-visible request identity mismatch")
         return self
 
 
 @_fact(
-    "mcp_input_required_request_envelope.v1",
+    "mcp_input_required_request_envelope.v2",
     "request_envelope_semantic_fingerprint",
-    "mcp-input-required-request-envelope:v1",
+    "mcp-input-required-request-envelope:v2",
 )
 class McpInputRequiredRequestEnvelopeFact(FrozenFactBase):
-    schema_version: Literal["mcp_input_required_request_envelope.v1"] = (
-        "mcp_input_required_request_envelope.v1"
+    schema_version: Literal["mcp_input_required_request_envelope.v2"] = (
+        "mcp_input_required_request_envelope.v2"
     )
-    protocol_version: str | None
+    protocol_revision: str
     ordered_user_visible_input_requests: tuple[McpUserVisibleInputRequestFact, ...] = (
         Field(max_length=MAX_MCP_INPUT_REQUESTS)
     )
-    original_request_semantic_fingerprint: str
-    request_state_semantic_fingerprint: str | None
+    request_set_fingerprint: str
     request_envelope_semantic_fingerprint: str
 
     @model_validator(mode="after")
@@ -186,6 +169,15 @@ class McpInputRequiredRequestEnvelopeFact(FrozenFactBase):
         )
         if len(payload) > MAX_MCP_INPUT_REQUEST_BYTES:
             raise ValueError("MCP input request envelope exceeds its byte bound")
+        expected_set = context_fingerprint(
+            "mcp-input-request-set:v1",
+            tuple(
+                (item.key, item.request.request_fingerprint)
+                for item in self.ordered_user_visible_input_requests
+            ),
+        )
+        if self.request_set_fingerprint != expected_set:
+            raise ValueError("MCP request envelope set fingerprint mismatch")
         return self
 
 
@@ -214,23 +206,22 @@ class McpPendingLeaseReservationIdentityFact(FrozenFactBase):
 
 
 @_fact(
-    "mcp_input_required_suspension.v1",
+    "mcp_input_required_suspension.v2",
     "suspension_fact_fingerprint",
-    "mcp-input-required-suspension:v1",
+    "mcp-input-required-suspension:v2",
 )
 class McpInputRequiredSuspensionFact(FrozenFactBase):
-    schema_version: Literal["mcp_input_required_suspension.v1"] = (
-        "mcp_input_required_suspension.v1"
+    schema_version: Literal["mcp_input_required_suspension.v2"] = (
+        "mcp_input_required_suspension.v2"
     )
     interaction: McpInputRequiredInteractionSemanticFact
     binding_identity: McpBindingIdentityFact
     pending_lease_reservation: McpPendingLeaseReservationIdentityFact
     request_envelope: McpInputRequiredRequestEnvelopeFact
+    durable_continuation: McpInputRequiredDurableContinuationFact
     rollout_reservation_id: str
     rollout_reservation_fingerprint: str
     source_mcp_installation_id: str
-    durable_deadline_utc: str | None
-    deadline_policy_fingerprint: str
     predecessor_resolution_submitted_event_reference: ContextEventReferenceFact | None
     suspension_fact_fingerprint: str
 
@@ -246,16 +237,6 @@ class McpInputRequiredSuspensionFact(FrozenFactBase):
             label="MCP suspension identity",
         )
 
-    @field_validator("durable_deadline_utc")
-    @classmethod
-    def _deadline_utc(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("MCP durable deadline must be timezone-aware")
-        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
     @model_validator(mode="after")
     def _source_join(self) -> "McpInputRequiredSuspensionFact":
         reservation = self.pending_lease_reservation
@@ -264,87 +245,42 @@ class McpInputRequiredSuspensionFact(FrozenFactBase):
             or reservation.binding_identity != self.binding_identity
         ):
             raise ValueError("MCP suspension pending lease identity mismatch")
+        continuation = self.durable_continuation
+        if (
+            continuation.request_set_fingerprint
+            != self.request_envelope.request_set_fingerprint
+            or continuation.protocol_semantic_fingerprint == ""
+            or continuation.binding_contract_fingerprint == ""
+            or continuation.round_ordinal != self.interaction.round_count
+        ):
+            raise ValueError("MCP suspension continuation authority mismatch")
         predecessor = self.predecessor_resolution_submitted_event_reference
         if (self.interaction.round_count == 1) != (predecessor is None):
             raise ValueError("MCP suspension predecessor/round matrix mismatch")
         return self
 
 
-class PreparedMcpInputRequiredSuspension(FrozenRuntimeStateBase):
-    interaction: McpInputRequiredInteractionSemanticFact
-    binding_identity: McpBindingIdentityFact
-    pending_lease_reservation: McpPendingLeaseReservationIdentityFact
-    request_envelope: McpInputRequiredRequestEnvelopeFact
-    owned_original_request_json_bytes: bytes
-    owned_request_state_json_bytes: bytes | None
-    deadline_monotonic: float | None
-    prepared_suspension_fingerprint: str
-    tool_observation_timing_seed: FrozenJsonObjectFact | None = None
-
-    @model_validator(mode="after")
-    def _prepared_source(self) -> "PreparedMcpInputRequiredSuspension":
-        if (
-            self.pending_lease_reservation.interaction_id
-            != self.interaction.interaction_id
-            or self.pending_lease_reservation.binding_identity != self.binding_identity
-        ):
-            raise ValueError("prepared MCP suspension lease identity mismatch")
-        if (
-            context_fingerprint(
-                "mcp-original-request:v1",
-                self.owned_original_request_json_bytes.decode("utf-8"),
-            )
-            != self.request_envelope.original_request_semantic_fingerprint
-        ):
-            raise ValueError("prepared MCP original request fingerprint mismatch")
-        state_fingerprint = (
-            context_fingerprint(
-                "mcp-request-state:v1",
-                self.owned_request_state_json_bytes.decode("utf-8"),
-            )
-            if self.owned_request_state_json_bytes is not None
-            else None
-        )
-        if (
-            state_fingerprint
-            != self.request_envelope.request_state_semantic_fingerprint
-        ):
-            raise ValueError("prepared MCP request state fingerprint mismatch")
-        return self
-
-    def thaw_original_request(self) -> dict[str, Any]:
-        value = json.loads(self.owned_original_request_json_bytes.decode("utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("prepared MCP original request is not an object")
-        return value
-
-    def thaw_request_state(self) -> str | None:
-        if self.owned_request_state_json_bytes is None:
-            return None
-        value = json.loads(self.owned_request_state_json_bytes.decode("utf-8"))
-        if not isinstance(value, str):
-            raise ValueError("prepared MCP request state is not a string")
-        return value
-
-
 @_fact(
-    "mcp_input_required_source_authority.v1",
+    "mcp_input_required_source_authority.v2",
     "source_authority_fingerprint",
-    "mcp-input-required-source-authority:v1",
+    "mcp-input-required-source-authority:v2",
 )
 class McpInputRequiredSourceAuthorityFact(FrozenFactBase):
-    schema_version: Literal["mcp_input_required_source_authority.v1"] = (
-        "mcp_input_required_source_authority.v1"
+    schema_version: Literal["mcp_input_required_source_authority.v2"] = (
+        "mcp_input_required_source_authority.v2"
     )
     interaction: McpInputRequiredInteractionSemanticFact
     binding_identity: McpBindingIdentityFact
     pending_lease_reservation: McpPendingLeaseReservationIdentityFact
     request_envelope_semantic_fingerprint: str
+    request_set_fingerprint: str
+    continuation_carrier_id: str
+    continuation_fact_fingerprint: str
+    operation_expires_at_utc: str
+    expiry_fingerprint: str
     rollout_reservation_id: str
     rollout_reservation_fingerprint: str
     source_mcp_installation_id: str
-    durable_deadline_utc: str | None
-    deadline_policy_fingerprint: str
     predecessor_resolution_submitted_event_reference: ContextEventReferenceFact | None
     source_suspension_fact_fingerprint: str
     source_suspension_event_reference: ContextEventReferenceFact
@@ -372,69 +308,15 @@ class McpInputRequiredSourceAuthorityFact(FrozenFactBase):
             or self.pending_lease_reservation.binding_identity != self.binding_identity
         ):
             raise ValueError("MCP source authority pending lease mismatch")
+        if (
+            not self.request_set_fingerprint
+            or not self.continuation_carrier_id
+            or not self.continuation_fact_fingerprint
+            or not self.operation_expires_at_utc
+            or not self.expiry_fingerprint
+        ):
+            raise ValueError("MCP source authority continuation identity is incomplete")
         return self
-
-
-@_fact(
-    "mcp_input_required_resolution.v1",
-    "resolution_semantic_fingerprint",
-    "mcp-input-required-resolution:v1",
-)
-class McpInputRequiredResolutionSemanticFact(FrozenFactBase):
-    schema_version: Literal["mcp_input_required_resolution.v1"] = (
-        "mcp_input_required_resolution.v1"
-    )
-    cancelled: bool
-    ordered_response_keys: tuple[str, ...] = Field(max_length=MAX_MCP_RESPONSE_KEYS)
-    response_payload_receipt_fingerprint: str
-    resolution_semantic_fingerprint: str
-
-    @model_validator(mode="after")
-    def _keys(self) -> "McpInputRequiredResolutionSemanticFact":
-        if self.ordered_response_keys != tuple(sorted(set(self.ordered_response_keys))):
-            raise ValueError("MCP response keys must be sorted and unique")
-        for key in self.ordered_response_keys:
-            _bounded_utf8(
-                key,
-                maximum=MAX_RUNTIME_NAME_BYTES,
-                label="MCP response key",
-            )
-        return self
-
-
-class PreparedMcpResponseEntry(FrozenRuntimeStateBase):
-    key: str
-    canonical_response_json_bytes: bytes
-    response_semantic_fingerprint: str
-
-
-class PreparedMcpInputRequiredResolution(FrozenRuntimeStateBase):
-    source_suspension_event_reference: ContextEventReferenceFact
-    source_suspension_fact_fingerprint: str
-    interaction_id: str
-    cancelled: bool
-    ordered_response_entries: tuple[PreparedMcpResponseEntry, ...]
-    resolution_semantic: McpInputRequiredResolutionSemanticFact
-    prepared_resolution_fingerprint: str
-
-    @model_validator(mode="after")
-    def _prepared_join(self) -> "PreparedMcpInputRequiredResolution":
-        keys = tuple(item.key for item in self.ordered_response_entries)
-        if keys != self.resolution_semantic.ordered_response_keys:
-            raise ValueError("prepared MCP response keys drifted")
-        total_bytes = sum(
-            len(item.canonical_response_json_bytes)
-            for item in self.ordered_response_entries
-        )
-        if total_bytes > MAX_MCP_PREPARED_RESPONSE_BYTES:
-            raise ValueError("prepared MCP response payload exceeds its byte bound")
-        return self
-
-    def thaw_responses(self) -> dict[str, Any]:
-        return {
-            item.key: json.loads(item.canonical_response_json_bytes.decode("utf-8"))
-            for item in self.ordered_response_entries
-        }
 
 
 @_fact(
@@ -617,60 +499,6 @@ class ContextCompactionRequestFact(FrozenFactBase):
         return self
 
 
-class CurrentToolResultReceiptItem(FrozenRuntimeStateBase):
-    result_block: ToolResultBlock
-    tool_result_end_reference: ContextEventReferenceFact
-    terminal_projection_reference: ContextEventReferenceFact
-    tool_call_id: str
-    result_semantic_fingerprint: str
-    item_fingerprint: str
-
-    @model_validator(mode="after")
-    def _identity(self) -> "CurrentToolResultReceiptItem":
-        if (
-            self.result_block.id != self.tool_call_id
-            or self.tool_result_end_reference.event_type != "TOOL_RESULT_END"
-            or self.terminal_projection_reference.event_type
-            != "TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED"
-        ):
-            raise ValueError("current ToolResult receipt identity mismatch")
-        if (
-            self.tool_result_end_reference.runtime_session_id
-            != self.terminal_projection_reference.runtime_session_id
-            or self.terminal_projection_reference.sequence
-            >= self.tool_result_end_reference.sequence
-        ):
-            raise ValueError("current ToolResult receipt reference ordering mismatch")
-        expected = context_fingerprint(
-            "current-tool-result-receipt-item:v1",
-            self.model_dump(mode="json", exclude={"item_fingerprint"}),
-        )
-        if self.item_fingerprint != expected:
-            raise ValueError("current ToolResult receipt fingerprint mismatch")
-        return self
-
-
-class CurrentToolResultBatchReceipt(FrozenRuntimeStateBase):
-    ordered_items: tuple[CurrentToolResultReceiptItem, ...] = Field(
-        min_length=1,
-        max_length=MAX_TOOL_RESULT_RECEIPT_ITEMS,
-    )
-    ordered_item_fingerprints_accumulator: str
-
-    @model_validator(mode="after")
-    def _ordered(self) -> "CurrentToolResultBatchReceipt":
-        expected = ordered_fingerprint_accumulator(
-            "current-tool-result-batch:v1",
-            tuple(item.item_fingerprint for item in self.ordered_items),
-        )
-        if self.ordered_item_fingerprints_accumulator != expected:
-            raise ValueError("current ToolResult batch accumulator mismatch")
-        call_ids = tuple(item.tool_call_id for item in self.ordered_items)
-        if len(call_ids) != len(set(call_ids)):
-            raise ValueError("current ToolResult batch contains duplicate calls")
-        return self
-
-
 @_fact(
     "mid_turn_context_compaction_skip.v1",
     "skip_semantic_fingerprint",
@@ -822,170 +650,6 @@ class CompactionPublicationTerminalizationScope(FrozenRuntimeStateBase):
         return self
 
 
-class CompactionCandidateProjectionRequestIdentity(FrozenRuntimeStateBase):
-    request_id: str
-    compaction_id: str
-    expected_completed_event_id: str
-    extractor_id: str
-    extractor_version: str
-    extractor_contract_fingerprint: str
-    projection_policy_fingerprint: str
-    request_fingerprint: str
-
-    @model_validator(mode="after")
-    def _request_identity(self) -> "CompactionCandidateProjectionRequestIdentity":
-        expected = context_fingerprint(
-            "compaction-candidate-projection-request:v1",
-            self.model_dump(mode="json", exclude={"request_fingerprint"}),
-        )
-        if self.request_fingerprint != expected:
-            raise ValueError("compaction projection request fingerprint mismatch")
-        return self
-
-
-class PreparedCompactionCandidateProjectionInput(FrozenRuntimeStateBase):
-    request_identity: CompactionCandidateProjectionRequestIdentity
-    owner_id: str
-    summary_artifact_id: str
-    summary_artifact_content_fingerprint: str
-    owned_summary_canonical_utf8_bytes: bytes
-    prepared_input_fingerprint: str
-
-    @model_validator(mode="after")
-    def _prepared_input(self) -> "PreparedCompactionCandidateProjectionInput":
-        try:
-            summary = self.owned_summary_canonical_utf8_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("prepared compaction summary is not UTF-8") from exc
-        if len(self.owned_summary_canonical_utf8_bytes) > 256 * 1_024:
-            raise ValueError("prepared compaction summary exceeds its byte bound")
-        if (
-            context_fingerprint(
-                "compaction-summary-artifact-content:v1",
-                summary,
-            )
-            != self.summary_artifact_content_fingerprint
-        ):
-            raise ValueError("prepared compaction summary content drifted")
-        expected = context_fingerprint(
-            "prepared-compaction-candidate-projection-input:v1",
-            {
-                **self.model_dump(
-                    mode="json",
-                    exclude={
-                        "prepared_input_fingerprint",
-                        "owned_summary_canonical_utf8_bytes",
-                    },
-                ),
-                "owned_summary_canonical_utf8": summary,
-            },
-        )
-        if self.prepared_input_fingerprint != expected:
-            raise ValueError("prepared compaction projection fingerprint mismatch")
-        return self
-
-
-CompactionCandidateProjectionStatus: TypeAlias = Literal[
-    "not_requested",
-    "preparation_failed",
-    "owner_installation_failed",
-    "suppressed_by_publication_latch",
-    "owner_installed",
-    "candidate_frozen",
-    "producer_bundle_full",
-    "projection_applied",
-    "reconciliation_required",
-]
-
-
-class CompactionCandidateProjectionReceipt(FrozenRuntimeStateBase):
-    completed_compaction_event_reference: ContextEventReferenceFact
-    request_identity: CompactionCandidateProjectionRequestIdentity | None
-    status: CompactionCandidateProjectionStatus
-    owner_id: str | None
-    prepared_input_fingerprint: str | None
-    failure_stage: Literal["prepared_input_factory", "owner_installation"] | None
-    failure_diagnostic: BoundedRuntimeFailureDiagnosticFact | None
-    producer_event_id: str | None
-    producer_payload_fingerprint: str | None
-    producer_event_reference: ContextEventReferenceFact | None
-    outbox_item_accumulator: str | None
-    reconciliation_from_status: (
-        Literal[
-            "owner_installed",
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-        ]
-        | None
-    )
-
-    @model_validator(mode="after")
-    def _status_matrix(self) -> "CompactionCandidateProjectionReceipt":
-        request_required = self.status != "not_requested"
-        if request_required != (self.request_identity is not None):
-            raise ValueError("compaction projection request identity matrix mismatch")
-        failure = self.status in {"preparation_failed", "owner_installation_failed"}
-        if failure != (
-            self.failure_stage is not None and self.failure_diagnostic is not None
-        ):
-            raise ValueError("compaction projection failure field matrix mismatch")
-        if self.status == "preparation_failed":
-            if (
-                self.failure_stage != "prepared_input_factory"
-                or self.owner_id is not None
-                or self.prepared_input_fingerprint is not None
-            ):
-                raise ValueError("compaction projection preparation failure drifted")
-        if self.status == "owner_installation_failed":
-            if (
-                self.failure_stage != "owner_installation"
-                or self.owner_id is not None
-                or self.prepared_input_fingerprint is None
-            ):
-                raise ValueError("compaction projection owner failure drifted")
-        owner_statuses = {
-            "owner_installed",
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-            "reconciliation_required",
-        }
-        if (self.status in owner_statuses) != (
-            self.owner_id is not None and self.prepared_input_fingerprint is not None
-        ):
-            raise ValueError("compaction projection owner field matrix mismatch")
-        producer_frozen = self.status in {
-            "candidate_frozen",
-            "producer_bundle_full",
-            "projection_applied",
-        } or (
-            self.status == "reconciliation_required"
-            and self.reconciliation_from_status
-            in {"candidate_frozen", "producer_bundle_full", "projection_applied"}
-        )
-        if producer_frozen != (
-            self.producer_event_id is not None
-            and self.producer_payload_fingerprint is not None
-        ):
-            raise ValueError("compaction projection producer identity matrix mismatch")
-        durable = self.status in {"producer_bundle_full", "projection_applied"} or (
-            self.status == "reconciliation_required"
-            and self.reconciliation_from_status
-            in {"producer_bundle_full", "projection_applied"}
-        )
-        if durable != (
-            self.producer_event_reference is not None
-            and self.outbox_item_accumulator is not None
-        ):
-            raise ValueError("compaction projection durable receipt matrix mismatch")
-        if (self.status == "reconciliation_required") != (
-            self.reconciliation_from_status is not None
-        ):
-            raise ValueError("compaction projection reconciliation matrix mismatch")
-        return self
-
-
 def build_mcp_interaction_semantic(
     *,
     interaction_id: str,
@@ -1009,203 +673,16 @@ def build_mcp_interaction_semantic(
 
 def build_mcp_user_visible_request(
     *,
-    key: str,
-    method: str,
-    params: Mapping[str, Any],
+    request: McpElicitationRequestFact,
 ) -> McpUserVisibleInputRequestFact:
     from pulsara_agent.primitives.frozen import build_frozen_fact
 
-    frozen = freeze_json(dict(params))
-    if not isinstance(frozen, FrozenJsonObjectFact):
-        raise TypeError("MCP input request params must be a JSON object")
     return build_frozen_fact(
         McpUserVisibleInputRequestFact,
-        schema_version="mcp_user_visible_input_request.v1",
-        key=key,
-        method=method,
-        user_visible_params=frozen,
-        params_semantic_fingerprint=context_fingerprint(
-            "mcp-user-visible-input-request-params:v1",
-            frozen,
-        ),
-    )
-
-
-def prepare_mcp_input_required_suspension(
-    *,
-    interaction_id: str,
-    tool_call_id: str,
-    tool_name: str,
-    server_id: str,
-    round_count: int,
-    binding_identity: McpBindingIdentityFact,
-    pending_lease_reservation_id: str,
-    protocol_version: str | None,
-    input_requests: tuple[Mapping[str, Any], ...],
-    original_request: Mapping[str, Any],
-    request_state: str | None,
-    deadline_monotonic: float | None,
-) -> PreparedMcpInputRequiredSuspension:
-    from pulsara_agent.primitives.frozen import build_frozen_fact
-
-    interaction = build_mcp_interaction_semantic(
-        interaction_id=interaction_id,
-        tool_call_id=tool_call_id,
-        tool_name=tool_name,
-        server_id=server_id,
-        round_count=round_count,
-    )
-    reservation = build_frozen_fact(
-        McpPendingLeaseReservationIdentityFact,
-        schema_version="mcp_pending_lease_reservation_identity.v1",
-        reservation_id=pending_lease_reservation_id,
-        interaction_id=interaction_id,
-        binding_identity=binding_identity,
-    )
-    requests = tuple(
-        sorted(
-            (
-                build_mcp_user_visible_request(
-                    key=str(item["key"]),
-                    method=str(item["method"]),
-                    params=dict(item.get("params") or {}),
-                )
-                for item in input_requests
-            ),
-            key=lambda item: item.key,
-        )
-    )
-    original_bytes = canonical_json_bytes(dict(original_request))
-    request_state_bytes = (
-        canonical_json_bytes(request_state) if request_state is not None else None
-    )
-    envelope = build_frozen_fact(
-        McpInputRequiredRequestEnvelopeFact,
-        schema_version="mcp_input_required_request_envelope.v1",
-        protocol_version=protocol_version,
-        ordered_user_visible_input_requests=requests,
-        original_request_semantic_fingerprint=context_fingerprint(
-            "mcp-original-request:v1",
-            original_bytes.decode("utf-8"),
-        ),
-        request_state_semantic_fingerprint=(
-            context_fingerprint(
-                "mcp-request-state:v1",
-                request_state_bytes.decode("utf-8"),
-            )
-            if request_state_bytes is not None
-            else None
-        ),
-    )
-    payload = {
-        "interaction": interaction,
-        "binding_identity": binding_identity,
-        "pending_lease_reservation": reservation,
-        "request_envelope": envelope,
-        "owned_original_request_json_bytes": bytes(original_bytes),
-        "owned_request_state_json_bytes": (
-            bytes(request_state_bytes) if request_state_bytes is not None else None
-        ),
-        "deadline_monotonic": deadline_monotonic,
-    }
-    return PreparedMcpInputRequiredSuspension(
-        **payload,
-        prepared_suspension_fingerprint=context_fingerprint(
-            "prepared-mcp-input-required-suspension:v1",
-            {
-                "interaction": interaction,
-                "binding_identity": binding_identity,
-                "pending_lease_reservation": reservation,
-                "request_envelope": envelope,
-                "owned_original_request_json": original_bytes.decode("utf-8"),
-                "owned_request_state_json": (
-                    request_state_bytes.decode("utf-8")
-                    if request_state_bytes is not None
-                    else None
-                ),
-                "deadline_monotonic": deadline_monotonic,
-            },
-        ),
-    )
-
-
-def prepare_mcp_input_required_resolution(
-    *,
-    source_suspension_event_reference: ContextEventReferenceFact,
-    source_suspension_fact_fingerprint: str,
-    interaction_id: str,
-    responses: Mapping[str, Any],
-    cancelled: bool,
-) -> PreparedMcpInputRequiredResolution:
-    from pulsara_agent.primitives.frozen import build_frozen_fact
-
-    keys = tuple(sorted(responses))
-    if len(keys) > MAX_MCP_RESPONSE_KEYS or len(keys) != len(set(keys)):
-        raise ValueError("MCP response key set is invalid")
-    entries: list[PreparedMcpResponseEntry] = []
-    receipt_values: list[str] = []
-    total_bytes = 0
-    for key in keys:
-        _bounded_utf8(
-            key,
-            maximum=MAX_RUNTIME_NAME_BYTES,
-            label="MCP response key",
-        )
-        frozen = freeze_json(responses[key])
-        payload = canonical_json_bytes(thaw_json(frozen))
-        total_bytes += len(payload)
-        if total_bytes > MAX_MCP_PREPARED_RESPONSE_BYTES:
-            raise ValueError("prepared MCP responses exceed their byte bound")
-        fingerprint = context_fingerprint(
-            "mcp-response-entry:v1", payload.decode("utf-8")
-        )
-        entries.append(
-            PreparedMcpResponseEntry(
-                key=key,
-                canonical_response_json_bytes=bytes(payload),
-                response_semantic_fingerprint=fingerprint,
-            )
-        )
-        receipt_values.append(fingerprint)
-    receipt = ordered_fingerprint_accumulator(
-        "mcp-response-payload-receipt:v1",
-        tuple(receipt_values),
-    )
-    semantic = build_frozen_fact(
-        McpInputRequiredResolutionSemanticFact,
-        schema_version="mcp_input_required_resolution.v1",
-        cancelled=cancelled,
-        ordered_response_keys=keys,
-        response_payload_receipt_fingerprint=receipt,
-    )
-    payload = {
-        "source_suspension_event_reference": source_suspension_event_reference,
-        "source_suspension_fact_fingerprint": source_suspension_fact_fingerprint,
-        "interaction_id": interaction_id,
-        "cancelled": cancelled,
-        "ordered_response_entries": tuple(entries),
-        "resolution_semantic": semantic,
-    }
-    return PreparedMcpInputRequiredResolution(
-        **payload,
-        prepared_resolution_fingerprint=context_fingerprint(
-            "prepared-mcp-input-required-resolution:v1",
-            {
-                **payload,
-                "ordered_response_entries": tuple(
-                    {
-                        "key": item.key,
-                        "canonical_response_json": (
-                            item.canonical_response_json_bytes.decode("utf-8")
-                        ),
-                        "response_semantic_fingerprint": (
-                            item.response_semantic_fingerprint
-                        ),
-                    }
-                    for item in entries
-                ),
-            },
-        ),
+        schema_version="mcp_user_visible_input_request.v2",
+        key=request.key,
+        method=request.method,
+        request=request,
     )
 
 
@@ -1232,14 +709,6 @@ _DIAGNOSTIC_PROFILE_CONTRACTS: Mapping[str, Mapping[str, object]] = {
     },
     "runtime_session_bootstrap_error.v1": {
         "default_message": "Runtime session owner bootstrap failed.",
-        "accepts_explicit_redacted_message": False,
-    },
-    "compaction_candidate_projection_preparation_error.v1": {
-        "default_message": "Compaction candidate projection preparation failed.",
-        "accepts_explicit_redacted_message": False,
-    },
-    "compaction_candidate_projection_owner_installation_error.v1": {
-        "default_message": "Compaction candidate projection owner installation failed.",
         "accepts_explicit_redacted_message": False,
     },
 }
@@ -1351,17 +820,10 @@ def build_runtime_event_deadline_budget(
 
 __all__ = [
     "BoundedRuntimeFailureDiagnosticFact",
-    "CompactionCandidateProjectionReceipt",
-    "CompactionCandidateProjectionRequestIdentity",
-    "CompactionCandidateProjectionStatus",
     "CompactionPublicationTerminalizationScope",
     "ContextCompactionRequestFact",
-    "CurrentToolResultBatchReceipt",
-    "CurrentToolResultReceiptItem",
     "MAX_MCP_INPUT_REQUEST_BYTES",
     "MAX_MCP_INPUT_REQUESTS",
-    "MAX_MCP_PREPARED_RESPONSE_BYTES",
-    "MAX_MCP_RESPONSE_KEYS",
     "MAX_PUBLICATION_TERMINATION_REFS",
     "MAX_TOOL_RESULT_RECEIPT_ITEMS",
     "McpInputRequiredInteractionSemanticFact",
@@ -1374,10 +836,6 @@ __all__ = [
     "McpPendingLeaseReservationIdentityFact",
     "McpUserVisibleInputRequestFact",
     "MidTurnCompactionSkipFact",
-    "PreparedCompactionCandidateProjectionInput",
-    "PreparedMcpInputRequiredSuspension",
-    "PreparedMcpInputRequiredResolution",
-    "PreparedMcpResponseEntry",
     "PublicationLatchedRunTerminationFact",
     "RuntimeEventOperationDeadlineBudget",
     "ToolResultEvidenceProjectionFailureFact",
@@ -1387,7 +845,5 @@ __all__ = [
     "build_mcp_user_visible_request",
     "build_runtime_event_deadline_budget",
     "ordered_fingerprint_accumulator",
-    "prepare_mcp_input_required_resolution",
-    "prepare_mcp_input_required_suspension",
     "stable_runtime_event_id",
 ]

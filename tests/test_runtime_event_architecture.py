@@ -55,8 +55,8 @@ SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
     "profile_id",
     (
         "execution_evidence_projection_error.v1",
-        "compaction_candidate_projection_preparation_error.v1",
-        "compaction_candidate_projection_owner_installation_error.v1",
+        "durable_projection_job_error.v1",
+        "runtime_session_bootstrap_error.v1",
     ),
 )
 def test_runtime_failure_diagnostic_profiles_never_persist_raw_error_text(
@@ -367,7 +367,7 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
 
 
 def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
-    assert AGENT_EVENT_SCHEMA_VERSION == 6
+    assert AGENT_EVENT_SCHEMA_VERSION == 8
     assert "CUSTOM" not in EventType.__members__
     assert all(
         getattr(event_type, "__name__", "") != "CustomEvent"
@@ -402,6 +402,7 @@ def test_typed_runtime_audit_events_are_explicit_non_transcript() -> None:
         EventType.MCP_INPUT_REQUIRED_BINDING_CHANGED.value,
         EventType.MCP_INPUT_REQUIRED_RESUME_FAILED.value,
         EventType.MCP_INPUT_REQUIRED_INTERACTION_CLOSED.value,
+        EventType.MCP_CONTINUATION_DISPATCH_RESERVED.value,
         EventType.CONTEXT_COMPACTION_REQUESTED.value,
         EventType.MID_TURN_CONTEXT_COMPACTION_SKIPPED.value,
         EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED.value,

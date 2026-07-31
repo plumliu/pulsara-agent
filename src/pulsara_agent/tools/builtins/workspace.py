@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
     ToolResultArtifactCandidate,
@@ -19,7 +19,7 @@ from pulsara_agent.primitives.terminal_observation import (
 )
 
 if TYPE_CHECKING:
-    from pulsara_agent.capability.result_semantics import (
+    from pulsara_agent.ports.tool_result_semantics import (
         ToolResultSemanticsRuntimeInput,
     )
 
@@ -89,9 +89,7 @@ class WorkspaceTool:
             display_payload=display_payload,
             semantics_input=semantics_input,
             terminal_payload_timing=terminal_payload_timing,
-            terminal_process_observation_receipt=(
-                terminal_process_observation_receipt
-            ),
+            terminal_process_observation_receipt=(terminal_process_observation_receipt),
             prepared_terminal_notification_reservation=(
                 prepared_terminal_notification_reservation
             ),

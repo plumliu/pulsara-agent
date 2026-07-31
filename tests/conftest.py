@@ -102,6 +102,7 @@ _POSTGRES_TEST_MODULES = frozenset(
     {
         "test_action_boundary_trigger.py",
         "test_artifact_store_contract.py",
+        "test_compaction_memory_extraction_postgres.py",
         "test_durable_memory.py",
         "test_durable_memory_contract.py",
         "test_event_log_contract.py",
@@ -119,6 +120,7 @@ _POSTGRES_TEST_MODULES = frozenset(
         "test_memory_supersede.py",
         "test_memory_vector_index_sync.py",
         "test_memory_vector_schema.py",
+        "test_mcp_continuation_postgres.py",
         "test_oxigraph_graph_store.py",
         "test_oxigraph_materializer.py",
         "test_postgres_driver.py",
@@ -601,6 +603,7 @@ def run_start_permission_fields(
     reply_id: str | None = None,
     mcp_installation_id: str = "mcp_installation:empty",
     mcp_installation_owner_runtime_session_id: str = "runtime:test",
+    ledger_runtime_session_id: str | None = None,
     model_target=None,
     transcript_source_through_sequence: int = 0,
     transcript_source_event_count: int = 0,
@@ -612,7 +615,9 @@ def run_start_permission_fields(
         build_default_subagent_graph_reducer_contract,
     )
 
-    runtime_session_id = mcp_installation_owner_runtime_session_id
+    runtime_session_id = (
+        ledger_runtime_session_id or mcp_installation_owner_runtime_session_id
+    )
     observed_at = "1970-01-01T00:00:00.000000Z"
     resolved_turn_id = turn_id or run_id.replace("run:", "turn:", 1)
     resolved_reply_id = reply_id or run_id.replace("run:", "reply:", 1)
@@ -648,7 +653,9 @@ def run_start_permission_fields(
         "model_target": target,
         "subagent_graph_reducer_contract": graph_contract,
         "mcp_installation_id": mcp_installation_id,
-        "mcp_installation_owner_runtime_session_id": runtime_session_id,
+        "mcp_installation_owner_runtime_session_id": (
+            mcp_installation_owner_runtime_session_id
+        ),
         "current_user_message": current_user,
         **_empty_run_transcript_seed_fields(
             runtime_session_id,
@@ -658,7 +665,7 @@ def run_start_permission_fields(
     }
     if source == "child_profile":
         reservation_ref = RolloutReservationReferenceFact(
-            owner_runtime_session_id=runtime_session_id,
+            owner_runtime_session_id=mcp_installation_owner_runtime_session_id,
             reservation_id=f"reservation:test:{run_id}",
             reservation_event_id=f"reservation_event:test:{run_id}",
             reservation_sequence=1,
@@ -698,7 +705,9 @@ def run_start_permission_fields(
             summarizer_target=target,
             graph_reducer_contract=graph_contract,
             account_id=f"rollout_account:test:parent:{run_id}",
-            account_owner_runtime_session_id=runtime_session_id,
+            account_owner_runtime_session_id=(
+                mcp_installation_owner_runtime_session_id
+            ),
             account_owner_run_id=f"parent:{run_id}",
             inherited_rollout_reservation=reservation_ref,
         )
@@ -716,6 +725,33 @@ def run_start_permission_fields(
                 "child-rollout-subaccount:v1", subaccount_payload
             ),
         )
+        child_surface = build_capability_execution_surface_identity(
+            surface_contract_version="test:v1",
+            entries=(),
+            mcp_installation_id=mcp_installation_id,
+        )
+        child_basis = build_capability_resolve_basis(
+            basis_id=f"capability_basis:test:child:{run_id}",
+            basis_kind="initial",
+            source_basis_id=None,
+            source_basis_fingerprint=None,
+            owner=CapabilityExposureOwnerFact(
+                owner_kind="subagent_run_start",
+                owner_id=f"run_start:test:{run_id}",
+                host_boundary_kind=None,
+                runtime_session_id=runtime_session_id,
+                run_id=run_id,
+            ),
+            workspace_identity_fingerprint="sha256:test-child-workspace",
+            memory_domain_id="memory_domain:test-child",
+            permission_snapshot_id=permission_snapshot_id,
+            plan_active=False,
+            active_skill_names=(),
+            user_intent_fingerprint="sha256:test-child-intent",
+            prior_transcript_fingerprint="sha256:test-child-transcript",
+            mcp_installation_id=mcp_installation_id,
+            execution_surface_identity=child_surface,
+        )
         return {
             **common,
             "long_horizon": child_long_horizon.contract,
@@ -727,7 +763,7 @@ def run_start_permission_fields(
             "subagent_run_entry": SubagentRunEntryFact(
                 subagent_run_id=run_id,
                 subagent_task_id=f"task:{run_id}",
-                parent_runtime_session_id=runtime_session_id,
+                parent_runtime_session_id=mcp_installation_owner_runtime_session_id,
                 parent_run_id=f"parent:{run_id}",
                 spawn_edge_id=f"edge:{run_id}",
                 capability_profile_fingerprint="sha256:test-profile",
@@ -741,7 +777,10 @@ def run_start_permission_fields(
                 permission_snapshot_id=permission_snapshot_id,
                 model_target_fingerprint=target.target_fingerprint,
                 mcp_installation_id=mcp_installation_id,
-                mcp_installation_owner_runtime_session_id=runtime_session_id,
+                mcp_installation_owner_runtime_session_id=(
+                    mcp_installation_owner_runtime_session_id
+                ),
+                capability_basis=child_basis,
             ),
         }
 
@@ -990,7 +1029,6 @@ async def emit_test_accepted_model_reply(
     from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
     from pulsara_agent.llm.registry import LLMTransportRegistry
     from pulsara_agent.primitives.model_call import ModelCallPurpose
-    from pulsara_agent.runtime.state import LoopState
     from tests.support import (
         bind_test_provider_input_context,
         bind_test_context,
@@ -1103,12 +1141,6 @@ async def emit_test_accepted_model_reply(
         run_execution_activation=activation,
         provider_input_start_bundle=provider_input,
     )
-    state = LoopState(
-        session_id=runtime_session.runtime_session_id,
-        run_id=event_context.run_id,
-        turn_id=event_context.turn_id,
-        reply_id=event_context.reply_id,
-    )
     handle = llm_runtime.start_stream(
         call=call,
         context=context,
@@ -1116,7 +1148,6 @@ async def emit_test_accepted_model_reply(
         start_bundle=start_bundle,
         commit_port=RuntimeSessionModelStreamEventCommitPort(
             runtime_session=runtime_session,
-            state=state,
         ),
         execution_registry=runtime_session.model_stream_execution_registry,
     )
@@ -1132,8 +1163,7 @@ async def emit_test_accepted_model_reply(
         model_call_index=1,
         event_context=event_context,
         runtime_session=runtime_session,
-        state=state,
-    )
+            )
 
 
 def test_run_end_event_id(run_id: str) -> str:

@@ -7,11 +7,20 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, TypeAlias
 from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
+from pulsara_agent.event import (
+    AgentEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionOption,
+)
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact, thaw_json
+from pulsara_agent.primitives.mcp_continuation import (
+    McpElicitationRequestFact,
+    McpFormElicitationRequestFact,
+    McpUrlElicitationRequestFact,
+)
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredSuspensionFact,
-    PreparedMcpInputRequiredSuspension,
 )
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.approval import PendingApproval
@@ -24,7 +33,8 @@ from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
-from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus
+
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
 PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
 
@@ -283,7 +293,6 @@ class PendingMcpInputRequired:
     server_id: str
     source_suspension_event_reference: ContextEventReferenceFact
     suspension_fact: McpInputRequiredSuspensionFact
-    prepared_suspension: PreparedMcpInputRequiredSuspension
     input_requests: tuple[dict[str, Any], ...]
     round_count: int = 1
     deadline_monotonic: float | None = None
@@ -307,7 +316,9 @@ class PendingMcpInputRequired:
             "suspension_fact_fingerprint": (
                 self.suspension_fact.suspension_fact_fingerprint
             ),
-            "protocol_version": self.suspension_fact.request_envelope.protocol_version,
+            "protocol_revision": (
+                self.suspension_fact.request_envelope.protocol_revision
+            ),
             "input_requests": [dict(item) for item in self.input_requests],
             "round_count": self.round_count,
             "created_at": self.created_at,
@@ -359,12 +370,18 @@ class PendingPlanInteraction:
         }
 
 
-PendingInteraction: TypeAlias = PendingApproval | PendingPlanInteraction | PendingMcpInputRequired
+PendingInteraction: TypeAlias = (
+    PendingApproval | PendingPlanInteraction | PendingMcpInputRequired
+)
 
 
-def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) -> PendingPlanInteraction:
+def pending_plan_interaction_from_state(
+    state: RunActivationWorkingState, host_session_id: str
+) -> PendingPlanInteraction:
     if state.status is not LoopStatus.WAITING_USER:
-        raise ValueError("cannot create pending plan interaction from a non-waiting state")
+        raise ValueError(
+            "cannot create pending plan interaction from a non-waiting state"
+        )
     if state.pending_interaction_kind != "plan":
         raise ValueError("waiting state does not contain a plan interaction")
     payload = dict(state.pending_interaction_payload)
@@ -372,7 +389,9 @@ def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) 
     if kind not in {"question", "exit"}:
         raise ValueError("pending plan interaction has invalid kind")
     return PendingPlanInteraction(
-        interaction_id=str(payload.get("interaction_id") or f"plan_interaction:{uuid4().hex}"),
+        interaction_id=str(
+            payload.get("interaction_id") or f"plan_interaction:{uuid4().hex}"
+        ),
         kind=kind,  # type: ignore[arg-type]
         host_session_id=host_session_id,
         runtime_session_id=state.session_id,
@@ -391,46 +410,90 @@ def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) 
     )
 
 
-def pending_mcp_input_required_from_state(state: LoopState, host_session_id: str) -> PendingMcpInputRequired:
+def pending_mcp_input_required_from_state(
+    state: RunActivationWorkingState, host_session_id: str
+) -> PendingMcpInputRequired:
     if state.status is not LoopStatus.WAITING_USER:
-        raise ValueError("cannot create pending MCP input-required from a non-waiting state")
+        raise ValueError(
+            "cannot create pending MCP input-required from a non-waiting state"
+        )
     if state.pending_interaction_kind != "mcp_input_required":
-        raise ValueError("waiting state does not contain an MCP input-required interaction")
+        raise ValueError(
+            "waiting state does not contain an MCP input-required interaction"
+        )
     payload = dict(state.pending_interaction_payload)
-    prepared = payload.get("prepared_mcp_input_required")
+    pending_handle = payload.get("mcp_pending_handle")
     suspension = payload.get("suspension_fact")
     source_reference = payload.get("source_suspension_event_reference")
-    if not isinstance(prepared, PreparedMcpInputRequiredSuspension):
-        raise ValueError("pending MCP interaction lacks its prepared suspension owner")
+    if pending_handle is None or not hasattr(pending_handle, "suspension_commit_view"):
+        raise ValueError("pending MCP interaction lacks its process-local handle")
+    view = pending_handle.suspension_commit_view
     if not isinstance(suspension, McpInputRequiredSuspensionFact):
         raise ValueError("pending MCP interaction lacks its typed suspension fact")
     if not isinstance(source_reference, ContextEventReferenceFact):
         raise ValueError("pending MCP interaction lacks its suspension event reference")
     return PendingMcpInputRequired(
-        interaction_id=prepared.interaction.interaction_id,
+        interaction_id=view.interaction.interaction_id,
         kind="mcp_input_required",
         host_session_id=host_session_id,
         runtime_session_id=state.session_id,
         run_id=state.run_id,
         turn_id=state.turn_id,
         reply_id=state.reply_id,
-        tool_call_id=prepared.interaction.tool_call_id,
-        tool_name=prepared.interaction.tool_name,
-        server_id=prepared.interaction.server_id,
+        tool_call_id=view.interaction.tool_call_id,
+        tool_name=view.interaction.tool_name,
+        server_id=view.interaction.server_id,
         source_suspension_event_reference=source_reference,
         suspension_fact=suspension,
-        prepared_suspension=prepared,
         input_requests=tuple(
-            {
-                "key": item.key,
-                "method": item.method,
-                "params": thaw_json(item.user_visible_params),
-            }
-            for item in prepared.request_envelope.ordered_user_visible_input_requests
+            _public_mcp_elicitation_request(
+                item.request,
+                exact_url=(
+                    pending_handle.elicitation_batch_owner.exact_url_for_display(
+                        request_key=item.key
+                    )
+                    if isinstance(item.request, McpUrlElicitationRequestFact)
+                    else None
+                ),
+            )
+            for item in view.request_envelope.ordered_user_visible_input_requests
         ),
-        round_count=prepared.interaction.round_count,
-        deadline_monotonic=prepared.deadline_monotonic,
+        round_count=view.interaction.round_count,
+        deadline_monotonic=view.deadline_monotonic,
     )
+
+
+def _public_mcp_elicitation_request(
+    request: McpElicitationRequestFact,
+    *,
+    exact_url: str | None,
+) -> dict[str, Any]:
+    if isinstance(request, McpFormElicitationRequestFact):
+        if exact_url is not None:
+            raise ValueError("MCP form request cannot carry a URL projection")
+        return {
+            "key": request.key,
+            "method": request.method.value,
+            "mode": request.mode,
+            "message": request.message,
+            "requested_schema": thaw_json(request.requested_schema),
+        }
+    if isinstance(request, McpUrlElicitationRequestFact):
+        if exact_url is None:
+            raise ValueError("MCP URL request requires an exact display URL")
+        return {
+            "key": request.key,
+            "method": request.method.value,
+            "mode": request.mode,
+            "message": request.message,
+            "display_origin": request.display_origin,
+            "ascii_host": request.ascii_host,
+            "unicode_host": request.unicode_host,
+            "explicit_port": request.explicit_port,
+            "punycode_warning_required": request.punycode_warning_required,
+            "url": exact_url,
+        }
+    raise TypeError("unsupported MCP elicitation request fact")
 
 
 def reduce_plan_workflow_state(events: Iterable[AgentEvent]) -> PlanWorkflowState:

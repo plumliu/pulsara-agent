@@ -12,7 +12,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     RuntimeWriteAdmissionEpochFact,
     RuntimeWriteAdmissionGuardHandle,
     RuntimeWriteAdmissionMode,
@@ -24,7 +24,7 @@ from pulsara_agent.runtime.projection_jobs.contracts import (
 
 
 _V5_RESOURCE_NAME = "0005_runtime_write_protected_relations_v1.json"
-_LATEST_RESOURCE_NAME = "0006_runtime_write_protected_relations_v2.json"
+_LATEST_RESOURCE_NAME = "0010_runtime_write_protected_relations_v1.json"
 
 
 def _resource_payload(
@@ -81,9 +81,7 @@ def build_runtime_write_protected_relation_registry(
                         {
                             "timing": "before",
                             "operations": ("insert", "update", "delete"),
-                            "function": (
-                                "public.pulsara_assert_runtime_write_guard"
-                            ),
+                            "function": ("public.pulsara_assert_runtime_write_guard"),
                         },
                     ),
                 ),
@@ -358,9 +356,7 @@ def acquire_maintenance_runtime_write_guard(
         maintenance_authority_fingerprint=context_fingerprint(
             "runtime-write-maintenance-authority-reference:v1",
             {
-                "maintenance_operation_id": (
-                    observed.maintenance_operation_id
-                ),
+                "maintenance_operation_id": (observed.maintenance_operation_id),
                 "epoch_fingerprint": observed.epoch_fingerprint,
                 "target_migration_version": observed.target_migration_version,
             },
@@ -443,9 +439,7 @@ def install_runtime_write_normal_epoch(
         resource_name=protected_relation_resource_name
     )
     resulting = build_runtime_write_epoch(
-        database_target_fingerprint=(
-            maintenance_epoch.database_target_fingerprint
-        ),
+        database_target_fingerprint=(maintenance_epoch.database_target_fingerprint),
         epoch_number=maintenance_epoch.epoch_number + 1,
         mode=RuntimeWriteAdmissionMode.NORMAL,
         authorized_runtime_role=maintenance_epoch.authorized_runtime_role,
@@ -550,6 +544,29 @@ def replace_runtime_write_protected_relation_registry(
                 registry.registry_fingerprint,
             ),
         )
+        trigger_exists = connection.execute(
+            """
+            SELECT 1
+            FROM pg_catalog.pg_trigger t
+            JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s
+              AND t.tgname = %s AND NOT t.tgisinternal
+            """,
+            (item.schema_name, item.relation_name, item.guard_trigger_name),
+        ).fetchone()
+        if trigger_exists is None:
+            connection.execute(
+                sql.SQL(
+                    "CREATE TRIGGER {} BEFORE INSERT OR UPDATE OR DELETE ON {}.{} "
+                    "FOR EACH ROW EXECUTE FUNCTION "
+                    "public.pulsara_assert_runtime_write_guard()"
+                ).format(
+                    sql.Identifier(item.guard_trigger_name),
+                    sql.Identifier(item.schema_name),
+                    sql.Identifier(item.relation_name),
+                )
+            )
     return registry
 
 
@@ -564,9 +581,7 @@ def abort_runtime_write_maintenance(
     ):
         raise ValueError("maintenance abort requires a maintenance epoch")
     resulting = build_runtime_write_epoch(
-        database_target_fingerprint=(
-            maintenance_epoch.database_target_fingerprint
-        ),
+        database_target_fingerprint=(maintenance_epoch.database_target_fingerprint),
         epoch_number=maintenance_epoch.epoch_number + 1,
         mode=RuntimeWriteAdmissionMode.NORMAL,
         authorized_runtime_role=maintenance_epoch.authorized_runtime_role,
@@ -619,7 +634,9 @@ def require_runtime_write_epoch_matches_registry(
         or epoch.protected_relation_registry_fingerprint
         != expected_registry.registry_fingerprint
     ):
-        raise RuntimeError("runtime write admission epoch does not match verified schema")
+        raise RuntimeError(
+            "runtime write admission epoch does not match verified schema"
+        )
     return epoch
 
 

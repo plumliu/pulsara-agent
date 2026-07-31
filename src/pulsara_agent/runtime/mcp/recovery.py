@@ -29,6 +29,15 @@ from pulsara_agent.runtime.context_input.event_slice import (
     event_reference_from_stored,
 )
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.mcp.continuation_store import (
+    McpContinuationRepository,
+    McpContinuationMutationKind,
+    build_mcp_continuation_transaction_intent,
+)
+from pulsara_agent.primitives.mcp_continuation import (
+    McpContinuationCompanionKind,
+    mcp_continuation_charge_contract_fingerprint,
+)
 from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
 
 
@@ -46,6 +55,7 @@ async def terminalize_reopened_mcp_input_required(
     run_id: str,
     closure_reason: str,
     deadline_monotonic: float,
+    continuation_repository: McpContinuationRepository,
 ) -> RecoveredMcpInputRequiredClosure:
     """Close one active MCP lifecycle without recreating its provider lease."""
 
@@ -54,9 +64,7 @@ async def terminalize_reopened_mcp_input_required(
         "child_pending_unsupported",
     }:
         raise ValueError("reopen MCP recovery received an invalid closure reason")
-    records = runtime_session.mcp_input_required_lifecycle_store.active_for_run(
-        run_id
-    )
+    records = runtime_session.mcp_input_required_lifecycle_store.active_for_run(run_id)
     if len(records) != 1:
         raise RuntimeError(
             "MCP lifecycle recovery requires one exact active interaction"
@@ -87,9 +95,7 @@ async def terminalize_reopened_mcp_input_required(
     source = build_frozen_fact(
         McpInputRequiredTerminalSourceFact,
         schema_version="mcp_input_required_terminal_source.v1",
-        source_suspension_event_reference=(
-            record.source_suspension_event_reference
-        ),
+        source_suspension_event_reference=(record.source_suspension_event_reference),
         source_resolution_submitted_event_reference=(
             record.latest_resolution_submitted_event_reference
         ),
@@ -120,11 +126,9 @@ async def terminalize_reopened_mcp_input_required(
             mcp_input_required_terminal_source=source,
         )
     )
-    prepared = (
-        await runtime_session.tool_terminal_projection_service.prepare_batch(
-            candidates,
-            deadline_monotonic=deadline_monotonic,
-        )
+    prepared = await runtime_session.tool_terminal_projection_service.prepare_batch(
+        candidates,
+        deadline_monotonic=deadline_monotonic,
     )
     terminal = next(
         event for event in prepared if isinstance(event, ToolResultEndEvent)
@@ -154,9 +158,7 @@ async def terminalize_reopened_mcp_input_required(
         run_id=record.run_id,
         turn_id=record.turn_id,
         reply_id=record.reply_id,
-        source_suspension_event_reference=(
-            record.source_suspension_event_reference
-        ),
+        source_suspension_event_reference=(record.source_suspension_event_reference),
         source_resolution_submitted_event_reference=(
             record.latest_resolution_submitted_event_reference
         ),
@@ -179,10 +181,7 @@ async def terminalize_reopened_mcp_input_required(
         tool_call_id=record.tool_call_id,
     )
     rollout_settlement = RolloutBudgetReservationSettledEvent(
-        id=(
-            "rollout_budget_reservation_settled:"
-            f"{rollout_reservation.reservation_id}"
-        ),
+        id=(f"rollout_budget_reservation_settled:{rollout_reservation.reservation_id}"),
         run_id=record.run_id,
         turn_id=record.turn_id,
         reply_id=record.reply_id,
@@ -200,15 +199,52 @@ async def terminalize_reopened_mcp_input_required(
         owner_id=record.tool_call_id,
     )
     if physical_reservation is None:
-        raise RuntimeError(
-            "MCP lifecycle recovery lacks its physical tool reservation"
+        raise RuntimeError("MCP lifecycle recovery lacks its physical tool reservation")
+    if record.latest_resolution_submitted_event_reference is None:
+        carrier_id = (
+            source_event.suspension.durable_continuation.continuation_carrier_id
         )
+    else:
+        resolution_event = runtime_session.event_log.get_by_id(
+            record.latest_resolution_submitted_event_reference.event_id
+        )
+        from pulsara_agent.event import McpInputRequiredResolutionSubmittedEvent
+
+        if not isinstance(
+            resolution_event, McpInputRequiredResolutionSubmittedEvent
+        ):
+            raise RuntimeError("MCP recovery lost its replay carrier source")
+        carrier_id = resolution_event.continuation.replay_continuation_carrier_id
+    stored_carrier = continuation_repository.read(
+        carrier_id,
+        deadline_monotonic=deadline_monotonic,
+    )
+    if stored_carrier is None:
+        raise RuntimeError("MCP recovery terminalization lost its secret row")
+    transaction_companion = build_mcp_continuation_transaction_intent(
+        companion_kind=McpContinuationCompanionKind.TERMINAL_DELETE,
+        mutation_kind=McpContinuationMutationKind.DELETE_TERMINAL,
+        runtime_session_id=runtime_session.runtime_session_id,
+        interaction_id=record.interaction_id,
+        round_ordinal=source_event.suspension.interaction.round_count,
+        source_event_id=terminal.id,
+        repository=continuation_repository,
+        issuer_id="mcp-reopen-terminalizer",
+        issuer_generation=1,
+        charge_contract_fingerprint=(
+            mcp_continuation_charge_contract_fingerprint(
+                source_event.suspension.durable_continuation.bounds
+            )
+        ),
+        source_carrier_id=carrier_id,
+        expected_control=stored_carrier.control,
+    )
     result = await runtime_session.event_write_service.execute(
         lambda: runtime_session.settle_physical_operation_from_thread(
             tuple(ordered),
             reservation=physical_reservation,
             terminal_outcome="interrupted",
-            state=None,
+            transaction_companion=transaction_companion,
         ),
         deadline_monotonic=deadline_monotonic,
         admission_class=LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
@@ -254,9 +290,7 @@ def _rollout_reservation(
         if reservation.reservation_id == reservation_id
     )
     if len(matches) != 1:
-        raise RuntimeError(
-            "MCP lifecycle recovery requires one rollout reservation"
-        )
+        raise RuntimeError("MCP lifecycle recovery requires one rollout reservation")
     reservation = matches[0]
     if (
         reservation.semantic_fingerprint != reservation_fingerprint

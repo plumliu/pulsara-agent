@@ -17,10 +17,6 @@ from pulsara_agent.storage.postgres_connection_provider import (
     VerifiedPostgresConnectionProviderProtocol,
 )
 
-from pulsara_agent.capability.descriptor import (
-    CapabilityArtifactMode,
-    CapabilityDescriptor,
-)
 from pulsara_agent.event import EventContext
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.message import (
@@ -42,20 +38,25 @@ from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessObservationReceiptFact,
     TerminalProcessObservationSemanticFact,
 )
-from pulsara_agent.tools.base import (
+from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
     ToolResultArtifactCandidate,
 )
+from pulsara_agent.ports.artifact import (
+    AdaptivePreview,
+    ToolArtifactMode,
+    ToolResultArtifactOptions,
+    ToolResultArtifactProcessingPolicy,
+    build_adaptive_preview,
+    effective_terminal_output_cap,
+    build_tool_artifact_info_view,
+    build_tool_artifact_record_view,
+    build_tool_artifact_text_slice_view,
+    build_tool_result_artifact_processing_policy,
+)
 
 
-DEFAULT_TOOL_ARTIFACT_THRESHOLD_BYTES = 8_000
-DEFAULT_COMPLETE_PREVIEW_BODY_CHARS = 32_000
-DEFAULT_LARGE_PREVIEW_CHARS = 8_000
-DEFAULT_HUGE_OUTPUT_CHARS = 200_000
-DEFAULT_HUGE_PREVIEW_CHARS = 4_000
-DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS = 2_600
-_HEAD_RATIO = 0.65
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 _TERMINAL_OBSERVATION_ARTIFACT_CODEC_CONTRACT_FINGERPRINT = context_fingerprint(
     "terminal-observation-artifact-codec-contract:v1",
@@ -64,73 +65,6 @@ _TERMINAL_OBSERVATION_ARTIFACT_CODEC_CONTRACT_FINGERPRINT = context_fingerprint(
         "covered_content": "exact-sanitized-output-range",
     },
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ToolResultArtifactOptions:
-    archive_threshold_bytes: int = DEFAULT_TOOL_ARTIFACT_THRESHOLD_BYTES
-    complete_preview_body_chars: int = DEFAULT_COMPLETE_PREVIEW_BODY_CHARS
-    large_preview_chars: int = DEFAULT_LARGE_PREVIEW_CHARS
-    huge_output_chars: int = DEFAULT_HUGE_OUTPUT_CHARS
-    huge_preview_chars: int = DEFAULT_HUGE_PREVIEW_CHARS
-    streaming_live_head_cap_chars: int = DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS
-
-    def __post_init__(self) -> None:
-        effective_archive_threshold = self.effective_archive_threshold_bytes
-        effective_large_preview = self.effective_large_preview_chars
-        if effective_archive_threshold < 1:
-            raise ValueError("archive_threshold_bytes must be >= 1")
-        if self.complete_preview_body_chars < 1:
-            raise ValueError("complete_preview_body_chars must be >= 1")
-        if effective_large_preview < 1:
-            raise ValueError("large_preview_chars must be >= 1")
-        if self.huge_output_chars < 1:
-            raise ValueError("huge_output_chars must be >= 1")
-        if self.huge_preview_chars < 1:
-            raise ValueError("huge_preview_chars must be >= 1")
-        if self.streaming_live_head_cap_chars < 1:
-            raise ValueError("streaming_live_head_cap_chars must be >= 1")
-
-    @property
-    def effective_archive_threshold_bytes(self) -> int:
-        return self.archive_threshold_bytes
-
-    @property
-    def effective_large_preview_chars(self) -> int:
-        return self.large_preview_chars
-
-
-@dataclass(frozen=True, slots=True)
-class AdaptivePreview:
-    text: str
-    policy: str
-    original_chars: int
-    original_bytes: int
-    preview_chars: int
-    visible_head_chars: int
-    visible_tail_chars: int
-    omitted_middle_chars: int
-
-    def to_metadata(
-        self, *, artifact_id: str | None = None
-    ) -> ToolResultPreviewMetadata:
-        read_more: dict[str, object] = {
-            "tool": "artifact_read",
-            "suggested_offset_chars": self.visible_head_chars,
-            "suggested_max_chars": 20_000,
-        }
-        if artifact_id is not None:
-            read_more["artifact_id"] = artifact_id
-        return ToolResultPreviewMetadata(
-            preview_policy=self.policy,  # type: ignore[arg-type]
-            preview_chars=self.preview_chars,
-            original_chars=self.original_chars,
-            original_bytes=self.original_bytes,
-            omitted_middle_chars=self.omitted_middle_chars,
-            visible_head_chars=self.visible_head_chars,
-            visible_tail_chars=self.visible_tail_chars,
-            read_more=read_more,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,34 +99,6 @@ class ToolResultArtifactIndex(Protocol):
     def get_for_session(
         self, artifact_id: str, *, session_id: str
     ) -> ToolResultArtifactRecord | None: ...
-
-
-@dataclass(slots=True)
-class InMemoryToolResultArtifactIndex:
-    records: dict[str, ToolResultArtifactRecord] = field(default_factory=dict)
-
-    def put(self, record: ToolResultArtifactRecord) -> None:
-        existing = self.records.get(record.id)
-        if existing is not None and existing != record:
-            raise ValueError(
-                f"tool result artifact record {record.id!r} already exists with different data"
-            )
-        self.records[record.id] = record
-
-    def get_for_session(
-        self, artifact_id: str, *, session_id: str
-    ) -> ToolResultArtifactRecord | None:
-        matches = [
-            record
-            for record in self.records.values()
-            if record.artifact_id == artifact_id and record.session_id == session_id
-        ]
-        if not matches:
-            return None
-        matches.sort(
-            key=lambda record: (record.run_id, record.tool_call_id, record.ordinal)
-        )
-        return matches[0]
 
 
 @dataclass(slots=True)
@@ -291,6 +197,65 @@ class PostgresToolResultArtifactIndex:
         return _record_from_row(row) if row is not None else None
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeToolArtifactReadPort:
+    """Session-scoped artifact reader that exposes only immutable views."""
+
+    archive: ArtifactStore
+    index: ToolResultArtifactIndex
+    runtime_session_id: str
+
+    def lookup(self, artifact_id: str):
+        record = self.index.get_for_session(
+            artifact_id, session_id=self.runtime_session_id
+        )
+        if record is None:
+            return None
+        try:
+            info = self.archive.get_info(
+                artifact_id, session_id=self.runtime_session_id
+            )
+        except KeyError:
+            return None
+        return build_tool_artifact_record_view(
+            artifact_id=artifact_id,
+            role=record.role,
+            media_type=record.media_type,
+            size_bytes=record.size_bytes,
+            stored_complete=record.stored_complete,
+            loss_reason=record.loss_reason,
+            content_digest=info.digest,
+        )
+
+    def info(self, artifact_id: str):
+        record_view = self.lookup(artifact_id)
+        if record_view is None:
+            raise KeyError(artifact_id)
+        info = self.archive.get_info(artifact_id, session_id=self.runtime_session_id)
+        return build_tool_artifact_info_view(
+            record=record_view,
+            stored_at_utc=info.stored_at,
+            created_at_utc=info.created_at,
+        )
+
+    def read_text(self, artifact_id: str, *, offset_chars: int, max_chars: int):
+        info_view = self.info(artifact_id)
+        text_slice = self.archive.read_text(
+            artifact_id,
+            session_id=self.runtime_session_id,
+            offset_chars=offset_chars,
+            max_chars=max_chars,
+        )
+        return build_tool_artifact_text_slice_view(
+            info=info_view,
+            text=text_slice.text,
+            offset_chars=text_slice.offset_chars,
+            returned_chars=text_slice.returned_chars,
+            total_chars=text_slice.total_chars,
+            has_more=text_slice.has_more,
+        )
+
+
 @dataclass(slots=True)
 class ToolResultArtifactService:
     archive: ArtifactStore
@@ -306,40 +271,35 @@ class ToolResultArtifactService:
         *,
         event_context: EventContext,
         tool_call: ToolCall,
-        descriptor: CapabilityDescriptor | None = None,
+        policy: ToolResultArtifactProcessingPolicy,
     ) -> tuple[ToolExecutionResult, tuple[ToolResultArtifactRef, ...]]:
-        artifact_mode = (
-            descriptor.artifact_mode
-            if descriptor is not None
-            else CapabilityArtifactMode.DEFAULT
-        )
-        if result.tool_name == "artifact_read":
+        artifact_mode = policy.artifact_mode
+        if policy.source_reference_policy == "reuse_input_artifact":
             return result, self._artifact_read_source_refs(result, tool_call)
-
-        # Compatibility for direct service tests/callers that have not yet
-        # threaded a descriptor. The normal runtime path supplies the
-        # descriptor and expresses this as artifact_mode=NEVER.
-        if artifact_mode is CapabilityArtifactMode.NEVER:
+        if artifact_mode is ToolArtifactMode.NEVER:
             return result, ()
 
-        options = _options_for_tool_call(self.options, tool_call)
+        options = ToolResultArtifactOptions(
+            archive_threshold_bytes=policy.archive_threshold_bytes,
+            complete_preview_body_chars=policy.complete_preview_body_chars,
+            large_preview_chars=policy.large_preview_chars,
+            huge_output_chars=policy.huge_output_chars,
+            huge_preview_chars=policy.huge_preview_chars,
+            streaming_live_head_cap_chars=policy.streaming_live_head_cap_chars,
+        )
         candidates = tuple(result.artifact_candidates)
         processed_output = result.output
         processed_display_payload = result.display_payload
         force_archive = artifact_mode in {
-            CapabilityArtifactMode.ALWAYS,
-            CapabilityArtifactMode.STRUCTURED_JSON,
+            ToolArtifactMode.ALWAYS,
+            ToolArtifactMode.STRUCTURED_JSON,
         }
         if not candidates and (
             force_archive
             or len(result.output.encode("utf-8"))
             > options.effective_archive_threshold_bytes
         ):
-            media_type = (
-                "application/json"
-                if artifact_mode is CapabilityArtifactMode.STRUCTURED_JSON
-                else "text/plain; charset=utf-8"
-            )
+            media_type = policy.fallback_media_type
             candidates = (
                 ToolResultArtifactCandidate(
                     role="output",
@@ -417,15 +377,7 @@ class ToolResultArtifactService:
         result: ToolExecutionResult,
         tool_call: ToolCall,
     ) -> tuple[ToolResultArtifactRef, ...]:
-        """Attach the source artifact ref for artifact_read without re-archiving.
-
-        artifact_read is intentionally artifact_mode=NEVER: reading an artifact
-        should not recursively create another artifact.  But the returned text
-        can legitimately be larger than the ledger's inline-output threshold.
-        Carrying the original source artifact ref through ToolResultEndEvent
-        preserves the evidence anchor and lets persistence use the block-aware
-        path instead of treating the read text as an orphaned large output.
-        """
+        """Attach the source artifact ref without recursively archiving a read."""
 
         if result.status is not ToolResultState.SUCCESS:
             return ()
@@ -527,6 +479,34 @@ class ToolResultArtifactService:
             context_reference=context_reference,
             candidate=candidate,
         )
+
+
+def artifact_processing_policy_for_descriptor(
+    *,
+    descriptor,
+    tool_call: ToolCall,
+    options: ToolResultArtifactOptions,
+) -> ToolResultArtifactProcessingPolicy:
+    """Freeze descriptor and resolved call bounds before artifact processing."""
+
+    if descriptor is None:
+        raise ValueError("artifact processing requires a frozen capability descriptor")
+    resolved = _options_for_tool_call(options, tool_call)
+    return build_tool_result_artifact_processing_policy(
+        descriptor_id=descriptor.id,
+        descriptor_fingerprint=descriptor.fingerprint(),
+        artifact_mode=descriptor.artifact_mode,
+        source_reference_policy=(
+            "reuse_input_artifact" if descriptor.name == "artifact_read" else "none"
+        ),
+        archive_threshold_bytes=resolved.effective_archive_threshold_bytes,
+        complete_preview_body_chars=resolved.complete_preview_body_chars,
+        large_preview_chars=resolved.effective_large_preview_chars,
+        huge_output_chars=resolved.huge_output_chars,
+        huge_preview_chars=resolved.huge_preview_chars,
+        streaming_live_head_cap_chars=resolved.streaming_live_head_cap_chars,
+        max_inline_chars=descriptor.max_inline_chars,
+    )
 
 
 def _attach_exact_terminal_observation_artifact_coverage(
@@ -659,87 +639,6 @@ def _options_for_tool_call(
         streaming_live_head_cap_chars=max(
             1, min(options.streaming_live_head_cap_chars, huge_head_cap)
         ),
-    )
-
-
-def effective_terminal_output_cap(raw: object) -> int | None:
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return None
-    if raw <= 0:
-        return None
-    from pulsara_agent.tools.builtins.schemas import (
-        DEFAULT_MAX_OUTPUT_CHARS,
-        MIN_TERMINAL_OUTPUT_CHARS,
-    )
-
-    return max(MIN_TERMINAL_OUTPUT_CHARS, min(raw, DEFAULT_MAX_OUTPUT_CHARS))
-
-
-def build_adaptive_preview(
-    text: str, options: ToolResultArtifactOptions
-) -> AdaptivePreview:
-    original_chars = len(text)
-    original_bytes = len(text.encode("utf-8"))
-    if original_chars <= options.complete_preview_body_chars:
-        return AdaptivePreview(
-            text=text,
-            policy="full",
-            original_chars=original_chars,
-            original_bytes=original_bytes,
-            preview_chars=original_chars,
-            visible_head_chars=original_chars,
-            visible_tail_chars=0,
-            omitted_middle_chars=0,
-        )
-
-    budget = (
-        options.huge_preview_chars
-        if original_chars > options.huge_output_chars
-        else options.effective_large_preview_chars
-    )
-    budget = max(1, min(budget, original_chars))
-    preliminary_head = max(1, int(budget * _HEAD_RATIO))
-    preliminary_tail = max(0, budget - preliminary_head)
-    preliminary_omitted = max(0, original_chars - preliminary_head - preliminary_tail)
-    notice = _preview_truncation_notice(preliminary_omitted, preliminary_head)
-    content_budget = max(1, budget - len(notice))
-    head_chars = max(1, int(content_budget * _HEAD_RATIO))
-    tail_chars = max(0, content_budget - head_chars)
-    if head_chars + tail_chars >= original_chars:
-        return AdaptivePreview(
-            text=text,
-            policy="full",
-            original_chars=original_chars,
-            original_bytes=original_bytes,
-            preview_chars=original_chars,
-            visible_head_chars=original_chars,
-            visible_tail_chars=0,
-            omitted_middle_chars=0,
-        )
-    omitted = max(0, original_chars - head_chars - tail_chars)
-    notice = _preview_truncation_notice(omitted, head_chars)
-    text_preview = (
-        text[:head_chars] + notice + (text[-tail_chars:] if tail_chars else "")
-    )
-    return AdaptivePreview(
-        text=text_preview,
-        policy="head_tail_huge"
-        if original_chars > options.huge_output_chars
-        else "head_tail",
-        original_chars=original_chars,
-        original_bytes=original_bytes,
-        preview_chars=len(text_preview),
-        visible_head_chars=head_chars,
-        visible_tail_chars=tail_chars,
-        omitted_middle_chars=omitted,
-    )
-
-
-def _preview_truncation_notice(omitted: int, suggested_offset_chars: int) -> str:
-    return (
-        f"\n\n[OUTPUT TRUNCATED / PREVIEW: omitted {omitted} chars from the middle. "
-        f"Full retained output is available via artifact_read. Prefer reading from offset_chars={suggested_offset_chars} "
-        "if you need content after the visible head.]\n\n"
     )
 
 

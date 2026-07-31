@@ -1,3 +1,4 @@
+
 import asyncio
 from threading import Event, Timer
 from time import monotonic
@@ -10,7 +11,10 @@ from tests.support.model_stream import (
 )
 
 from pulsara_agent.event import EventContext
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
 from tests.support.capability import preview_capability_plan
@@ -25,11 +29,13 @@ from pulsara_agent.memory.governance.executor import (
 )
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import (
+from pulsara_agent.runtime.wiring import (
     AgentRuntimeWiring,
-    build_agent_runtime_wiring,
     build_durable_runtime_wiring,
-    build_in_memory_runtime_wiring,
+)
+from tests.support.runtime_factory import (
+    build_component_agent_runtime_wiring,
+    build_component_runtime_wiring,
 )
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -61,11 +67,10 @@ def _governance_execution_identity(
 
 
 def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) -> None:
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(
-            tmp_path,
-            runtime_session_id=f"runtime:test:{uuid4().hex}",
-        )
+    wiring = build_component_runtime_wiring(
+        tmp_path,
+        runtime_session_id=f"runtime:test:{uuid4().hex}",
+    )
     runtime = wiring.runtime_session
     source_ctx = _event_context("governance-publisher-gap")
     candidate = wiring.candidate_pool.append_candidate(
@@ -142,11 +147,10 @@ def test_governance_apply_runs_off_host_event_loop(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(
-            tmp_path,
-            runtime_session_id=f"runtime:test:{uuid4().hex}",
-        )
+    wiring = build_component_runtime_wiring(
+        tmp_path,
+        runtime_session_id=f"runtime:test:{uuid4().hex}",
+    )
     executor = wiring.memory_governance_executor
     candidate = wiring.candidate_pool.append_candidate(
         PooledMemoryCandidate(
@@ -216,10 +220,9 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     settings = _settings_for_storage(compatibility_storage_config())
-    wiring = build_agent_runtime_wiring(
+    wiring = build_component_agent_runtime_wiring(
         settings,
         tmp_path,
-        durable=False,
         model_role=ModelRole.FLASH,
         options=LLMOptions(),
         system_prompt="test prompt",
@@ -228,7 +231,10 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     )
 
     assert isinstance(wiring, AgentRuntimeWiring)
-    assert wiring.agent_runtime.runtime_session is wiring.runtime_wiring.runtime_session
+    assert (
+        wiring.runtime_wiring.runtime_session
+        is wiring.runtime_wiring.runtime_session
+    )
     assert (
         wiring.runtime_wiring.runtime_session.runtime_session_id == runtime_session_id
     )
@@ -272,13 +278,11 @@ required_binaries: [terminal-only, missing-cli]
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
     settings = _settings_for_storage(compatibility_storage_config())
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_agent_runtime_wiring(
-            settings,
-            tmp_path,
-            durable=False,
-            model_role=ModelRole.FLASH,
-        )
+    wiring = build_component_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        model_role=ModelRole.FLASH,
+    )
 
     exposure = preview_capability_plan(
         wiring.agent_runtime.capability_runtime,
@@ -286,9 +290,9 @@ required_binaries: [terminal-only, missing-cli]
         workspace_kind="transient",
         memory_domain=wiring.agent_runtime.memory_domain,
         tool_registry=wiring.agent_runtime.tool_executor.registry,
-        archive=wiring.agent_runtime.runtime_session.archive,
-        runtime_session_id=wiring.agent_runtime.runtime_session.runtime_session_id,
-        mcp_installation_id=wiring.agent_runtime.runtime_session.mcp_installation_id,
+        archive=wiring.runtime_wiring.runtime_session.archive,
+        runtime_session_id=wiring.runtime_wiring.runtime_session.runtime_session_id,
+        mcp_installation_id=wiring.runtime_wiring.runtime_session.mcp_installation_id,
         user_input="$terminal-cli",
     )
 
@@ -310,7 +314,7 @@ def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -
         stable_project_key=str(project_root),
     )
 
-    wiring = build_in_memory_runtime_wiring(
+    wiring = build_component_runtime_wiring(
         tmp_path,
         runtime_session_id=f"runtime:test:{uuid4().hex}",
         memory_domain=domain,
@@ -333,10 +337,9 @@ def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(
     )
     settings = _settings_for_storage(compatibility_storage_config())
 
-    wiring = build_agent_runtime_wiring(
+    wiring = build_component_agent_runtime_wiring(
         settings,
         tmp_path,
-        durable=False,
         model_role=ModelRole.FLASH,
         memory_domain=domain,
         enable_workspace_skills=False,
@@ -362,10 +365,9 @@ def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(
         terminal=TerminalAccess.OFF,
     )
 
-    wiring = build_agent_runtime_wiring(
+    wiring = build_component_agent_runtime_wiring(
         settings,
         tmp_path,
-        durable=False,
         model_role=ModelRole.FLASH,
         permission_policy=policy,
     )
@@ -380,7 +382,7 @@ def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(
 
 def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:
     with pytest.raises(ValueError, match="graph:user"):
-        build_in_memory_runtime_wiring(
+        build_component_runtime_wiring(
             tmp_path,
             runtime_session_id=f"runtime:test:{uuid4().hex}",
             graph_id="graph:user/u_test",

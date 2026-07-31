@@ -28,6 +28,10 @@ class FrozenLongHorizonFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class LongHorizonReducerApplyError(RuntimeError):
+    """Committed long-horizon facts violate the frozen reducer contract."""
+
+
 class ContextWindowOpenReason(StrEnum):
     INITIAL_RUN = "initial_run"
     LLM_COMPACTION = "llm_compaction"

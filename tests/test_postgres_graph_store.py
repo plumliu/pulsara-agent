@@ -14,7 +14,7 @@ from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMutationSurface,
 )
 from pulsara_agent.runtime.projection_jobs.mutation_writer import (
@@ -102,12 +102,14 @@ def test_durable_facade_delete_graph_commits_v2_projection_obligation() -> None:
     graph_id = f"graph:test/{uuid4().hex}"
     now = utc_now()
     postgres = PostgresGraphStore(connection_provider=verified_postgres_provider(dsn))
+    surface_plan = build_surface_plan((CanonicalMutationSurface.OXIGRAPH,))
     facade = DurableGraphFacade(
         postgres=postgres,
         mutation_writer=CanonicalMutationV2Writer(
             connection_provider=verified_postgres_provider(dsn),
-            surface_plan=build_surface_plan((CanonicalMutationSurface.OXIGRAPH,)),
+            surface_plan=surface_plan,
         ),
+        mutation_surface_plan=surface_plan,
     )
 
     facade.put_jsonld(

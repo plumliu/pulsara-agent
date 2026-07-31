@@ -8,7 +8,7 @@ from threading import RLock
 from typing import Callable, cast
 
 from pulsara_agent.primitives._context_base import context_fingerprint
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionAppliedResultReceiptFact,
     DurableProjectionArtifactResultDocumentReferenceFact,
     DurableProjectionCanonicalMutationReferenceFact,
@@ -91,9 +91,7 @@ class InMemoryDurableProjectionRepository:
             tuple[str, DurableProjectionKind], DurableProjectionSeedStateFact
         ] = {}
         self._seed_failures: dict[str, DurableProjectionSeedFailureFact] = {}
-        self._seed_repairs: dict[
-            str, DurableProjectionSeedRepairActionFact
-        ] = {}
+        self._seed_repairs: dict[str, DurableProjectionSeedRepairActionFact] = {}
         self._seed_resolutions: dict[
             str, DurableProjectionSeedFailureResolutionFact
         ] = {}
@@ -102,16 +100,16 @@ class InMemoryDurableProjectionRepository:
             tuple[DurableProjectionKind, str], DurableProjectionTargetHeadFact
         ] = {}
         self._conflicts: dict[str, DurableProjectionTargetAuthorityConflictFact] = {}
-        self._target_leases: dict[
-            tuple[DurableProjectionKind, str], str
-        ] = {}
+        self._target_leases: dict[tuple[DurableProjectionKind, str], str] = {}
 
     def install_seed_state(self, state: DurableProjectionSeedStateFact) -> None:
         key = (state.runtime_session_id, state.projection_kind)
         with self._lock:
             existing = self._seed_states.get(key)
             if existing is not None and existing != state:
-                raise ValueError("projection seed state already has different authority")
+                raise ValueError(
+                    "projection seed state already has different authority"
+                )
             self._seed_states[key] = state
 
     def read_seed_state(
@@ -198,8 +196,7 @@ class InMemoryDurableProjectionRepository:
                 )
                 if (
                     failure is None
-                    or self._seed_resolutions.get(failure.failure_id)
-                    is None
+                    or self._seed_resolutions.get(failure.failure_id) is None
                 ):
                     return self._seed_outcome(
                         confirmation=DurableProjectionCommitConfirmation.CONFLICT,
@@ -232,10 +229,8 @@ class InMemoryDurableProjectionRepository:
                 or state.admitted_job_candidate_count
                 != current.admitted_job_candidate_count
                 + len(candidate.ordered_job_candidates)
-                or state.admitted_job_candidate_accumulator
-                != expected_accumulator
-                or candidate.source_event_count
-                < len(candidate.ordered_job_candidates)
+                or state.admitted_job_candidate_accumulator != expected_accumulator
+                or candidate.source_event_count < len(candidate.ordered_job_candidates)
             ):
                 return self._seed_outcome(
                     confirmation=DurableProjectionCommitConfirmation.CONFLICT,
@@ -338,16 +333,14 @@ class InMemoryDurableProjectionRepository:
                 return self._seed_outcome(
                     confirmation=(
                         DurableProjectionCommitConfirmation.FULL
-                        if len(active_failures) == 1
-                        and active == candidate.failure
+                        if len(active_failures) == 1 and active == candidate.failure
                         else DurableProjectionCommitConfirmation.CONFLICT
                     ),
                     candidate=candidate,
                     committed_state=None,
                     committed_failure=(
                         candidate.failure.failure_fingerprint
-                        if len(active_failures) == 1
-                        and active == candidate.failure
+                        if len(active_failures) == 1 and active == candidate.failure
                         else None
                     ),
                     committed_resolution=None,
@@ -436,9 +429,7 @@ class InMemoryDurableProjectionRepository:
                 attempted_candidate_fingerprint=candidate.candidate_fingerprint,
                 committed_seed_state_fingerprint=committed_state,
                 committed_seed_failure_fingerprint=committed_failure,
-                committed_seed_failure_resolution_fingerprint=(
-                    committed_resolution
-                ),
+                committed_seed_failure_resolution_fingerprint=(committed_resolution),
                 committed_job_ids=committed_jobs,
                 failure=None,
             ),
@@ -485,15 +476,16 @@ class InMemoryDurableProjectionRepository:
                 if key in self._target_leases:
                     continue
                 records = grouped[key]
-                policy = records[0].candidate.job_semantic.handler_contract.target_update_policy
+                policy = records[
+                    0
+                ].candidate.job_semantic.handler_contract.target_update_policy
                 records.sort(
                     key=lambda item: (
                         item.candidate.job_semantic.source_event_reference.sequence,
                         item.candidate.job_semantic.job_id,
                     ),
                     reverse=(
-                        policy
-                        is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
+                        policy is DurableProjectionTargetUpdatePolicy.FULL_REPLACEMENT
                     ),
                 )
                 selected.append(records[0])
@@ -670,10 +662,7 @@ class InMemoryDurableProjectionRepository:
                         existing=head,
                         reason="single-assignment target already has distinct authority",
                     )
-            elif (
-                head is not None
-                and source_sequence < head.applied_source_sequence
-            ):
+            elif head is not None and source_sequence < head.applied_source_sequence:
                 applied = self._read_applied_head_receipt(head)
                 superseded = self._superseded_receipt(
                     lease=lease, prepared=prepared, effective=applied
@@ -685,10 +674,7 @@ class InMemoryDurableProjectionRepository:
                     status=DurableProjectionJobStatus.SUPERSEDED,
                     receipt=superseded,
                 )
-            elif (
-                head is not None
-                and source_sequence == head.applied_source_sequence
-            ):
+            elif head is not None and source_sequence == head.applied_source_sequence:
                 receipt = self._read_applied_head_receipt(head)
                 if (
                     head.applied_source_event_reference_fingerprint
@@ -787,9 +773,7 @@ class InMemoryDurableProjectionRepository:
                     policy.maximum_delay_milliseconds,
                     policy.base_delay_milliseconds * multiplier,
                 )
-                next_attempt = effective_now + timedelta(
-                    milliseconds=delay_ms
-                )
+                next_attempt = effective_now + timedelta(milliseconds=delay_ms)
             next_state = cast(
                 DurableProjectionJobOperationalStateFact,
                 build_projection_fact(
@@ -829,9 +813,7 @@ class InMemoryDurableProjectionRepository:
                     attempted_lease_fingerprint=lease.lease_fingerprint,
                     resulting_status=next_state.status,
                     resulting_state_revision=next_state.state_revision,
-                    resulting_repair_generation=(
-                        next_state.repair_generation
-                    ),
+                    resulting_repair_generation=(next_state.repair_generation),
                     result_receipt_reference=None,
                     failure=diagnostic,
                 ),
@@ -886,10 +868,8 @@ class InMemoryDurableProjectionRepository:
                 or state.state_revision != action.expected_state_revision
                 or record.candidate.job_semantic.job_semantic_fingerprint
                 != action.expected_job_semantic_fingerprint
-                or state.repair_generation
-                != action.expected_repair_generation
-                or action.resulting_repair_generation
-                != state.repair_generation + 1
+                or state.repair_generation != action.expected_repair_generation
+                or action.resulting_repair_generation != state.repair_generation + 1
             ):
                 raise ValueError("projection repair CAS failed")
             next_state = cast(
@@ -923,8 +903,7 @@ class InMemoryDurableProjectionRepository:
             raise ValueError("leased projection job is absent")
         state = record.state
         if (
-            record.candidate.candidate_fingerprint
-            != lease.job_candidate_fingerprint
+            record.candidate.candidate_fingerprint != lease.job_candidate_fingerprint
             or state.status is not DurableProjectionJobStatus.LEASED
             or state.state_revision != lease.expected_state_revision
             or state.lease_generation != lease.lease_generation
@@ -941,7 +920,9 @@ class InMemoryDurableProjectionRepository:
         head_revision: int,
     ) -> DurableProjectionAppliedResultReceiptFact:
         job = lease.job
-        documents = tuple(self._document_reference(item) for item in prepared.ordered_documents)
+        documents = tuple(
+            self._document_reference(item) for item in prepared.ordered_documents
+        )
         mutations = tuple(
             cast(
                 DurableProjectionCanonicalMutationReferenceFact,
@@ -1037,9 +1018,7 @@ class InMemoryDurableProjectionRepository:
                 candidate_source_event_reference_fingerprint=(
                     lease.job.source_event_reference.reference_fingerprint
                 ),
-                candidate_source_sequence=(
-                    lease.job.source_event_reference.sequence
-                ),
+                candidate_source_sequence=(lease.job.source_event_reference.sequence),
                 effective_applied_result_receipt_reference=effective_ref,
                 target_head_revision=effective.target_head_revision,
             ),
@@ -1152,9 +1131,7 @@ class InMemoryDurableProjectionRepository:
             candidate=record.candidate,
             state=next_state,
         )
-        self._target_leases.pop(
-            (lease.job.projection_kind, lease.job.target_key), None
-        )
+        self._target_leases.pop((lease.job.projection_kind, lease.job.target_key), None)
         return cast(
             DurableProjectionSettlementOutcome,
             build_projection_fact(
@@ -1196,8 +1173,7 @@ class InMemoryDurableProjectionRepository:
         conflict_kind = (
             "distinct_source_for_single_assignment"
             if (
-                policy
-                is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
+                policy is DurableProjectionTargetUpdatePolicy.SINGLE_ASSIGNMENT
                 and distinct_source
             )
             else "same_source_different_result"
@@ -1243,9 +1219,7 @@ class InMemoryDurableProjectionRepository:
                 candidate_source_event_reference_fingerprint=(
                     lease.job.source_event_reference.reference_fingerprint
                 ),
-                candidate_source_sequence=(
-                    lease.job.source_event_reference.sequence
-                ),
+                candidate_source_sequence=(lease.job.source_event_reference.sequence),
                 candidate_result_semantic_fingerprint=(
                     candidate_result_semantic_fingerprint
                 ),
@@ -1280,9 +1254,7 @@ class InMemoryDurableProjectionRepository:
         self._jobs[lease.job.job_id] = DurableProjectionJobRecord(
             candidate=record.candidate, state=next_state
         )
-        self._target_leases.pop(
-            (lease.job.projection_kind, lease.job.target_key), None
-        )
+        self._target_leases.pop((lease.job.projection_kind, lease.job.target_key), None)
         return cast(
             DurableProjectionSettlementOutcome,
             build_projection_fact(
@@ -1315,7 +1287,9 @@ class InMemoryDurableProjectionRepository:
             try:
                 return self._receipts[receipt_id]
             except KeyError as exc:
-                raise KeyError(f"projection result receipt is absent: {receipt_id}") from exc
+                raise KeyError(
+                    f"projection result receipt is absent: {receipt_id}"
+                ) from exc
 
     def read_head(
         self, projection_kind: DurableProjectionKind, target_key: str

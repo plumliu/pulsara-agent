@@ -9,11 +9,14 @@ from dataclasses import dataclass, field
 from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionCompletedEvent,
-    ContextCompactionMemoryCandidatesProposedEvent,
+    ContextCompactionMemoryExtractionCompletedEvent,
+    ContextCompactionMemoryExtractionRequestedEvent,
     EventType,
     MemoryReflectionCompletedEvent,
     ModelCallEndEvent,
+    ModelCallStartEvent,
     ModelCallControlDispositionResolvedEvent,
+    RunStartEvent,
 )
 from pulsara_agent.event_log import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -26,15 +29,30 @@ from pulsara_agent.memory.candidates.pool import (
     PooledMemoryCandidate,
     candidate_payload_fingerprint,
 )
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives import context_fingerprint
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.compaction import (
+    CompactionMemoryExtractionInputDocumentFact,
+)
+from pulsara_agent.memory.compaction.sanitizer import (
+    SANITIZER_CONTRACT_FINGERPRINT,
+    sanitize_compaction_evidence,
+)
+from pulsara_agent.memory.compaction.evidence import compaction_evidence_node_id
+from pulsara_agent.projection_jobs.compaction_memory import (
+    CompactionMemoryModelResultAttributionFact,
+)
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.primitives.governance_evidence import (
     CandidateEvidenceRejectionReason,
-    CompactionGovernanceSourceSemanticFact,
+    CompactionExtractionGovernanceSourceSemanticFact,
     GovernanceCandidateAttributionFact,
     GovernanceCandidatePayloadSemanticFact,
     GovernanceCandidatePromptPayloadFact,
@@ -75,9 +93,7 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptToolPairLeafEntryFact,
     TranscriptToolResultLeafEntryFact,
 )
-from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
-    GovernanceTranscriptAuthoritySnapshot,
-)
+from pulsara_agent.memory.foundation.protocols import GovernanceTranscriptAuthority
 from pulsara_agent.memory.candidates.main_agent_builder import (
     build_main_agent_memory_candidate_payload,
     main_agent_memory_candidate_builder_contract,
@@ -92,7 +108,7 @@ _PROMPT_FIELDS = (
     "selected_tool_arguments",
     "tool_result_essential",
     "reflection_report",
-    "compaction_summary",
+    "canonical_sanitized_user_message",
 )
 
 
@@ -126,7 +142,7 @@ class GovernanceSourceEvidenceBuilder:
         self,
         *,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> GovernanceEvidencePreparation:
         high_water = authority.ledger_through_sequence
         if candidate.source_session_id != self.runtime_session_id:
@@ -249,7 +265,7 @@ class GovernanceSourceEvidenceBuilder:
     def _main_tool(
         self,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> tuple[
         MainAgentToolGovernanceSourceSemanticFact,
         GovernanceSourceEvidenceAttributionFact,
@@ -444,7 +460,7 @@ class GovernanceSourceEvidenceBuilder:
     def _reflection(
         self,
         candidate: PooledMemoryCandidate,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> tuple[
         ReflectionGovernanceSourceSemanticFact,
         GovernanceSourceEvidenceAttributionFact,
@@ -573,12 +589,12 @@ class GovernanceSourceEvidenceBuilder:
         candidate: PooledMemoryCandidate,
         high_water: int,
     ) -> tuple[
-        CompactionGovernanceSourceSemanticFact,
+        CompactionExtractionGovernanceSourceSemanticFact,
         GovernanceSourceEvidenceAttributionFact,
     ]:
-        event, proposed_ref = self._required_source_event(
+        event, result_ref = self._required_source_event(
             candidate,
-            expected_type=ContextCompactionMemoryCandidatesProposedEvent,
+            expected_type=ContextCompactionMemoryExtractionCompletedEvent,
             high_water=high_water,
         )
         matches = tuple(
@@ -592,84 +608,216 @@ class GovernanceSourceEvidenceBuilder:
                 CandidateEvidenceRejectionReason.PRODUCER_OMITS_CANDIDATE,
             )
         item = matches[0]
-        if item.candidate_payload != candidate.payload:
+        if (
+            not _extraction_payload_matches_candidate(
+                item.candidate_payload,
+                candidate,
+            )
+            or candidate.intent_fingerprint
+            != item.candidate_occurrence_fingerprint
+        ):
             raise _CandidateSourceInvalid(
                 GovernanceEvidenceBuildReason.INVALID_CANDIDATE_PAYLOAD_MISMATCH,
                 CandidateEvidenceRejectionReason.CANDIDATE_PAYLOAD_MISMATCH,
             )
-        completed_raw = self._required_referenced_raw(
-            event.completed_compaction_event_identity.event_id,
-            high_water=high_water,
-        )
-        completed_ref = _stored_event_ref(completed_raw)
-        if completed_ref.stable_identity != event.completed_compaction_event_identity:
+        outcome = event.occurrence_attribution.outcome_attribution
+        if not isinstance(outcome, CompactionMemoryModelResultAttributionFact):
             raise _AuthorityUntrusted(
                 GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
             )
-        completed = completed_raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        request = self._decode_exact(event.occurrence_attribution.request_event_reference)
         if (
-            not isinstance(completed, ContextCompactionCompletedEvent)
-            or completed.id != event.source_event_id
-            or completed_raw.sequence != event.source_event_sequence
-            or completed.compaction_id != event.compaction_id
-            or completed.summary_artifact_id != event.summary_artifact_id
-            or item.raw_candidate_index >= event.attempted_count
-            or not _event_matches_candidate_source(event, candidate)
-            or not _event_matches_candidate_source(completed, candidate)
+            not isinstance(request, ContextCompactionMemoryExtractionRequestedEvent)
+            or request.extension_link != event.occurrence_attribution.extension_link
         ):
             raise _AuthorityUntrusted(
                 GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
             )
-        try:
-            summary = self.archive.get_text(
-                event.summary_artifact_id,
-                session_id=self.runtime_session_id,
+        source_completed_raw = self._required_referenced_raw(
+            request.extension_link.completed_event_id,
+            high_water=high_water,
+        )
+        source_completed_ref = _stored_event_ref(source_completed_raw)
+        source_completed = source_completed_raw.decode_owned(
+            DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
+        if (
+            not isinstance(source_completed, ContextCompactionCompletedEvent)
+            or source_completed.compaction_id != request.extension_link.compaction_id
+            or request.extension_link.request_event_id != request.id
+        ):
+            raise _AuthorityUntrusted(
+                GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
             )
-            info = self.archive.get_info(
-                event.summary_artifact_id,
-                session_id=self.runtime_session_id,
+
+        model_start = self._decode_exact(outcome.model_call_start_event_reference)
+        model_end = self._decode_exact(outcome.model_call_end_event_reference)
+        if (
+            not isinstance(model_start, ModelCallStartEvent)
+            or not isinstance(model_end, ModelCallEndEvent)
+            or model_start.resolved_call.purpose.value
+            != "compaction_memory_extraction"
+            or model_start.recovery_plan.stable_model_call_end_event_id
+            != model_end.id
+            or model_end.terminal_projection.projection_reference
+            != outcome.model_terminal_projection_reference
+        ):
+            raise _AuthorityUntrusted(
+                GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+            )
+
+        try:
+            input_text = self._verified_artifact_text(
+                outcome.input_artifact_reference
+            )
+            input_document = CompactionMemoryExtractionInputDocumentFact.model_validate_json(
+                input_text
             )
         except TimeoutError as exc:
             raise _EvidenceNotReady(
                 GovernanceEvidenceBuildReason.WAIT_ARTIFACT_CONFIRMATION
             ) from exc
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise _AuthorityUntrusted(
                 GovernanceEvidenceBuildReason.UNTRUSTED_ARTIFACT_HASH
             ) from exc
-        encoded = summary.encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()
-        if digest != event.summary_content_sha256 or len(encoded) != event.summary_content_bytes:
+
+        evidence_set = input_document.semantic.evidence_set
+        if (
+            input_document.semantic.input_semantic_fingerprint
+            != outcome.input_semantic_fingerprint
+            or evidence_set.evidence_set_semantic_fingerprint
+            != event.result_semantic.evidence_set_semantic_fingerprint
+            or input_document.attribution.request_event_reference
+            != event.occurrence_attribution.request_event_reference
+            or input_document.attribution.extension_link != request.extension_link
+        ):
             raise _AuthorityUntrusted(
-                GovernanceEvidenceBuildReason.UNTRUSTED_ARTIFACT_HASH
+                GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
             )
-        artifact_ref = build_frozen_fact(
-            GovernanceEvidenceArtifactReferenceFact,
-            schema_version="governance_evidence_artifact_reference.v1",
-            artifact_kind="compaction_summary",
-            artifact_id=event.summary_artifact_id,
-            media_type=info.media_type,
-            content_sha256=digest,
-            content_bytes=len(encoded),
-            artifact_contract_id="pulsara.compaction.summary",
-            artifact_contract_version="1",
-            artifact_contract_fingerprint=event.extractor_contract.contract_fingerprint,
-        )
+
+        node_rows: dict[str, tuple[object, object]] = {}
+        if len(evidence_set.ordered_evidence_semantics) != len(
+            input_document.attribution.ordered_evidence_attributions
+        ):
+            raise _AuthorityUntrusted(
+                GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+            )
+        for evidence_semantic, evidence_attribution in zip(
+            evidence_set.ordered_evidence_semantics,
+            input_document.attribution.ordered_evidence_attributions,
+            strict=True,
+        ):
+            node_id = compaction_evidence_node_id(
+                semantic=evidence_semantic,
+                attribution=evidence_attribution,
+            )
+            if node_id in node_rows:
+                raise _AuthorityUntrusted(
+                    GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+                )
+            node_rows[node_id] = (evidence_semantic, evidence_attribution)
+
+        quote_semantics: list[GovernanceQuotedEvidenceSemanticFact] = []
+        quote_attributions: list[GovernanceQuotedEvidenceAttributionFact] = []
+        human_refs: list[GovernanceStoredEventReferenceFact] = []
+        for node_id, expected_semantic_fingerprint in zip(
+            item.ordered_evidence_node_ids,
+            item.ordered_evidence_semantic_fingerprints,
+            strict=True,
+        ):
+            row = node_rows.get(node_id)
+            if row is None:
+                raise _CandidateSourceInvalid(
+                    GovernanceEvidenceBuildReason.INVALID_PRODUCER_OMITS_CANDIDATE,
+                    CandidateEvidenceRejectionReason.PRODUCER_OMITS_CANDIDATE,
+                )
+            evidence_semantic, evidence_attribution = row
+            if (
+                evidence_semantic.evidence_semantic_fingerprint
+                != expected_semantic_fingerprint
+            ):
+                raise _AuthorityUntrusted(
+                    GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+                )
+            human_event = self._decode_exact(
+                evidence_attribution.source_event_reference
+            )
+            if not isinstance(human_event, RunStartEvent):
+                raise _AuthorityUntrusted(
+                    GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+                )
+            sanitized = sanitize_compaction_evidence(
+                human_event.current_user_message.text
+            )
+            if (
+                human_event.current_user_message.message_id
+                != evidence_attribution.source_message_id
+                or human_event.current_user_message.content_sha256
+                != evidence_attribution.original_text_sha256
+                or sanitized.text
+                != evidence_semantic.sanitized_full_message_text
+                or sanitized.text_sha256
+                != evidence_semantic.sanitized_full_message_sha256
+                or evidence_set.sanitizer_contract_fingerprint
+                != SANITIZER_CONTRACT_FINGERPRINT
+            ):
+                raise _AuthorityUntrusted(
+                    GovernanceEvidenceBuildReason.UNTRUSTED_ID_PAYLOAD_CONFLICT
+                )
+            quote = _quote_semantic(
+                text=sanitized.text,
+                quote_kind="canonical_sanitized_user_message",
+                verification_status="canonical_sanitized_match",
+            )
+            quote_semantics.append(quote)
+            quote_attributions.append(
+                build_frozen_fact(
+                    GovernanceQuotedEvidenceAttributionFact,
+                    schema_version="governance_quoted_evidence_attribution.v1",
+                    quote_semantic_fingerprint=quote.semantic_fingerprint,
+                    source_entry_ref=None,
+                    source_artifact_ref=None,
+                    start_char=None,
+                    end_char=None,
+                    producer_event_reference=(
+                        evidence_attribution.source_event_reference
+                    ),
+                )
+            )
+            human_refs.append(evidence_attribution.source_event_reference)
+
         payload_fp = _candidate_payload_semantic(candidate).payload_semantic_fingerprint
         semantic = build_frozen_fact(
-            CompactionGovernanceSourceSemanticFact,
-            schema_version="compaction_governance_source_semantic.v1",
+            CompactionExtractionGovernanceSourceSemanticFact,
+            schema_version=(
+                "compaction_extraction_governance_source_semantic.v1"
+            ),
             evidence_kind="compaction",
             candidate_payload_semantic_fingerprint=payload_fp,
-            summary_content_sha256=digest,
-            summary_content_semantic_fingerprint=context_fingerprint(
-                "compaction-summary-content-semantic:v1", summary
+            evidence_set_semantic_fingerprint=(
+                evidence_set.evidence_set_semantic_fingerprint
             ),
-            extractor_contract=event.extractor_contract,
-            raw_candidate_index=item.raw_candidate_index,
-            canonical_parsed_candidate_payload_fingerprint=payload_fp,
-            intent_fingerprint=item.intent_fingerprint,
-            quoted_evidence_semantic=None,
+            extraction_semantic_contract_fingerprint=(
+                event.result_semantic.extraction_semantic_contract_fingerprint
+            ),
+            ordered_evidence_semantics=tuple(quote_semantics),
+        )
+        producer_refs = tuple(
+            sorted(
+                {
+                    ref.stable_identity.event_id: ref
+                    for ref in (
+                        source_completed_ref,
+                        event.occurrence_attribution.request_event_reference,
+                        outcome.model_call_start_event_reference,
+                        outcome.model_call_end_event_reference,
+                        result_ref,
+                        *human_refs,
+                    )
+                }.values(),
+                key=lambda ref: ref.sequence,
+            )
         )
         attribution = build_frozen_fact(
             GovernanceSourceEvidenceAttributionFact,
@@ -679,16 +827,35 @@ class GovernanceSourceEvidenceBuilder:
             runtime_session_id=self.runtime_session_id,
             authority_ledger_through_sequence=high_water,
             candidate_entry_id=candidate.entry_id,
-            producer_event_references=tuple(
-                sorted((completed_ref, proposed_ref), key=lambda ref: ref.sequence)
+            producer_event_references=producer_refs,
+            model_terminal_projection_reference=(
+                outcome.model_terminal_projection_reference
             ),
-            model_terminal_projection_reference=None,
             model_disposition_event_reference=None,
             tool_terminal_projection_reference=None,
-            quoted_evidence_attributions=(),
-            source_artifact_references=(artifact_ref,),
+            quoted_evidence_attributions=tuple(quote_attributions),
+            source_artifact_references=(outcome.input_artifact_reference,),
             producer_contract_fingerprints=(
-                event.extractor_contract.contract_fingerprint,
+                request.extraction_contract.contract_fingerprint,
+                event.result_semantic.extraction_semantic_contract_fingerprint,
+                evidence_set.selection_contract_fingerprint,
+                evidence_set.sanitizer_contract_fingerprint,
+            ),
+            compaction_candidate_attribution_fingerprint=(
+                item.attribution_fingerprint
+            ),
+            compaction_candidate_ordinal=item.candidate_ordinal,
+            compaction_occurrence_attribution_fingerprint=(
+                event.occurrence_attribution.occurrence_attribution_fingerprint
+            ),
+            permanent_automatic_omission_count=(
+                input_document.attribution.permanent_omission_count
+            ),
+            permanent_automatic_omission_semantic_accumulator=(
+                input_document.attribution.permanent_omission_semantic_accumulator
+            ),
+            permanent_automatic_omission_attribution_accumulator=(
+                input_document.attribution.permanent_omission_attribution_accumulator
             ),
         )
         return semantic, attribution
@@ -699,7 +866,7 @@ class GovernanceSourceEvidenceBuilder:
         candidate: PooledMemoryCandidate,
         semantic: GovernanceSourceEvidenceSemanticFact,
         attribution: GovernanceSourceEvidenceAttributionFact,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> GovernanceEvidencePromptProjectionFact:
         evidence: list[GovernancePromptEvidenceTextFact] = []
         truncations: list[str] = []
@@ -780,26 +947,30 @@ class GovernanceSourceEvidenceBuilder:
                 )
             tool_name = result_state = timing_fp = None
             accepted = False
-        else:
-            summary = self._verified_artifact_text(
-                attribution.source_artifact_references[0]
-            )
-            projected_summary = _head_tail(
-                summary,
-                self.prompt_contract.max_assistant_text_characters_per_candidate,
-            )
-            if projected_summary != summary:
-                truncations.append("compaction_summary:character_limit")
-            evidence.append(
-                _prompt_text(
-                    "compaction_summary",
-                    projected_summary,
-                    semantic.summary_content_semantic_fingerprint,
-                    "origin_reported",
+        elif isinstance(
+            semantic, CompactionExtractionGovernanceSourceSemanticFact
+        ):
+            artifacts = ()
+            for quote in semantic.ordered_evidence_semantics:
+                if (
+                    len(quote.text)
+                    > self.prompt_contract.max_quote_characters_per_candidate
+                ):
+                    raise _AuthorityUntrusted(
+                        GovernanceEvidenceBuildReason.UNTRUSTED_REDUCER_EVENT_MISMATCH
+                    )
+                evidence.append(
+                    _prompt_text(
+                        "canonical_sanitized_user_message",
+                        quote.text,
+                        quote.semantic_fingerprint,
+                        "canonical_sanitized_match",
+                    )
                 )
-            )
             tool_name = result_state = timing_fp = None
             accepted = False
+        else:  # pragma: no cover - closed semantic union
+            raise TypeError("unsupported governance evidence semantic branch")
         payload_values = {
             "schema_version": "governance_candidate_prompt_payload.v1",
             "candidate_entry_id": candidate.entry_id,
@@ -871,7 +1042,7 @@ class GovernanceSourceEvidenceBuilder:
     def _tool_result_prompt_text(
         self,
         reference: TerminalProjectionReferenceFact | None,
-        authority: GovernanceTranscriptAuthoritySnapshot,
+        authority: GovernanceTranscriptAuthority,
     ) -> str:
         if reference is None:
             return ""
@@ -1250,13 +1421,13 @@ def default_governance_prompt_projection_contract(
         schema_version="governance_evidence_prompt_projection_contract.v1",
         policy_id="pulsara.governance_evidence_prompt",
         policy_version="1",
-        max_quote_characters_per_candidate=2_000,
+        max_quote_characters_per_candidate=8_192,
         max_assistant_text_characters_per_candidate=2_000,
         max_tool_result_characters_per_candidate=2_000,
         max_artifact_refs_per_candidate=8,
         max_candidates_per_batch=20,
         max_related_memories_per_candidate=5,
-        max_candidate_projection_utf8_bytes=16 * 1024,
+        max_candidate_projection_utf8_bytes=32 * 1024,
         max_batch_projection_utf8_bytes=128 * 1024,
         truncation_policy="typed_head_tail_v1",
         essential_envelope_contract_fingerprint=context_fingerprint(
@@ -1269,21 +1440,37 @@ def default_governance_prompt_projection_contract(
 def _candidate_payload_semantic(
     candidate: PooledMemoryCandidate,
 ) -> GovernanceCandidatePayloadSemanticFact:
-    payload_json = candidate.payload.model_dump(mode="json")
-    payload_bytes = json.dumps(
-        payload_json,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    semantic = candidate.candidate_semantic
+    if semantic is None:
+        raise _CandidateSourceInvalid(
+            GovernanceEvidenceBuildReason.INVALID_CANDIDATE_PAYLOAD_MISMATCH,
+            CandidateEvidenceRejectionReason.CANDIDATE_PAYLOAD_MISMATCH,
+        )
     return build_frozen_fact(
         GovernanceCandidatePayloadSemanticFact,
         schema_version="governance_candidate_payload_semantic.v1",
-        candidate_origin=candidate.origin.value,
-        payload_kind=candidate.payload.payload_kind,
-        canonical_candidate_payload=candidate.payload,
-        canonical_payload_utf8_bytes=len(payload_bytes),
-        intent_fingerprint=candidate.intent_fingerprint,
+        candidate_semantic=semantic,
+    )
+
+
+def _extraction_payload_matches_candidate(
+    source,
+    candidate: PooledMemoryCandidate,
+) -> bool:
+    payload = candidate.payload
+    if not isinstance(payload, ValidCandidatePayload) or not isinstance(
+        payload.candidate, PreferenceCandidate
+    ):
+        return False
+    value = payload.candidate
+    return (
+        source.kind == value.kind
+        and source.candidate_id == value.candidate_id
+        and source.statement == value.statement
+        and source.scope == value.scope
+        and source.evidence_ids == value.evidence_ids
+        and source.source_authority == value.source_authority
+        and source.verification_status == value.verification_status
     )
 
 
@@ -1293,10 +1480,28 @@ def _candidate_attribution(
     source_event_reference: GovernanceStoredEventReferenceFact | None,
     source_artifact_reference: GovernanceEvidenceArtifactReferenceFact | None,
 ) -> GovernanceCandidateAttributionFact:
+    semantic = candidate.candidate_semantic
+    if semantic is None:
+        raise _CandidateSourceInvalid(
+            GovernanceEvidenceBuildReason.INVALID_CANDIDATE_PAYLOAD_MISMATCH,
+            CandidateEvidenceRejectionReason.CANDIDATE_PAYLOAD_MISMATCH,
+        )
+    payload_bytes = json.dumps(
+        candidate.payload.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
     return build_frozen_fact(
         GovernanceCandidateAttributionFact,
         schema_version="governance_candidate_attribution.v1",
         entry_id=candidate.entry_id,
+        candidate_origin=candidate.origin.value,
+        payload_kind=candidate.payload.payload_kind,
+        canonical_candidate_payload=candidate.payload,
+        canonical_payload_utf8_bytes=len(payload_bytes),
+        candidate_semantic_fingerprint=semantic.semantic_fingerprint,
+        intent_fingerprint=candidate.intent_fingerprint,
         runtime_session_id=candidate.source_session_id,
         source_run_id=candidate.source_run_id,
         source_turn_id=candidate.source_turn_id,

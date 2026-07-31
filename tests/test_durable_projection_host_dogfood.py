@@ -23,6 +23,7 @@ from pulsara_agent.runtime.projection_jobs.inspection import (
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from tests.support import test_llm_config
+from tests.support.host import host_process_resource_lease
 from tests.support.postgres import verified_postgres_provider
 from tests.support.postgres_database import MigratedPostgresTestDatabase
 from tests.support.raw_provider import (
@@ -139,12 +140,12 @@ def test_durable_host_projection_backlog_recovers_after_core_restart(
         build_runtime,
     )
     monkeypatch.setattr(
-        "pulsara_agent.host.core.build_retrieval_runtime_resources",
+        "pulsara_agent.host.production_composition.build_retrieval_runtime_resources",
         lambda _config: RetrievalRuntimeResources(),
     )
 
     async def scenario() -> tuple[str, str]:
-        first_core = HostCore(settings=settings, durable=True)
+        first_core = HostCore.production(settings=settings)
         session = await first_core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
@@ -153,23 +154,21 @@ def test_durable_host_projection_backlog_recovers_after_core_restart(
             ),
             model_role=ModelRole.FLASH,
             memory_reflection=False,
-            permission_policy=preset_to_policy(
-                PermissionMode.BYPASS_PERMISSIONS
-            ),
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         )
-        assert first_core._projection_service is not None
-        await first_core._projection_service.aclose()
+        first_resources = await host_process_resource_lease(first_core)
+        await first_resources.projection_service.aclose(
+            deadline_monotonic=monotonic() + 10.0
+        )
 
         result = await session.run_turn("run the durable projection dogfood")
         assert result.status.value == "finished", result.error_message
         assert result.final_text == "durable projection dogfood complete"
         runtime_session_id = session.runtime_session_id
-        run_id = result.state.run_id
+        run_id = result.run_id
 
         store = PostgresInspectorStore(
-            verified_postgres_provider(
-                migrated_postgres_database.runtime_dsn
-            )
+            verified_postgres_provider(migrated_postgres_database.runtime_dsn)
         )
         before_restart = inspect_durable_projection_state(
             store,
@@ -180,7 +179,7 @@ def test_durable_host_projection_backlog_recovers_after_core_restart(
         assert before_restart["jobs"] == []
         await first_core.shutdown()
 
-        second_core = HostCore(settings=settings, durable=True)
+        second_core = HostCore.production(settings=settings)
         await second_core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
@@ -202,22 +201,19 @@ def test_durable_host_projection_backlog_recovers_after_core_restart(
             jobs = snapshot["jobs"]
             assert isinstance(jobs, list)
             if jobs and all(
-                item.get("state", {}).get("status")
-                in {"succeeded", "superseded"}
+                item.get("state", {}).get("status") in {"succeeded", "superseded"}
                 for item in jobs
             ):
                 break
             await asyncio.sleep(0.05)
-        assert second_core._projection_service is not None
-        service_snapshot = second_core._projection_service.snapshot()
+        second_resources = await host_process_resource_lease(second_core)
+        service_snapshot = second_resources.projection_service.snapshot()
         await second_core.shutdown()
 
         jobs = snapshot["jobs"]
         assert isinstance(jobs, list)
         assert jobs
-        assert {
-            item["projection_kind"] for item in jobs
-        } == {
+        assert {item["projection_kind"] for item in jobs} == {
             "run_timeline.v1",
             "tool_result_execution_evidence.v1",
         }

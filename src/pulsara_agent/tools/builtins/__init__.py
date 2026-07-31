@@ -19,7 +19,6 @@ from pulsara_agent.tools.builtins.plan import (
     EnterPlanTool,
     ExitPlanTool,
 )
-from pulsara_agent.tools.builtins.registry import build_core_tool_registry
 from pulsara_agent.tools.builtins.subagent import (
     CreateAgentTasksTool,
     ListAgentsTool,
@@ -63,5 +62,4 @@ __all__ = [
     "WaitAgentTool",
     "WaitAgentTasksTool",
     "WriteFileTool",
-    "build_core_tool_registry",
 ]

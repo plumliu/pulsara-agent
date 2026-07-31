@@ -36,7 +36,7 @@ from pulsara_agent.runtime.recovery import (
     project_recovery_from_state,
     render_recovery_text,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import RunActivationWorkingState
 
 
 CTX = EventContext(
@@ -203,12 +203,12 @@ def test_host_teardown_has_distinct_recovery_guidance() -> None:
 
 
 def test_project_recovery_from_state_uses_in_run_step_failed_guidance() -> None:
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
     state.in_run_recovery = InRunRecoveryState(
         cause=InRunRecoveryCause.TOOL_FAILURE,
         consecutive_failures=1,
     )
-    state.scratchpad["plan_state"] = PlanWorkflowState(active=True)
+    state.plan_progress.workflow_state = PlanWorkflowState(active=True)
 
     projection = project_recovery_from_state(state)
 

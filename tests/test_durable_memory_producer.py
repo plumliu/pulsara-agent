@@ -8,6 +8,9 @@ the durable pool. Canonical memory writes are owned by governance.
 
 from __future__ import annotations
 
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 import json
 from pathlib import Path
@@ -27,7 +30,7 @@ from pulsara_agent.event import (
     EventContext,
     EventType,
 )
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ActionBoundaryCandidate,
     DecisionCandidate,
     InvalidAttemptPayload,
@@ -36,7 +39,7 @@ from pulsara_agent.event.candidates import (
 )
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMRuntime
-from tests.support import stream_agent_task, test_llm_config
+from tests.support import memory_hook_view, stream_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
@@ -45,10 +48,11 @@ from pulsara_agent.memory.candidates.pool import (
     CandidatePoolProposal,
     InMemoryCandidatePool,
 )
-from pulsara_agent.runtime import AgentRuntime, LoopState
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.memory import (
     RememberActionBoundaryTool,
     RememberDecisionTool,
@@ -169,9 +173,9 @@ def test_durable_hooks_drain_appends_candidates_without_writing_graph() -> None:
     sink = MemoryProposalSink()
     sink.deposit(_proposal(_preference()))
     hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
 
-    events = asyncio.run(hooks.after_tool_results(state, []))
+    events = asyncio.run(hooks.after_tool_results(memory_hook_view(state), []))
 
     assert events == []
     pending = pool.list_pending()
@@ -180,7 +184,7 @@ def test_durable_hooks_drain_appends_candidates_without_writing_graph() -> None:
     assert pending[0].payload.candidate.candidate_id == "candidate:pref"
     assert graph.find_by_type(memory.PREFERENCE) == []
     # Drained: a second drain at session end produces nothing.
-    assert asyncio.run(hooks.on_session_end(state)) == []
+    assert asyncio.run(hooks.on_session_end(memory_hook_view(state))) == []
 
 
 def test_durable_hooks_delays_invalid_attempts_until_session_end() -> None:
@@ -189,13 +193,13 @@ def test_durable_hooks_delays_invalid_attempts_until_session_end() -> None:
     sink.record_invalid(_invalid_proposal("call:1", statement="bad"), "intent:bad")
     sink.record_invalid(_invalid_proposal("call:2", statement="last bad"), "intent:bad")
     hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
 
-    assert asyncio.run(hooks.after_tool_results(state, [])) == []
+    assert asyncio.run(hooks.after_tool_results(memory_hook_view(state), [])) == []
     assert pool.list_pending() == []
     assert sink.pending_count() == 1
 
-    assert asyncio.run(hooks.on_session_end(state)) == []
+    assert asyncio.run(hooks.on_session_end(memory_hook_view(state))) == []
     pending = pool.list_pending()
     assert len(pending) == 1
     assert isinstance(pending[0].payload, InvalidAttemptPayload)
@@ -208,11 +212,11 @@ def test_durable_hooks_empty_sink_returns_no_events() -> None:
     hooks = DurableMemoryHooks(
         candidate_pool=InMemoryCandidatePool(), sink=MemoryProposalSink()
     )
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
 
-    assert asyncio.run(hooks.after_model_reply(state, None)) == []
-    assert asyncio.run(hooks.after_tool_results(state, [])) == []
-    assert asyncio.run(hooks.on_session_end(state)) == []
+    assert asyncio.run(hooks.after_model_reply(memory_hook_view(state), None)) == []
+    assert asyncio.run(hooks.after_tool_results(memory_hook_view(state), [])) == []
+    assert asyncio.run(hooks.on_session_end(memory_hook_view(state))) == []
 
 
 def test_durable_hooks_event_context_comes_from_loop_state() -> None:
@@ -220,9 +224,9 @@ def test_durable_hooks_event_context_comes_from_loop_state() -> None:
     sink = MemoryProposalSink()
     sink.deposit(_proposal(_preference()))
     hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
 
-    asyncio.run(hooks.after_tool_results(state, []))
+    asyncio.run(hooks.after_tool_results(memory_hook_view(state), []))
 
     candidate = pool.list_pending()[0]
     assert candidate.source_run_id == state.run_id
@@ -519,11 +523,15 @@ class _ScriptedTransport:
         del call
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockStart(
+                **event_context.event_fields(), block_id="text:1"
+            )
             yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(
+                **event_context.event_fields(), block_id="text:1"
+            )
         for call in reply.get("tool_calls", []):
             yield RawProviderToolCallStart(
                 **event_context.event_fields(),
@@ -582,7 +590,7 @@ def test_agent_runtime_queues_candidate_without_canonical_write(tmp_path: Path) 
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
@@ -630,7 +638,7 @@ def test_default_agent_runtime_does_not_expose_memory_write_tools(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
@@ -675,7 +683,7 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
@@ -743,7 +751,7 @@ def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),

@@ -41,7 +41,7 @@ from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.primitives.model_call import canonical_json_bytes, sha256_fingerprint
-from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.subagent import (
     PostgresEventLogLocator,
     SubagentGraphHydrator,
@@ -56,7 +56,6 @@ from pulsara_agent.settings import StorageConfig
 class _FailingObserver:
     async def on_published_event(self, _published) -> None:
         raise RuntimeError("synthetic observer failure")
-
 
 
 def _delete_sessions(dsn: str, session_ids: list[str]) -> None:
@@ -149,6 +148,7 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
             await child_session.write_events(
                 (
                     RunStartEvent(
+                        id=f"run_start:test:{child_context.run_id}",
                         **child_context.event_fields(),
                         **run_start_permission_fields(
                             child_context.run_id,
@@ -240,6 +240,7 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             await child_session.write_event(
                 RunStartEvent(
+                    id=f"run_start:test:{child_context.run_id}",
                     **child_context.event_fields(),
                     **run_start_permission_fields(
                         child_context.run_id,
@@ -345,8 +346,9 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             await child_session.write_events(
                 (
-                    RunStartEvent(
-                        **native_context.event_fields(),
+                        RunStartEvent(
+                            id=f"run_start:test:{native_run_id}",
+                            **native_context.event_fields(),
                         **run_start_permission_fields(
                             native_run_id,
                             source="child_profile",

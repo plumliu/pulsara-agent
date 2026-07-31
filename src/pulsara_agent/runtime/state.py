@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, Usage
@@ -12,6 +12,14 @@ from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 
 if TYPE_CHECKING:
+    from pulsara_agent.capability.execution_surface import FrozenCapabilityExecutionSurface
+    from pulsara_agent.replay.provenance import RuntimeEventSpan
+    from pulsara_agent.primitives.capability import CapabilityResolveBasisFact
+    from pulsara_agent.primitives.context import ContextEventReferenceFact
+    from pulsara_agent.primitives.run_entry import SubagentRunEntryFact
+    from pulsara_agent.primitives.user_message import CurrentUserMessageFact
+    from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
+    from pulsara_agent.runtime.plan import PlanWorkflowState
     from pulsara_agent.llm.resolution import ResolvedModelTarget
     from pulsara_agent.runtime.recovery import (
         AbortKind,
@@ -54,7 +62,56 @@ class LoopBudget:
 
 
 @dataclass(slots=True)
-class LoopState:
+class PlanEntryAuditState:
+    source: Literal["user", "agent"]
+    reason: str
+    previous_permission_mode: str
+    previous_permission_policy: dict[str, object]
+    event_id: str
+
+
+@dataclass(slots=True)
+class RunPlanProgressState:
+    workflow_state: PlanWorkflowState | None = None
+    entry_audit: PlanEntryAuditState | None = None
+    entry_audit_emitted: bool = False
+    exit_revisions: int = 0
+    interactions: int = 0
+    revision_feedback: str = ""
+    revision_required: bool = False
+
+
+@dataclass(slots=True)
+class RunModelToolProgressState:
+    model_call_index: int = 0
+    current_model_call_index: int | None = None
+    current_context_id: str | None = None
+    latest_model_control_disposition_event_id: str | None = None
+    latest_model_control_disposition_model_call_index: int | None = None
+    tool_result_event_spans: dict[str, RuntimeEventSpan] = field(default_factory=dict)
+    tool_result_audit_consumed_call_ids: set[str] = field(default_factory=set)
+    active_context_window_id: str | None = None
+
+
+@dataclass(slots=True)
+class RunExecutionResourceState:
+    host_session_id: str | None = None
+    run_execution_handle_id: str | None = None
+    capability_execution_borrow_authority: object | None = None
+    capability_execution_borrow_kind: Literal["parent", "child"] = "parent"
+    capability_resolve_basis: CapabilityResolveBasisFact | None = None
+    frozen_capability_execution_surface: FrozenCapabilityExecutionSurface | None = None
+    subagent_run_entry_fact: SubagentRunEntryFact | None = None
+    current_user_message_fact: CurrentUserMessageFact | None = None
+    resume_activation_blocked: bool = False
+    resume_boundary_attempts: dict[str, int] = field(default_factory=dict)
+    latest_mcp_input_required_resolution_reference: (
+        ContextEventReferenceFact | None
+    ) = None
+
+
+@dataclass(slots=True)
+class RunActivationWorkingState:
     """Short-lived state for one active agent loop.
 
     This is the Working Context Cache. It is not a durable fact source.
@@ -72,6 +129,10 @@ class LoopState:
     pending_tool_calls: list[ToolCallBlock] = field(default_factory=list)
     pending_interaction_kind: str | None = None
     pending_interaction_payload: dict[str, Any] = field(default_factory=dict)
+    pending_interaction_source_event_reference: (
+        ContextEventReferenceFact | None
+    ) = None
+    pending_interaction_source_event_candidate: FrozenEventWriteCandidate | None = None
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     memory_projection: dict[str, Any] | None = None
     token_usage: Usage = field(default_factory=Usage)
@@ -85,11 +146,18 @@ class LoopState:
     stop_reason: RunStopReason | None = None
     error_message: str | None = None
     finalized: bool = False
-    scratchpad: dict[str, Any] = field(default_factory=dict)
+    plan_progress: RunPlanProgressState = field(default_factory=RunPlanProgressState)
+    model_tool_progress: RunModelToolProgressState = field(
+        default_factory=RunModelToolProgressState
+    )
+    execution_resources: RunExecutionResourceState = field(
+        default_factory=RunExecutionResourceState
+    )
     budget: LoopBudget = field(default_factory=LoopBudget)
     permission_snapshot: RunPermissionSnapshot | None = None
     run_model_target: ResolvedModelTarget | None = None
     run_working_set: RunWorkingSet | None = None
+    terminal_run_end_event_id: str | None = None
 
     def begin_next_turn(self) -> None:
         self.turn_index += 1
@@ -98,6 +166,8 @@ class LoopState:
         self.pending_tool_calls = []
         self.pending_interaction_kind = None
         self.pending_interaction_payload = {}
+        self.pending_interaction_source_event_reference = None
+        self.pending_interaction_source_event_candidate = None
         self.tool_results = []
 
     def transition(self, transition: LoopTransition) -> None:

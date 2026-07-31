@@ -31,7 +31,7 @@ from pulsara_agent.storage.postgres_connection_provider import (
 )
 
 if TYPE_CHECKING:
-    from pulsara_agent.runtime.projection_jobs.contracts import (
+    from pulsara_agent.projection_jobs.contracts import (
         CanonicalGraphNodeReadViewFact,
     )
 
@@ -53,7 +53,7 @@ class PostgresGraphStore:
             )
 
     def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
-        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+        from pulsara_agent.graph.projection_relations import (
             reject_owned_relation_predicates,
         )
 
@@ -83,7 +83,7 @@ class PostgresGraphStore:
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
         payload = self._get_base_jsonld(node_id, graph_id=graph_id)
-        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+        from pulsara_agent.graph.projection_relations import (
             PostgresCanonicalGraphRelationRepository,
         )
 
@@ -106,7 +106,7 @@ class PostgresGraphStore:
         graph_id: str | None = None,
     ) -> CanonicalGraphNodeReadViewFact:
         payload = self._get_base_jsonld(node_id, graph_id=graph_id)
-        from pulsara_agent.runtime.projection_jobs.graph_relation import (
+        from pulsara_agent.graph.projection_relations import (
             PostgresCanonicalGraphRelationRepository,
         )
 

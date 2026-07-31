@@ -9,7 +9,11 @@ from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     EventContext,
     RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
 )
+from pulsara_agent.event_log import InMemoryEventLog
+from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
 from pulsara_agent.capability.facts import (
@@ -81,6 +85,11 @@ from pulsara_agent.tools.registry import (
 )
 from pulsara_agent.llm.user_carrier import encode_human_input
 from pulsara_agent.primitives import context_fingerprint
+from pulsara_agent.runtime.run_execution.authority import (
+    materialize_initial_revision,
+    materialize_run_genesis,
+)
+from tests.conftest import run_start_permission_fields
 
 
 UTC = "2026-07-12T01:02:03Z"
@@ -232,6 +241,33 @@ def test_subagent_task_and_primitive_entry_modes_are_distinct() -> None:
         max_summary_chars=200,
         max_artifact_refs=32,
     )
+    surface = build_capability_execution_surface_identity(
+        surface_contract_version="test:v1",
+        entries=(),
+        mcp_installation_id="mcp:parent",
+    )
+    basis = build_capability_resolve_basis(
+        basis_id="basis:child",
+        basis_kind="initial",
+        source_basis_id=None,
+        source_basis_fingerprint=None,
+        owner=CapabilityExposureOwnerFact(
+            owner_kind="subagent_run_start",
+            owner_id="run_start:child",
+            host_boundary_kind=None,
+            runtime_session_id="runtime:parent",
+            run_id="child-run:1",
+        ),
+        workspace_identity_fingerprint="workspace-fp",
+        memory_domain_id="memory:child",
+        permission_snapshot_id="permission:child",
+        plan_active=False,
+        active_skill_names=(),
+        user_intent_fingerprint="intent-fp",
+        prior_transcript_fingerprint="transcript-fp",
+        mcp_installation_id="mcp:parent",
+        execution_surface_identity=surface,
+    )
     common = dict(
         subagent_run_id="subagent-run:1",
         parent_runtime_session_id="runtime:parent",
@@ -245,6 +281,7 @@ def test_subagent_task_and_primitive_entry_modes_are_distinct() -> None:
         model_target_fingerprint="model-target-fp",
         mcp_installation_id="mcp:parent",
         mcp_installation_owner_runtime_session_id="runtime:parent",
+        capability_basis=basis,
     )
     task_entry = SubagentRunEntryFact(subagent_task_id="task:1", **common)
     task_message = CurrentUserMessageFact(
@@ -314,6 +351,173 @@ def test_new_run_boundary_cross_checks_capability_basis() -> None:
         degraded_reason_codes=(),
     )
     assert boundary.identity.boundary_id == "boundary:1"
+
+
+def test_child_capability_basis_is_rebound_at_all_four_authority_layers() -> None:
+    run_id = "run:child-authority"
+    runtime_session_id = "runtime:child-authority"
+    parent_runtime_session_id = "runtime:parent-authority"
+    event_id = f"run_start:test:{run_id}"
+    context = EventContext(run_id, "turn:child-authority", "reply:child-authority")
+    fields = run_start_permission_fields(
+        run_id,
+        source="child_profile",
+        user_input="inspect authority",
+        turn_id=context.turn_id,
+        reply_id=context.reply_id,
+        mcp_installation_owner_runtime_session_id=parent_runtime_session_id,
+        ledger_runtime_session_id=runtime_session_id,
+    )
+    entry = fields["subagent_run_entry"]
+    assert isinstance(entry, SubagentRunEntryFact)
+    basis = entry.capability_basis
+
+    wrong_permission_basis = build_capability_resolve_basis(
+        basis_id="basis:wrong-permission",
+        basis_kind="initial",
+        source_basis_id=None,
+        source_basis_fingerprint=None,
+        owner=basis.owner,
+        workspace_identity_fingerprint=basis.workspace_identity_fingerprint,
+        memory_domain_id=basis.memory_domain_id,
+        permission_snapshot_id="permission:wrong",
+        plan_active=basis.plan_active,
+        active_skill_names=basis.active_skill_names,
+        user_intent_fingerprint=basis.user_intent_fingerprint,
+        prior_transcript_fingerprint=basis.prior_transcript_fingerprint,
+        mcp_installation_id=basis.mcp_installation_id,
+        execution_surface_identity=basis.execution_surface_identity,
+    )
+    with pytest.raises(ValidationError, match="permission mismatch"):
+        SubagentRunEntryFact.model_validate(
+            {
+                **entry.model_dump(mode="json"),
+                "capability_basis": wrong_permission_basis,
+            }
+        )
+
+    wrong_owner_basis = build_capability_resolve_basis(
+        basis_id="basis:wrong-owner",
+        basis_kind="initial",
+        source_basis_id=None,
+        source_basis_fingerprint=None,
+        owner=basis.owner.model_copy(update={"owner_id": "run_start:other"}),
+        workspace_identity_fingerprint=basis.workspace_identity_fingerprint,
+        memory_domain_id=basis.memory_domain_id,
+        permission_snapshot_id=basis.permission_snapshot_id,
+        plan_active=basis.plan_active,
+        active_skill_names=basis.active_skill_names,
+        user_intent_fingerprint=basis.user_intent_fingerprint,
+        prior_transcript_fingerprint=basis.prior_transcript_fingerprint,
+        mcp_installation_id=basis.mcp_installation_id,
+        execution_surface_identity=basis.execution_surface_identity,
+    )
+    wrong_owner_entry = SubagentRunEntryFact.model_validate(
+        {
+            **entry.model_dump(mode="json"),
+            "capability_basis": wrong_owner_basis,
+        }
+    )
+    with pytest.raises(ValidationError, match="basis attribution mismatch"):
+        RunStartEvent(
+            id=event_id,
+            **context.event_fields(),
+            **{**fields, "subagent_run_entry": wrong_owner_entry},
+            user_input_chars=len("inspect authority"),
+        )
+
+    candidate = RunStartEvent(
+        id=event_id,
+        **context.event_fields(),
+        **fields,
+        user_input_chars=len("inspect authority"),
+    )
+    event_log = InMemoryEventLog(runtime_session_id=runtime_session_id)
+    stored = event_log.append(candidate)
+    assert isinstance(stored, RunStartEvent)
+    [stored_envelope] = event_log.read_raw_events_by_id((stored.id,))
+    genesis = materialize_run_genesis(
+        stored,
+        stored_envelope=stored_envelope,
+    )
+    wrong_ledger_envelope = RawStoredEventEnvelope.from_stored_event(
+        event=stored,
+        runtime_session_id="runtime:wrong-ledger",
+        schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+    )
+    with pytest.raises(ValueError, match="another ledger"):
+        materialize_run_genesis(
+            stored,
+            stored_envelope=wrong_ledger_envelope,
+        )
+
+    projection = empty_capability_projection()
+    semantic = build_capability_exposure_semantic(
+        execution_surface=basis.execution_surface_identity,
+        catalog_projection=projection,
+        active_skill_projection=projection,
+        authorization_fingerprint=capability_authorization_fingerprint(()),
+    )
+    exposure = build_capability_exposure_snapshot(
+        exposure_id="exposure:child-authority",
+        owner=basis.owner,
+        resolution_kind="initial",
+        resolve_basis=basis,
+        semantic=semantic,
+        authorization_entries=(),
+        source_exposure_id=None,
+    )
+    stored_exposure = event_log.append(
+        CapabilityExposureResolvedEvent(
+            **context.event_fields(),
+            exposure=exposure,
+            exposure_revision=1,
+        )
+    )
+    assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
+    materialize_initial_revision(
+        genesis=genesis,
+        stored_exposure=stored_exposure,
+    )
+
+    alternate_basis = build_capability_resolve_basis(
+        basis_id="basis:alternate",
+        basis_kind="initial",
+        source_basis_id=None,
+        source_basis_fingerprint=None,
+        owner=basis.owner,
+        workspace_identity_fingerprint=basis.workspace_identity_fingerprint,
+        memory_domain_id=basis.memory_domain_id,
+        permission_snapshot_id=basis.permission_snapshot_id,
+        plan_active=basis.plan_active,
+        active_skill_names=basis.active_skill_names,
+        user_intent_fingerprint="intent:alternate",
+        prior_transcript_fingerprint=basis.prior_transcript_fingerprint,
+        mcp_installation_id=basis.mcp_installation_id,
+        execution_surface_identity=basis.execution_surface_identity,
+    )
+    alternate_exposure = build_capability_exposure_snapshot(
+        exposure_id="exposure:child-authority:alternate",
+        owner=alternate_basis.owner,
+        resolution_kind="initial",
+        resolve_basis=alternate_basis,
+        semantic=semantic,
+        authorization_entries=(),
+        source_exposure_id=None,
+    )
+    alternate_stored = event_log.append(
+        CapabilityExposureResolvedEvent(
+            **context.event_fields(),
+            exposure=alternate_exposure,
+            exposure_revision=1,
+        )
+    )
+    assert isinstance(alternate_stored, CapabilityExposureResolvedEvent)
+    with pytest.raises(ValueError, match="does not match RunStart basis"):
+        materialize_initial_revision(
+            genesis=genesis,
+            stored_exposure=alternate_stored,
+        )
 
 
 def test_child_result_render_policy_fingerprint_covers_caps() -> None:

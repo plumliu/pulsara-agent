@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from tests.support.runtime_owner import runtime_session_for_test
+
+from tests.support.runtime_owner import build_test_agent_runtime
+
+
 import asyncio
 import json
 from pathlib import Path
@@ -27,12 +32,16 @@ from pulsara_agent.event import (
     MemoryReflectionFailedEvent,
     RunErrorEvent,
 )
-from pulsara_agent.event.candidates import InvalidAttemptPayload, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    InvalidAttemptPayload,
+    ValidCandidatePayload,
+)
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.raw_provider import RawProviderFailure
 from tests.support import (
+    memory_hook_view,
     stream_agent_task,
     test_llm_config,
     test_model_limits,
@@ -57,7 +66,8 @@ from pulsara_agent.memory.reflection.engine import (
 )
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus
+from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus
 from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
@@ -129,7 +139,7 @@ def test_memory_reflection_queues_preference_from_explicit_memory_signal() -> No
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -163,7 +173,7 @@ def test_memory_reflection_does_not_call_flash_without_trigger() -> None:
 
     events = asyncio.run(
         engine.reflect(
-            state=_state("What is the current status?"),
+            view=_state("What is the current status?"),
             event_store=InMemoryEventLog(),
         )
     )
@@ -181,7 +191,7 @@ def test_memory_reflection_invalid_json_returns_failure_event() -> None:
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -218,7 +228,7 @@ def test_reflection_completed_carries_usage_and_estimated_input() -> None:
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -260,7 +270,7 @@ def test_reflection_pre_start_failure_abandons_provider_input_owner(
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=engine.runtime_session.event_log,
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -298,7 +308,7 @@ def test_reflection_failed_before_resolution_allows_missing_call_fact(
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -375,7 +385,7 @@ def test_reflection_budget_validation_failure_requires_input_estimate() -> None:
 
     events = asyncio.run(
         engine.reflect(
-            state=_state("remember " + "x" * 8_000),
+            view=_state("remember " + "x" * 8_000),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -408,7 +418,7 @@ def test_reflection_run_error_drains_end_before_failed_event() -> None:
 
     events = asyncio.run(
         engine.reflect(
-            state=_state(),
+            view=_state(),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[_hint()],
@@ -435,7 +445,7 @@ def test_memory_reflection_false_positive_records_decision_without_candidate() -
 
     events = asyncio.run(
         engine.reflect(
-            state=_state("以后再说吧，先看当前测试结果。"),
+            view=_state("以后再说吧，先看当前测试结果。"),
             event_store=InMemoryEventLog(),
             trigger_reasons=["cheap_memory_hint"],
             cheap_hints=[
@@ -517,7 +527,7 @@ def test_agent_runtime_flash_reflection_queues_candidate_at_session_end(
     event_types = [event.type for event in events]
     assert any(
         isinstance(event, MemoryReflectionCompletedEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert EventType.MEMORY_WRITE_RESULT not in event_types
     assert event_types[-1] is EventType.RUN_END
@@ -643,7 +653,9 @@ def test_aborted_run_skips_memory_reflection(tmp_path: Path) -> None:
     agent = _agent_with_reflection(
         tmp_path, graph=graph, pool=pool, transport=transport
     )
-    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(
+        session_id=runtime_session_for_test(agent).runtime_session_id
+    )
     state.status = LoopStatus.ABORTED
     state.stop_reason = "aborted"
     state.messages.append(
@@ -652,9 +664,10 @@ def test_aborted_run_skips_memory_reflection(tmp_path: Path) -> None:
 
     async def run():
         await agent.memory_hooks.on_session_start(
-            state, "Please remember that I prefer concise summaries."
+            memory_hook_view(state),
+            "Please remember that I prefer concise summaries.",
         )
-        return await agent.memory_hooks.on_session_end(state)
+        return await agent.memory_hooks.on_session_end(memory_hook_view(state))
 
     events = asyncio.run(run())
 
@@ -670,7 +683,9 @@ def test_failed_run_skips_memory_reflection(tmp_path: Path) -> None:
     agent = _agent_with_reflection(
         tmp_path, graph=graph, pool=pool, transport=transport
     )
-    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(
+        session_id=runtime_session_for_test(agent).runtime_session_id
+    )
     state.status = LoopStatus.FAILED
     state.stop_reason = "model_error"
     state.messages.append(
@@ -679,9 +694,10 @@ def test_failed_run_skips_memory_reflection(tmp_path: Path) -> None:
 
     async def run():
         await agent.memory_hooks.on_session_start(
-            state, "Please remember that I prefer concise summaries."
+            memory_hook_view(state),
+            "Please remember that I prefer concise summaries.",
         )
-        return await agent.memory_hooks.on_session_end(state)
+        return await agent.memory_hooks.on_session_end(memory_hook_view(state))
 
     events = asyncio.run(run())
 
@@ -697,7 +713,9 @@ def test_finished_run_still_allows_memory_reflection(tmp_path: Path) -> None:
     agent = _agent_with_reflection(
         tmp_path, graph=graph, pool=pool, transport=transport
     )
-    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(
+        session_id=runtime_session_for_test(agent).runtime_session_id
+    )
     state.status = LoopStatus.FINISHED
     state.stop_reason = "final"
     state.messages.append(
@@ -706,16 +724,17 @@ def test_finished_run_still_allows_memory_reflection(tmp_path: Path) -> None:
 
     async def run():
         await agent.memory_hooks.on_session_start(
-            state, "Please remember that I prefer concise summaries."
+            memory_hook_view(state),
+            "Please remember that I prefer concise summaries.",
         )
-        return await agent.memory_hooks.on_session_end(state)
+        return await agent.memory_hooks.on_session_end(memory_hook_view(state))
 
     events = asyncio.run(run())
 
     assert events == []
     assert any(
         isinstance(event, MemoryReflectionCompletedEvent)
-        for event in agent.runtime_session.event_log.iter()
+        for event in runtime_session_for_test(agent).event_log.iter()
     )
     assert len(transport.contexts) == 1
     assert len(pool.list_pending()) == 1
@@ -883,7 +902,7 @@ def _agent_with_reflection(
         reflection=reflection,
         event_store=runtime_session.event_log,
     )
-    return AgentRuntime(
+    return build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=llm_runtime,
@@ -1012,10 +1031,10 @@ def _make_llm_runtime(
 
 def _state(
     user_text: str = "Please remember that I prefer concise summaries.",
-) -> LoopState:
-    state = LoopState(session_id="runtime:test")
+) -> object:
+    state = RunActivationWorkingState(session_id="runtime:test")
     state.messages.append(UserMsg(name="user", content=user_text))
-    return state
+    return memory_hook_view(state)
 
 
 def _reflection_json(*, statement: str = "The user prefers concise summaries") -> str:

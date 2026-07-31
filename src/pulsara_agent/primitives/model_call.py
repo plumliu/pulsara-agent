@@ -24,6 +24,7 @@ class ModelCallPurpose(StrEnum):
     CONTEXT_WINDOW_COMPACTION_SUMMARY = "context_window_compaction_summary"
     MEMORY_GOVERNANCE = "memory_governance"
     MEMORY_REFLECTION = "memory_reflection"
+    COMPACTION_MEMORY_EXTRACTION = "compaction_memory_extraction"
 
 
 class ModelContextMode(StrEnum):

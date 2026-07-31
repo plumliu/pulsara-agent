@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.long_horizon import LongHorizonToolPolicyFact
 from pulsara_agent.primitives.tool_result import CapabilityResultRenderContractFact
+from pulsara_agent.ports.artifact import ToolArtifactMode
+from pulsara_agent.ports.tool_execution import (
+    FrozenToolJsonDict,
+    freeze_tool_json_object,
+)
 
 
 class CapabilityProviderKind(StrEnum):
@@ -31,14 +35,6 @@ class CapabilityAdvertisePolicy(StrEnum):
     HIDDEN = "hidden"
 
 
-class CapabilityArtifactMode(StrEnum):
-    DEFAULT = "default"
-    NEVER = "never"
-    ALWAYS = "always"
-    LARGE_OUTPUT = "large_output"
-    STRUCTURED_JSON = "structured_json"
-
-
 @dataclass(frozen=True, slots=True)
 class CapabilityProvenance:
     provider_kind: CapabilityProviderKind
@@ -53,7 +49,7 @@ class CapabilityDescriptor:
     id: str
     name: str
     description: str
-    input_schema: dict[str, Any] | None
+    input_schema: FrozenToolJsonDict | None
     namespace: str | None
     provider_kind: CapabilityProviderKind
     provider_id: str
@@ -68,13 +64,26 @@ class CapabilityDescriptor:
     permission_category: str = "general"
     approval_policy_hint: str | None = None
     advertise_policy: CapabilityAdvertisePolicy = CapabilityAdvertisePolicy.DIRECT
-    artifact_mode: CapabilityArtifactMode = CapabilityArtifactMode.DEFAULT
+    artifact_mode: ToolArtifactMode = ToolArtifactMode.DEFAULT
     max_inline_chars: int | None = None
     timeout_ms: int | None = None
     availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE
     health_message: str | None = None
     provenance: CapabilityProvenance | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+
+    def __post_init__(self) -> None:
+        if self.input_schema is not None:
+            object.__setattr__(
+                self,
+                "input_schema",
+                freeze_tool_json_object(self.input_schema),
+            )
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_tool_json_object(self.metadata),
+        )
 
     def to_diagnostic_dict(self) -> dict[str, object]:
         return {

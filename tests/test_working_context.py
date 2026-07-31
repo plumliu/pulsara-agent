@@ -31,12 +31,13 @@ from pulsara_agent.memory.working_context import (
     propose_working_context_update,
 )
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.runtime.state import LoopState
-from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.runtime.state import RunActivationWorkingState
+from pulsara_agent.replay.timeline import build_run_timeline
 from pulsara_agent.memory.foundation.run_timeline_query import summarize_run_timeline
 from pulsara_agent.memory.foundation.run_timeline_query import RunTimelineSummary
 from pulsara_agent.settings import StorageConfig
 from tests.conftest import tool_result_end_contract_fields
+from tests.support import memory_hook_view
 
 
 def test_working_context_guard_rejects_low_signal_run() -> None:
@@ -168,7 +169,7 @@ def test_durable_hook_does_not_reconstruct_working_context_without_projection() 
         working_context_store=store,
         working_context_domain=domain,
     )
-    state = LoopState(session_id="runtime:test")
+    state = RunActivationWorkingState(session_id="runtime:test")
     ctx = EventContext(
         run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
     )
@@ -207,8 +208,10 @@ def test_durable_hook_does_not_reconstruct_working_context_without_projection() 
         ]:
             event_log.append(event)
 
-        asyncio.run(hooks.on_session_end(state))
-        projection = asyncio.run(hooks.project(state, token_budget=120))
+        asyncio.run(hooks.on_session_end(memory_hook_view(state)))
+        projection = asyncio.run(
+            hooks.project(memory_hook_view(state), token_budget=120)
+        )
 
         assert store.get_latest(memory_domain_id=domain.memory_domain_id) is None
         # DPJ hard-cut: the hook may consume an already durable timeline
@@ -304,14 +307,14 @@ def test_durable_hook_lazily_refreshes_after_timeline_projection_arrives(
         working_context_domain=domain,
         working_context_async_operation_port=run_owned,
     )
-    state = LoopState(session_id="runtime:lazy")
-    state.scratchpad["working_context_refresh_model_step_key"] = "run:new:1"
-    assert hooks.baseline_projection(state, token_budget=120) is None
+    state = RunActivationWorkingState(session_id="runtime:lazy")
+    assert hooks.baseline_projection(memory_hook_view(state), token_budget=120) is None
     assert observed == []
 
     async def exercise() -> None:
-        assert await hooks.project(state, token_budget=120) is None
-        assert await hooks.project(state, token_budget=120) is None
+        view = memory_hook_view(state)
+        assert await hooks.project(view, token_budget=120) is None
+        assert await hooks.project(view, token_budget=120) is None
 
     asyncio.run(exercise())
     assert operation_names == ["working-context-lazy-refresh"]

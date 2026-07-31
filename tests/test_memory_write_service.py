@@ -17,7 +17,7 @@ from pulsara_agent.event import (
     MemoryCandidateProposedEvent,
     MemoryWriteFailedEvent,
 )
-from pulsara_agent.event.candidates import (
+from pulsara_agent.primitives.memory_candidate import (
     ActionBoundaryCandidate,
     ClaimCandidate,
     DecisionCandidate,

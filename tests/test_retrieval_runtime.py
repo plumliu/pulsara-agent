@@ -12,7 +12,7 @@ from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime.projection_jobs.contracts import (
+from pulsara_agent.projection_jobs.contracts import (
     CanonicalMemoryMutationOperationKind,
     CanonicalMutationSurface,
 )
@@ -118,7 +118,7 @@ def test_hostcore_shares_one_projection_service_and_materializes_vector_delivery
         provider = _WorkerEmbeddingProvider()
         resources = RetrievalRuntimeResources(embedding=provider)  # type: ignore[arg-type]
         monkeypatch.setattr(
-            "pulsara_agent.host.core.build_retrieval_runtime_resources",
+            "pulsara_agent.host.production_composition.build_retrieval_runtime_resources",
             lambda _config: resources,
         )
         settings = PulsaraSettings(
@@ -130,7 +130,7 @@ def test_hostcore_shares_one_projection_service_and_materializes_vector_delivery
             ),
             storage=storage,
         )
-        core = HostCore(settings, durable=True)
+        core = HostCore.production(settings=settings)
         domain_id = f"u_vector_worker_{uuid4().hex}"
         first = await core.open_session(
             HostWorkspaceInput(

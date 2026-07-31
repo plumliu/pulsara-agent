@@ -15,7 +15,7 @@ from pulsara_agent.event_log import (
     EventLog,
     InMemoryEventLog,
 )
-from pulsara_agent.memory.foundation.records import ArtifactContentConflict
+from pulsara_agent.ports.artifact import ArtifactContentConflict
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives.long_horizon import (
     SubagentGraphCheckpointPolicyFact,

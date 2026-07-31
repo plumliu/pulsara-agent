@@ -7,6 +7,7 @@ from typing import Literal, Sequence
 
 from pulsara_agent.event import (
     AgentEvent,
+    McpContinuationDispatchReservedEvent,
     McpInputRequiredBindingChangedEvent,
     McpInputRequiredExpiredEvent,
     McpInputRequiredInteractionClosedEvent,
@@ -27,6 +28,7 @@ from pulsara_agent.runtime.context_input.event_slice import (
 McpInputRequiredLifecycleStatus = Literal[
     "suspended",
     "resolution_submitted",
+    "dispatch_reserved",
     "resume_failed",
     "terminal",
     "closed",
@@ -50,6 +52,7 @@ class McpInputRequiredLifecycleRecord:
     latest_resolution_submitted_event_reference: (
         ContextEventReferenceFact | None
     ) = None
+    latest_dispatch_reserved_event_reference: ContextEventReferenceFact | None = None
     latest_resume_failed_event_reference: ContextEventReferenceFact | None = None
     terminal_tool_result_event_reference: ContextEventReferenceFact | None = None
     terminal_disposition_event_reference: ContextEventReferenceFact | None = None
@@ -61,6 +64,7 @@ class McpInputRequiredLifecycleRecord:
         return self.status in {
             "suspended",
             "resolution_submitted",
+            "dispatch_reserved",
             "resume_failed",
         }
 
@@ -202,6 +206,8 @@ class McpInputRequiredLifecycleStore:
                 self._apply_suspension(event, known)
             elif isinstance(event, McpInputRequiredResolutionSubmittedEvent):
                 self._apply_resolution(event, known)
+            elif isinstance(event, McpContinuationDispatchReservedEvent):
+                self._apply_dispatch_reserved(event, known)
             elif isinstance(event, McpInputRequiredResumeFailedEvent):
                 self._apply_resume_failed(event, known)
             elif isinstance(event, ToolResultEndEvent):
@@ -268,6 +274,7 @@ class McpInputRequiredLifecycleStore:
             (
                 ToolExecutionSuspendedEvent,
                 McpInputRequiredResolutionSubmittedEvent,
+                McpContinuationDispatchReservedEvent,
                 McpInputRequiredResumeFailedEvent,
                 McpInputRequiredExpiredEvent,
                 McpInputRequiredBindingChangedEvent,
@@ -284,6 +291,14 @@ class McpInputRequiredLifecycleStore:
             return event.suspension.interaction.interaction_id
         if isinstance(event, McpInputRequiredResolutionSubmittedEvent):
             return event.source.interaction.interaction_id
+        if isinstance(event, McpContinuationDispatchReservedEvent):
+            reference = event.dispatch_reservation.source_resolution_event_reference
+            resolution = known.get(reference.event_id)
+            return (
+                resolution.source.interaction.interaction_id
+                if isinstance(resolution, McpInputRequiredResolutionSubmittedEvent)
+                else None
+            )
         reference: ContextEventReferenceFact | None = None
         if isinstance(event, McpInputRequiredResumeFailedEvent):
             reference = event.resolution_submitted_event_reference
@@ -391,7 +406,7 @@ class McpInputRequiredLifecycleStore:
                 previous is None
                 or predecessor is None
                 or previous.latest_resolution_submitted_event_reference != predecessor
-                or previous.status != "resolution_submitted"
+                or previous.status != "dispatch_reserved"
             ):
                 raise ValueError("next MCP suspension lacks its exact predecessor")
             self._require_exact(
@@ -442,16 +457,22 @@ class McpInputRequiredLifecycleStore:
             != suspension.suspension.pending_lease_reservation
             or source.request_envelope_semantic_fingerprint
             != suspension.suspension.request_envelope.request_envelope_semantic_fingerprint
+            or source.request_set_fingerprint
+            != suspension.suspension.request_envelope.request_set_fingerprint
+            or source.continuation_carrier_id
+            != suspension.suspension.durable_continuation.continuation_carrier_id
+            or source.continuation_fact_fingerprint
+            != suspension.suspension.durable_continuation.continuation_fact_fingerprint
+            or source.operation_expires_at_utc
+            != suspension.suspension.durable_continuation.expiry.operation_expires_at_utc
+            or source.expiry_fingerprint
+            != suspension.suspension.durable_continuation.expiry.expiry_fingerprint
             or source.rollout_reservation_id
             != suspension.suspension.rollout_reservation_id
             or source.rollout_reservation_fingerprint
             != suspension.suspension.rollout_reservation_fingerprint
             or source.source_mcp_installation_id
             != suspension.suspension.source_mcp_installation_id
-            or source.durable_deadline_utc
-            != suspension.suspension.durable_deadline_utc
-            or source.deadline_policy_fingerprint
-            != suspension.suspension.deadline_policy_fingerprint
             or source.predecessor_resolution_submitted_event_reference
             != suspension.suspension.predecessor_resolution_submitted_event_reference
             or event.run_id != record.run_id
@@ -495,7 +516,43 @@ class McpInputRequiredLifecycleStore:
             record,
             status="resolution_submitted",
             latest_resolution_submitted_event_reference=self._reference(event),
+            latest_dispatch_reserved_event_reference=None,
             latest_resume_failed_event_reference=None,
+        )
+
+    def _apply_dispatch_reserved(
+        self,
+        event: McpContinuationDispatchReservedEvent,
+        known: dict[str, AgentEvent],
+    ) -> None:
+        fact = event.dispatch_reservation
+        resolution = self._require_exact(
+            fact.source_resolution_event_reference,
+            expected_type=McpInputRequiredResolutionSubmittedEvent,
+            known=known,
+        )
+        assert isinstance(resolution, McpInputRequiredResolutionSubmittedEvent)
+        record = self._record_for_suspension(
+            resolution.source.source_suspension_event_reference,
+            known=known,
+        )
+        if (
+            record.status != "resolution_submitted"
+            or record.latest_resolution_submitted_event_reference
+            != fact.source_resolution_event_reference
+            or fact.interaction_id != record.interaction_id
+            or fact.runtime_session_id != self.runtime_session_id
+            or fact.replay_continuation_carrier_id
+            != resolution.continuation.replay_continuation_carrier_id
+            or fact.operation_expires_at_utc
+            != resolution.continuation.operation_expires_at_utc
+            or fact.expiry_fingerprint != resolution.continuation.expiry_fingerprint
+        ):
+            raise ValueError("MCP dispatch reservation source authority drifted")
+        self._records[record.interaction_id] = replace(
+            record,
+            status="dispatch_reserved",
+            latest_dispatch_reserved_event_reference=self._reference(event),
         )
 
     def _apply_resume_failed(
@@ -514,7 +571,7 @@ class McpInputRequiredLifecycleStore:
             known=known,
         )
         if (
-            record.status != "resolution_submitted"
+            record.status != "dispatch_reserved"
             or record.latest_resolution_submitted_event_reference
             != event.resolution_submitted_event_reference
         ):
@@ -548,6 +605,8 @@ class McpInputRequiredLifecycleStore:
             )
             if record.latest_resolution_submitted_event_reference != resolution:
                 raise ValueError("MCP terminal consumes a stale resolution")
+            if record.status not in {"resolution_submitted", "dispatch_reserved"}:
+                raise ValueError("MCP terminal consumes an invalid resolution state")
         elif record.status not in {"suspended", "resume_failed"}:
             raise ValueError("MCP terminal without resolution has no active suspension")
         self._records[record.interaction_id] = replace(

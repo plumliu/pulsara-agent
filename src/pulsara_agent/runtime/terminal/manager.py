@@ -8,10 +8,16 @@ from pathlib import Path
 from threading import RLock
 
 from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
-from pulsara_agent.runtime.terminal.models import TerminalBackendType, TerminalSessionState
+from pulsara_agent.runtime.terminal.models import (
+    TerminalBackendType,
+    TerminalSessionState,
+)
 from pulsara_agent.runtime.terminal.process import ProcessRegistry
 from pulsara_agent.runtime.terminal.session import TerminalSession
-from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_terminal_shell
+from pulsara_agent.runtime.terminal.shell import (
+    TerminalShellConfig,
+    detect_terminal_shell,
+)
 
 
 DEFAULT_TERMINAL_SESSION_ID = "default"
@@ -29,7 +35,9 @@ class TerminalSessionManager:
     shell: TerminalShellConfig | None = None
     env_builder: TerminalEnvBuilder | None = None
     env_config: TerminalEnvConfig | None = None
-    _sessions: dict[tuple[str | None, str], TerminalSession] = field(default_factory=dict, init=False, repr=False)
+    _sessions: dict[tuple[str | None, str], TerminalSession] = field(
+        default_factory=dict, init=False, repr=False
+    )
     process_registry: ProcessRegistry = field(init=False)
     _released_owners: set[str] = field(default_factory=set, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -42,7 +50,9 @@ class TerminalSessionManager:
         if self.shell is None:
             self.shell = detect_terminal_shell()
         if self.env_builder is None:
-            self.env_builder = TerminalEnvBuilder(config=self.env_config or TerminalEnvConfig.from_env())
+            self.env_builder = TerminalEnvBuilder(
+                config=self.env_config or TerminalEnvConfig.from_env()
+            )
         self.process_registry = ProcessRegistry(
             max_live_processes=self.max_live_processes,
             max_finished_processes=self.max_finished_processes,
@@ -61,8 +71,13 @@ class TerminalSessionManager:
         with self._lock:
             if self._closed:
                 raise RuntimeError("terminal session manager is closed")
-            if owner_host_session_id is not None and owner_host_session_id in self._released_owners:
-                raise RuntimeError(f"terminal owner has been released: {owner_host_session_id}")
+            if (
+                owner_host_session_id is not None
+                and owner_host_session_id in self._released_owners
+            ):
+                raise RuntimeError(
+                    f"terminal owner has been released: {owner_host_session_id}"
+                )
             key = (owner_host_session_id, normalized)
             if key in self._sessions:
                 return self._sessions[key]
@@ -185,6 +200,17 @@ class TerminalSessionManager:
             owner_host_session_id=owner_host_session_id,
         )
 
+    def abort_unreserved_yielded_process(
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str | None,
+    ) -> None:
+        self.process_registry.abort_unreserved_yielded_process(
+            process_id,
+            owner_host_session_id=owner_host_session_id,
+        )
+
     def write_process(
         self,
         process_id: str,
@@ -282,7 +308,9 @@ class TerminalSessionManager:
         )
         with self._lock:
             self._released_owners.add(owner_host_session_id)
-            stale_keys = [key for key in self._sessions if key[0] == owner_host_session_id]
+            stale_keys = [
+                key for key in self._sessions if key[0] == owner_host_session_id
+            ]
             for key in stale_keys:
                 self._sessions.pop(key, None)
         return results
@@ -291,15 +319,28 @@ class TerminalSessionManager:
         return self.process_registry.list_owned(owner_host_session_id)
 
     def has_live_processes(self, *, owner_host_session_id: str | None = None) -> bool:
-        return self.process_registry.live_count(owner_host_session_id=owner_host_session_id) > 0
+        return (
+            self.process_registry.live_count(
+                owner_host_session_id=owner_host_session_id
+            )
+            > 0
+        )
 
     def live_process_count(self, *, owner_host_session_id: str | None = None) -> int:
-        return self.process_registry.live_count(owner_host_session_id=owner_host_session_id)
+        return self.process_registry.live_count(
+            owner_host_session_id=owner_host_session_id
+        )
 
-    def finished_process_count(self, *, owner_host_session_id: str | None = None) -> int:
-        return self.process_registry.finished_count(owner_host_session_id=owner_host_session_id)
+    def finished_process_count(
+        self, *, owner_host_session_id: str | None = None
+    ) -> int:
+        return self.process_registry.finished_count(
+            owner_host_session_id=owner_host_session_id
+        )
 
-    def pending_completion_count(self, *, owner_host_session_id: str | None = None) -> int:
+    def pending_completion_count(
+        self, *, owner_host_session_id: str | None = None
+    ) -> int:
         return self.process_registry.pending_completion_count(
             owner_host_session_id=owner_host_session_id
         )

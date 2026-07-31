@@ -21,7 +21,41 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
     resolve_permission_policy,
 )
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.event import EventContext
+from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
+from tests.support.capability import (
+    descriptor_attribution_for_test,
+    tool_runtime_context,
+)
+from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.tools import build_component_tool_executor
+
+
+def _execute_terminal_process_for_test(tmp_path, call: ToolCall):
+    runtime_session = in_memory_runtime_session(tmp_path)
+    executor = build_component_tool_executor(runtime_session)
+    event_context = EventContext(
+        run_id="run:permission-terminal",
+        turn_id="turn:permission-terminal",
+        reply_id="reply:permission-terminal",
+    )
+    descriptor = next(
+        item for item in builtin_tool_descriptors() if item.name == "terminal_process"
+    )
+    return executor.execute(
+        call,
+        event_context=event_context,
+        descriptor=descriptor,
+        descriptor_attribution=descriptor_attribution_for_test(
+            descriptor,
+            runtime_session_id=runtime_session.runtime_session_id,
+        ),
+        runtime_context=tool_runtime_context(
+            runtime_session_id=runtime_session.runtime_session_id,
+            event_context=event_context,
+        ),
+    )
 
 
 def test_default_permission_policy_defaults_to_bypass() -> None:
@@ -61,10 +95,34 @@ def test_permission_policy_dict_reports_read_and_write_filesystem_scopes() -> No
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        ("read-only", (PermissionProfile.READ_ONLY, ApprovalPolicy.ON_REQUEST, TerminalAccess.OFF)),
-        ("ask-permissions", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.ON_REQUEST, TerminalAccess.ASK)),
-        ("accept-edits", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ASK)),
-        ("bypass-permissions", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ALLOW)),
+        (
+            "read-only",
+            (
+                PermissionProfile.READ_ONLY,
+                ApprovalPolicy.ON_REQUEST,
+                TerminalAccess.OFF,
+            ),
+        ),
+        (
+            "ask-permissions",
+            (
+                PermissionProfile.TRUSTED_HOST,
+                ApprovalPolicy.ON_REQUEST,
+                TerminalAccess.ASK,
+            ),
+        ),
+        (
+            "accept-edits",
+            (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ASK),
+        ),
+        (
+            "bypass-permissions",
+            (
+                PermissionProfile.TRUSTED_HOST,
+                ApprovalPolicy.NEVER,
+                TerminalAccess.ALLOW,
+            ),
+        ),
     ],
 )
 def test_preset_to_policy_resolves_contract_triples(mode, expected) -> None:
@@ -102,7 +160,9 @@ def test_resolve_permission_policy_uses_cli_over_env() -> None:
 
 
 @pytest.mark.parametrize("terminal", ["ask", "allow"])
-def test_resolve_permission_policy_rejects_read_only_with_terminal(terminal: str) -> None:
+def test_resolve_permission_policy_rejects_read_only_with_terminal(
+    terminal: str,
+) -> None:
     with pytest.raises(ValueError, match="read_only"):
         resolve_permission_policy(profile="read_only", terminal=terminal, env={})
 
@@ -115,7 +175,9 @@ def test_resolve_permission_policy_accepts_non_read_only_cross_product(
     approval: str,
     terminal: str,
 ) -> None:
-    policy = resolve_permission_policy(profile=profile, approval=approval, terminal=terminal, env={})
+    policy = resolve_permission_policy(
+        profile=profile, approval=approval, terminal=terminal, env={}
+    )
 
     assert policy.profile.value == profile
     assert policy.approval.value == approval
@@ -123,8 +185,12 @@ def test_resolve_permission_policy_accepts_non_read_only_cross_product(
 
 
 @pytest.mark.parametrize("approval", ["never", "risky_only", "on_request"])
-def test_resolve_permission_policy_accepts_read_only_with_terminal_off(approval: str) -> None:
-    policy = resolve_permission_policy(profile="read_only", approval=approval, terminal="off", env={})
+def test_resolve_permission_policy_accepts_read_only_with_terminal_off(
+    approval: str,
+) -> None:
+    policy = resolve_permission_policy(
+        profile="read_only", approval=approval, terminal="off", env={}
+    )
 
     assert policy.profile is PermissionProfile.READ_ONLY
     assert policy.approval.value == approval
@@ -166,7 +232,11 @@ def test_policy_gate_denies_tools_hidden_by_terminal_off() -> None:
         inner=AllowAllPermissionGate(),
     )
 
-    decision = asyncio.run(gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "pwd"})]))
+    decision = asyncio.run(
+        gate.evaluate(
+            [ToolCall(id="call:term", name="terminal", arguments={"command": "pwd"})]
+        )
+    )
 
     assert decision.kind is PermissionDecisionKind.DENY
     assert "terminal" in (decision.reason or "")
@@ -183,7 +253,15 @@ def test_policy_gate_risky_terminal_command_waits_for_user() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf build"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term",
+                    name="terminal",
+                    arguments={"command": "rm -rf build"},
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
@@ -201,7 +279,15 @@ def test_policy_gate_never_allows_non_hardline_risky_terminal_command() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf build"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term",
+                    name="terminal",
+                    arguments={"command": "rm -rf build"},
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.ALLOW
@@ -218,7 +304,13 @@ def test_policy_gate_ask_overrides_never_for_terminal() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "printf ok"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term", name="terminal", arguments={"command": "printf ok"}
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
@@ -236,7 +328,13 @@ def test_policy_gate_hardline_terminal_command_denies_even_when_never() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf /"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term", name="terminal", arguments={"command": "rm -rf /"}
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.DENY
@@ -252,7 +350,13 @@ def test_bypass_preset_still_denies_hardline_terminal_command() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf /"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term", name="terminal", arguments={"command": "rm -rf /"}
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.DENY
@@ -277,7 +381,9 @@ def test_bypass_preset_still_denies_hardline_terminal_command() -> None:
         "dd if=/dev/zero of=/dev/hda bs=1m",
     ],
 )
-def test_policy_gate_hardline_terminal_variants_deny_even_when_never(command: str) -> None:
+def test_policy_gate_hardline_terminal_variants_deny_even_when_never(
+    command: str,
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,
@@ -288,7 +394,9 @@ def test_policy_gate_hardline_terminal_variants_deny_even_when_never(command: st
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": command})])
+        gate.evaluate(
+            [ToolCall(id="call:term", name="terminal", arguments={"command": command})]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.DENY
@@ -316,14 +424,18 @@ def test_policy_gate_never_allows_nested_absolute_rm_paths(command: str) -> None
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": command})])
+        gate.evaluate(
+            [ToolCall(id="call:term", name="terminal", arguments={"command": command})]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.ALLOW
 
 
 @pytest.mark.parametrize("action", ["write", "submit"])
-def test_policy_gate_hardline_terminal_process_input_denies_even_when_never(action: str) -> None:
+def test_policy_gate_hardline_terminal_process_input_denies_even_when_never(
+    action: str,
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,
@@ -360,7 +472,9 @@ def test_policy_gate_hardline_terminal_process_input_denies_even_when_never(acti
         ("edit_file", {"path": "x", "old": "a", "new": "b"}),
     ],
 )
-def test_policy_gate_on_request_file_write_tools_wait_for_user(tool_name: str, arguments: dict) -> None:
+def test_policy_gate_on_request_file_write_tools_wait_for_user(
+    tool_name: str, arguments: dict
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.WORKSPACE_GUARDED,
@@ -370,10 +484,17 @@ def test_policy_gate_on_request_file_write_tools_wait_for_user(tool_name: str, a
         inner=AllowAllPermissionGate(),
     )
 
-    decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]))
+    decision = asyncio.run(
+        gate.evaluate(
+            [ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]
+        )
+    )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
-    assert decision.suggested_rules[0] == {"tool": tool_name, "reason": "write_tool_on_request"}
+    assert decision.suggested_rules[0] == {
+        "tool": tool_name,
+        "reason": "write_tool_on_request",
+    }
 
 
 @pytest.mark.parametrize(
@@ -383,7 +504,9 @@ def test_policy_gate_on_request_file_write_tools_wait_for_user(tool_name: str, a
         ("terminal_process", {"action": "kill", "process_id": "terminal-process:fake"}),
     ],
 )
-def test_policy_gate_on_request_terminal_tools_wait_for_user(tool_name: str, arguments: dict) -> None:
+def test_policy_gate_on_request_terminal_tools_wait_for_user(
+    tool_name: str, arguments: dict
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,
@@ -393,14 +516,23 @@ def test_policy_gate_on_request_terminal_tools_wait_for_user(tool_name: str, arg
         inner=AllowAllPermissionGate(),
     )
 
-    decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]))
+    decision = asyncio.run(
+        gate.evaluate(
+            [ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]
+        )
+    )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
-    assert decision.suggested_rules[0] == {"tool": tool_name, "reason": "terminal_on_request"}
+    assert decision.suggested_rules[0] == {
+        "tool": tool_name,
+        "reason": "terminal_on_request",
+    }
 
 
 @pytest.mark.parametrize("action", ["list", "log", "poll", "wait"])
-def test_policy_gate_terminal_process_read_only_actions_do_not_wait_under_ask_or_on_request(action: str) -> None:
+def test_policy_gate_terminal_process_read_only_actions_do_not_wait_under_ask_or_on_request(
+    action: str,
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,
@@ -414,14 +546,18 @@ def test_policy_gate_terminal_process_read_only_actions_do_not_wait_under_ask_or
         arguments.pop("process_id")
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:process", name="terminal_process", arguments=arguments)])
+        gate.evaluate(
+            [ToolCall(id="call:process", name="terminal_process", arguments=arguments)]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.ALLOW
 
 
 @pytest.mark.parametrize("action", ["kill", "write", "submit", "close_stdin"])
-def test_policy_gate_terminal_access_ask_waits_for_side_effect_terminal_process_actions(action: str) -> None:
+def test_policy_gate_terminal_access_ask_waits_for_side_effect_terminal_process_actions(
+    action: str,
+) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,
@@ -435,11 +571,16 @@ def test_policy_gate_terminal_access_ask_waits_for_side_effect_terminal_process_
         arguments["data"] = "printf ok"
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:process", name="terminal_process", arguments=arguments)])
+        gate.evaluate(
+            [ToolCall(id="call:process", name="terminal_process", arguments=arguments)]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
-    assert decision.suggested_rules[0] == {"tool": "terminal_process", "reason": "terminal_access_ask"}
+    assert decision.suggested_rules[0] == {
+        "tool": "terminal_process",
+        "reason": "terminal_access_ask",
+    }
 
 
 def test_policy_gate_terminal_access_ask_takes_precedence_over_on_request() -> None:
@@ -453,11 +594,20 @@ def test_policy_gate_terminal_access_ask_takes_precedence_over_on_request() -> N
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "printf ok"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term", name="terminal", arguments={"command": "printf ok"}
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
-    assert decision.suggested_rules[0] == {"tool": "terminal", "reason": "terminal_access_ask"}
+    assert decision.suggested_rules[0] == {
+        "tool": "terminal",
+        "reason": "terminal_access_ask",
+    }
 
 
 def test_policy_gate_hardline_terminal_command_denies_under_ask() -> None:
@@ -471,7 +621,13 @@ def test_policy_gate_hardline_terminal_command_denies_under_ask() -> None:
     )
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf /"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term", name="terminal", arguments={"command": "rm -rf /"}
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.DENY
@@ -580,14 +736,31 @@ def test_hardline_terminal_denied_under_every_preset(mode: PermissionMode) -> No
     gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
 
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": _HARDLINE_COMMAND})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:term",
+                    name="terminal",
+                    arguments={"command": _HARDLINE_COMMAND},
+                )
+            ]
+        )
     )
 
     assert decision.kind is PermissionDecisionKind.DENY
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS, PermissionMode.BYPASS_PERMISSIONS])
-def test_hardline_terminal_process_input_denied_under_mutating_presets(mode: PermissionMode) -> None:
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PermissionMode.ASK_PERMISSIONS,
+        PermissionMode.ACCEPT_EDITS,
+        PermissionMode.BYPASS_PERMISSIONS,
+    ],
+)
+def test_hardline_terminal_process_input_denied_under_mutating_presets(
+    mode: PermissionMode,
+) -> None:
     gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
 
     decision = asyncio.run(
@@ -596,7 +769,11 @@ def test_hardline_terminal_process_input_denied_under_mutating_presets(mode: Per
                 ToolCall(
                     id="call:process",
                     name="terminal_process",
-                    arguments={"action": "write", "process_id": "terminal-process:fake", "data": _HARDLINE_COMMAND},
+                    arguments={
+                        "action": "write",
+                        "process_id": "terminal-process:fake",
+                        "data": _HARDLINE_COMMAND,
+                    },
                 )
             ]
         )
@@ -609,36 +786,43 @@ def test_hardline_terminal_process_input_denied_under_mutating_presets(mode: Per
 def test_exec_policy_blocks_hardline_independently_of_gate(tmp_path) -> None:
     # The spawn-boundary layer blocks hardline on its own, without any gate.
     from pulsara_agent.runtime.terminal.models import TerminalRequest
-    from pulsara_agent.runtime.terminal.policy import ExecPolicyDecisionKind, TerminalExecPolicy
+    from pulsara_agent.runtime.terminal.policy import (
+        ExecPolicyDecisionKind,
+        TerminalExecPolicy,
+    )
 
     policy = TerminalExecPolicy(tmp_path)
 
-    blocked = policy.evaluate(TerminalRequest(command=_HARDLINE_COMMAND), current_cwd=tmp_path)
-    allowed = policy.evaluate(TerminalRequest(command=_BENIGN_COMMAND), current_cwd=tmp_path)
+    blocked = policy.evaluate(
+        TerminalRequest(command=_HARDLINE_COMMAND), current_cwd=tmp_path
+    )
+    allowed = policy.evaluate(
+        TerminalRequest(command=_BENIGN_COMMAND), current_cwd=tmp_path
+    )
 
     assert blocked.kind is ExecPolicyDecisionKind.BLOCK
     assert blocked.code == "hardline_terminal_command"
     assert allowed.kind is ExecPolicyDecisionKind.ALLOW
 
 
-def test_terminal_process_tool_blocks_hardline_input_independently_of_gate(tmp_path) -> None:
+def test_terminal_process_tool_blocks_hardline_input_independently_of_gate(
+    tmp_path,
+) -> None:
     # The tool-execution layer blocks hardline stdin on its own, even after an
     # approval-resume path that does not re-run the gate.
     import json
 
-    from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
-
-    tool = TerminalProcessTool(
+    result = _execute_terminal_process_for_test(
         tmp_path,
-        permission_state=PermissionState.from_policy(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)),
-    )
-
-    result = tool.execute(
         ToolCall(
             id="call:process",
             name="terminal_process",
-            arguments={"action": "submit", "process_id": "terminal-process:fake", "data": _HARDLINE_COMMAND},
-        )
+            arguments={
+                "action": "submit",
+                "process_id": "terminal-process:fake",
+                "data": _HARDLINE_COMMAND,
+            },
+        ),
     )
     payload = json.loads(result.output)
 
@@ -655,10 +839,12 @@ def test_all_three_layers_share_one_hardline_judgment(monkeypatch, tmp_path) -> 
 
     import pulsara_agent.runtime.permission as permission_mod
     import pulsara_agent.runtime.terminal.policy as policy_mod
-    import pulsara_agent.tools.builtins.terminal_process as process_mod
+    import pulsara_agent.runtime.terminal.tool_port as process_port_mod
     from pulsara_agent.runtime.terminal.models import TerminalRequest
-    from pulsara_agent.runtime.terminal.policy import ExecPolicyDecisionKind, TerminalExecPolicy
-    from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
+    from pulsara_agent.runtime.terminal.policy import (
+        ExecPolicyDecisionKind,
+        TerminalExecPolicy,
+    )
 
     sentinel = "totally_benign_marker_cmd"
 
@@ -667,27 +853,39 @@ def test_all_three_layers_share_one_hardline_judgment(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(permission_mod, "is_hardline_terminal_command", fake_hardline)
     monkeypatch.setattr(policy_mod, "is_hardline_terminal_command", fake_hardline)
-    monkeypatch.setattr(process_mod, "is_hardline_terminal_command", fake_hardline)
+    monkeypatch.setattr(
+        process_port_mod,
+        "is_hardline_terminal_command",
+        fake_hardline,
+    )
 
     # Layer 1: gate
-    gate = PolicyPermissionGate(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS), inner=AllowAllPermissionGate())
+    gate = PolicyPermissionGate(
+        preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        inner=AllowAllPermissionGate(),
+    )
     gate_decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:t", name="terminal", arguments={"command": sentinel})])
+        gate.evaluate(
+            [ToolCall(id="call:t", name="terminal", arguments={"command": sentinel})]
+        )
     )
     # Layer 2: exec policy
-    exec_decision = TerminalExecPolicy(tmp_path).evaluate(TerminalRequest(command=sentinel), current_cwd=tmp_path)
-    # Layer 3: tool write
-    tool = TerminalProcessTool(
-        tmp_path,
-        permission_state=PermissionState.from_policy(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)),
+    exec_decision = TerminalExecPolicy(tmp_path).evaluate(
+        TerminalRequest(command=sentinel), current_cwd=tmp_path
     )
+    # Layer 3: tool write
     tool_payload = json.loads(
-        tool.execute(
+        _execute_terminal_process_for_test(
+            tmp_path,
             ToolCall(
                 id="call:p",
                 name="terminal_process",
-                arguments={"action": "write", "process_id": "terminal-process:fake", "data": sentinel},
-            )
+                arguments={
+                    "action": "write",
+                    "process_id": "terminal-process:fake",
+                    "data": sentinel,
+                },
+            ),
         ).output
     )
 
@@ -707,7 +905,13 @@ def test_permission_state_holder_drives_gate_live() -> None:
 
     # read-only: write denied by the gate (tool still "exists" / is visible).
     before = asyncio.run(
-        gate.evaluate([ToolCall(id="c1", name="write_file", arguments={"path": "x", "content": "y"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="c1", name="write_file", arguments={"path": "x", "content": "y"}
+                )
+            ]
+        )
     )
     assert before.kind is PermissionDecisionKind.DENY
 
@@ -715,7 +919,13 @@ def test_permission_state_holder_drives_gate_live() -> None:
     state.policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
     state.mode = PermissionMode.BYPASS_PERMISSIONS
     after = asyncio.run(
-        gate.evaluate([ToolCall(id="c2", name="write_file", arguments={"path": "x", "content": "y"})])
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="c2", name="write_file", arguments={"path": "x", "content": "y"}
+                )
+            ]
+        )
     )
     assert after.kind is PermissionDecisionKind.ALLOW
 
@@ -726,7 +936,9 @@ def test_permission_state_switch_preserves_hardline_floor() -> None:
     # Switch all the way to bypass; hardline must STILL be denied.
     state.policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="c", name="terminal", arguments={"command": "rm -rf /"})])
+        gate.evaluate(
+            [ToolCall(id="c", name="terminal", arguments={"command": "rm -rf /"})]
+        )
     )
     assert decision.kind is PermissionDecisionKind.DENY
     assert decision.suggested_rules[0]["reason"] == "hardline_terminal_command"
@@ -745,9 +957,17 @@ def test_permission_state_switch_preserves_hardline_floor() -> None:
     ],
 )
 def test_subagent_system_tools_require_bypass_mode(tool_name: str) -> None:
-    for mode in (PermissionMode.READ_ONLY, PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS):
-        gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
-        decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)]))
+    for mode in (
+        PermissionMode.READ_ONLY,
+        PermissionMode.ASK_PERMISSIONS,
+        PermissionMode.ACCEPT_EDITS,
+    ):
+        gate = PolicyPermissionGate(
+            preset_to_policy(mode), inner=AllowAllPermissionGate()
+        )
+        decision = asyncio.run(
+            gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)])
+        )
         assert decision.kind is PermissionDecisionKind.DENY
         assert decision.reason == "subagent_requires_bypass_mode"
 
@@ -755,7 +975,9 @@ def test_subagent_system_tools_require_bypass_mode(tool_name: str) -> None:
         preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         inner=AllowAllPermissionGate(),
     )
-    bypass_decision = asyncio.run(bypass_gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)]))
+    bypass_decision = asyncio.run(
+        bypass_gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)])
+    )
     assert bypass_decision.kind is PermissionDecisionKind.ALLOW
 
 
@@ -792,7 +1014,9 @@ _READ_ONLY_GATE = PolicyPermissionGate(
 
 def _read_only_decision(name: str, arguments: dict | None = None):
     return asyncio.run(
-        _READ_ONLY_GATE.evaluate([ToolCall(id=f"call:{name}", name=name, arguments=arguments or {})])
+        _READ_ONLY_GATE.evaluate(
+            [ToolCall(id=f"call:{name}", name=name, arguments=arguments or {})]
+        )
     )
 
 
@@ -814,7 +1038,15 @@ def test_read_only_denies_remember_tools(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["read_file", "search_files", "artifact_read", "memory_search", "memory_get", "memory_explain", "todo"],
+    [
+        "read_file",
+        "search_files",
+        "artifact_read",
+        "memory_search",
+        "memory_get",
+        "memory_explain",
+        "todo",
+    ],
 )
 def test_read_only_allows_allowlist_tools(name: str) -> None:
     assert _read_only_decision(name).kind is PermissionDecisionKind.ALLOW
@@ -823,9 +1055,14 @@ def test_read_only_allows_allowlist_tools(name: str) -> None:
 def test_read_only_denies_unknown_side_effecting_tool() -> None:
     # fail-closed: a tool not on the allowlist is denied by default, so a future
     # side-effecting tool cannot leak through read-only.
-    assert _read_only_decision("some_future_side_effect_tool").kind is PermissionDecisionKind.DENY
+    assert (
+        _read_only_decision("some_future_side_effect_tool").kind
+        is PermissionDecisionKind.DENY
+    )
 
 
-@pytest.mark.parametrize("name", ["write_file", "edit_file", "terminal", "terminal_process"])
+@pytest.mark.parametrize(
+    "name", ["write_file", "edit_file", "terminal", "terminal_process"]
+)
 def test_read_only_still_denies_write_and_terminal(name: str) -> None:
     assert _read_only_decision(name).kind is PermissionDecisionKind.DENY

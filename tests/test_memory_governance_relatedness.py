@@ -12,7 +12,10 @@ import psycopg
 import pytest
 
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
+from pulsara_agent.primitives.memory_candidate import (
+    PreferenceCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, PostgresMemoryQuery
@@ -170,6 +173,51 @@ def test_relatedness_batches_deduplicated_embedding_and_hides_exact_scores_from_
     internal = result.diagnostics["per_candidate"]["pool:a"]["internal_scores"]
     assert internal["preference:egg-tart"]["dense"] > 0.9
     assert result.diagnostics["same_batch_lifecycle_deferred"] is True
+
+
+def test_relatedness_exact_duplicate_uses_shared_candidate_semantic() -> None:
+    view = _view("preference:case-sensitive", "Likes  Tea")
+    service = _service([view], embedding=_Embedding())
+
+    result = asyncio.run(
+        service.collect_batch(
+            [_candidate("pool:case-sensitive", " likes tea ")],
+            graph_id="graph:test",
+        )
+    )
+
+    related = result.for_candidate("pool:case-sensitive").memories[0]
+    assert related.is_exact_duplicate is False
+    assert "exact" not in related.match_channels
+
+
+def test_relatedness_rejects_candidate_payload_semantic_drift() -> None:
+    candidate = _candidate("pool:drift", "Likes tea")
+    drifted = candidate.model_copy(
+        update={
+            "payload": ValidCandidatePayload(
+                candidate=PreferenceCandidate(
+                    candidate_id="candidate:pool:drift",
+                    statement="Likes coffee",
+                    scope="ctx:user",
+                    source_authority=(
+                        memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION
+                    ),
+                    verification_status=(
+                        memory.VerificationStatus.USER_CONFIRMED
+                    ),
+                )
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="shared semantic identity drifted"):
+        asyncio.run(
+            _service([], embedding=None).collect_batch(
+                [drifted],
+                graph_id="graph:test",
+            )
+        )
 
 
 def test_relatedness_labeled_semantic_fixture_meets_recall_at_k_gate() -> None:
