@@ -1,6 +1,6 @@
 # Pulsara Schema Hot-Path Hard Cut 实施规格
 
-> 状态：Implementation-ready
+> 状态：**D1 CLOSED**（reset-only V1；生产实现与 DoD 已核验）
 > 日期：2026-07-22
 > 代码基线：`main@dca11e75a150489a6fe167a39cd92189ca51b84d`
 > 上游审计：`PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md` 第 12 节

@@ -68,6 +68,7 @@ def test_cme5_dod_evidence_matches_frozen_suite() -> None:
     repository_root = DEFAULT_SUITE_ROOT.parents[3]
     implementation_spec = (
         repository_root
+        / "archived_docs"
         / "PULSARA_POST_COMPACTION_MEMORY_EXTRACTION_HARD_CUT_IMPLEMENTATION.zh.md"
     ).read_text(encoding="utf-8")
     dod = implementation_spec.split("## 22. Definition of Done", 1)[1].split(
@@ -77,7 +78,9 @@ def test_cme5_dod_evidence_matches_frozen_suite() -> None:
     assert "D5 CLOSED" in implementation_spec.splitlines()[2]
 
     debt = (
-        repository_root / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
+        repository_root
+        / "archived_docs"
+        / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
     ).read_text(encoding="utf-8")
     assert "### D5：Compaction-memory extension（`CLOSED`）" in debt
 
@@ -163,6 +166,7 @@ def test_d6_dod_evidence_matches_ownership_hard_cut() -> None:
     repository_root = DEFAULT_SUITE_ROOT.parents[3]
     implementation_spec = (
         repository_root
+        / "archived_docs"
         / "PULSARA_AGENT_RUNTIME_AND_HOST_SESSION_OWNERSHIP_HARD_CUT_IMPLEMENTATION.zh.md"
     ).read_text(encoding="utf-8")
     dod = implementation_spec.split("## 22. Definition of Done", 1)[1].split(
@@ -172,7 +176,9 @@ def test_d6_dod_evidence_matches_ownership_hard_cut() -> None:
     assert "D6 CLOSED" in implementation_spec.splitlines()[2]
 
     debt = (
-        repository_root / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
+        repository_root
+        / "archived_docs"
+        / "PULSARA_RUNTIME_ARCHITECTURE_DEBT_REBASE.zh.md"
     ).read_text(encoding="utf-8")
     assert "### D6：AgentRuntime/HostSession ownership 拆分（`CLOSED`）" in debt
 

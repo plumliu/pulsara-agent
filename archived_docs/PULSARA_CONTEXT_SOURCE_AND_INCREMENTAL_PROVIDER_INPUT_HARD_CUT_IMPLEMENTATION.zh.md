@@ -1,12 +1,14 @@
 # Pulsara ContextSource 与 Incremental ProviderInput 两阶段 Hard Cut 实施规格
 
-> 状态：下一阶段权威实施规格草案，待 review 后冻结。
+> 状态：**SUPERSEDED / CLOSED（2026-07-31）**。ContextSource ownership 与
+> incremental ProviderInput generation 已完成 production hard cut；因果顺序及
+> runtime-observation 条款随后由对应 P1 hard-cut 规格收紧。本文仅保留历史实施背景。
 >
 > 记录日期：2026-07-19。
 >
-> 本文取代 `PULSARA_NEXT_FIVE_HARD_CUT_STAGES_PLAN.zh.md` 中原阶段五、阶段六的实施顺序；旧文仍保留历史背景。
+> 本文取代 `archived_docs/PULSARA_NEXT_FIVE_HARD_CUT_STAGES_PLAN.zh.md` 中原阶段五、阶段六的实施顺序；旧文仍保留历史背景。
 >
-> 本文同时取代 `PULSARA_PROMPT_CACHE_CONTRACT.zh.md` 中“可变 suffix 每轮重建”的 lane 设计与旧 PR 顺序；其中 cache 不是 authority、完整本地输入、禁止 remote continuation、usage 只作观察等原则继续有效。
+> 本文同时取代 `archived_docs/PULSARA_PROMPT_CACHE_CONTRACT.zh.md` 中“可变 suffix 每轮重建”的 lane 设计与旧 PR 顺序；其中 cache 不是 authority、完整本地输入、禁止 remote continuation、usage 只作观察等原则继续有效。
 >
 > **后续因果顺序hard cut（2026-07-19）：** ordered transcript projection、context frame placement、
 > strict-prefix frontier、pending continuation exact join与rollover authority的最终契约由

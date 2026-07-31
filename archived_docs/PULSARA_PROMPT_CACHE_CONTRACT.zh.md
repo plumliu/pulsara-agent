@@ -1,6 +1,9 @@
 # Pulsara Prompt Cache Contract
 
-> 状态：设计草案，作为 ResolvedModelCall hard-cut 之后的候选大章。
+> 状态：**SUPERSEDED / CLOSED（2026-07-31）**。稳定 provider-visible prefix、
+> append-only ProviderInput generation、prefix continuity、cached usage观测与
+> remote continuation禁令均已由后续 ContextSource、ProviderInput 与 ROAC hard cut
+> 接管并落地；本文仅保留为历史设计背景。
 >
 > 本文不阻塞当前 code review、修复与验证；当前不修改 runtime 行为。
 >
@@ -15,6 +18,10 @@
 > **ROAC hard cut（2026-07-20）：** 动态事实不再以mid-history system/developer hint发送。Human input、runtime request与runtime observation使用三种typed
 > user-wire envelope；clock按调用追加，memory/capability相同semantic snapshot为no-op，变化时追加完整replacement。Standalone `auxiliary_frame_rebase`已删除；只有root/tool/
 > compatibility变化、typed source-disposition rewrite或confirmed Long-Horizon rewrite允许重建generation。每个historical replacement head必须有显式retain/replace/empty/terminal/rewrite disposition；absence不是删除。API对象prefix与adapter-final token-template cache命中必须分别观测。
+>
+> 显式 provider cache hint 从始至终只是可选扩展，并非当前高命中率上下文设计的
+> correctness 或性能前提。若未来启用，应以 provider-specific adapter contract
+> 单独立项，不再继续本文的旧 lane/PR 设计。
 
 ## 0. 目标
 

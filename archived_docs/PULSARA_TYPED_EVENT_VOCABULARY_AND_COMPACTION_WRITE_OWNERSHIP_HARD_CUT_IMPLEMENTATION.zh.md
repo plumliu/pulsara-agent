@@ -1,6 +1,6 @@
 # Pulsara Typed Event Vocabulary 与 Compaction Write Ownership Hard Cut 实施规格
 
-状态：**IMPLEMENTATION READY**
+状态：**EV0–EV4 已实施，D2 CLOSED**
 
 本文冻结下一阶段 event vocabulary 与 compaction write ownership 的一次性硬切：
 

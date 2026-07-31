@@ -1153,7 +1153,7 @@ MCP installed snapshot
 - `PULSARA_MCP_STARTUP_LATENCY_NOTE.zh.md`：保留为问题与实测记录；
 - `PULSARA_MCP_STARTUP_LATENCY_HARD_CUT_IMPLEMENTATION.zh.md`：阶段一唯一实施规格；
 - `archived_docs/PULSARA_HOST_RUN_BOUNDARY_SAFE_POINT_HARD_CUT_IMPLEMENTATION.zh.md`：已完成的阶段二实施规格；
-- `ARCHITECTURE_DEBT_AUDIT.zh.md`：记录阶段二、三、五的债务来源；
+- `ARCHITECTURE_DEBT_AUDIT_2026-07-10.zh.md`：记录阶段二、三、五的债务来源；
 - `PULSARA_LONG_HORIZON_BUDGET_PRIOR_ART_RESEARCH.zh.md`：阶段四研究输入，实施前另写hard-cut规格；
 - `PULSARA_PROMPT_CACHE_CONTRACT.zh.md`：阶段六产品契约，实施前按阶段二至五最终DTO校准。
 

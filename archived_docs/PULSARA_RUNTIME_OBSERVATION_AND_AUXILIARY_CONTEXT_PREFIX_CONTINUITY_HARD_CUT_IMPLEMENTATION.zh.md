@@ -1,6 +1,8 @@
 # Pulsara Human/Runtime User Carrier、Runtime Observation 与 Auxiliary Context Prefix Continuity P1 Hard Cut 实施规格
 
-> 状态：供 reviewer 反向审阅的实施规格草案；完成 review 前，不得继续宣称 DeepSeek provider token-prefix continuity 已闭环。
+> 状态：**CLOSED（2026-07-31）**。ROAC0–ROAC5 的 typed user carrier、
+> runtime-observation lifecycle、prefix continuity 与 auxiliary rebase 删除均已进入
+> production、长期合同和 architecture gates；本文仅保留历史实施与实验背景。
 >
 > 记录日期：2026-07-20。
 >
@@ -8,7 +10,7 @@
 >
 > - `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
 > - `PULSARA_PROVIDER_INPUT_CAUSAL_ORDER_AND_PREFIX_CONTINUITY_HARD_CUT_IMPLEMENTATION.zh.md`
-> - `PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
+> - `archived_docs/PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
 >
 > 凡涉及 human-input/runtime-request/runtime-observation user carrier、mid-history `system` / `developer` hint、runtime clock、memory/capability complete snapshot、lifecycle note、`auxiliary_frame_rebase` 与 provider token-prefix continuity 的条款，以本文为准。
 
@@ -2752,7 +2754,7 @@ Inspector必须展示：
   - source head restart restore。
 - `contracts/INSPECTOR_PROJECTION_CONTRACT.zh.md`
   - internal role、wire role、prefix observation和rollover authority。
-- `PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
+- `archived_docs/PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
   - API-array prefix与adapter-final token-template prefix的区别。
 - `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
   - memory/capability semantic no-op与clock append-once。
@@ -2762,7 +2764,7 @@ Inspector必须展示：
   - mid-history privileged role禁令；
   - runtime-observation rewrite与transcript compaction/current tail使用同一ordered projection validator；
   - generation-neutral observation causal placement与bounded partition proof。
-- `PULSARA_LONG_HORIZON_CONTEXT_WINDOWS_HARD_CUT_IMPLEMENTATION.zh.md`
+- `archived_docs/PULSARA_LONG_HORIZON_CONTEXT_WINDOWS_HARD_CUT_IMPLEMENTATION.zh.md`
   - 删除V1“runtime observation是inert、非user carrier”定义；
   - 将runtime-observation projection纳入typed rewrite domain；
   - 冻结latest effective head/current run/latest clock/unclosed lifecycle的protection matrix；

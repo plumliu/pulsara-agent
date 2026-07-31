@@ -1,6 +1,8 @@
 # Pulsara ProviderInput 因果顺序与 Prefix Continuity P1 Hard Cut 实施规格
 
-> 状态：紧急 P1 修复规格草案，完成 review 前阻止继续宣称 Incremental ProviderInput 已闭环。
+> 状态：**SUPERSEDED / CLOSED（2026-07-31）**。Ordered transcript、causal
+> placement 与 strict-prefix hard cut 已落地；动态 non-root carrier、rollover
+> matrix 与 `auxiliary_frame_rebase` 删除由后续 ROAC 规格最终收口。本文仅保留历史实施背景。
 >
 > 记录日期：2026-07-19。
 >
@@ -1712,7 +1714,7 @@ Real provider cache只作观察性验收。语义与因果测试是硬gate，不
 - `contracts/EVENT_LOG_STORAGE_CONTRACT.zh.md`
 - `contracts/RECOVERY_CONTRACT.zh.md`
 - `contracts/INSPECTOR_PROJECTION_CONTRACT.zh.md`
-- `PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
+- `archived_docs/PULSARA_PROMPT_CACHE_CONTRACT.zh.md`
 - `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
 
 ---

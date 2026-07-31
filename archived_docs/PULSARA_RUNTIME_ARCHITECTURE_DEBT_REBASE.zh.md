@@ -2,8 +2,9 @@
 
 > 审计日期：2026-07-22
 > D5 完成复核：2026-07-28
+> D6 完成复核：2026-07-29；D1–D6 全部 CLOSED
 > 代码基线：`main@dca11e75a150489a6fe167a39cd92189ca51b84d`
-> 原始来源：`ARCHITECTURE_DEBT_AUDIT.zh.md` 第 14 节依赖表的后半部分
+> 原始来源：`ARCHITECTURE_DEBT_AUDIT_2026-07-10.zh.md` 第 14 节依赖表的后半部分
 > 范围：从 `Async LiveRuntimeEventWriter` 到 `Compaction-memory extension`
 
 ## 1. 目的
@@ -39,7 +40,7 @@
 | CustomEvent typed 化 | `CLOSED` | 7 个 production事实及 MCP closure已 typed；`CustomEvent`/`EventType.CUSTOM`与旧 decoder已物理删除 | 已完成 |
 | Hook/outbox 重构 | `CLOSED` | timeline/evidence、canonical mutation surfaces、seed repair、shutdown physical owner与eventual working-context均由durable owner闭环 | 已完成 |
 | Runtime dependency-cycle cleanup | `CLOSED`（D4 scope） | target DAG、ports、test-support、durable Host与facade hard cut已闭环；剩余全局SCC仅作为D6 diagnostic baseline | 已完成 |
-| AgentRuntime coordinator 拆分 | `OPEN`，已有基础 | `RunWorkingSet` 与若干 coordinator 已出现，但 production scratchpad 和大范围 orchestration 仍集中 | 中后期 |
+| AgentRuntime coordinator 拆分 | `CLOSED` | stable RunOwner、per-activation coordinator、opaque Host outcome、shared Host/child registry与scratchpad hard cut已闭环 | 已完成 |
 | 删除 legacy MCP / in-memory product mode | `CLOSED` | legacy transport、production mock、`durable=False`与in-memory product composition均已删除；fake world只在tests/support | 已完成 |
 | Schema hot-path hard cut | `CLOSED` | migration registry/ledger、verify-only startup与verified connection provider已落地；constructor/UOW DDL及raw-DSN adapter入口已删除 | 已完成 |
 | Compaction-memory extension | `CLOSED` | summary 与 extraction 已拆为两次调用；Call B 由 durable job、exact human evidence、budget、RESULT_READY 与 governance 完整拥有 | 已完成 |
@@ -272,7 +273,7 @@ Compaction candidate projection outbox属于D5，不因D3关闭而自动关闭�
 sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 ```
 
-该 baseline 中仍存在跨 `runtime/llm/memory/host/storage/graph/event_log/capability` 的全局 SCC。D5 已删除其负责的旧边并阻止新增 residual edge；剩余部分属于 D6 AgentRuntime/HostSession ownership 拆分。D4/D5 的关闭不宣称全仓库跨 package SCC 已消除，也不得重新引入 lazy facade。
+该历史 baseline 中仍存在跨 `runtime/llm/memory/host/storage/graph/event_log/capability` 的全局 SCC。D5 删除了其负责的旧边并阻止新增 residual edge；随后 D6 完成 AgentRuntime/HostSession ownership 拆分并将 canonical cross-package SCC observation 清零。不得重新引入 lazy facade。
 
 ### 9.3 验证结果
 
@@ -286,7 +287,9 @@ sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 
 ## 10. AgentRuntime coordinator 拆分
 
-### 10.1 当前进展
+状态：**CLOSED（2026-07-29，D6-0–D6-5）**。
+
+### 10.1 D6 前的代码真值（历史基线）
 
 原审计建议先建立 typed `RunWorkingSet`。这一步已经部分完成：
 
@@ -295,7 +298,7 @@ sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 
 这说明拆分不应从零开始，也不应另建一组与现有 coordinator 重叠的 service。
 
-### 10.2 仍然存在的债务
+### 10.2 D6 前仍存在的债务（历史基线）
 
 当前规模为：
 
@@ -313,7 +316,7 @@ sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 
 这些字段跨 HostSession 和 AgentRuntime 读写，没有统一 schema、generation 或 invalidation owner。现有大函数也同时处理 compile、model step、tool terminalization、pending interaction、compaction 和 run finalization。
 
-### 10.3 重基线后的切法
+### 10.3 已实施的切法
 
 先迁移 owner，再移动控制流：
 
@@ -345,7 +348,9 @@ sha256:3714e6d2b587364c3636a249feb2fc6d2171edfc2f5c802278e957562e7126cc
 - coordinator 不直接依赖 HostSession 或全能 RuntimeSession facade；
 - AgentRuntime/HostSession 缩小是 ownership 迁移的结果，不是独立 KPI。
 
-结论：**仍是 OPEN，但应位于 dependency/ports 之后，不是下一项最先动手的债务。**
+结论：**D6 CLOSED。** 最终实现与机器证据见
+`PULSARA_AGENT_RUNTIME_AND_HOST_SESSION_OWNERSHIP_HARD_CUT_IMPLEMENTATION.zh.md`
+及 `benchmarks/suites/core/v1/d6_dod_evidence.json`。
 
 ## 11. Legacy MCP / in-memory product mode
 
@@ -486,11 +491,11 @@ Governance same-UOW 不再位于待办图中；它是已经完成的 outbox owne
 
 ### D0：更新 architecture guards 与旧审计状态
 
-- 在 `ARCHITECTURE_DEBT_AUDIT.zh.md` 或债务索引中把 writer/governance状态标记为已重基线；
+- 在 `ARCHITECTURE_DEBT_AUDIT_2026-07-10.zh.md` 或债务索引中把 writer/governance状态标记为已重基线；
 - guard direct EventLog write、production CustomEvent 和 package dependency新增边；
 - 避免后续 PR按旧依赖表重复建设。
 
-### D1：Schema hot-path hard cut（已完成）
+### D1：Schema hot-path hard cut（`CLOSED`）
 
 Migration ledger/runner/CLI、verify-only startup、verified connection provider、runtime DDL删除与受限role gate已经落地。后续durable hook schema直接在该registry上增加migration。
 
@@ -592,15 +597,15 @@ candidate producer FULL前的 crash-to-durable-owner窗口也未因此关闭。
 
 ## 17. 最终裁决
 
-依赖表后半部分的九项工作，当前不能按“九项都未做”处理：
+依赖表后半部分的九项工作已经完成最终重基线：
 
 - **1 项已被更合适的方案替代并闭环**：Governance events 同 UOW；
 - **1 项 correctness 已完成，仅保留独立性能门控**：Async LiveRuntimeEventWriter；
-- **2 项由D4一并关闭**：target dependency/test-support hard cut，以及legacy MCP/in-memory product mode；
-- **1 项仍是有效债务**：AgentRuntime/HostSession ownership拆分。
+- **7 项已完成 correctness hard cut**：typed event vocabulary、durable hook/projection jobs、
+  dependency/test-support、AgentRuntime/HostSession ownership、legacy MCP/in-memory product
+  mode、schema hot path 与 compaction-memory extension。
 
-Schema hot-path、D2 event vocabulary/writer尾巴、D3 durable projection jobs、D4 dependency/test-support
-hard cut与D5 post-compaction memory extraction均已完成。下一项是D6；D4冻结且经D5向下收缩的
-global SCC baseline继续作为D6新增依赖的阻断基线。
+因此 D1–D6 全部 `CLOSED`，本 rebase 不再保留 correctness 待办。D4/D6 architecture
+gate与原生 async PostgreSQL 的独立性能门控继续作为长期回归约束，而不是新的债务阶段。
 
-这份重基线的目的不是减少债务数量，而是把工程投入重新对准仍然存在的风险。
+这份重基线及其逐阶段实施规格至此转为历史审计记录。

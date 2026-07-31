@@ -1,16 +1,19 @@
 # Pulsara Context Evidence Cursor 性能优化实施规格
 
-> 状态：EC0–EC3 已完成；EC4 benchmark、live diagnostics 与最终性能验收待实施
+> 状态：**PARTIALLY CLOSED（2026-07-31）**。EC0–EC3 correctness 与 production
+> ownership hard cut 已完成；EC4 benchmark、live diagnostics 与可归因的最终性能验收
+> 尚未完成，继续作为非 correctness 阻塞的性能收口项保留。
 >
 > 日期：2026-07-17
 >
-> 前置：`PULSARA_AUTHORITY_MATERIALIZATION_AND_LOSSLESS_TRANSCRIPT_PROJECTION_DESIGN.zh.md`
+> 前置：`archived_docs/PULSARA_AUTHORITY_MATERIALIZATION_AND_LOSSLESS_TRANSCRIPT_PROJECTION_DESIGN.zh.md`
 >
-> 性能计划：`PULSARA_POST_STAGE4_RUNTIME_PERFORMANCE_OPTIMIZATION_PLAN.zh.md`
+> 性能计划：`archived_docs/PULSARA_POST_STAGE4_RUNTIME_PERFORMANCE_OPTIMIZATION_PLAN.zh.md`
 >
 > 基线：`benchmarks/durable-runtime/baselines/v1/context-suite-7e9a484d/`
 >
-> 后续：Stage 5 `ContextSource Ownership Hard Cut`
+> 后续（已完成并归档）：
+> `archived_docs/PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
 
 ---
 
