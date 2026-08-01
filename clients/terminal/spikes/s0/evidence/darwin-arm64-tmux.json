@@ -1,0 +1,12 @@
+{
+  "status": "pass",
+  "tmux_version": "tmux 3.6a",
+  "alternate_screen_entered": true,
+  "alternate_screen_restored": true,
+  "bracketed_paste_entered": true,
+  "bracketed_paste_restored": true,
+  "mouse_cell_motion_entered": true,
+  "mouse_cell_motion_restored": true,
+  "large_paste_bytes": 1048576,
+  "resize_matrix": ["80x24", "120x32", "160x40", "12x4"]
+}

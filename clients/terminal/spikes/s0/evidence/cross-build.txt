@@ -1,0 +1,9 @@
+pulsara-tui-s0 s0-v2.0.6
+pulsara-tui-s0-darwin-amd64: Mach-O 64-bit executable x86_64
+pulsara-tui-s0-darwin-arm64: Mach-O 64-bit executable arm64
+pulsara-tui-s0-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=lPzauyP1T8wbC_LlLMV-/nDpumFkMPjge7WpWM3MY/GRgusKSi6Jo1g20nPwqf/3FmzuERBSV0JCJsubUhR, BuildID[sha1]=cd197d229916cda8707e436c3bd89c1ef1b6c325, stripped
+pulsara-tui-s0-linux-arm64: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=sq8IxupKIhx8iJ5IQ6Ah/YDpRNMiEcYdY9MuLbwPp/crPn8EJ8vzUCfhfjQDjj/cbt9YxWXPnqXaahyWaPj, BuildID[sha1]=def26ca8a66d0c5f53679dabe33b301ae2e65f81, stripped
+b5de36462305d8de819ef5ff3b561f8fc8c09e03f6474b599e63e9738ba2b319  pulsara-tui-s0-darwin-amd64
+9ae1957c55f22c3c5c1406d7f36e6ff1b52a89a2839c67443b87a1fda778b155  pulsara-tui-s0-darwin-arm64
+b8ece1c29c80669caa3f85e6492b1297f26e69c32a893bd60600b0ec7854f965  pulsara-tui-s0-linux-amd64
+d1db316fadccf8596ce09ac267a0ee4308d1c87939de0292312e221cbd84e31a  pulsara-tui-s0-linux-arm64

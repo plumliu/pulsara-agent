@@ -821,7 +821,8 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 | INFRA-5C | controller、closed mutation、durable receipt/query | IMPLEMENTED |
 | INFRA-5D | interaction、secret lease/reveal/submit/revoke | IMPLEMENTED |
 | INFRA-5E | test-only Python headless attach/snapshot/delta/page/GAP/command/detach conformance | IMPLEMENTED |
-| TUI-BT-S0/S1-S6 | Go process supervision、TTY、renderer、cross-language packaging | DEFERRED |
+| TUI-BT-S0 | 隔离Go/Python process、TTY、framework与cross-build feasibility spike | IN PROGRESS；不连接本协议的production adapter |
+| TUI-BT-S1-S6 | production Go process supervision、TTY renderer与cross-language client packaging | DEFERRED |
 
 ## 14. Tests与gate
 

@@ -1,6 +1,6 @@
 # Pulsara Bubble Tea v2 Terminal Client Hard-Cut 实施规格
 
-> 状态：DEFERRED；S0 feasibility、全部`TUI-BT-*`、Go packaging与默认TTY activation均不属于当前renderer-neutral Python infrastructure hard cut，且不得在本轮完成证据中标记为已实现。
+> 状态：S0 IN PROGRESS（2026-08-01：隔离自动化smoke、20次CPU/RSS/render-jitter基线与真实远程SSH host通过，真实IME/attached tmux/非native clean runner仍待人工证据）；S1-S6、production接线与默认TTY activation继续`DEFERRED`。
 > Requirement namespace：`TUI-BT-*`
 > 唯一owner：Go Terminal client的TTY、Model/Update/View、layout、composer与distribution
 > Wire contract：`PULSARA_TERMINAL_CLIENT_PROTOCOL_CONTRACT.zh.md`
@@ -129,6 +129,46 @@ Bubble Tea `v2.0.6`包含wide-character修复，因此S0必须锁定该版本或
 - signal ownership探针证明Go UI action不会直接cancel Python run owner。
 
 任一阻断项失败即停止S1+ production接线，并在产品基线记录结论。
+
+### TUI-BT-S0-004 当前实施与证据
+
+S0 disposable module位于`clients/terminal/spikes/s0/`。它拥有独立`go.mod`和fake Protobuf schema，只通过继承FD连接Python parent probe，不import或连接production Runtime、EventLog、Terminal client protocol或secret owner。该目录不得成为S1 production module的compatibility facade；S0完成后可以整体删除。
+
+2026-08-01自动化smoke结果：
+
+| 能力 | 当前结论 | 证据边界 |
+|---|---|---|
+| dependency pin | PASS | Bubble Tea `v2.0.6`、Bubbles `v2.1.0`、Lip Gloss `v2.0.5`进入`go.mod`/`go.sum`和runtime build info |
+| CJK/wide rune | PARTIAL | 已组合UTF-8、emoji、wide-rune cursor/edit通过；真实macOS IME pre-edit/candidate提交仍须人工 |
+| textarea/cursor | PASS | multiline、dynamic height、Home/End/跨行与wide-rune边界、Shift+Enter typed path及Ctrl+J fallback通过 |
+| undo | FEASIBLE WITH CLIENT OWNER | Bubbles textarea无native undo stack；spike的bounded client-owned wrapper通过，S3不得把undo authority假设给framework |
+| paste | AUTOMATED PASS / MANUAL PARTIAL | small、cancel boundary、1 MiB bracketed paste和非resident large-paste path通过；真实terminal手工取消仍待记录 |
+| concurrent stream | PASS | fake Protobuf 20Hz/100Hz各20次、合计40条轨迹均保持完整draft与exact delta count；per-run keypress p95的跨run p95分别为20.227ms/20.418ms |
+| CPU/RSS/render cadence | PASS | 每档20次；1s warm-up、3s active window、10Hz process sampling、每轮20个keypress probe；20Hz/100Hz CPU average跨run p95为4.500%/10.039%，RSS全局peak为15.578/16.828MiB，physical renderer write interval p99的跨run p95为87.701ms/45.035ms |
+| resize | PASS | unit与tmux覆盖80/120/160列、12x4极端窗口和连续resize |
+| tmux | AUTOMATED PASS / ATTACHED PENDING | tmux 3.6a detached PTY验证alternate screen、bracketed paste和restore；真实attached client/IME仍待记录 |
+| SSH | REAL REMOTE PASS | macOS OpenSSH → Windows OpenSSH/ConPTY → WSL2 Linux x86_64真实主机链路通过；UTF-8、`TERM=xterm-256color`、CJK、alternate-screen、20次keypress p95/p99 98.972/100.636ms、abrupt disconnect后remote process退出、parent emergency restore和reconnect均已验证 |
+| crash/signal | PASS | normal、panic、SIGTERM、SIGINT均由child恢复；SIGKILL由Python parent emergency restore；parent operation持续存活 |
+| packaging | PARTIAL | darwin/linux amd64/arm64交叉构建、checksum、dependency inspection和native darwin/arm64 launch通过；其余target clean runner launch待补 |
+
+机器证据与复现入口：
+
+- `clients/terminal/spikes/s0/evidence/darwin-arm64-pty.json`
+- `clients/terminal/spikes/s0/evidence/darwin-arm64-tmux.json`
+- `clients/terminal/spikes/s0/evidence/docker-ssh-arm64.json`
+- `clients/terminal/spikes/s0/evidence/real-ssh-plumliuwin-wsl2-amd64.json`
+- `clients/terminal/spikes/s0/evidence/cross-build.txt`
+- `clients/terminal/spikes/s0/evidence/darwin-arm64-performance.json`
+- `clients/terminal/spikes/s0/evidence/darwin-arm64-performance.md`
+- `clients/terminal/spikes/s0/scripts/run_automated.sh`
+- `clients/terminal/spikes/s0/scripts/run_performance.sh`
+- `clients/terminal/spikes/s0/scripts/real_ssh_smoke.sh`
+
+性能基线固定使用nearest-rank percentile；renderer cadence量的是Bubble Tea最终PTY output writer的non-empty physical write，不把Python PTY read分包或terminal display refresh冒充framework frame。Feasibility gate冻结为：keypress p95/p99不超过50/100ms、stream delivery p95不超过10ms、renderer write interval p99不超过100ms、jitter(`p95 - p50`)不超过50ms、CPU average跨run p95在20Hz/100Hz下不超过25%/50%单核、CPU interval peak不超过150%、RSS peak不超过128MiB、每轮首尾quartile median growth绝对值不超过16MiB；跨run`p95 - p05`允许方差分别为keypress p95不超过25ms、CPU average不超过20 percentage points、RSS steady p95不超过16MiB、renderer interval p95不超过25ms。40条轨迹的correctness invariant与统计gate全部通过，raw per-run summary和全部check保存在JSON证据中；这些是S0 feasibility guard，不是production SLO。
+
+真实SSH fixture上传现有`linux/amd64` artifact并核对SHA-256，不把Windows加入production packaging target；远端运行面明确位于WSL2。远程latency gate独立冻结为first frame不超过3s、20个probe的keypress p95/p99不超过150/250ms；不错误复用本机50/100ms gate。测试结束后对remote process、WSL `/tmp` binary与Windows staging file逐项验证不存在。该自动化关闭真实host/network/PTY/reconnect项，但不冒充macOS真实IME候选窗口或terminal emulator视觉检查。
+
+当前总判定仍为`PARTIAL`，不得据此启动S1 production接线。只有真实IME、attached tmux与四target clean-runner launch补齐后，才能把S0改为`PASS`。
 
 ## 4. Bubble Tea lifecycle
 

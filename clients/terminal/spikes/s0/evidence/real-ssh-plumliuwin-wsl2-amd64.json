@@ -1,0 +1,62 @@
+{
+  "abrupt_disconnect": {
+    "emergency_restore_used": true,
+    "local_ssh_returncode": -9,
+    "remote_process_exited": true,
+    "status": "pass",
+    "terminal_restored_by_ssh": false,
+    "terminal_was_raw": true
+  },
+  "binary": {
+    "remote_digest_matched": true,
+    "sha256": "b8ece1c29c80669caa3f85e6492b1297f26e69c32a893bd60600b0ec7854f965",
+    "target": "linux/amd64"
+  },
+  "interactive": {
+    "alternate_screen_entered": true,
+    "alternate_screen_restored": true,
+    "bracketed_paste_entered": true,
+    "bracketed_paste_restored": true,
+    "cjk_input_visible": true,
+    "keypress_latency_ms": {
+      "max": 100.636,
+      "p05": 13.829,
+      "p50": 27.374,
+      "p95": 98.972,
+      "p99": 100.636,
+      "sample_count": 20
+    },
+    "latency_gate": {
+      "checks": {
+        "keypress_p95": true,
+        "keypress_p99": true,
+        "startup": true
+      },
+      "status": "pass",
+      "thresholds": {
+        "keypress_p95_ms": 150.0,
+        "keypress_p99_ms": 250.0,
+        "startup_ms": 3000.0
+      }
+    },
+    "startup_ms": 403.669,
+    "status": "pass",
+    "terminal_restored": true,
+    "terminal_was_raw": true,
+    "total_elapsed_ms": 1212.38
+  },
+  "reconnect_version": "pulsara-tui-s0 s0-v2.0.6",
+  "remote_hostname": "plumliuwin",
+  "remote_identity": "plumliuwin\\plumlocal",
+  "remote_runtime": {
+    "locale_charmap": "UTF-8",
+    "term": "xterm-256color",
+    "uname": "Linux 6.6.87.2-microsoft-standard-WSL2 x86_64 GNU/Linux",
+    "user": "plumlocal"
+  },
+  "remote_staging_cleaned": true,
+  "schema_version": "pulsara.terminal.s0.real-ssh-result.v1",
+  "status": "pass",
+  "target": "plumlocal@plumliuwin.local",
+  "transport": "macOS OpenSSH -> Windows OpenSSH/ConPTY -> WSL2 Linux"
+}

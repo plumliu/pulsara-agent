@@ -1,0 +1,121 @@
+{
+  "binary": "pulsara-tui-s0",
+  "concurrent_stream": {
+    "100hz": {
+      "delta_count": 300,
+      "delta_rate_hz": 100,
+      "draft_sha256": "714d9b6e668727e83465e05434d6d97555575cb31793d9e564b6a93d2be2724b",
+      "go_metrics": {
+        "dependencies": {
+          "charm.land/bubbles/v2": "v2.1.0",
+          "charm.land/bubbletea/v2": "v2.0.6",
+          "charm.land/lipgloss/v2": "v2.0.5",
+          "google.golang.org/protobuf": "v1.36.11"
+        },
+        "metrics": {
+          "delivery_max_micros": 595,
+          "delivery_p50_micros": 114,
+          "delivery_p95_micros": 219,
+          "delivery_p99_micros": 392,
+          "delivery_sample_count": 300,
+          "delta_count": 300,
+          "draft": "持续输入中文🙂ASCII①②③④⑤⑥⑦⑧⑨⑩small-paste\nline-2",
+          "draft_sha256": "714d9b6e668727e83465e05434d6d97555575cb31793d9e564b6a93d2be2724b",
+          "height": 32,
+          "keyboard_disambiguated": false,
+          "large_paste_bytes": 1048576,
+          "large_paste_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b",
+          "last_action": "normal_quit",
+          "last_delta_sequence": 300,
+          "width": 120
+        },
+        "outcome": "completed",
+        "version": "s0-v2.0.6"
+      },
+      "keypress_max_ms": 17.328,
+      "keypress_p95_ms": 17.328,
+      "large_paste_ms": 132.264,
+      "status": "pass"
+    },
+    "20hz": {
+      "delta_count": 60,
+      "delta_rate_hz": 20,
+      "draft_sha256": "714d9b6e668727e83465e05434d6d97555575cb31793d9e564b6a93d2be2724b",
+      "go_metrics": {
+        "dependencies": {
+          "charm.land/bubbles/v2": "v2.1.0",
+          "charm.land/bubbletea/v2": "v2.0.6",
+          "charm.land/lipgloss/v2": "v2.0.5",
+          "google.golang.org/protobuf": "v1.36.11"
+        },
+        "metrics": {
+          "delivery_max_micros": 11282,
+          "delivery_p50_micros": 149,
+          "delivery_p95_micros": 1196,
+          "delivery_p99_micros": 11282,
+          "delivery_sample_count": 60,
+          "delta_count": 60,
+          "draft": "持续输入中文🙂ASCII①②③④⑤⑥⑦⑧⑨⑩small-paste\nline-2",
+          "draft_sha256": "714d9b6e668727e83465e05434d6d97555575cb31793d9e564b6a93d2be2724b",
+          "height": 32,
+          "keyboard_disambiguated": false,
+          "large_paste_bytes": 1048576,
+          "large_paste_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b",
+          "last_action": "normal_quit",
+          "last_delta_sequence": 60,
+          "width": 120
+        },
+        "outcome": "completed",
+        "version": "s0-v2.0.6"
+      },
+      "keypress_max_ms": 17.942,
+      "keypress_p95_ms": 17.942,
+      "large_paste_ms": 195.273,
+      "status": "pass"
+    }
+  },
+  "crash_matrix": {
+    "normal_quit": {
+      "emergency_restore_used": false,
+      "parent_operation_survived": true,
+      "restored_by_child": true,
+      "returncode": 0,
+      "status": "pass",
+      "terminal_was_raw": true
+    },
+    "panic": {
+      "emergency_restore_used": false,
+      "parent_operation_survived": true,
+      "restored_by_child": true,
+      "returncode": 1,
+      "status": "pass",
+      "terminal_was_raw": true
+    },
+    "parent_kill_child": {
+      "emergency_restore_used": false,
+      "parent_operation_survived": true,
+      "restored_by_child": true,
+      "returncode": 1,
+      "status": "pass",
+      "terminal_was_raw": true
+    },
+    "sigkill": {
+      "emergency_restore_used": true,
+      "parent_operation_survived": true,
+      "restored_by_child": false,
+      "returncode": -9,
+      "status": "pass",
+      "terminal_was_raw": true
+    },
+    "sigterm": {
+      "emergency_restore_used": false,
+      "parent_operation_survived": true,
+      "restored_by_child": true,
+      "returncode": 0,
+      "status": "pass",
+      "terminal_was_raw": true
+    }
+  },
+  "platform": "Darwin/arm64",
+  "schema_version": "pulsara.terminal.s0.probe-result.v1"
+}

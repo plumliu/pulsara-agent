@@ -3,7 +3,7 @@
 > 文档性质：竞品代码真值调研 + Pulsara Terminal 产品设计基线 + 规范索引
 > 状态：ACTIVE PRODUCT BASELINE；Bubble Tea v2为长期一等Terminal客户端的provisional selection，须先通过S0 feasibility gate
 >
-> 当前实施边界（2026-08-01）：renderer-neutral Python infrastructure hard cut独立推进；S0 feasibility、全部`TUI-BT-*`、Go packaging与默认TTY activation均为`DEFERRED`，不计入本轮完成口径。
+> 当前实施边界（2026-08-01）：renderer-neutral Python infrastructure hard cut已独立完成；隔离、可删除的S0 feasibility spike现为`IN PROGRESS`，但S1-S6 production接线、正式Go packaging与默认TTY activation仍为`DEFERRED`。S0自动化smoke不得计入Python Foundation完成证据，也不得冒充production client。
 > 规范口径：本文拥有`TUI-UX-*`产品行为与跨规格总边界；其中保留的DTO、算法和伪代码用于解释设计来源，不再充当唯一implementation authority
 > 调研对象：
 >
@@ -2676,6 +2676,10 @@ F/B namespace只表达contract ownership，不表达PR合入顺序。生产落�
 - 验证Python parent/Go child的SIGINT、SIGTERM、SIGHUP和unexpected exit ownership；
 - 产出darwin arm64/amd64与linux amd64/arm64测试artifact；
 - 记录CPU、resident memory、input latency和render jitter基线。
+
+2026-08-01的disposable S0 fixture已经完成20Hz/100Hz各20次的本机darwin/arm64基线：1秒warm-up、3秒active window、10Hz process sampling与每轮20个交错keypress probe全部通过。CPU/RSS通过`proc_pid_rusage`采样，renderer cadence来自Bubble Tea最终PTY output writer的physical write seam；完整阈值、per-run结果与binary identity由`clients/terminal/spikes/s0/evidence/darwin-arm64-performance.json`持有。
+
+同日真实远程host fixture也已通过：macOS OpenSSH → Windows OpenSSH/ConPTY → WSL2 Linux x86_64，运行现有`linux/amd64` artifact并验证SHA-256、UTF-8、TERM、CJK、alternate-screen、keypress latency、abrupt disconnect、remote process exit、parent emergency restore、reconnect及删除后的remote staging absence。证据由`clients/terminal/spikes/s0/evidence/real-ssh-plumliuwin-wsl2-amd64.json`持有。该结果关闭resource/render与真实SSH自动化项，不替代真实IME、attached tmux、terminal emulator视觉检查或non-native clean-runner证据。
 
 验收：
 

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package pulsara.terminal.s0;
+
+option go_package = "pulsara.local/terminal-s0/internal/probeproto";
+
+message Snapshot {
+  uint64 revision = 1;
+  repeated string lines = 2;
+}
+
+message Delta {
+  uint64 sequence = 1;
+  string content = 2;
+  int64 sent_unix_nanos = 3;
+}
+
+message ProbeFrame {
+  oneof body {
+    Snapshot snapshot = 1;
+    Delta delta = 2;
+  }
+}
