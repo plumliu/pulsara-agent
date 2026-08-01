@@ -249,7 +249,9 @@ def prepare_transcript_provider_projection(
             )
         )
         if header is not None:
-            raise ValueError("dynamic transcript timing headers require ordered lowering")
+            raise ValueError(
+                "dynamic transcript timing headers require ordered lowering"
+            )
     _validate_chronological_message_coverage(
         chronological_messages=chronological_messages,
         lane_inputs=lane_inputs,
@@ -378,7 +380,9 @@ def materialize_transcript_provider_projection(
             )
         )
         if header is not None:
-            raise ValueError("dynamic transcript timing headers require ordered lowering")
+            raise ValueError(
+                "dynamic transcript timing headers require ordered lowering"
+            )
     if seen_lanes != set(expected_sections):
         raise ValueError("frozen provider projection omitted a transcript lane")
     _validate_chronological_message_coverage(
@@ -544,10 +548,7 @@ def _render_transcript_section(
     return replace(
         section,
         metadata=metadata,
-        estimated_tokens=(
-            message_tokens
-            + header_tokens
-        ),
+        estimated_tokens=(message_tokens + header_tokens),
     )
 
 

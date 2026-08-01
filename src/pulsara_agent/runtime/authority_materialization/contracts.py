@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -10,7 +12,7 @@ from pulsara_agent.event_log.transcript_prefix import (
     TRANSCRIPT_ACCELERATION_EVENT_TYPES,
     TRANSCRIPT_SEMANTIC_EVENT_TYPES,
 )
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.event_log.protocol import RawTranscriptDomainDeltaSnapshot
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -95,7 +97,9 @@ def materialize_transcript_sparse_read_proof(
         entry = binding.resolve_envelope(envelope)
         if entry.event_domain != "transcript_semantic":
             raise ValueError("sparse transcript snapshot contains non-semantic event")
-        event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(
+            envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         from pulsara_agent.event_log.transcript_prefix import (
             advance_transcript_semantic_accumulator,
         )
@@ -157,9 +161,7 @@ def materialize_transcript_sparse_read_proof(
         "through_sequence": snapshot.after.through_sequence,
         "prefix_before": prefix_before,
         "prefix_through": prefix_through,
-        "selected_transcript_semantic_event_count": len(
-            snapshot.semantic_events
-        ),
+        "selected_transcript_semantic_event_count": len(snapshot.semantic_events),
         "selected_transcript_semantic_accumulator": accumulator,
         "selected_event_ids_fingerprint": selected_ids_fingerprint,
     }
@@ -373,7 +375,9 @@ class AuthorityMaterializationContractDoctor:
         required = {item.value for item in PhysicalOperationKind}
         if set(kinds) != required:
             missing = sorted(required.difference(kinds))
-            raise ValueError("physical burst registry is incomplete: " + ", ".join(missing))
+            raise ValueError(
+                "physical burst registry is incomplete: " + ", ".join(missing)
+            )
         normal_event_limit = (
             bundle.limits.max_unreclaimable_ledger_events
             - bundle.limits.maintenance_reserved_events
@@ -392,7 +396,9 @@ class AuthorityMaterializationContractDoctor:
                 or contract.canonical_event_serialization_contract_fingerprint
                 != _CANONICAL_EVENT_SERIALIZATION_CONTRACT_FINGERPRINT
             ):
-                raise ValueError("physical burst binding references another contract bundle")
+                raise ValueError(
+                    "physical burst binding references another contract bundle"
+                )
             if contract.operation_kind is PhysicalOperationKind.CHECKPOINT_COMMIT:
                 event_limit = bundle.limits.maintenance_reserved_events
                 byte_limit = bundle.limits.maintenance_reserved_payload_bytes
@@ -483,7 +489,10 @@ class AuthorityMaterializationContractDoctor:
                     + bundle.charge_contract.suspension_bookkeeping_charge_bytes
                     + bundle.charge_contract.settlement_bookkeeping_charge_bytes
                 )
-                if contract.max_structural_tail_payload_bytes < minimum_structural_bytes:
+                if (
+                    contract.max_structural_tail_payload_bytes
+                    < minimum_structural_bytes
+                ):
                     raise ValueError(
                         "fixed batch commit quote exceeds structural byte quote"
                     )
@@ -634,9 +643,7 @@ def _build_charge_contract() -> PhysicalChargeContractFact:
         "reservation_bookkeeping_charge_events": 1,
         "reservation_bookkeeping_charge_bytes": bookkeeping_envelope_bound,
         "charge_applied_bookkeeping_charge_events": 1,
-        "charge_applied_bookkeeping_base_charge_bytes": (
-            charge_applied_base_charge
-        ),
+        "charge_applied_bookkeeping_base_charge_bytes": (charge_applied_base_charge),
         "charge_applied_bookkeeping_per_business_event_charge_bytes": (
             charge_applied_per_business_event_charge
         ),
@@ -679,9 +686,7 @@ def _build_limits() -> AuthorityMaterializationLimits:
         "max_model_stream_source_items_per_call": (
             MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL
         ),
-        "max_model_stream_recovery_events": (
-            MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS
-        ),
+        "max_model_stream_recovery_events": (MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS),
         "max_model_stream_recovery_payload_bytes": (
             MAX_MODEL_STREAM_STRUCTURAL_TAIL_PAYLOAD_BYTES
         ),
@@ -755,12 +760,9 @@ def _transport_contract(
         "physical_charge_contract_fingerprint": charge_fingerprint,
         "segmentation_mode": "contiguous_model_delta_segment_v1",
         "max_source_items": MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
-        "max_source_payload_bytes": (
-            MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
-        ),
+        "max_source_payload_bytes": (MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL),
         "max_single_source_item_canonical_bytes": (
-            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
-            .max_single_source_item_canonical_bytes
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_single_source_item_canonical_bytes
         ),
         "max_segment_source_items": (
             DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_segment_source_items
@@ -773,8 +775,7 @@ def _transport_contract(
         ),
         "max_durable_event_wrapper_overhead_bytes": 2_048,
         "max_unconfirmed_age_millis": (
-            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
-            .max_unconfirmed_age_millis
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_unconfirmed_age_millis
         ),
         "max_durable_events_per_source_item": 1,
         "max_synthetic_semantic_tail_events": 1,
@@ -847,9 +848,7 @@ def _tool_contract(
     }
     return ToolDeltaBurstContractFact(
         **payload,
-        contract_fingerprint=_own_fingerprint(
-            "tool-delta-burst-contract:v2", payload
-        ),
+        contract_fingerprint=_own_fingerprint("tool-delta-burst-contract:v2", payload),
     )
 
 
@@ -879,9 +878,7 @@ def _fixed_contract(
     max_commit_batches = 4
     structural_tail_bytes = max(
         2 * 1024 * 1024,
-        3 * 256 * 1024
-        + max_commit_batches * 7_680
-        + max_business_events * 2_048,
+        3 * 256 * 1024 + max_commit_batches * 7_680 + max_business_events * 2_048,
     )
     payload = {
         "schema_version": "fixed_batch_burst_contract.v1",
@@ -898,9 +895,7 @@ def _fixed_contract(
             0 if operation_kind is PhysicalOperationKind.LEDGER_GENESIS else 8
         ),
         "terminal_tail_reserved_payload_bytes": (
-            0
-            if operation_kind is PhysicalOperationKind.LEDGER_GENESIS
-            else 512 * 1024
+            0 if operation_kind is PhysicalOperationKind.LEDGER_GENESIS else 512 * 1024
         ),
         "max_total_reserved_events": max_business_events + 16,
         "max_total_reserved_payload_bytes": (
@@ -918,14 +913,13 @@ def _fixed_contract(
     }
     return FixedBatchBurstContractFact(
         **payload,
-        contract_fingerprint=_own_fingerprint(
-            "fixed-batch-burst-contract:v1", payload
-        ),
+        contract_fingerprint=_own_fingerprint("fixed-batch-burst-contract:v1", payload),
     )
 
 
-def build_default_authority_materialization_contract_bundle(
-) -> AuthorityMaterializationContractBundle:
+def build_default_authority_materialization_contract_bundle() -> (
+    AuthorityMaterializationContractBundle
+):
     domain = build_default_transcript_event_domain_registry_binding()
     charge = _build_charge_contract()
     limits = _build_limits()
@@ -991,6 +985,7 @@ def build_default_authority_materialization_contract_bundle(
             EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED,
             EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION,
             EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED,
+            EventType.PROMPT_QUEUE_COMMITTED_TO_RUN,
         ),
         PhysicalOperationKind.CHECKPOINT_COMMIT: (
             EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED,

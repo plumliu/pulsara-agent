@@ -322,13 +322,11 @@ class MockMcpClientManager:
         dispatch_receipt: McpConfirmedContinuationDispatchReceipt,
         timeout_ms: int,
     ) -> Any:
-        borrow = McpContinuationSecretBorrowIssuer(
-            "test-mcp-manager-wire"
-        ).issue(McpSecretAccessPurpose.FRESH_WIRE_BUILD)
+        borrow = McpContinuationSecretBorrowIssuer("test-mcp-manager-wire").issue(
+            McpSecretAccessPurpose.FRESH_WIRE_BUILD
+        )
         try:
-            base, _request_state, _responses = borrow.wire_retry_parts(
-                replay_plaintext
-            )
+            base, _request_state, _responses = borrow.wire_retry_parts(replay_plaintext)
         finally:
             borrow.revoke()
         if dispatch_receipt.interaction_id == "":
@@ -432,12 +430,8 @@ async def queue_ready_test_mcp_candidate(
         schema_version="mcp_tool_discovery_attribution.v1",
         tool_semantic_fingerprint=conformed.semantic.tool_semantic_fingerprint,
         source_page_receipt_fingerprint=tools_page.page_receipt_fingerprint,
-        sdk_conformance_contract_fingerprint=(
-            MCP_SDK_CONFORMANCE_CONTRACT_FINGERPRINT
-        ),
-        sdk_conformed_listing_generation_fingerprint=(
-            listing_generation_fingerprint
-        ),
+        sdk_conformance_contract_fingerprint=(MCP_SDK_CONFORMANCE_CONTRACT_FINGERPRINT),
+        sdk_conformed_listing_generation_fingerprint=(listing_generation_fingerprint),
         sdk_header_routing_contract_fingerprint=(
             MCP_SDK_CONFORMANCE_CONTRACT_FINGERPRINT
         ),
@@ -520,9 +514,7 @@ async def queue_ready_test_mcp_candidate(
         negotiation_source="server_discover",
         negotiation_wire_receipt_fingerprint=wire_receipt.receipt_fingerprint,
         sdk_version="2.0.0",
-        sdk_conformance_contract_fingerprint=(
-            MCP_SDK_CONFORMANCE_CONTRACT_FINGERPRINT
-        ),
+        sdk_conformance_contract_fingerprint=(MCP_SDK_CONFORMANCE_CONTRACT_FINGERPRINT),
         server_info=freeze_json({}),
         endpoint_attribution_fingerprint=endpoint.attribution_fingerprint,
         auth_attribution_fingerprint=auth.attribution_fingerprint,

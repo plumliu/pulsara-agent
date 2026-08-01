@@ -97,17 +97,13 @@ def build_provider_retry_summary(
             "reason": trace.reason[:96],
             "status_code": trace.status_code,
             "delay_millis": _seconds_to_millis(trace.delay_seconds),
-            "retry_after_millis": _seconds_to_millis(
-                trace.retry_after_seconds
-            ),
+            "retry_after_millis": _seconds_to_millis(trace.retry_after_seconds),
             "retry_after_exceeded": trace.retry_after_exceeded,
         }
         provisional = ProviderRetryAttemptSummaryFact.model_construct(
             **payload, attempt_fingerprint="pending"
         )
-        canonical = provisional.model_dump(
-            mode="json", exclude={"attempt_fingerprint"}
-        )
+        canonical = provisional.model_dump(mode="json", exclude={"attempt_fingerprint"})
         attempts.append(
             ProviderRetryAttemptSummaryFact(
                 **canonical,
@@ -157,9 +153,7 @@ def build_provider_retry_summary(
     canonical = provisional.model_dump(mode="json", exclude={"summary_fingerprint"})
     return ProviderRetrySummaryFact(
         **canonical,
-        summary_fingerprint=sha256_fingerprint(
-            "provider-retry-summary:v1", canonical
-        ),
+        summary_fingerprint=sha256_fingerprint("provider-retry-summary:v1", canonical),
     )
 
 

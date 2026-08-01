@@ -40,9 +40,7 @@ def build_test_agent_runtime(
             system_prompt=agent.system_prompt,
             capability_runtime=agent.capability_runtime,
             workspace_kind=agent.workspace_kind,
-            rollout_budget_feasibility_report=(
-                agent.rollout_budget_feasibility_report
-            ),
+            rollout_budget_feasibility_report=(agent.rollout_budget_feasibility_report),
             activation_factory=RunActivationFactory(),
             subagent_runtime=agent.subagent_runtime,
         )

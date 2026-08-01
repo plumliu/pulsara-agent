@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass
 from threading import RLock
@@ -125,14 +127,12 @@ class ProviderInputGenerationCoordinator:
                             pending_continuation.continuation_fingerprint
                         )
                         if pending_materialization is None:
-                            pending_materialization = (
-                                await self._prepare_pending_continuation(
-                                    pending_continuation,
-                                    deadline_monotonic=deadline,
-                                    stable_entries=(
-                                        prepared_context_input.transcript_projection_evidence.stable_entries
-                                    ),
-                                )
+                            pending_materialization = await self._prepare_pending_continuation(
+                                pending_continuation,
+                                deadline_monotonic=deadline,
+                                stable_entries=(
+                                    prepared_context_input.transcript_projection_evidence.stable_entries
+                                ),
                             )
                             continuation_materializations[
                                 pending_continuation.continuation_fingerprint
@@ -484,7 +484,9 @@ class ProviderInputGenerationCoordinator:
             )
             if len(rows) != 1:
                 raise RuntimeError("provider generation ModelStart is unavailable")
-            start = rows[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            start = decode_raw_stored_event_envelope(
+                rows[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             if start.type is not EventType.MODEL_CALL_START:
                 raise RuntimeError("provider generation attribution is not ModelStart")
             close_event = build_session_generation_close_event(

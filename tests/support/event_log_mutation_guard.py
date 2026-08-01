@@ -11,6 +11,7 @@ from typing import Iterable
 EVENT_ROW_MUTATION_METHODS = frozenset(
     {
         "append",
+        "commit_batch",
         "extend",
         "extend_with_materialization_state",
         "write_runtime_projection_checkpoint",

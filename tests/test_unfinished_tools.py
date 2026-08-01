@@ -91,9 +91,7 @@ def test_durable_tool_call_name_remains_recovery_authority() -> None:
         ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
-            tool_calls=[
-                ToolCallBlock(id="call:write", name="write_file", input="{}")
-            ],
+            tool_calls=[ToolCallBlock(id="call:write", name="write_file", input="{}")],
         ),
         ToolResultStartEvent(
             **CTX.event_fields(),

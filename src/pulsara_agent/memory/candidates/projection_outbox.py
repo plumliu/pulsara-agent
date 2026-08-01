@@ -68,8 +68,7 @@ class CandidateProjectionOutboxRow:
         semantic = self.candidate.candidate_semantic
         if (
             semantic is None
-            or semantic.semantic_fingerprint
-            != self.item.candidate_semantic_fingerprint
+            or semantic.semantic_fingerprint != self.item.candidate_semantic_fingerprint
         ):
             raise ValueError("candidate projection outbox semantic drifted")
         identity = stable_event_identity(
@@ -299,8 +298,7 @@ class PostgresCandidateProjectionOutbox:
             stored = cursor.fetchone()
             if (
                 stored is None
-                or stored["outbox_item_fingerprint"]
-                != row.item.item_fingerprint
+                or stored["outbox_item_fingerprint"] != row.item.item_fingerprint
                 or stored["candidate_payload"] != candidate_payload
             ):
                 raise ValueError("candidate projection outbox id/payload conflict")
@@ -347,7 +345,9 @@ class PostgresCandidateProjectionOutbox:
                     (runtime_session_id, producer_event_id, candidate_entry_id),
                 )
                 if cursor.rowcount != 1:
-                    raise KeyError((runtime_session_id, producer_event_id, candidate_entry_id))
+                    raise KeyError(
+                        (runtime_session_id, producer_event_id, candidate_entry_id)
+                    )
 
 
 @dataclass(slots=True)
@@ -487,14 +487,11 @@ class MemoryCandidateProjectionCommitPort:
                         transaction_companion=companion,
                     )
                 else:
-                    result = (
-                        await self.runtime_session.confirm_and_handoff_event_batch_async(
-                            (bundle.producer_event,),
-                            deadline_monotonic=(
-                                self.runtime_session.event_write_service
-                                .new_deadline_monotonic()
-                            ),
-                        )
+                    result = await self.runtime_session.confirm_and_handoff_event_batch_async(
+                        (bundle.producer_event,),
+                        deadline_monotonic=(
+                            self.runtime_session.event_write_service.new_deadline_monotonic()
+                        ),
                     )
             except EventWriteCancelled as cancelled:
                 if cancelled.outcome.status == "full":
@@ -511,9 +508,7 @@ class MemoryCandidateProjectionCommitPort:
                     retry_delay = min(retry_delay * 2, 1.0)
                     continue
             except EventCommitError as error:
-                operation = (
-                    "confirm" if error.commit_outcome == "unknown" else "write"
-                )
+                operation = "confirm" if error.commit_outcome == "unknown" else "write"
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 1.0)
                 continue
@@ -647,11 +642,11 @@ def _row_from_postgres(row: dict[str, object]) -> CandidateProjectionOutboxRow:
             "candidate_entry_id": row["candidate_entry_id"],
             "candidate_index": row["candidate_index"],
             "candidate_payload": candidate.payload,
-            "candidate_semantic_fingerprint": row[
-                "candidate_semantic_fingerprint"
-            ],
+            "candidate_semantic_fingerprint": row["candidate_semantic_fingerprint"],
             "candidate_payload_fingerprint": row["candidate_payload_fingerprint"],
-            "candidate_attribution_fingerprint": row["candidate_attribution_fingerprint"],
+            "candidate_attribution_fingerprint": row[
+                "candidate_attribution_fingerprint"
+            ],
             "item_fingerprint": row["outbox_item_fingerprint"],
         }
     )
@@ -662,8 +657,6 @@ def stable_event_identity_from_row(row: dict[str, object]):
     from pulsara_agent.primitives.frozen import StableEventIdentityFact
 
     return StableEventIdentityFact.model_validate(row["producer_event_identity"])
-
-
 
 
 __all__ = [

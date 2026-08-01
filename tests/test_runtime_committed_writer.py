@@ -16,6 +16,9 @@ from pulsara_agent.event import (
     TextBlockSegmentEvent,
 )
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
+from pulsara_agent.ports.stored_event import (
+    GroupingIndependentOwnedEventReducerAdapter,
+)
 from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
     EventReconciliationRequired,
@@ -66,7 +69,9 @@ def test_reducer_catches_missing_interval_before_current_batch(tmp_path) -> None
     runtime.register_committed_reducer(
         reducer_id="test:reducer",
         through_sequence=0,
-        apply_committed=lambda events: applied.append(tuple(_sequences(events))),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.append(tuple(_sequences(events))),
+        ),
     )
     runtime.event_log.append(_event("offline"))
 
@@ -88,7 +93,9 @@ def test_reducer_and_publisher_catch_up_from_independent_high_water_marks(
     runtime.register_committed_reducer(
         reducer_id="test:reducer",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
     runtime.event_log.append(_event("offline"))
 
@@ -110,7 +117,9 @@ def test_write_conflict_catches_reducer_and_publisher_to_actual_high_water(
     runtime.register_committed_reducer(
         reducer_id="test:reducer",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
     runtime.event_log.append(_event("external"))
 
@@ -137,7 +146,9 @@ def test_async_and_thread_writes_share_session_write_coordinator(tmp_path) -> No
     runtime.register_committed_reducer(
         reducer_id="test:reducer",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
 
     async def run() -> None:
@@ -168,7 +179,9 @@ def test_event_write_applies_reducer_before_observer(tmp_path) -> None:
     runtime.register_committed_reducer(
         reducer_id="test:reducer",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
 
     class AssertReducedSubscriber:
@@ -232,7 +245,9 @@ def test_committed_reducer_failure_requires_reconciliation(tmp_path) -> None:
     runtime.register_committed_reducer(
         reducer_id="test:broken",
         through_sequence=0,
-        apply_committed=fail,
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=fail,
+        ),
     )
 
     async def run() -> None:
@@ -263,7 +278,10 @@ def test_initial_reducer_catch_up_failure_remains_registered_for_reconciliation(
         runtime.register_committed_reducer(
             reducer_id="test:failed-registration",
             through_sequence=0,
-            apply_committed=apply,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=apply,
+                reset_owned_events=lambda: None,
+            ),
         )
 
     assert "test:failed-registration" in runtime._committed_reducers
@@ -280,19 +298,26 @@ def test_initial_reducer_catch_up_failure_remains_registered_for_reconciliation(
 def test_committed_reducer_reconciliation_uses_full_rebuild_callback(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     applied: list[int] = []
+    fail_incremental = True
 
     def fail_after_mutation(events: tuple[AgentEvent, ...]) -> None:
+        nonlocal fail_incremental
         applied.extend(_sequences(events))
-        raise RuntimeError("synthetic incremental failure")
+        if fail_incremental:
+            raise RuntimeError("synthetic incremental failure")
 
-    def rebuild(events: tuple[AgentEvent, ...]) -> None:
-        applied[:] = _sequences(events)
+    def reset() -> None:
+        nonlocal fail_incremental
+        applied.clear()
+        fail_incremental = False
 
     runtime.register_committed_reducer(
         reducer_id="test:rebuild",
         through_sequence=0,
-        apply_committed=fail_after_mutation,
-        rebuild_committed=rebuild,
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=fail_after_mutation,
+            reset_owned_events=reset,
+        ),
     )
     result = asyncio.run(runtime.write_event(_event("committed")))
     assert result.reconciliation_required is True
@@ -322,11 +347,13 @@ def test_inconsistent_full_rebuild_keeps_runtime_reconciliation_required(
         runtime.register_committed_reducer(
             reducer_id=store.reducer_id,
             through_sequence=0,
-            apply_committed=store.apply_committed,
-            rebuild_committed=store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=store.apply_committed,
+                reset_owned_events=lambda: store.rebuild(()),
+            ),
         )
 
-    with pytest.raises(SubagentReducerApplyError, match="remain inconsistent"):
+    with pytest.raises(SubagentReducerApplyError, match="require reconciliation"):
         runtime.reconcile_committed_reducer(store.reducer_id)
 
     assert store.state.consistent is False
@@ -340,7 +367,9 @@ def runtime_session_for_test_close_unregisters_committed_reducers(tmp_path) -> N
     runtime.register_committed_reducer(
         reducer_id="test:close",
         through_sequence=0,
-        apply_committed=lambda _events: None,
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda _events: None,
+        ),
     )
 
     runtime.close()
@@ -355,7 +384,9 @@ def test_reducer_registration_catches_up_commit_race(tmp_path) -> None:
     runtime.register_committed_reducer(
         reducer_id="test:late",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
     assert applied == [1]
 
@@ -366,7 +397,9 @@ def test_thread_write_applies_reducer_when_live_publisher_unavailable(tmp_path) 
     runtime.register_committed_reducer(
         reducer_id="test:thread",
         through_sequence=0,
-        apply_committed=lambda events: applied.extend(_sequences(events)),
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=lambda events: applied.extend(_sequences(events)),
+        ),
     )
     result = runtime.write_events_from_thread((_event("thread"),))
     assert result.publication_status == "unavailable"

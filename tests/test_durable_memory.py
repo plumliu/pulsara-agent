@@ -98,7 +98,6 @@ def test_observation_round_trips(graph_store) -> None:
     assert doc[memory.HAS_EVIDENCE.name] == [{"@id": "evidence:ci-flaky"}]
 
 
-
 def test_preference_gate_rejects_empty_statement() -> None:
     decision = MemoryWriteGate().evaluate_preference(
         statement="   ",

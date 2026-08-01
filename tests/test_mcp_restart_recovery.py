@@ -171,8 +171,7 @@ def test_stateless_awaiting_continuation_rebinds_without_physical_replay() -> No
     assert supervisor.recovered_reservation_id == "pending-reservation:restart"
     assert supervisor.physical_resume_count == 0
     assert (
-        port.handle_for_interaction("interaction:restart")
-        is recovered.pending_handle
+        port.handle_for_interaction("interaction:restart") is recovered.pending_handle
     )
 
     port.discard_recovered_continuation(recovered)
@@ -230,8 +229,7 @@ def test_reopened_terminalization_is_owned_by_port_repository(
         return sentinel
 
     monkeypatch.setattr(
-        "pulsara_agent.runtime.mcp.recovery."
-        "terminalize_reopened_mcp_input_required",
+        "pulsara_agent.runtime.mcp.recovery.terminalize_reopened_mcp_input_required",
         terminalize,
     )
     result = asyncio.run(

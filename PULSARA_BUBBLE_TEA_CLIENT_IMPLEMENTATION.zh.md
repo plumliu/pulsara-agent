@@ -1,6 +1,6 @@
 # Pulsara Bubble Tea v2 Terminal Client Hard-Cut 实施规格
 
-> 状态：DRAFT FOR REVIEW；S0通过前为provisional implementation target
+> 状态：DEFERRED；S0 feasibility、全部`TUI-BT-*`、Go packaging与默认TTY activation均不属于当前renderer-neutral Python infrastructure hard cut，且不得在本轮完成证据中标记为已实现。
 > Requirement namespace：`TUI-BT-*`
 > 唯一owner：Go Terminal client的TTY、Model/Update/View、layout、composer与distribution
 > Wire contract：`PULSARA_TERMINAL_CLIENT_PROTOCOL_CONTRACT.zh.md`

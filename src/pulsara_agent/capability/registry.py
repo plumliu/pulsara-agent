@@ -27,7 +27,9 @@ class CapabilityRegistry:
         if existing is not None:
             if existing == descriptor:
                 return
-            raise ValueError(f"Capability descriptor id already registered with different data: {descriptor.id}")
+            raise ValueError(
+                f"Capability descriptor id already registered with different data: {descriptor.id}"
+            )
         existing_id_for_name = self._ids_by_name.get(descriptor.name)
         if existing_id_for_name is not None and existing_id_for_name != descriptor.id:
             raise ValueError(
@@ -50,7 +52,9 @@ class CapabilityRegistry:
             raise KeyError(f"Unknown capability id: {id}") from exc
 
     def snapshot(self) -> CapabilityRegistrySnapshot:
-        descriptors = tuple(self._descriptors_by_id[id] for id in sorted(self._descriptors_by_id))
+        descriptors = tuple(
+            self._descriptors_by_id[id] for id in sorted(self._descriptors_by_id)
+        )
         return CapabilityRegistrySnapshot(
             generation=self._generation,
             descriptors=descriptors,

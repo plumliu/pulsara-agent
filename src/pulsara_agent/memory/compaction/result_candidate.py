@@ -309,9 +309,7 @@ def _outbox_plan(
             "candidate-outbox-plan-item-accumulator:v1",
             tuple(item.item_fingerprint for item in items),
         ),
-        lowering_contract_fingerprint=(
-            CANDIDATE_OUTBOX_LOWERING_CONTRACT_FINGERPRINT
-        ),
+        lowering_contract_fingerprint=(CANDIDATE_OUTBOX_LOWERING_CONTRACT_FINGERPRINT),
     )
 
 
@@ -326,7 +324,10 @@ def build_result_candidate(
     permanent_automatic_omission_semantic_accumulator: str,
     permanent_automatic_omission_attribution_accumulator: str,
 ) -> CompactionMemoryExtractionResultCandidateFact:
-    if lease.job.projection_kind is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION:
+    if (
+        lease.job.projection_kind
+        is not DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
+    ):
         raise ValueError("result candidate requires an extraction job")
     if event.id != extraction_completed_event_id(
         runtime_session_id=runtime_session_id,
@@ -356,29 +357,23 @@ def build_result_candidate(
     )
     plan = _outbox_plan(event=event, rows=rows)
     owner = projection_job_result_owner(lease)
-    result_candidate_id = (
-        "compaction-memory-result-candidate:"
-        + context_fingerprint(
-            "compaction-memory-extraction-result-candidate-id:v1",
-            (
-                owner.owner_fingerprint,
-                event.id,
-                event.result_semantic.result_semantic_fingerprint,
-            ),
-        ).removeprefix("sha256:")
-    )
-    receipt_id = (
-        "compaction-memory-result-receipt:"
-        + context_fingerprint(
-            "compaction-memory-extraction-result-receipt-id:v1",
-            (
-                owner.owner_fingerprint,
-                event.id,
-                lease.job.target_key,
-                event.result_semantic.result_semantic_fingerprint,
-            ),
-        ).removeprefix("sha256:")
-    )
+    result_candidate_id = "compaction-memory-result-candidate:" + context_fingerprint(
+        "compaction-memory-extraction-result-candidate-id:v1",
+        (
+            owner.owner_fingerprint,
+            event.id,
+            event.result_semantic.result_semantic_fingerprint,
+        ),
+    ).removeprefix("sha256:")
+    receipt_id = "compaction-memory-result-receipt:" + context_fingerprint(
+        "compaction-memory-extraction-result-receipt-id:v1",
+        (
+            owner.owner_fingerprint,
+            event.id,
+            lease.job.target_key,
+            event.result_semantic.result_semantic_fingerprint,
+        ),
+    ).removeprefix("sha256:")
     return build_frozen_fact(
         CompactionMemoryExtractionResultCandidateFact,
         schema_version="compaction_memory_extraction_result_candidate.v1",
@@ -388,16 +383,12 @@ def build_result_candidate(
         target_key=lease.job.target_key,
         completed_event_id=event.id,
         producer_event_candidate=producer,
-        result_semantic_fingerprint=(
-            event.result_semantic.result_semantic_fingerprint
-        ),
+        result_semantic_fingerprint=(event.result_semantic.result_semantic_fingerprint),
         receipt_id=receipt_id,
         intended_target_head_revision=intended_target_head_revision,
         expected_target_head_fingerprint=expected_target_head_fingerprint,
         candidate_outbox_plan=plan,
-        permanent_automatic_omission_count=(
-            permanent_automatic_omission_count
-        ),
+        permanent_automatic_omission_count=(permanent_automatic_omission_count),
         permanent_automatic_omission_semantic_accumulator=(
             permanent_automatic_omission_semantic_accumulator
         ),

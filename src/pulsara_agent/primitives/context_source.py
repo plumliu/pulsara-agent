@@ -735,7 +735,9 @@ class PlanRevisionPayloadFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _active(self) -> "PlanRevisionPayloadFact":
-        has_terminal_identity = self.workflow_id is not None and self.content is not None
+        has_terminal_identity = (
+            self.workflow_id is not None and self.content is not None
+        )
         if self.active:
             if not has_terminal_identity or self.plan_decision not in {
                 "enter",
@@ -1004,8 +1006,7 @@ class ContextSourceDispositionFact(FrozenFactBase):
             "rewrite_required",
         } or (self.disposition == "retain" and self.reason == "semantic_noop")
         if candidate_owned != (self.candidate_semantic_fingerprint is not None) or (
-            candidate_owned
-            != (self.candidate_payload_semantic_fingerprint is not None)
+            candidate_owned != (self.candidate_payload_semantic_fingerprint is not None)
         ):
             raise ValueError("ContextSource disposition candidate matrix mismatch")
         if self.disposition == "retain" and self.reason not in {
@@ -1014,7 +1015,10 @@ class ContextSourceDispositionFact(FrozenFactBase):
             "semantic_noop",
         }:
             raise ValueError("ContextSource retain disposition has invalid reason")
-        if self.disposition == "rewrite_required" and self.reason != "allocation_omitted":
+        if (
+            self.disposition == "rewrite_required"
+            and self.reason != "allocation_omitted"
+        ):
             raise ValueError("ContextSource rewrite disposition has invalid reason")
         expected_reason = {
             "replace": "candidate_available",
@@ -1032,7 +1036,9 @@ class ContextSourceDispositionFact(FrozenFactBase):
             raise ValueError("ContextSource disposition refs are not ordered/unique")
         horizon_ids = tuple(item.runtime_session_id for item in self.authority_horizons)
         if horizon_ids != tuple(sorted(set(horizon_ids))):
-            raise ValueError("ContextSource disposition horizons are not ordered/unique")
+            raise ValueError(
+                "ContextSource disposition horizons are not ordered/unique"
+            )
         horizon_by_owner = {
             item.runtime_session_id: item for item in self.authority_horizons
         }

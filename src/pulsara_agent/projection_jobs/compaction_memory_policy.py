@@ -104,9 +104,7 @@ def build_default_compaction_memory_extraction_policy(
 
     delivery = _build_delivery_policy(
         maximum_attempts=DEFAULT_COMPACTION_MEMORY_MAXIMUM_ATTEMPTS,
-        provider_timeout_seconds=(
-            DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS
-        ),
+        provider_timeout_seconds=(DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS),
         lease_duration_seconds=DEFAULT_COMPACTION_MEMORY_LEASE_DURATION_SECONDS,
     )
     return build_frozen_fact(
@@ -117,9 +115,7 @@ def build_default_compaction_memory_extraction_policy(
         allowed_phases=("manual", "mid_turn", "pre_run", "window_maintenance"),
         model_target=model_target,
         maximum_attempts=DEFAULT_COMPACTION_MEMORY_MAXIMUM_ATTEMPTS,
-        provider_timeout_seconds=(
-            DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS
-        ),
+        provider_timeout_seconds=(DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS),
         lease_duration_seconds=DEFAULT_COMPACTION_MEMORY_LEASE_DURATION_SECONDS,
         retry_policy_fingerprint=delivery.retry_policy.policy_fingerprint,
         input_budget_policy_fingerprint=(
@@ -136,9 +132,7 @@ def default_compaction_memory_delivery_policy() -> DurableProjectionDeliveryPoli
 
     return _build_delivery_policy(
         maximum_attempts=DEFAULT_COMPACTION_MEMORY_MAXIMUM_ATTEMPTS,
-        provider_timeout_seconds=(
-            DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS
-        ),
+        provider_timeout_seconds=(DEFAULT_COMPACTION_MEMORY_PROVIDER_TIMEOUT_SECONDS),
         lease_duration_seconds=DEFAULT_COMPACTION_MEMORY_LEASE_DURATION_SECONDS,
     )
 

@@ -59,10 +59,10 @@ from pulsara_agent.event_log import (
     PostgresEventLog,
     RawContextAuthorityBundleRequest,
     RawEventSelectionBounds,
-    RawRuntimeProjectionCheckpoint,
     dump_agent_event,
     load_agent_event,
 )
+from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.llm.control import build_model_call_control_disposition_event

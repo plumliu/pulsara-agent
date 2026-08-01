@@ -226,7 +226,9 @@ class ResolvedBenchmarkCase:
         return str(self.execution_case.case_id)
 
     @property
-    def case_kind(self) -> Literal[
+    def case_kind(
+        self,
+    ) -> Literal[
         "production_valid",
         "sensitivity_analysis",
         "counterfactual_analysis",
@@ -268,9 +270,7 @@ def load_dataset_manifest(path: Path) -> DatasetManifest:
     except ValueError as error:
         raise DatasetContractError(f"invalid dataset manifest: {error}") from error
     if document.allowed_local_services != ("postgresql",):
-        raise DatasetContractError(
-            "offline dataset may only allow local PostgreSQL"
-        )
+        raise DatasetContractError("offline dataset may only allow local PostgreSQL")
     listed_paths = (*document.writer_scenarios, *document.context_scenarios)
     if len(set(listed_paths)) != len(listed_paths):
         raise DatasetContractError("dataset manifest contains duplicate scenario paths")
@@ -373,9 +373,7 @@ def expand_benchmark_cases(
                         result_contract=manifest.document.result_contract,
                         generator_contract=scenario.generator_contract,
                         grader_contract=scenario.grader_contract,
-                        case_contract_fingerprint=canonical_sha256(
-                            fingerprint_payload
-                        ),
+                        case_contract_fingerprint=canonical_sha256(fingerprint_payload),
                     )
                 )
     return tuple(cases)
@@ -402,9 +400,7 @@ def recompute_case_contract_fingerprint(case: ResolvedBenchmarkCase) -> str:
             "schema_version": "resolved-durable-runtime-case.v1",
             "dataset_id": case.dataset_id,
             "manifest_contract_fingerprint": case.manifest_contract_fingerprint,
-            "scenario_contract_fingerprint": (
-                case.scenario_contract_fingerprint
-            ),
+            "scenario_contract_fingerprint": (case.scenario_contract_fingerprint),
             "execution_case": case.execution_case,
             "mode_contract": case.mode_contract,
             "warmup_iterations": case.warmup_iterations,
@@ -450,9 +446,7 @@ def _load_scenario(
             f"invalid typed scenario {relative}: {error}"
         ) from error
     if contract.scenario_id != path.stem:
-        raise DatasetContractError(
-            f"scenario ID must match its filename: {relative}"
-        )
+        raise DatasetContractError(f"scenario ID must match its filename: {relative}")
     _validate_binding_contracts(contract)
     return LoadedScenario(
         group=group,
@@ -503,9 +497,7 @@ def _validate_binding_contracts(contract: ScenarioContract) -> None:
             "pulsara.writer.model-semantic-structural-grouping"
         ),
         "multi-session-contention": "pulsara.writer.multi-session-contention",
-        "stable-confirmation-faults": (
-            "pulsara.writer.stable-confirmation-faults"
-        ),
+        "stable-confirmation-faults": ("pulsara.writer.stable-confirmation-faults"),
         "mixed-runtime-accounting": "pulsara.writer.mixed-runtime-accounting",
         "long-plan-prefix-growth": "pulsara.context.long-plan-prefix-growth",
         "incremental-active-window": "pulsara.context.incremental-active-window",
@@ -537,7 +529,9 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise DatasetContractError(f"cannot read JSON object {path}: {error}") from error
+        raise DatasetContractError(
+            f"cannot read JSON object {path}: {error}"
+        ) from error
     if not isinstance(payload, dict):
         raise DatasetContractError(f"expected JSON object: {path}")
     return payload
@@ -553,8 +547,5 @@ def _json_value(payload: Any) -> Any:
     if isinstance(payload, list):
         return [_json_value(item) for item in payload]
     if isinstance(payload, dict):
-        return {
-            str(key): _json_value(value)
-            for key, value in payload.items()
-        }
+        return {str(key): _json_value(value) for key, value in payload.items()}
     return payload

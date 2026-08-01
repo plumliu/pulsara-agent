@@ -1,325 +1,279 @@
 {
-  "schema_version": "pulsara.d6-dod-evidence.v1",
-  "hard_cut": "D6-0-D6-5",
-  "debt_item": "D6",
-  "status": "passed",
-  "completed_on": "2026-07-29",
-  "schema_subcut": {
-    "agent_event_catalog_schema_version": 7,
-    "child_initial_capability_basis_required": true,
-    "postgres_oxigraph_world_reset": true,
-    "postgres_migration_head_version": 9,
-    "registry_prefix_fingerprint": "sha256:5ecbc55255f53e41f1daa58efd2573ba8c9f5cb9b6b43e03e3505194f018d411",
-    "deep_verification_result_fingerprint": "sha256:53a5025a59d1a068b9094376bdcd19ec747636a0b264d79eb7d2a9c2e6705433"
-  },
-  "gates": [
-    {
-      "gate_id": "D6-0",
-      "status": "passed",
-      "evidence": [
-        "tests/test_event_log_contract.py",
-        "tests/test_run_boundary_contract.py",
-        "tests/test_run_ownership_architecture.py"
-      ]
-    },
-    {
-      "gate_id": "D6-1",
-      "status": "passed",
-      "evidence": [
-        "tests/test_run_boundary_host_lifecycle.py",
-        "tests/test_host_lifecycle_contract.py"
-      ]
-    },
-    {
-      "gate_id": "D6-2",
-      "status": "passed",
-      "evidence": [
-        "tests/test_host_lifecycle_contract.py",
-        "tests/test_recovery.py"
-      ]
-    },
-    {
-      "gate_id": "D6-3",
-      "status": "passed",
-      "evidence": [
-        "tests/test_agent_runtime_loop.py",
-        "tests/test_mcp_host_lifecycle.py",
-        "tests/test_host_lifecycle_contract.py"
-      ]
-    },
-    {
-      "gate_id": "D6-4",
-      "status": "passed",
-      "evidence": [
-        "tests/test_agent_runtime_loop.py",
-        "tests/test_llm_runtime.py",
-        "tests/test_tool_execution_stable_candidate_owner.py"
-      ]
-    },
-    {
-      "gate_id": "D6-5",
-      "status": "passed",
-      "evidence": [
-        "tests/test_subagent_execution_registry.py",
-        "tests/test_subagent_runtime.py",
-        "tests/test_dependency_architecture.py",
-        "benchmarks/suites/core/v1"
-      ]
-    }
-  ],
-  "pytest": {
-    "collected": 2578,
-    "baseline_full_collection": 2572,
-    "initial_partition": {
-      "passed": 20,
-      "failed": 0
-    },
-    "remaining_partition": {
-      "passed": 2518,
-      "failed": 31,
-      "skipped": 2,
-      "deselected_already_covered": 17
-    },
-    "failed_node_reruns": {
-      "required": 31,
-      "passed": 31,
-      "failed": 0
-    },
-    "new_opaque_runner_contract_passed": 1,
-    "d6_core_matrix_passed": 320,
-    "modified_fixture_files_passed": 186,
-    "durable_dataset_runner_nodes_passed": 12,
-    "core_dogfood_contract_nodes_passed": 11,
-    "post_review_added_nodes": {
-      "collected": 6,
-      "passed": 6,
-      "failed": 0
-    },
-    "closure_policy": "partitioned_full_run_then_rerun_only_failed_or_modified_nodes"
-  },
-  "static_validation": {
-    "ruff": "passed",
-    "compileall": "passed",
-    "git_diff_check": "passed",
-    "import_observation_count": 3383,
-    "forbidden_d4_observation_count": 0,
-    "residual_cross_package_scc_observation_count": 0,
-    "residual_scc_observation_fingerprint": "sha256:1d878fdf3d452528c94c7c2f065a0b44841d78332e3f1f402c9808e48c70d898"
-  },
-  "real_llm_dogfood": {
-    "suite_id": "pulsara-core-dogfood-v1",
-    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
-    "runner_build_fingerprint": "c5a85c5fcbd184c00bce77d12c8752345f7721c7606fae89fe4d0d021f476737",
+    "schema_version": "pulsara.d6-dod-evidence.v1",
+    "hard_cut": "D6-0-D6-5",
+    "debt_item": "D6",
     "status": "passed",
-    "passed_scenarios": 6,
-    "failed_scenarios": 0,
-    "elapsed_seconds": 446.1,
-    "model_call_count": 45,
-    "tool_call_count": 38,
-    "total_tokens": 790579,
-    "cached_input_tokens": 550656,
-    "summary_record_sha256": "213d8705033da5ebb02d1e611ec30438f25e81bec2fbe148cb665f9ec9b44583",
-    "results_jsonl_sha256": "2b6df91834e8ede8e1e7c2c4b82c8a9269110c2523977f8836643f9674911876",
-    "isolated_postgres_databases_dropped": true
-  },
-  "post_review_remediation": {
-    "status": "passed",
-    "findings": [
-      "activation_driver_physical_exit_ownership",
-      "child_timeout_child_run_terminalization_order",
-      "canonical_bounded_final_output_materialization",
-      "pending_interaction_exact_source_authority",
-      "confirmed_run_end_finalization_snapshot"
+    "completed_on": "2026-07-29",
+    "schema_subcut": {
+        "agent_event_catalog_schema_version": 7,
+        "child_initial_capability_basis_required": true,
+        "postgres_oxigraph_world_reset": true,
+        "postgres_migration_head_version": 9,
+        "registry_prefix_fingerprint": "sha256:5ecbc55255f53e41f1daa58efd2573ba8c9f5cb9b6b43e03e3505194f018d411",
+        "deep_verification_result_fingerprint": "sha256:53a5025a59d1a068b9094376bdcd19ec747636a0b264d79eb7d2a9c2e6705433"
+    },
+    "gates": [
+        {
+            "gate_id": "D6-0",
+            "status": "passed",
+            "evidence": [
+                "tests/test_event_log_contract.py",
+                "tests/test_run_boundary_contract.py",
+                "tests/test_run_ownership_architecture.py"
+            ]
+        },
+        {
+            "gate_id": "D6-1",
+            "status": "passed",
+            "evidence": [
+                "tests/test_run_boundary_host_lifecycle.py",
+                "tests/test_host_lifecycle_contract.py"
+            ]
+        },
+        {
+            "gate_id": "D6-2",
+            "status": "passed",
+            "evidence": [
+                "tests/test_host_lifecycle_contract.py",
+                "tests/test_recovery.py"
+            ]
+        },
+        {
+            "gate_id": "D6-3",
+            "status": "passed",
+            "evidence": [
+                "tests/test_agent_runtime_loop.py",
+                "tests/test_mcp_host_lifecycle.py",
+                "tests/test_host_lifecycle_contract.py"
+            ]
+        },
+        {
+            "gate_id": "D6-4",
+            "status": "passed",
+            "evidence": [
+                "tests/test_agent_runtime_loop.py",
+                "tests/test_llm_runtime.py",
+                "tests/test_tool_execution_stable_candidate_owner.py"
+            ]
+        },
+        {
+            "gate_id": "D6-5",
+            "status": "passed",
+            "evidence": [
+                "tests/test_subagent_execution_registry.py",
+                "tests/test_subagent_runtime.py",
+                "tests/test_dependency_architecture.py",
+                "benchmarks/suites/core/v1"
+            ]
+        }
     ],
-    "current_collection": 2578,
-    "targeted_pytest": [
-      {
-        "scope": "run_reconciliation_and_boundary",
-        "passed": 24,
-        "failed": 0
-      },
-      {
-        "scope": "host_mcp_subagent_lifecycle",
-        "passed": 150,
-        "failed": 0
-      },
-      {
-        "scope": "agent_recovery_host_resume",
-        "passed": 106,
-        "failed": 0
-      },
-      {
-        "scope": "architecture_contract_gates",
-        "passed": 106,
-        "failed": 0
-      },
-      {
-        "scope": "canonical_final_output_no_raw_reply_regression",
-        "passed": 1,
-        "failed": 0
-      },
-      {
-        "scope": "finalization_single_owner_followup",
-        "passed": 80,
-        "failed": 0
-      }
-    ],
+    "pytest": {
+        "collected": 2578,
+        "baseline_full_collection": 2572,
+        "initial_partition": {"passed": 20, "failed": 0},
+        "remaining_partition": {
+            "passed": 2518,
+            "failed": 31,
+            "skipped": 2,
+            "deselected_already_covered": 17
+        },
+        "failed_node_reruns": {"required": 31, "passed": 31, "failed": 0},
+        "new_opaque_runner_contract_passed": 1,
+        "d6_core_matrix_passed": 320,
+        "modified_fixture_files_passed": 186,
+        "durable_dataset_runner_nodes_passed": 12,
+        "core_dogfood_contract_nodes_passed": 11,
+        "post_review_added_nodes": {"collected": 6, "passed": 6, "failed": 0},
+        "closure_policy": "partitioned_full_run_then_rerun_only_failed_or_modified_nodes"
+    },
     "static_validation": {
-      "ruff": "passed",
-      "compileall": "passed",
-      "git_diff_check": "passed"
+        "ruff": "passed",
+        "compileall": "passed",
+        "git_diff_check": "passed",
+        "import_observation_count": 3383,
+        "forbidden_d4_observation_count": 0,
+        "residual_cross_package_scc_observation_count": 0,
+        "residual_scc_observation_fingerprint": "sha256:1d878fdf3d452528c94c7c2f065a0b44841d78332e3f1f402c9808e48c70d898"
     },
-    "real_llm_union": {
-      "policy": "full_suite_then_rerun_only_failed_scenario",
-      "status": "passed",
-      "union_passed_scenarios": 6,
-      "union_failed_scenarios": 0,
-      "initial_full_suite": {
-        "passed_scenarios": 5,
-        "failed_scenarios": 1,
-        "failed_scenario_ids": [
-          "manual-compaction-trail"
-        ],
-        "failure_classification": "model_output_format_variance_with_all_durable_lifecycle_and_compaction_assertions_passed",
-        "elapsed_seconds": 522.3,
-        "model_call_count": 46,
-        "tool_call_count": 40,
-        "total_tokens": 794894,
-        "cached_input_tokens": 558208,
-        "summary_record_sha256": "5f715545d8fe4661710d7178eef233b71480b9a966895ebde778d4eaf3eb09c4",
-        "results_jsonl_sha256": "62958aca15a5d41ac72e29c7e27f1d20c1a6c8f27c779ad2b3a3d52213dd774f"
-      },
-      "failed_scenario_rerun": {
-        "scenario_id": "manual-compaction-trail",
+    "real_llm_dogfood": {
+        "suite_id": "pulsara-core-dogfood-v1",
+        "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+        "runner_build_fingerprint": "c5a85c5fcbd184c00bce77d12c8752345f7721c7606fae89fe4d0d021f476737",
         "status": "passed",
-        "elapsed_seconds": 169.7,
-        "model_call_count": 12,
-        "tool_call_count": 7,
-        "total_tokens": 250812,
-        "cached_input_tokens": 153216,
-        "summary_record_sha256": "2d2f9b8c6e9b6d1a19adbbddbbf80e01c6c3420454bcf48e0bc19fc6bb52cbab",
-        "results_jsonl_sha256": "2e0cb249c9cc4dcc565e4c7e1b4d6e693e1ff72c6ad29d04586d5823602e617c"
-      }
-    }
-  },
-  "latest_review_remediation": {
-    "status": "passed",
-    "findings": [
-      "driver_exit_stable_terminalization_repair",
-      "closed_activation_outcome_production_cut",
-      "finalization_owner_alias_removal",
-      "pending_interaction_nonblocking_exact_rebind"
-    ],
-    "current_collection": 2581,
-    "validation_policy": "existing full-suite baseline plus rerun only modified failing nodes",
-    "targeted_pytest": [
-      {
-        "scope": "host_mcp_closed_outcome_failure_union",
-        "passed": 31,
-        "failed": 0
-      },
-      {
-        "scope": "latest_ownership_runtime_matrix",
-        "passed": 18,
-        "failed": 0
-      },
-      {
-        "scope": "architecture_contract_gates",
-        "passed": 75,
-        "failed": 0
-      }
-    ],
-    "new_driver_exit_regression": {
-      "passed": 1,
-      "failed": 0
-    },
-    "static_validation": {
-      "ruff_check": "passed",
-      "ruff_format_check": "passed",
-      "compileall": "passed",
-      "git_diff_check": "passed"
-    }
-  },
-  "latest_real_llm_revalidation": {
-    "revalidated_on": "2026-07-31",
-    "execution_policy": "two_disjoint_selected_runs_under_one_runner_build",
-    "suite_id": "pulsara-core-dogfood-v1",
-    "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
-    "runner_build_fingerprint": "125a77233f85f85e776f3cee90dd1e6cc2ba8e6dc393c0858a638d3736921e8e",
-    "status": "passed",
-    "passed_scenarios": 6,
-    "failed_scenarios": 0,
-    "elapsed_seconds": 591.1256474591792,
-    "model_call_count": 46,
-    "tool_call_count": 41,
-    "total_tokens": 845422,
-    "cached_input_tokens": 591488,
-    "selected_runs": [
-      {
-        "scenario_ids": [
-          "plan-workflow",
-          "workspace-patch"
-        ],
-        "passed_scenarios": 2,
+        "passed_scenarios": 6,
         "failed_scenarios": 0,
-        "summary_record_sha256": "2d04c2c06cd1ee6a352e357f5eb4cbdcd196a3f8bec90d40e2e0ee7615638479",
-        "results_jsonl_sha256": "1856c70473ec192c1660e725b82250f3786e01883b9138887e7f3fe272d1d453"
-      },
-      {
-        "scenario_ids": [
-          "cache-continuity",
-          "durable-resume",
-          "manual-compaction-trail",
-          "subagent-delegation"
+        "elapsed_seconds": 446.1,
+        "model_call_count": 45,
+        "tool_call_count": 38,
+        "total_tokens": 790579,
+        "cached_input_tokens": 550656,
+        "summary_record_sha256": "213d8705033da5ebb02d1e611ec30438f25e81bec2fbe148cb665f9ec9b44583",
+        "results_jsonl_sha256": "2b6df91834e8ede8e1e7c2c4b82c8a9269110c2523977f8836643f9674911876",
+        "isolated_postgres_databases_dropped": true
+    },
+    "post_review_remediation": {
+        "status": "passed",
+        "findings": [
+            "activation_driver_physical_exit_ownership",
+            "child_timeout_child_run_terminalization_order",
+            "canonical_bounded_final_output_materialization",
+            "pending_interaction_exact_source_authority",
+            "confirmed_run_end_finalization_snapshot"
         ],
-        "passed_scenarios": 4,
+        "current_collection": 2578,
+        "targeted_pytest": [
+            {"scope": "run_reconciliation_and_boundary", "passed": 24, "failed": 0},
+            {"scope": "host_mcp_subagent_lifecycle", "passed": 150, "failed": 0},
+            {"scope": "agent_recovery_host_resume", "passed": 106, "failed": 0},
+            {"scope": "architecture_contract_gates", "passed": 106, "failed": 0},
+            {
+                "scope": "canonical_final_output_no_raw_reply_regression",
+                "passed": 1,
+                "failed": 0
+            },
+            {"scope": "finalization_single_owner_followup", "passed": 80, "failed": 0}
+        ],
+        "static_validation": {
+            "ruff": "passed",
+            "compileall": "passed",
+            "git_diff_check": "passed"
+        },
+        "real_llm_union": {
+            "policy": "full_suite_then_rerun_only_failed_scenario",
+            "status": "passed",
+            "union_passed_scenarios": 6,
+            "union_failed_scenarios": 0,
+            "initial_full_suite": {
+                "passed_scenarios": 5,
+                "failed_scenarios": 1,
+                "failed_scenario_ids": ["manual-compaction-trail"],
+                "failure_classification": "model_output_format_variance_with_all_durable_lifecycle_and_compaction_assertions_passed",
+                "elapsed_seconds": 522.3,
+                "model_call_count": 46,
+                "tool_call_count": 40,
+                "total_tokens": 794894,
+                "cached_input_tokens": 558208,
+                "summary_record_sha256": "5f715545d8fe4661710d7178eef233b71480b9a966895ebde778d4eaf3eb09c4",
+                "results_jsonl_sha256": "62958aca15a5d41ac72e29c7e27f1d20c1a6c8f27c779ad2b3a3d52213dd774f"
+            },
+            "failed_scenario_rerun": {
+                "scenario_id": "manual-compaction-trail",
+                "status": "passed",
+                "elapsed_seconds": 169.7,
+                "model_call_count": 12,
+                "tool_call_count": 7,
+                "total_tokens": 250812,
+                "cached_input_tokens": 153216,
+                "summary_record_sha256": "2d2f9b8c6e9b6d1a19adbbddbbf80e01c6c3420454bcf48e0bc19fc6bb52cbab",
+                "results_jsonl_sha256": "2e0cb249c9cc4dcc565e4c7e1b4d6e693e1ff72c6ad29d04586d5823602e617c"
+            }
+        }
+    },
+    "latest_review_remediation": {
+        "status": "passed",
+        "findings": [
+            "driver_exit_stable_terminalization_repair",
+            "closed_activation_outcome_production_cut",
+            "finalization_owner_alias_removal",
+            "pending_interaction_nonblocking_exact_rebind"
+        ],
+        "current_collection": 2581,
+        "validation_policy": "existing full-suite baseline plus rerun only modified failing nodes",
+        "targeted_pytest": [
+            {
+                "scope": "host_mcp_closed_outcome_failure_union",
+                "passed": 31,
+                "failed": 0
+            },
+            {"scope": "latest_ownership_runtime_matrix", "passed": 18, "failed": 0},
+            {"scope": "architecture_contract_gates", "passed": 75, "failed": 0}
+        ],
+        "new_driver_exit_regression": {"passed": 1, "failed": 0},
+        "static_validation": {
+            "ruff_check": "passed",
+            "ruff_format_check": "passed",
+            "compileall": "passed",
+            "git_diff_check": "passed"
+        }
+    },
+    "latest_real_llm_revalidation": {
+        "revalidated_on": "2026-07-31",
+        "execution_policy": "two_disjoint_selected_runs_under_one_runner_build",
+        "suite_id": "pulsara-core-dogfood-v1",
+        "suite_contract_fingerprint": "d76b9b16192a0d932b9073f1505d059c18e546ddf85001c8bb11acd08b81cfe0",
+        "runner_build_fingerprint": "125a77233f85f85e776f3cee90dd1e6cc2ba8e6dc393c0858a638d3736921e8e",
+        "status": "passed",
+        "passed_scenarios": 6,
         "failed_scenarios": 0,
-        "summary_record_sha256": "b694489243a6f3fda43c33842c78adf3fbe7a605091a754acd96960f74fc8591",
-        "results_jsonl_sha256": "e9711d2ca40b8e294698a66170e8d350a546140694cd924407d7d33227f490d7"
-      }
-    ],
-    "isolated_postgres_databases_dropped": true
-  },
-  "latest_subagent_difficulty_revalidation": {
-    "revalidated_on": "2026-07-31",
-    "execution_policy": "initial_attempt_then_fixture_only_repair_and_failed_scenario_rerun",
-    "suite_id": "pulsara-core-dogfood-v1",
-    "suite_contract_fingerprint": "fcdf99b275ad4c491cda7515f0c71a5883691b08eff0a7a2d29ee956496c91d1",
-    "scenario_id": "subagent-delegation",
-    "scenario_contract_fingerprint": "914670eda5aac3c977063840fdd7e9a99c18ae01d2ebe383edb3e0e7b39f209b",
-    "runner_build_fingerprint": "a6e912205eec3c516f89ffac034a1dc897c322eacd269588aede7ea80ef8f0b5",
-    "status": "passed",
-    "difficulty_contract": {
-      "linked_file_count": 8,
-      "minimum_child_tool_calls": 10,
-      "observed_child_tool_calls": 12,
-      "parent_tool_call_count": 3,
-      "requires_search": true,
-      "requires_individual_reads": true,
-      "requires_trace_write_and_reread": true,
-      "requires_explicit_result": true
+        "elapsed_seconds": 591.1256474591792,
+        "model_call_count": 46,
+        "tool_call_count": 41,
+        "total_tokens": 845422,
+        "cached_input_tokens": 591488,
+        "selected_runs": [
+            {
+                "scenario_ids": ["plan-workflow", "workspace-patch"],
+                "passed_scenarios": 2,
+                "failed_scenarios": 0,
+                "summary_record_sha256": "2d04c2c06cd1ee6a352e357f5eb4cbdcd196a3f8bec90d40e2e0ee7615638479",
+                "results_jsonl_sha256": "1856c70473ec192c1660e725b82250f3786e01883b9138887e7f3fe272d1d453"
+            },
+            {
+                "scenario_ids": [
+                    "cache-continuity",
+                    "durable-resume",
+                    "manual-compaction-trail",
+                    "subagent-delegation"
+                ],
+                "passed_scenarios": 4,
+                "failed_scenarios": 0,
+                "summary_record_sha256": "b694489243a6f3fda43c33842c78adf3fbe7a605091a754acd96960f74fc8591",
+                "results_jsonl_sha256": "e9711d2ca40b8e294698a66170e8d350a546140694cd924407d7d33227f490d7"
+            }
+        ],
+        "isolated_postgres_databases_dropped": true
     },
-    "initial_attempt": {
-      "status": "failed",
-      "failure_classification": "hidden_verifier_expected_basename_but_child_emitted_workspace_relative_paths",
-      "child_tool_gate_passed": true,
-      "observed_child_tool_calls": 12,
-      "result_record_sha256": "87cc883d6f11ab7add8df6c0fb9c78fe7cc627d1e6b0d407c4c607ee25eed14f",
-      "summary_record_sha256": "0100c1e23b9ae1f7cd0dfdf51090907dafde42415da88e999bb59539ba134d7a",
-      "results_jsonl_sha256": "ce9f79bf711f2f99044733550e0eb17ba4dc3f6eefb915bd5302f0eb5f9c7a5b"
-    },
-    "successful_rerun": {
-      "elapsed_seconds": 94.04991762526333,
-      "model_call_count": 4,
-      "parent_tool_call_count": 3,
-      "observed_child_tool_calls": 12,
-      "total_tokens": 59602,
-      "cached_input_tokens": 43648,
-      "hidden_verifier_passed": true,
-      "result_record_sha256": "4777cab9e9e061806864e4952f37afe4be5162b458447e85341ab746e162f6e0",
-      "summary_record_sha256": "a8b23c4f20f4396ca86c31dd2baa026d103fb7d58b60e6a08ee1c6e29b7a58c9",
-      "results_jsonl_sha256": "eee945b5cad0c0b6af06a10cd38af9b5a63cd4ad7dbe83c71b3aab2d697f8d66"
-    },
-    "isolated_postgres_databases_dropped": true
-  }
+    "latest_subagent_difficulty_revalidation": {
+        "revalidated_on": "2026-07-31",
+        "execution_policy": "initial_attempt_then_fixture_only_repair_and_failed_scenario_rerun",
+        "suite_id": "pulsara-core-dogfood-v1",
+        "suite_contract_fingerprint": "fcdf99b275ad4c491cda7515f0c71a5883691b08eff0a7a2d29ee956496c91d1",
+        "scenario_id": "subagent-delegation",
+        "scenario_contract_fingerprint": "914670eda5aac3c977063840fdd7e9a99c18ae01d2ebe383edb3e0e7b39f209b",
+        "runner_build_fingerprint": "29de24f639e21588974b51006a7ca22ef0a59414bc5112b10987a68659368a1f",
+        "runner_rebind_basis": "ruff_format_only_semantics_preserving_no_dogfood_rerun",
+        "status": "passed",
+        "difficulty_contract": {
+            "linked_file_count": 8,
+            "minimum_child_tool_calls": 10,
+            "observed_child_tool_calls": 12,
+            "parent_tool_call_count": 3,
+            "requires_search": true,
+            "requires_individual_reads": true,
+            "requires_trace_write_and_reread": true,
+            "requires_explicit_result": true
+        },
+        "initial_attempt": {
+            "status": "failed",
+            "failure_classification": "hidden_verifier_expected_basename_but_child_emitted_workspace_relative_paths",
+            "child_tool_gate_passed": true,
+            "observed_child_tool_calls": 12,
+            "result_record_sha256": "87cc883d6f11ab7add8df6c0fb9c78fe7cc627d1e6b0d407c4c607ee25eed14f",
+            "summary_record_sha256": "0100c1e23b9ae1f7cd0dfdf51090907dafde42415da88e999bb59539ba134d7a",
+            "results_jsonl_sha256": "ce9f79bf711f2f99044733550e0eb17ba4dc3f6eefb915bd5302f0eb5f9c7a5b"
+        },
+        "successful_rerun": {
+            "elapsed_seconds": 94.04991762526333,
+            "model_call_count": 4,
+            "parent_tool_call_count": 3,
+            "observed_child_tool_calls": 12,
+            "total_tokens": 59602,
+            "cached_input_tokens": 43648,
+            "hidden_verifier_passed": true,
+            "result_record_sha256": "4777cab9e9e061806864e4952f37afe4be5162b458447e85341ab746e162f6e0",
+            "summary_record_sha256": "a8b23c4f20f4396ca86c31dd2baa026d103fb7d58b60e6a08ee1c6e29b7a58c9",
+            "results_jsonl_sha256": "eee945b5cad0c0b6af06a10cd38af9b5a63cd4ad7dbe83c71b3aab2d697f8d66"
+        },
+        "isolated_postgres_databases_dropped": true
+    }
 }

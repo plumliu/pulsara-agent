@@ -127,9 +127,7 @@ def apply_rollout_event(
             for item in state.active_reservations
         ):
             if account is None:
-                raise RolloutReducerContractError(
-                    "settlement has no rollout account"
-                )
+                raise RolloutReducerContractError("settlement has no rollout account")
             state = _settle(account=account, state=state, event=event)
     elif isinstance(event, RolloutPhaseTransitionedEvent):
         if event.account_id == state.account_id:
@@ -145,10 +143,8 @@ def apply_rollout_event(
                     "rollout account closed with reservations"
                 )
             if (
-                event.final_state_fingerprint
-                != state_before_event.state_fingerprint
-                or event.charged_milliunits
-                != state_before_event.charged_milliunits
+                event.final_state_fingerprint != state_before_event.state_fingerprint
+                or event.charged_milliunits != state_before_event.charged_milliunits
                 or event.model_call_count != state_before_event.model_call_count
                 or event.tool_call_count != state_before_event.tool_call_count
             ):
@@ -206,7 +202,9 @@ def _settle(
         if item.reservation_id == event.reservation_id
     )
     if len(matching) != 1:
-        raise RolloutReducerContractError("settlement reservation is missing or ambiguous")
+        raise RolloutReducerContractError(
+            "settlement reservation is missing or ambiguous"
+        )
     reservation = matching[0]
     validate_rollout_settlement(
         policy=account.policy,
@@ -294,10 +292,7 @@ def validate_rollout_settlement(
         raise RolloutReducerContractError(
             "child terminal settlement lacks usage handoff"
         )
-    if (
-        event.charged_milliunits
-        != handoff.settlement_aggregate.charged_milliunits
-    ):
+    if event.charged_milliunits != handoff.settlement_aggregate.charged_milliunits:
         raise RolloutReducerContractError("child settlement aggregate mismatch")
 
 
@@ -325,15 +320,13 @@ def _validate_model_settlement(
         raise RolloutReducerContractError("model settlement call identity mismatch")
     if (
         quote.policy_fingerprint != policy.policy_fingerprint
-        or quote.non_cached_input_weight_milli
-        != policy.non_cached_input_weight_milli
+        or quote.non_cached_input_weight_milli != policy.non_cached_input_weight_milli
         or quote.output_weight_milli != policy.output_weight_milli
         or charge.policy_fingerprint != policy.policy_fingerprint
     ):
         raise RolloutReducerContractError("model settlement policy drifted")
     if (
-        charge.reservation_quote_fact_fingerprint
-        != quote.quote_fact_fingerprint
+        charge.reservation_quote_fact_fingerprint != quote.quote_fact_fingerprint
         or charge.physical_input_token_upper_bound
         != quote.physical_input_token_upper_bound
         or charge.output_token_upper_bound != quote.output_token_upper_bound
@@ -348,13 +341,10 @@ def _validate_model_settlement(
         assert charge.reported_input_tokens is not None
         assert charge.reported_cached_input_tokens is not None
         assert charge.reported_output_tokens is not None
-        non_cached = (
-            charge.reported_input_tokens - charge.reported_cached_input_tokens
-        )
+        non_cached = charge.reported_input_tokens - charge.reported_cached_input_tokens
         expected = (
             non_cached * policy.non_cached_input_weight_milli
-            + charge.reported_cached_input_tokens
-            * policy.cached_input_weight_milli
+            + charge.reported_cached_input_tokens * policy.cached_input_weight_milli
             + charge.reported_output_tokens * policy.output_weight_milli
         )
     elif event.usage_status == "not_started_zero":
@@ -377,7 +367,9 @@ def _transition(
     ):
         raise RolloutReducerContractError("rollout phase transition source mismatch")
     if event.source_through_sequence != state_before_event.through_sequence:
-        raise RolloutReducerContractError("rollout phase transition source sequence mismatch")
+        raise RolloutReducerContractError(
+            "rollout phase transition source sequence mismatch"
+        )
     if event.state_before_fingerprint != state_before_event.state_fingerprint:
         raise RolloutReducerContractError("rollout phase transition CAS mismatch")
     if ROLLOUT_PHASE_ORDER.index(event.to_phase) <= ROLLOUT_PHASE_ORDER.index(

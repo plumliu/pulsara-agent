@@ -2893,6 +2893,7 @@ def _new_transcript_units(
             ordered.source_attribution,
             DirectStableMessageSourceAttributionFact,
         )
+        and ordered.source_attribution.stable_leaf_reference is not None
         and ordered.source_attribution.stable_leaf_reference.entry_fact_fingerprint
         == pending_materialization.matched_stable_entry_fact_fingerprint
         and ordered.source_attribution.stable_leaf_reference.entry_semantic_fingerprint

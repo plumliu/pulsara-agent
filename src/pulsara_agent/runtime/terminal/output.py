@@ -210,7 +210,10 @@ class _StreamingSecretSanitizer:
                     output.append(char)
                     continue
                 self._pending_token += char
-                if self._sensitive_assignment_key is None and "=" in self._pending_token:
+                if (
+                    self._sensitive_assignment_key is None
+                    and "=" in self._pending_token
+                ):
                     key = self._pending_token.split("=", 1)[0]
                     if _SECRET_KEY_RE.match(f"{key}="):
                         self._sensitive_assignment_key = key
@@ -358,7 +361,10 @@ class _BoundedSpoolWriter:
         with self._lock:
             if not self._accepting or self._writer_state != "active":
                 return
-            if self._pending_bytes + len(data) > self.policy.maximum_pending_spool_utf8_bytes:
+            if (
+                self._pending_bytes + len(data)
+                > self.policy.maximum_pending_spool_utf8_bytes
+            ):
                 self._degrade_locked(
                     reason="writer_queue_overflow",
                     start=segment.start_cursor,
@@ -451,16 +457,24 @@ class _BoundedSpoolWriter:
         chunks: list[str] = []
         for page in pages:
             candidate = page.candidate
-            if candidate.end_cursor.sanitized_char_offset <= available_start.sanitized_char_offset:
+            if (
+                candidate.end_cursor.sanitized_char_offset
+                <= available_start.sanitized_char_offset
+            ):
                 continue
-            if candidate.start_cursor.sanitized_char_offset >= end.sanitized_char_offset:
+            if (
+                candidate.start_cursor.sanitized_char_offset
+                >= end.sanitized_char_offset
+            ):
                 break
             payload = page.path.read_bytes()
             if f"sha256:{sha256(payload).hexdigest()}" != candidate.content_sha256:
                 with self._lock:
                     self._writer_state = "authority_untrusted"
                     self._condition.notify_all()
-                raise _SpoolAuthorityConflict("terminal spool committed page hash conflict")
+                raise _SpoolAuthorityConflict(
+                    "terminal spool committed page hash conflict"
+                )
             text = payload.decode("utf-8")
             first = max(
                 0,
@@ -578,9 +592,7 @@ class _BoundedSpoolWriter:
                         "start_cursor": item.candidate.start_cursor.model_dump(
                             mode="json"
                         ),
-                        "end_cursor": item.candidate.end_cursor.model_dump(
-                            mode="json"
-                        ),
+                        "end_cursor": item.candidate.end_cursor.model_dump(mode="json"),
                     }
                     for item in self._pages
                 ],
@@ -664,12 +676,15 @@ class SanitizedOutputJournal:
         spool_root: Path | None = None,
         spool_fault_injector: Callable[[str], None] | None = None,
     ) -> None:
-        if min(
-            max_retained_segments,
-            max_retained_chars,
-            max_retained_utf8_bytes,
-            max_segment_utf8_bytes,
-        ) <= 0:
+        if (
+            min(
+                max_retained_segments,
+                max_retained_chars,
+                max_retained_utf8_bytes,
+                max_segment_utf8_bytes,
+            )
+            <= 0
+        ):
             raise ValueError("terminal output journal bounds must be positive")
         if partial_line_quiet_seconds <= 0:
             raise ValueError("terminal output quiet bound must be positive")
@@ -747,9 +762,9 @@ class SanitizedOutputJournal:
     @property
     def retained_utf8_bytes(self) -> int:
         with self._lock:
-            return sum(len(item.sanitized_text.encode("utf-8")) for item in self._segments) + len(
-                self._open_text.encode("utf-8")
-            )
+            return sum(
+                len(item.sanitized_text.encode("utf-8")) for item in self._segments
+            ) + len(self._open_text.encode("utf-8"))
 
     @property
     def spool_retained_bytes(self) -> int:
@@ -875,9 +890,7 @@ class SanitizedOutputJournal:
         return self._available_full_text()[0]
 
     def _available_full_text(self) -> tuple[str, TerminalOutputCursorFact]:
-        self._spool.wait_idle(
-            self._spool.policy.terminal_drain_timeout_ms / 1000
-        )
+        self._spool.wait_idle(self._spool.policy.terminal_drain_timeout_ms / 1000)
         with self._lock:
             retained = "".join(item.sanitized_text for item in self._segments)
             retained_start = self._retained_start_cursor
@@ -905,7 +918,9 @@ class SanitizedOutputJournal:
         return bool(self.snapshot(max_chars=max_chars).text)
 
     def wait_for_revision(self, revision: int, timeout_seconds: float | None) -> int:
-        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        deadline = (
+            None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        )
         with self._condition:
             while self._revision <= revision and not self._finished:
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -1059,8 +1074,7 @@ class SanitizedOutputJournal:
             )
             segment_end = min(
                 len(segment.sanitized_text),
-                end.sanitized_char_offset
-                - segment.start_cursor.sanitized_char_offset,
+                end.sanitized_char_offset - segment.start_cursor.sanitized_char_offset,
             )
             output.append(segment.sanitized_text[segment_start:segment_end])
             indexes.append(segment.segment_index)
@@ -1154,7 +1168,9 @@ def _cursor_offsets_le(
     )
 
 
-def _spool_failure_reason(exc: BaseException) -> Literal[
+def _spool_failure_reason(
+    exc: BaseException,
+) -> Literal[
     "write_enospc",
     "write_permission_denied",
     "write_io_error",
@@ -1217,7 +1233,10 @@ def recover_terminal_output_delta(
         for item in manifest["pages"]:
             start = TerminalOutputCursorFact.model_validate(item["start_cursor"])
             end = TerminalOutputCursorFact.model_validate(item["end_cursor"])
-            if end.sanitized_char_offset <= requested_start_cursor.sanitized_char_offset:
+            if (
+                end.sanitized_char_offset
+                <= requested_start_cursor.sanitized_char_offset
+            ):
                 continue
             if start.sanitized_char_offset >= terminal_cursor.sanitized_char_offset:
                 break
@@ -1260,7 +1279,10 @@ def recover_terminal_output_delta(
         terminal_cursor.sanitized_utf8_byte_offset
         - requested_start_cursor.sanitized_utf8_byte_offset
     )
-    if len(text_value) != expected_chars or len(text_value.encode("utf-8")) != expected_bytes:
+    if (
+        len(text_value) != expected_chars
+        or len(text_value.encode("utf-8")) != expected_bytes
+    ):
         return build_frozen_fact(
             UnavailableRecoveredTerminalOutputDeltaFact,
             schema_version="unavailable_recovered_terminal_output_delta.v1",
@@ -1289,14 +1311,17 @@ def recover_terminal_output_delta(
 
 def _recovery_unavailable_reason(
     state: TerminalOutputSpoolWriterStateFact,
-) -> Literal[
-    "spool_range_evicted",
-    "spool_write_failed",
-    "spool_writer_queue_overflow",
-    "spool_fsync_timeout",
-    "spool_terminal_drain_timeout",
-    "artifact_gc_confirmed",
-] | None:
+) -> (
+    Literal[
+        "spool_range_evicted",
+        "spool_write_failed",
+        "spool_writer_queue_overflow",
+        "spool_fsync_timeout",
+        "spool_terminal_drain_timeout",
+        "artifact_gc_confirmed",
+    ]
+    | None
+):
     gap = state.latest_gap
     if state.writer_state == "authority_untrusted":
         return "spool_write_failed"

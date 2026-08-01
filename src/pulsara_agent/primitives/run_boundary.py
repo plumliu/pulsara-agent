@@ -174,7 +174,9 @@ class ModelStreamRecoveryPlanFact(BaseModel):
             or self.run_execution_activation is not None
             or self.control_downstream_predicate_contract is not None
         ):
-            raise ValueError("direct/window recovery plan cannot carry main attribution")
+            raise ValueError(
+                "direct/window recovery plan cannot carry main attribution"
+            )
         reservation_fields = (
             self.reservation_id,
             self.reservation_quote_fingerprint,
@@ -183,7 +185,9 @@ class ModelStreamRecoveryPlanFact(BaseModel):
         if any(item is None for item in reservation_fields) and any(
             item is not None for item in reservation_fields
         ):
-            raise ValueError("model stream reservation recovery identity is all-or-none")
+            raise ValueError(
+                "model stream reservation recovery identity is all-or-none"
+            )
         if (self.lifecycle_kind == "window_compaction_summary") != (
             self.window_compaction_started_event_id is not None
         ):
@@ -213,7 +217,9 @@ class HostRunBoundaryDiagnostic(BaseModel):
         try:
             payload = canonical_json_bytes(self.metadata)
         except (TypeError, ValueError) as exc:
-            raise ValueError("boundary diagnostic metadata must be strict JSON") from exc
+            raise ValueError(
+                "boundary diagnostic metadata must be strict JSON"
+            ) from exc
         if len(payload) > 4096:
             raise ValueError("boundary diagnostic metadata exceeds bounded cap")
         return self
@@ -246,13 +252,15 @@ class BoundaryTranscriptSnapshotFact(BaseModel):
             value is None for value in checkpoint_fields
         ):
             raise ValueError("transcript checkpoint basis must be all-or-none")
-        if self.checkpoint_terminal_sequence is not None and int(
-            self.checkpoint_terminal_sequence
-        ) < 1:
+        if (
+            self.checkpoint_terminal_sequence is not None
+            and int(self.checkpoint_terminal_sequence) < 1
+        ):
             raise ValueError("transcript checkpoint sequence must be positive")
-        if self.checkpoint_keep_after_sequence is not None and int(
-            self.checkpoint_keep_after_sequence
-        ) < 0:
+        if (
+            self.checkpoint_keep_after_sequence is not None
+            and int(self.checkpoint_keep_after_sequence) < 0
+        ):
             raise ValueError("transcript checkpoint keep-after cannot be negative")
         attempt = self.preflight_compaction_id is not None
         terminal_fields = (
@@ -263,7 +271,9 @@ class BoundaryTranscriptSnapshotFact(BaseModel):
             if any(value is None for value in terminal_fields):
                 raise ValueError("preflight compaction requires terminal attribution")
             if int(self.preflight_compaction_terminal_sequence or 0) < 1:
-                raise ValueError("preflight compaction terminal sequence must be positive")
+                raise ValueError(
+                    "preflight compaction terminal sequence must be positive"
+                )
         elif any(value is not None for value in terminal_fields):
             raise ValueError("non-attempted preflight cannot carry compaction facts")
         return self
@@ -286,9 +296,7 @@ class NewRunBoundaryFact(BaseModel):
             raise ValueError(
                 "new run boundary requires PRE_RUN or PRE_RUNTIME_REQUEST identity"
             )
-        if self.degraded_reason_codes != tuple(
-            sorted(set(self.degraded_reason_codes))
-        ):
+        if self.degraded_reason_codes != tuple(sorted(set(self.degraded_reason_codes))):
             raise ValueError("degraded reason codes must be sorted and unique")
         if self.capability_basis.owner.owner_id != self.identity.boundary_id:
             raise ValueError("capability basis owner does not match new-run boundary")
@@ -459,7 +467,9 @@ class BoundaryBatchConfirmation(BaseModel):
             raise ValueError("committed sequences must be positive")
         if self.status is BoundaryBatchCommitStatus.FULL:
             if committed != candidates:
-                raise ValueError("full confirmation must contain every candidate in order")
+                raise ValueError(
+                    "full confirmation must contain every candidate in order"
+                )
             if self.committed_sequences and self.committed_sequences != tuple(
                 range(
                     self.committed_sequences[0],
@@ -472,7 +482,9 @@ class BoundaryBatchConfirmation(BaseModel):
                 raise ValueError("none confirmation cannot contain committed events")
         elif self.status is BoundaryBatchCommitStatus.PARTIAL:
             if not committed or len(committed) >= len(candidates):
-                raise ValueError("partial confirmation requires a strict candidate subset")
+                raise ValueError(
+                    "partial confirmation requires a strict candidate subset"
+                )
         return self
 
 

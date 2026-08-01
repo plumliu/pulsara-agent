@@ -7,6 +7,8 @@ underlying session from any public API.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -318,14 +320,103 @@ class RuntimeSessionRunModelPort:
     def release_active_run_monitor_safe_point(self, lease: object) -> None:
         self.__session.release_active_run_monitor_safe_point(lease)
 
+    async def borrow_active_run_prompt_steer_safe_point(
+        self,
+        *,
+        run_id: str,
+        next_model_call_index: int,
+    ):
+        return await self.__session.borrow_active_run_prompt_steer_safe_point(
+            run_id=run_id,
+            next_model_call_index=next_model_call_index,
+        )
+
+    def release_active_run_prompt_steer_safe_point(self, lease: object) -> None:
+        self.__session.release_active_run_prompt_steer_safe_point(lease)
+
+    def prepare_active_run_prompt_steer_start(
+        self,
+        *,
+        lease,
+        provider_input_start_bundle,
+        event_context,
+    ):
+        """Freeze the exact UserSteer + queue CAS companions for ModelStart."""
+
+        from pulsara_agent.event import ProviderInputAppendCommittedEvent
+        from pulsara_agent.ports.host_ingress import (
+            build_active_run_prompt_steer_guard,
+        )
+
+        append_events = tuple(
+            event
+            for event in provider_input_start_bundle.companion_events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        )
+        if len(append_events) != 1:
+            raise RuntimeError("active-run prompt steer requires one provider append")
+        append_event = append_events[0]
+        mutation = self.__session.prompt_queue_mutation_service
+        user_steer_event = mutation.prepare_user_steer_event(
+            queue_item_id=lease.queue_item_id,
+            reservation_fingerprint=lease.reservation_fingerprint,
+            command_id=lease.command_id,
+            event_context=event_context,
+            provider_input_append_event=append_event,
+            canonical_text=lease.text,
+        )
+        dispatch = mutation.prepare_commit_to_provider_input(
+            queue_item_id=lease.queue_item_id,
+            reservation_fingerprint=lease.reservation_fingerprint,
+            command_id=lease.command_id,
+            event_context=event_context,
+            provider_input_append_event=append_event,
+            user_steer_event=user_steer_event,
+            candidate_prefix=(
+                *provider_input_start_bundle.companion_events,
+                user_steer_event,
+            ),
+        )
+        return (
+            build_active_run_prompt_steer_guard(
+                lease=lease,
+                provider_input_start_bundle=provider_input_start_bundle,
+                expected_user_steer_event_id=user_steer_event.id,
+            ),
+            (user_steer_event, dispatch.prepared_events[-1]),
+            dispatch.transaction_companion,
+        )
+
+    @staticmethod
+    def build_prompt_steer_start_transaction_companion(
+        *,
+        queue_companion,
+        resolved_model_call_id: str,
+        model_call_start_event_id: str,
+    ):
+        from pulsara_agent.runtime.terminal_application.prompt_queue import (
+            PromptQueueModelStartTransactionCompanion,
+        )
+
+        return PromptQueueModelStartTransactionCompanion.build(
+            queue_companion=queue_companion,
+            resolved_model_call_id=resolved_model_call_id,
+            model_call_start_event_id=model_call_start_event_id,
+        )
+
     def prepare_lifecycle_start_bundle(self, **kwargs):
         return prepare_model_lifecycle_start_bundle(
             runtime_session=self.__session,
             **kwargs,
         )
 
-    def event_commit_port(self) -> RuntimeSessionModelStreamEventCommitPort:
-        return RuntimeSessionModelStreamEventCommitPort(runtime_session=self.__session)
+    def event_commit_port(
+        self, *, start_transaction_companion=None
+    ) -> RuntimeSessionModelStreamEventCommitPort:
+        return RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=self.__session,
+            start_transaction_companion=start_transaction_companion,
+        )
 
     async def resolve_completed_control_call(self, owner, **kwargs):
         return await owner.resolve_completed_call(
@@ -369,7 +460,7 @@ class RuntimeSessionRunToolPort:
             f"tool_result_end:{run_id}:{tool_call_id}",
         )
         decoded = [
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for raw in self.__session.event_log.read_raw_events_by_id(ids)
         ]
         if any(
@@ -428,7 +519,11 @@ class RuntimeSessionRunToolPort:
         return [
             decoded
             for raw in snapshot.events
-            if (decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).run_id
+            if (
+                decoded := decode_raw_stored_event_envelope(
+                    raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ).run_id
             == run_id
             and getattr(decoded, "tool_call_id", None) == tool_call_id
             and isinstance(

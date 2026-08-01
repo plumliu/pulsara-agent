@@ -73,15 +73,21 @@ class InMemoryGraphStore:
         document[memory.UPDATED_AT.name] = updated_at.isoformat()
         self.put_jsonld(document, graph_id=graph_id)
 
-    def find_by_type(self, type_name: Term, graph_id: str | None = None) -> list[dict[str, Any]]:
+    def find_by_type(
+        self, type_name: Term, graph_id: str | None = None
+    ) -> list[dict[str, Any]]:
         graph = self.graphs.get(_graph_key(graph_id), {})
         return [
             deepcopy(doc)
             for doc in graph.values()
-            if any(_type_matches(value, type_name) for value in _as_list(doc.get("@type")))
+            if any(
+                _type_matches(value, type_name) for value in _as_list(doc.get("@type"))
+            )
         ]
 
-    def query(self, sparql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def query(
+        self, sparql: str, bindings: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError("InMemoryGraphStore does not implement SPARQL query")
 
     def update(self, sparql: str) -> None:

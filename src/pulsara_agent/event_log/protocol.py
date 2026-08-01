@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from hashlib import sha256
-from typing import Any, Iterable, Protocol, Sequence, runtime_checkable
+from typing import Any, Iterable, Literal, Protocol, Sequence, runtime_checkable
 
 from pulsara_agent.event.events import AgentEvent
+from pulsara_agent.event_log.historical_decoder import build_decoder_stored_event_pair
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     EventSchemaDomainRegistry,
-    canonical_event_created_at,
     canonical_event_payload_bytes,
+    freeze_event_write_candidate,
     payload_sha256,
 )
 from pulsara_agent.message.message import Msg
@@ -22,9 +22,14 @@ from pulsara_agent.primitives.authority_materialization import (
 )
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
-    canonical_utc_timestamp,
     context_fingerprint,
 )
+import pulsara_agent.primitives.stored_event as stored_event_types
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    RawTranscriptDomainPrefixFact,
+)
+import pulsara_agent.ports.stored_event as stored_event_ports
 from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
 
 
@@ -142,16 +147,22 @@ class EventLogStoredCandidateBatchRebindReceipt:
 
     def __post_init__(self) -> None:
         count = len(self.ordered_event_ids)
-        if count == 0 or len(self.ordered_assigned_sequences) != count or len(
-            self.ordered_normalized_payload_fingerprints
-        ) != count:
+        if (
+            count == 0
+            or len(self.ordered_assigned_sequences) != count
+            or len(self.ordered_normalized_payload_fingerprints) != count
+        ):
             raise ValueError("stored candidate rebind receipt shape mismatch")
         first = self.ordered_assigned_sequences[0]
         if self.ordered_assigned_sequences != tuple(range(first, first + count)):
             raise ValueError("stored candidate sequence assignment is not contiguous")
         expected_continuity = context_fingerprint(
             "event-log-stored-sequence-continuity:v1",
-            tuple(zip(self.ordered_event_ids, self.ordered_assigned_sequences, strict=True)),
+            tuple(
+                zip(
+                    self.ordered_event_ids, self.ordered_assigned_sequences, strict=True
+                )
+            ),
         )
         if self.sequence_continuity_fingerprint != expected_continuity:
             raise ValueError("stored candidate continuity fingerprint mismatch")
@@ -172,7 +183,9 @@ class EventLogStoredCandidateBatchRebindReceipt:
 
 
 @runtime_checkable
-class CandidateBoundEventLogTransactionCompanion(EventLogTransactionCompanion, Protocol):
+class CandidateBoundEventLogTransactionCompanion(
+    EventLogTransactionCompanion, Protocol
+):
     @property
     def prepared_candidate_batch_identity(
         self,
@@ -182,6 +195,16 @@ class CandidateBoundEventLogTransactionCompanion(EventLogTransactionCompanion, P
         self,
         receipt: EventLogStoredCandidateBatchRebindReceipt,
     ) -> None: ...
+
+
+@runtime_checkable
+class CandidateBatchBindableEventLogTransactionCompanion(Protocol):
+    """Intent that becomes an EventLog companion after accounting is frozen."""
+
+    def bind_candidate_batch(
+        self,
+        candidates: Sequence[FrozenEventWriteCandidate],
+    ) -> CandidateBoundEventLogTransactionCompanion: ...
 
 
 def build_prepared_candidate_batch_identity(
@@ -295,6 +318,174 @@ class EventBatchConfirmation:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredEventCandidateMatch:
+    candidate_index: int
+    candidate_event_id: str
+    candidate_payload_fingerprint: str
+    owned_stored_event: AgentEvent
+    raw_stored_envelope: stored_event_types.RawStoredEventEnvelope
+    join_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventBatchConfirmationEvidence:
+    exact_ordered_candidate_batch_fingerprint: str
+    matched_candidates: tuple[StoredEventCandidateMatch, ...]
+    missing_event_ids: tuple[str, ...]
+    actual_last_sequence: int
+    evidence_fingerprint: str
+
+
+EventBatchConfirmationDisposition = Literal[
+    "full", "none", "partial", "conflict", "unavailable"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedFullStoredBatch:
+    receipt: stored_event_ports.StoredEventBatchCommitReceipt
+    confirmation_evidence_fingerprint: str
+    classifier_contract_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEventBatchConfirmation:
+    disposition: EventBatchConfirmationDisposition
+    evidence: EventBatchConfirmationEvidence | None
+    confirmed_full_batch: ConfirmedFullStoredBatch | None
+
+    def __post_init__(self) -> None:
+        if (self.disposition == "full") != (self.confirmed_full_batch is not None):
+            raise ValueError("only FULL confirmation can carry a stored batch receipt")
+        if self.disposition != "unavailable" and self.evidence is None:
+            raise ValueError("available confirmation requires typed evidence")
+        if self.disposition == "unavailable" and self.evidence is not None:
+            raise ValueError("unavailable confirmation cannot claim read evidence")
+
+
+_STORED_BATCH_CONFIRMATION_CLASSIFIER_FINGERPRINT = context_fingerprint(
+    "stored-event-candidate-classifier-contract:v1",
+    "full|none|partial|conflict|unavailable;ordered-contiguous-exact-payload",
+)
+
+
+def classify_stored_event_candidate_batch(
+    *,
+    candidates: Sequence[AgentEvent],
+    raw_by_event_id: dict[str, stored_event_types.RawStoredEventEnvelope],
+    actual_last_sequence: int,
+    schema_registry: EventSchemaDomainRegistry = DEFAULT_EVENT_SCHEMA_REGISTRY,
+) -> StoredEventBatchConfirmation:
+    """Classify exact candidate IDs against canonical stored rows."""
+
+    frozen = tuple(
+        freeze_event_write_candidate(item.model_copy(update={"sequence": None}))
+        for item in candidates
+    )
+    candidate_batch_fingerprint = context_fingerprint(
+        "exact-ordered-stored-event-candidate-batch:v1",
+        tuple(item.fingerprint_payload() for item in frozen),
+    )
+    matches: list[StoredEventCandidateMatch] = []
+    pair_proofs: list[object] = []
+    missing: list[str] = []
+    conflict = False
+    seen_ids: set[str] = set()
+    for index, (candidate, frozen_candidate) in enumerate(
+        zip(candidates, frozen, strict=True)
+    ):
+        if candidate.id in seen_ids:
+            conflict = True
+            continue
+        seen_ids.add(candidate.id)
+        envelope = raw_by_event_id.get(candidate.id)
+        if envelope is None:
+            missing.append(candidate.id)
+            continue
+        if not same_event_raw_payload(candidate, envelope):
+            conflict = True
+            continue
+        try:
+            pair = build_decoder_stored_event_pair(envelope, schema_registry)
+        except Exception:
+            conflict = True
+            continue
+        owned = pair.owned_stored_event
+        join_payload = {
+            "candidate_index": index,
+            "candidate_event_id": candidate.id,
+            "candidate_payload_fingerprint": frozen_candidate.payload_fingerprint,
+            "stored_sequence": envelope.sequence,
+            "stored_payload_fingerprint": envelope.payload_fingerprint,
+            "stored_envelope_fingerprint": envelope.envelope_fingerprint,
+            "pair_fingerprint": pair.pair_fingerprint,
+        }
+        matches.append(
+            StoredEventCandidateMatch(
+                candidate_index=index,
+                candidate_event_id=candidate.id,
+                candidate_payload_fingerprint=frozen_candidate.payload_fingerprint,
+                owned_stored_event=owned,
+                raw_stored_envelope=envelope,
+                join_fingerprint=context_fingerprint(
+                    "stored-event-candidate-match:v1", join_payload
+                ),
+            )
+        )
+        pair_proofs.append(pair)
+    sequences = tuple(item.raw_stored_envelope.sequence for item in matches)
+    if matches and (
+        tuple(item.candidate_index for item in matches)
+        != tuple(sorted(item.candidate_index for item in matches))
+        or sequences != tuple(range(sequences[0], sequences[-1] + 1))
+    ):
+        conflict = True
+    evidence_payload = {
+        "exact_ordered_candidate_batch_fingerprint": candidate_batch_fingerprint,
+        "matched_candidate_joins": tuple(item.join_fingerprint for item in matches),
+        "missing_event_ids": tuple(missing),
+        "actual_last_sequence": actual_last_sequence,
+    }
+    evidence = EventBatchConfirmationEvidence(
+        exact_ordered_candidate_batch_fingerprint=candidate_batch_fingerprint,
+        matched_candidates=tuple(matches),
+        missing_event_ids=tuple(missing),
+        actual_last_sequence=actual_last_sequence,
+        evidence_fingerprint=context_fingerprint(
+            "event-batch-confirmation-evidence:v1", evidence_payload
+        ),
+    )
+    if conflict:
+        disposition: EventBatchConfirmationDisposition = "conflict"
+    elif not matches:
+        disposition = "none"
+    elif missing:
+        disposition = "partial"
+    elif len(matches) == len(candidates):
+        disposition = "full"
+    else:
+        disposition = "conflict"
+    if disposition != "full":
+        return StoredEventBatchConfirmation(
+            disposition=disposition,
+            evidence=evidence,
+            confirmed_full_batch=None,
+        )
+    receipt = stored_event_ports.build_stored_event_batch_commit_receipt(pair_proofs)
+    return StoredEventBatchConfirmation(
+        disposition="full",
+        evidence=evidence,
+        confirmed_full_batch=ConfirmedFullStoredBatch(
+            receipt=receipt,
+            confirmation_evidence_fingerprint=evidence.evidence_fingerprint,
+            classifier_contract_fingerprint=(
+                _STORED_BATCH_CONFIRMATION_CLASSIFIER_FINGERPRINT
+            ),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class EventLogReadSnapshot:
     """One atomic ordered read boundary from a single runtime ledger."""
 
@@ -303,143 +494,9 @@ class EventLogReadSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class RawStoredEventEnvelope:
-    """Schema-aware immutable storage envelope, before current-union decode."""
-
-    stored_envelope_version: str
-    event_id: str
-    runtime_session_id: str
-    run_id: str
-    turn_id: str
-    reply_id: str
-    sequence: int
-    created_at_utc: str
-    event_type: str
-    event_schema_version: str
-    event_schema_fingerprint: str
-    event_domain_contract_fingerprint: str
-    canonical_payload_bytes: bytes
-    payload_fingerprint: str
-    envelope_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if self.stored_envelope_version != "stored-agent-event:v1":
-            raise ValueError("unsupported stored event envelope version")
-        if self.sequence < 1:
-            raise ValueError("stored event sequence must be positive")
-        payload_fingerprint = (
-            f"sha256:{sha256(self.canonical_payload_bytes).hexdigest()}"
-        )
-        if self.payload_fingerprint != payload_fingerprint:
-            raise ValueError("stored event payload fingerprint mismatch")
-        try:
-            payload = json.loads(self.canonical_payload_bytes.decode("utf-8"))
-        except Exception as exc:
-            raise ValueError("stored event payload is not canonical JSON") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("stored event payload must be a JSON object")
-        wrapper = (
-            payload.get("id"),
-            str(payload.get("type")),
-            payload.get("run_id"),
-            payload.get("turn_id"),
-            payload.get("reply_id"),
-            payload.get("sequence"),
-            canonical_utc_timestamp(str(payload.get("created_at"))),
-        )
-        expected_wrapper = (
-            self.event_id,
-            self.event_type,
-            self.run_id,
-            self.turn_id,
-            self.reply_id,
-            self.sequence,
-            self.created_at_utc,
-        )
-        if wrapper != expected_wrapper:
-            raise ValueError("stored event wrapper identity mismatch")
-        expected_envelope = context_fingerprint(
-            "stored-agent-event-envelope:v1",
-            {
-                "stored_envelope_version": self.stored_envelope_version,
-                "event_id": self.event_id,
-                "runtime_session_id": self.runtime_session_id,
-                "run_id": self.run_id,
-                "turn_id": self.turn_id,
-                "reply_id": self.reply_id,
-                "sequence": self.sequence,
-                "created_at_utc": self.created_at_utc,
-                "event_type": self.event_type,
-                "event_schema_version": self.event_schema_version,
-                "event_schema_fingerprint": self.event_schema_fingerprint,
-                "event_domain_contract_fingerprint": (
-                    self.event_domain_contract_fingerprint
-                ),
-                "payload_fingerprint": self.payload_fingerprint,
-            },
-        )
-        if self.envelope_fingerprint != expected_envelope:
-            raise ValueError("stored event envelope fingerprint mismatch")
-
-    @classmethod
-    def from_stored_event(
-        cls,
-        *,
-        event: AgentEvent,
-        runtime_session_id: str,
-        schema_registry: EventSchemaDomainRegistry,
-    ) -> "RawStoredEventEnvelope":
-        if event.sequence is None or event.sequence < 1:
-            raise ValueError("raw stored envelope requires a committed event")
-        binding = schema_registry.resolve_for_event(event)
-        contract = binding.schema_contract
-        payload = canonical_event_payload_bytes(event)
-        payload_fingerprint = f"sha256:{sha256(payload).hexdigest()}"
-        values = {
-            "stored_envelope_version": "stored-agent-event:v1",
-            "event_id": event.id,
-            "runtime_session_id": runtime_session_id,
-            "run_id": event.run_id,
-            "turn_id": event.turn_id,
-            "reply_id": event.reply_id,
-            "sequence": event.sequence,
-            "created_at_utc": canonical_event_created_at(event),
-            "event_type": str(event.type),
-            "event_schema_version": contract.event_schema_version,
-            "event_schema_fingerprint": contract.event_schema_fingerprint,
-            "event_domain_contract_fingerprint": (contract.domain_contract_fingerprint),
-            "canonical_payload_bytes": payload,
-            "payload_fingerprint": payload_fingerprint,
-        }
-        return cls(
-            **values,
-            envelope_fingerprint=context_fingerprint(
-                "stored-agent-event-envelope:v1",
-                {
-                    key: value
-                    for key, value in values.items()
-                    if key != "canonical_payload_bytes"
-                },
-            ),
-        )
-
-    def decode_owned(self, registry: EventSchemaDomainRegistry) -> AgentEvent:
-        binding = registry.resolve_historical_binding(
-            event_type=self.event_type,
-            event_schema_version=self.event_schema_version,
-            event_schema_fingerprint=self.event_schema_fingerprint,
-            event_domain_contract_fingerprint=(self.event_domain_contract_fingerprint),
-        )
-        event = binding.decode_owned_payload(self.canonical_payload_bytes)
-        if not hasattr(event, "id") or getattr(event, "id") != self.event_id:
-            raise ValueError("decoded historical event identity mismatch")
-        return event  # type: ignore[return-value]
-
-
-@dataclass(frozen=True, slots=True)
 class RawEventLogReadSnapshot:
     through_sequence: int
-    events: tuple[RawStoredEventEnvelope, ...]
+    events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
     snapshot_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -465,7 +522,7 @@ class RawEventIdSelectionSnapshot:
     """One atomic high-water plus an exact, caller-ordered ID selection."""
 
     through_sequence: int
-    events: tuple[RawStoredEventEnvelope, ...]
+    events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,7 +530,7 @@ class RawEventTypeSelectionSnapshot:
     """One atomic high-water plus a sparse, type-filtered event selection."""
 
     through_sequence: int
-    events: tuple[RawStoredEventEnvelope, ...]
+    events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
 
     def __post_init__(self) -> None:
         sequences = tuple(item.sequence for item in self.events)
@@ -486,60 +543,11 @@ class RawEventTypeSelectionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class RawTranscriptDomainPrefixFact:
-    through_sequence: int
-    ledger_payload_bytes: int
-    semantic_event_count: int
-    semantic_accumulator: str
-    ledger_continuity_accumulator: str
-
-    def __post_init__(self) -> None:
-        if (
-            self.through_sequence < 0
-            or self.ledger_payload_bytes < 0
-            or self.semantic_event_count < 0
-        ):
-            raise ValueError("transcript prefix counters must be non-negative")
-        if self.semantic_event_count > self.through_sequence:
-            raise ValueError("transcript semantic count exceeds ledger prefix")
-        if not self.semantic_accumulator or not self.ledger_continuity_accumulator:
-            raise ValueError("transcript prefix accumulators are required")
-
-
-@dataclass(frozen=True, slots=True)
-class RawRuntimeProjectionCheckpoint:
-    projection_kind: str
-    through_sequence: int
-    projection_schema_version: str
-    ledger_prefix: RawTranscriptDomainPrefixFact
-    validation_base_through_sequence: int
-    validation_base_state_payload: dict[str, Any]
-    state_payload: dict[str, Any]
-    payload_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if not self.projection_kind or not self.projection_schema_version:
-            raise ValueError("runtime projection checkpoint identity is required")
-        if self.through_sequence < 0:
-            raise ValueError("runtime projection checkpoint sequence is invalid")
-        if self.ledger_prefix.through_sequence != self.through_sequence:
-            raise ValueError(
-                "runtime projection checkpoint ledger prefix is not exact"
-            )
-        if not 0 <= self.validation_base_through_sequence <= self.through_sequence:
-            raise ValueError(
-                "runtime projection checkpoint validation base is invalid"
-            )
-        if not self.payload_fingerprint.startswith("sha256:"):
-            raise ValueError("runtime projection checkpoint fingerprint is invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class RawTranscriptDomainDeltaSnapshot:
     runtime_session_id: str
     before: RawTranscriptDomainPrefixFact
     after: RawTranscriptDomainPrefixFact
-    semantic_events: tuple[RawStoredEventEnvelope, ...]
+    semantic_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
     registry_contract_fingerprint: str
     snapshot_fingerprint: str
 
@@ -550,7 +558,7 @@ class RawTranscriptDomainDeltaSnapshot:
         runtime_session_id: str,
         before: RawTranscriptDomainPrefixFact,
         after: RawTranscriptDomainPrefixFact,
-        semantic_events: tuple[RawStoredEventEnvelope, ...],
+        semantic_events: tuple[stored_event_types.RawStoredEventEnvelope, ...],
         registry_contract_fingerprint: str,
     ) -> "RawTranscriptDomainDeltaSnapshot":
         values = {
@@ -704,10 +712,10 @@ class RawContextAuthorityBundle:
     runtime_session_id: str
     request_fingerprint: str
     through_sequence: int
-    primary_events: tuple[RawStoredEventEnvelope, ...]
-    run_sparse_events: tuple[RawStoredEventEnvelope, ...]
-    session_sparse_events: tuple[RawStoredEventEnvelope, ...]
-    exact_events: tuple[RawStoredEventEnvelope, ...]
+    primary_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
+    run_sparse_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
+    session_sparse_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
+    exact_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
     ledger_prefix: RawTranscriptDomainPrefixFact
     snapshot_fingerprint: str
 
@@ -718,10 +726,10 @@ class RawContextAuthorityBundle:
         runtime_session_id: str,
         request: RawContextAuthorityBundleRequest,
         through_sequence: int,
-        primary_events: tuple[RawStoredEventEnvelope, ...],
-        run_sparse_events: tuple[RawStoredEventEnvelope, ...],
-        session_sparse_events: tuple[RawStoredEventEnvelope, ...],
-        exact_events: tuple[RawStoredEventEnvelope, ...],
+        primary_events: tuple[stored_event_types.RawStoredEventEnvelope, ...],
+        run_sparse_events: tuple[stored_event_types.RawStoredEventEnvelope, ...],
+        session_sparse_events: tuple[stored_event_types.RawStoredEventEnvelope, ...],
+        exact_events: tuple[stored_event_types.RawStoredEventEnvelope, ...],
         ledger_prefix: RawTranscriptDomainPrefixFact,
     ) -> "RawContextAuthorityBundle":
         if ledger_prefix.through_sequence != through_sequence:
@@ -817,7 +825,7 @@ class RawContextAuthorityBundle:
 @dataclass(frozen=True, slots=True)
 class RawReplyEventGroup:
     reply_id: str
-    events: tuple[RawStoredEventEnvelope, ...]
+    events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
 
     def __post_init__(self) -> None:
         if not self.reply_id:
@@ -856,8 +864,8 @@ class RawCheckpointLedgerCandidate:
 
     checkpoint_id: str
     checkpoint_through_sequence: int
-    checkpoint_event: RawStoredEventEnvelope
-    delta_events: tuple[RawStoredEventEnvelope, ...]
+    checkpoint_event: stored_event_types.RawStoredEventEnvelope
+    delta_events: tuple[stored_event_types.RawStoredEventEnvelope, ...]
     delta_event_count: int
     delta_payload_bytes: int
     event_bound_satisfied: bool
@@ -1036,6 +1044,14 @@ class EventLog(Protocol):
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]: ...
 
+    def commit_batch(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> stored_event_ports.StoredEventBatchCommitReceipt: ...
+
     def read_materialization_account_state(
         self,
         *,
@@ -1066,7 +1082,7 @@ class EventLog(Protocol):
         transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
-    ) -> list[AgentEvent]: ...
+    ) -> stored_event_ports.StoredEventBatchCommitReceipt: ...
 
     def iter(
         self,
@@ -1092,6 +1108,13 @@ class EventLog(Protocol):
         deadline_monotonic: float | None = None,
     ) -> EventBatchConfirmation: ...
 
+    def confirm_stored_batch(
+        self,
+        candidates: Sequence[AgentEvent],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> StoredEventBatchConfirmation: ...
+
     def read_ledger_usage_snapshot(
         self,
         *,
@@ -1116,12 +1139,23 @@ class EventLog(Protocol):
         deadline_monotonic: float | None = None,
     ) -> RawEventLogReadSnapshot: ...
 
+    def read_joined_raw_range(
+        self,
+        *,
+        source_kind: stored_event_ports.RestoredRangeSourceKind,
+        from_sequence_exclusive: int,
+        through_sequence: int | None = None,
+        max_events: int | None = None,
+        max_payload_bytes: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> stored_event_ports.JoinedRawStoredEventRangeProof | None: ...
+
     def read_raw_events_by_id(
         self,
         event_ids: tuple[str, ...],
         *,
         deadline_monotonic: float | None = None,
-    ) -> tuple[RawStoredEventEnvelope, ...]: ...
+    ) -> tuple[stored_event_types.RawStoredEventEnvelope, ...]: ...
 
     def read_raw_events_by_id_snapshot(
         self,
@@ -1137,7 +1171,7 @@ class EventLog(Protocol):
         limit: int,
         through_sequence: int | None = None,
         deadline_monotonic: float | None = None,
-    ) -> tuple[RawStoredEventEnvelope, ...]: ...
+    ) -> tuple[stored_event_types.RawStoredEventEnvelope, ...]: ...
 
     def read_raw_events_by_types(
         self,
@@ -1184,7 +1218,7 @@ class EventLog(Protocol):
         max_events: int,
         max_payload_bytes: int,
         deadline_monotonic: float | None = None,
-    ) -> tuple[RawStoredEventEnvelope, ...]: ...
+    ) -> tuple[stored_event_types.RawStoredEventEnvelope, ...]: ...
 
     def read_raw_replies_snapshot(
         self,
@@ -1203,7 +1237,7 @@ class EventLog(Protocol):
         max_events: int,
         max_payload_bytes: int,
         deadline_monotonic: float | None = None,
-    ) -> tuple[RawStoredEventEnvelope, ...]: ...
+    ) -> tuple[stored_event_types.RawStoredEventEnvelope, ...]: ...
 
     def read_raw_model_call_events(
         self,
@@ -1212,7 +1246,7 @@ class EventLog(Protocol):
         max_events: int,
         max_payload_bytes: int,
         deadline_monotonic: float | None = None,
-    ) -> tuple[RawStoredEventEnvelope, ...]: ...
+    ) -> tuple[stored_event_types.RawStoredEventEnvelope, ...]: ...
 
     def read_raw_checkpoint_ledger_snapshot(
         self,
@@ -1235,7 +1269,7 @@ class EventLog(Protocol):
 
 
 def raw_checkpoint_catalog_identity(
-    envelope: RawStoredEventEnvelope,
+    envelope: stored_event_types.RawStoredEventEnvelope,
 ) -> tuple[str, int, str, str, str]:
     """Read bounded checkpoint catalog keys without current-union decoding."""
 
@@ -1283,7 +1317,7 @@ def same_event_payload(candidate: AgentEvent, stored: AgentEvent) -> bool:
 
 def same_event_raw_payload(
     candidate: AgentEvent,
-    stored: RawStoredEventEnvelope,
+    stored: stored_event_types.RawStoredEventEnvelope,
 ) -> bool:
     """Compare a live candidate with canonical stored bytes before decoding.
 

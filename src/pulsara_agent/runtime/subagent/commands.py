@@ -152,9 +152,15 @@ def validate_planned_transitions(
     run_reported_child = {
         run_id: fact.reported_child_run_id for run_id, fact in state.runs.items()
     }
-    result_run = {result_id: fact.subagent_run_id for result_id, fact in state.results.items()}
-    result_status = {result_id: fact.status for result_id, fact in state.results.items()}
-    result_summary = {result_id: fact.summary for result_id, fact in state.results.items()}
+    result_run = {
+        result_id: fact.subagent_run_id for result_id, fact in state.results.items()
+    }
+    result_status = {
+        result_id: fact.status for result_id, fact in state.results.items()
+    }
+    result_summary = {
+        result_id: fact.summary for result_id, fact in state.results.items()
+    }
     result_artifact = {
         result_id: fact.final_message_artifact_id
         for result_id, fact in state.results.items()
@@ -194,7 +200,9 @@ def validate_planned_transitions(
             task_terminal_event[event.task_id] = None
             continue
         if isinstance(event, SubagentTaskScheduledEvent):
-            _require_status(task_status, event.task_id, {"created", "waiting_dependency"}, "task")
+            _require_status(
+                task_status, event.task_id, {"created", "waiting_dependency"}, "task"
+            )
             _require_task_creation_attribution(
                 event.task_id,
                 batch_id=event.batch_id,
@@ -245,7 +253,9 @@ def validate_planned_transitions(
                 run_child_runtime=run_child_runtime,
                 run_reported_child=run_reported_child,
             )
-            kind = "spawn" if event.delivery_kind == "spawn_task" else event.delivery_kind
+            kind = (
+                "spawn" if event.delivery_kind == "spawn_task" else event.delivery_kind
+            )
             identity = (
                 kind,
                 event.parent_runtime_session_id,
@@ -259,7 +269,10 @@ def validate_planned_transitions(
             if existing_identity is not None and existing_identity != identity:
                 raise SubagentCommandPlanError("subagent edge identity conflict")
             existing_payload = edge_payload.get(event.edge_id)
-            if existing_payload is not None and existing_payload != event.message_artifact_id:
+            if (
+                existing_payload is not None
+                and existing_payload != event.message_artifact_id
+            ):
                 raise SubagentCommandPlanError("subagent edge payload conflict")
             edge_identity[event.edge_id] = identity
             edge_payload[event.edge_id] = event.message_artifact_id
@@ -287,8 +300,13 @@ def validate_planned_transitions(
             task_status[event.task_id] = event.status
             continue
         if isinstance(event, SubagentResultSubmittedEvent):
-            _require_status(run_status, event.subagent_run_id, {"running", "suspended"}, "run")
-            if event.task_id is not None and run_task[event.subagent_run_id] != event.task_id:
+            _require_status(
+                run_status, event.subagent_run_id, {"running", "suspended"}, "run"
+            )
+            if (
+                event.task_id is not None
+                and run_task[event.subagent_run_id] != event.task_id
+            ):
                 raise SubagentCommandPlanError("result task/run attribution mismatch")
             if run_result[event.subagent_run_id] is not None:
                 raise SubagentCommandPlanError("run already owns a result")
@@ -315,7 +333,9 @@ def validate_planned_transitions(
             run_status[event.subagent_run_id] = "suspended"
             continue
         if isinstance(event, SubagentRunCompletedEvent):
-            _require_status(run_status, event.subagent_run_id, {"running", "suspended"}, "run")
+            _require_status(
+                run_status, event.subagent_run_id, {"running", "suspended"}, "run"
+            )
             _require_run_session_attribution(
                 event.subagent_run_id,
                 parent_runtime_session_id=event.parent_runtime_session_id,
@@ -326,7 +346,10 @@ def validate_planned_transitions(
                 run_reported_child=run_reported_child,
             )
             existing_run_result = run_result[event.subagent_run_id]
-            if existing_run_result is not None and existing_run_result != event.result_id:
+            if (
+                existing_run_result is not None
+                and existing_run_result != event.result_id
+            ):
                 raise SubagentCommandPlanError(
                     "completion cannot replace explicit result identity"
                 )
@@ -360,7 +383,9 @@ def validate_planned_transitions(
                 run_reported_child[event.subagent_run_id] = event.child_run_id
             continue
         if isinstance(event, (SubagentRunFailedEvent, SubagentRunCancelledEvent)):
-            _require_status(run_status, event.subagent_run_id, {"running", "suspended"}, "run")
+            _require_status(
+                run_status, event.subagent_run_id, {"running", "suspended"}, "run"
+            )
             _require_run_session_attribution(
                 event.subagent_run_id,
                 parent_runtime_session_id=event.parent_runtime_session_id,
@@ -380,9 +405,13 @@ def validate_planned_transitions(
             if task_run[event.task_id] != event.subagent_run_id:
                 raise SubagentCommandPlanError("task/run attribution mismatch")
             if result_run.get(event.result_id) != event.subagent_run_id:
-                raise SubagentCommandPlanError("task completion result attribution mismatch")
+                raise SubagentCommandPlanError(
+                    "task completion result attribution mismatch"
+                )
             if run_result[event.subagent_run_id] != event.result_id:
-                raise SubagentCommandPlanError("run completion result attribution mismatch")
+                raise SubagentCommandPlanError(
+                    "run completion result attribution mismatch"
+                )
             if result_artifact.get(event.result_id) != event.primary_result_artifact_id:
                 raise SubagentCommandPlanError("task completion artifact mismatch")
             task_status[event.task_id] = "completed"
@@ -391,7 +420,10 @@ def validate_planned_transitions(
             continue
         if isinstance(event, (SubagentTaskFailedEvent, SubagentTaskCancelledEvent)):
             allowed = {"created", "waiting_dependency", "running"}
-            if isinstance(event, SubagentTaskCancelledEvent) and event.repair_id is not None:
+            if (
+                isinstance(event, SubagentTaskCancelledEvent)
+                and event.repair_id is not None
+            ):
                 allowed.add("blocked_dependency_failed")
             _require_status(task_status, event.task_id, allowed, "task")
             terminal_status = (
@@ -400,16 +432,22 @@ def validate_planned_transitions(
             owning_run_id = task_run[event.task_id]
             if owning_run_id is None:
                 if event.subagent_run_id is not None:
-                    raise SubagentCommandPlanError("task terminal run attribution mismatch")
+                    raise SubagentCommandPlanError(
+                        "task terminal run attribution mismatch"
+                    )
             else:
                 if event.subagent_run_id != owning_run_id:
-                    raise SubagentCommandPlanError("task terminal run attribution mismatch")
+                    raise SubagentCommandPlanError(
+                        "task terminal run attribution mismatch"
+                    )
                 _require_status(run_status, owning_run_id, {terminal_status}, "run")
             task_status[event.task_id] = terminal_status
             task_terminal_event[event.task_id] = event.id
             continue
         if isinstance(event, SubagentPhaseReportedEvent):
-            _require_status(run_status, event.subagent_run_id, {"running", "suspended"}, "run")
+            _require_status(
+                run_status, event.subagent_run_id, {"running", "suspended"}, "run"
+            )
             continue
         if isinstance(event, SubagentEdgeRecordedEvent):
             _require_present(run_status, event.subagent_run_id, "run")
@@ -426,7 +464,9 @@ def validate_planned_transitions(
             if event.result_id is not None:
                 _require_present(result_run, event.result_id, "result")
                 if result_run[event.result_id] != event.subagent_run_id:
-                    raise SubagentCommandPlanError("edge result/run attribution mismatch")
+                    raise SubagentCommandPlanError(
+                        "edge result/run attribution mismatch"
+                    )
                 if result_status.get(event.result_id) != "completed":
                     raise SubagentCommandPlanError("edge result is not completed")
                 if result_artifact.get(event.result_id) != event.result_artifact_id:
@@ -464,29 +504,39 @@ def validate_planned_transitions(
                         "consumption result/run attribution mismatch"
                     )
                 if result_status.get(event.result_id) != "completed":
-                    raise SubagentCommandPlanError("consumption result is not completed")
+                    raise SubagentCommandPlanError(
+                        "consumption result is not completed"
+                    )
             if event.task_id is not None:
                 if (
                     event.subagent_run_id is not None
                     and task_run[event.task_id] != event.subagent_run_id
                 ):
-                    raise SubagentCommandPlanError("consumption task/run attribution mismatch")
+                    raise SubagentCommandPlanError(
+                        "consumption task/run attribution mismatch"
+                    )
                 if (
                     event.result_id is not None
                     and task_result[event.task_id] != event.result_id
                 ):
-                    raise SubagentCommandPlanError("consumption task/result attribution mismatch")
+                    raise SubagentCommandPlanError(
+                        "consumption task/result attribution mismatch"
+                    )
                 if (
                     event.result_id is None
                     and task_terminal_event[event.task_id] != event.terminal_event_id
                 ):
-                    raise SubagentCommandPlanError("consumption terminal event mismatch")
+                    raise SubagentCommandPlanError(
+                        "consumption terminal event mismatch"
+                    )
             consumption_ids.add(event.consumption_id)
             continue
         if isinstance(event, SubagentResultDeliveredEvent):
             _require_present(result_run, event.result_id, "result")
             if result_run[event.result_id] != event.subagent_run_id:
-                raise SubagentCommandPlanError("delivery result/run attribution mismatch")
+                raise SubagentCommandPlanError(
+                    "delivery result/run attribution mismatch"
+                )
             _require_run_session_attribution(
                 event.subagent_run_id,
                 parent_runtime_session_id=event.parent_runtime_session_id,
@@ -507,7 +557,9 @@ def validate_planned_transitions(
     _require_reducer_acceptance(state, events)
 
 
-def _affected_ids(events: tuple[AgentEvent, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _affected_ids(
+    events: tuple[AgentEvent, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     task_ids: set[str] = set()
     run_ids: set[str] = set()
     for event in events:
@@ -593,9 +645,7 @@ def _require_reducer_acceptance(
 
     working = state
     for event in events:
-        simulated = event.model_copy(
-            update={"sequence": working.through_sequence + 1}
-        )
+        simulated = event.model_copy(update={"sequence": working.through_sequence + 1})
         next_state = apply_subagent_event(working, simulated)
         if working.consistent and not next_state.consistent:
             diagnostic = next_state.diagnostics[-1]

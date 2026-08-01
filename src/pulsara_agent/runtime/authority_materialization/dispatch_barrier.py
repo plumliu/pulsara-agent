@@ -138,7 +138,9 @@ class CheckpointDispatchBarrierCoordinator:
             if admission_class is LedgerWriteAdmissionClass.RECONCILIATION_CONTROL:
                 return None
 
-            raise AssertionError(f"unsupported ledger admission class: {admission_class}")
+            raise AssertionError(
+                f"unsupported ledger admission class: {admission_class}"
+            )
 
     def promote_write_admission(
         self,
@@ -168,9 +170,7 @@ class CheckpointDispatchBarrierCoordinator:
                 for owner_id in operation_owner_ids
             )
             self._active_producers.pop(token.token_id)
-            self._active_producers.update(
-                (item.token_id, item) for item in promoted
-            )
+            self._active_producers.update((item.token_id, item) for item in promoted)
             self._condition.notify_all()
             return promoted
 
@@ -233,9 +233,7 @@ class CheckpointDispatchBarrierCoordinator:
             self._generation += 1
             self._state = CheckpointDispatchGateState.DRAINING
             self._checkpoint_id = checkpoint_id
-            self._checkpoint_candidate_fingerprint = (
-                checkpoint_candidate_fingerprint
-            )
+            self._checkpoint_candidate_fingerprint = checkpoint_candidate_fingerprint
             self._condition.notify_all()
             return CheckpointDrainToken(
                 checkpoint_id=checkpoint_id,
@@ -321,9 +319,7 @@ class CheckpointDispatchBarrierCoordinator:
                     "checkpoint reconciliation candidate identity drifted"
                 )
             self._checkpoint_id = checkpoint_id
-            self._checkpoint_candidate_fingerprint = (
-                checkpoint_candidate_fingerprint
-            )
+            self._checkpoint_candidate_fingerprint = checkpoint_candidate_fingerprint
             self._state = CheckpointDispatchGateState.RECONCILIATION_REQUIRED
             self._condition.notify_all()
 

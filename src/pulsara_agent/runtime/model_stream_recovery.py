@@ -8,6 +8,8 @@ identity.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import time
 from dataclasses import dataclass
 
@@ -202,7 +204,9 @@ class ModelStreamRecoveryService:
             raise ModelStreamRecoveryStructuralError(
                 "model recovery physical reservation creation event is missing"
             )
-        reservation_event = raw[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        reservation_event = decode_raw_stored_event_envelope(
+            raw[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         from pulsara_agent.event import PhysicalOperationReservationCreatedEvent
 
         if not isinstance(reservation_event, PhysicalOperationReservationCreatedEvent):
@@ -270,7 +274,7 @@ class ModelStreamRecoveryService:
             raise ModelStreamRecoveryStructuralError(
                 "model recovery terminal settlement could not be confirmed"
             ) from exc
-        return committed.stored_events
+        return committed.stored_batch_receipt.owned_stored_events
 
     def _build_recovery_terminal_batch(
         self,
@@ -394,7 +398,7 @@ class ModelStreamRecoveryService:
             deadline_monotonic=deadline_monotonic,
         )
         events = tuple(
-            envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw.events
         )
         if tuple(event.sequence for event in events) != tuple(range(1, high_water + 1)):

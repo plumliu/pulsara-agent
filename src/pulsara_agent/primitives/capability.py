@@ -109,7 +109,9 @@ class CapabilityExecutionSurfaceIdentityFact(BaseModel):
         names = [entry.capability_name for entry in self.entries]
         descriptor_ids = [entry.descriptor_id for entry in self.entries]
         if names != sorted(names) or len(names) != len(set(names)):
-            raise ValueError("capability surface entries must be name-sorted and unique")
+            raise ValueError(
+                "capability surface entries must be name-sorted and unique"
+            )
         if len(descriptor_ids) != len(set(descriptor_ids)):
             raise ValueError("capability descriptor ids must be unique")
         descriptor_fp = capability_descriptor_set_fingerprint(self.entries)
@@ -191,7 +193,10 @@ class CapabilityRenderedProjectionFragmentFact(BaseModel):
             if self.static_scope is not None:
                 raise ValueError("entry fragment cannot set static_scope")
         else:
-            if self.source_entry_id is not None or self.source_content_fingerprint is not None:
+            if (
+                self.source_entry_id is not None
+                or self.source_content_fingerprint is not None
+            ):
                 raise ValueError("non-entry fragment cannot reference a source entry")
             if self.fragment_role == "static":
                 if self.static_scope is None:
@@ -243,7 +248,9 @@ class CapabilityProjectionFact(BaseModel):
                     entries_by_container.get(fragment.container_id, 0) + 1
                 )
         if referenced != set(entry_ids):
-            raise ValueError("visible projection entries must be exactly rendered entries")
+            raise ValueError(
+                "visible projection entries must be exactly rendered entries"
+            )
         for fragment in self.rendered_fragments:
             if fragment.fragment_role in {"prefix", "suffix"} or (
                 fragment.fragment_role == "static"
@@ -269,7 +276,9 @@ class CapabilityProjectionFact(BaseModel):
         )
         if self.rendered_fragments:
             if any(value is None for value in aggregate_fields):
-                raise ValueError("non-empty projection requires rendered prompt artifact")
+                raise ValueError(
+                    "non-empty projection requires rendered prompt artifact"
+                )
         elif (
             self.visible_source_entries
             or any(value is not None for value in aggregate_fields)
@@ -462,11 +471,19 @@ class CapabilityResolveBasisFact(BaseModel):
         if self.active_skill_names != tuple(sorted(set(self.active_skill_names))):
             raise ValueError("active skill names must be sorted and unique")
         if self.basis_kind == "initial":
-            if self.source_basis_id is not None or self.source_basis_fingerprint is not None:
+            if (
+                self.source_basis_id is not None
+                or self.source_basis_fingerprint is not None
+            ):
                 raise ValueError("initial capability basis cannot reference a source")
         elif self.source_basis_id is None or self.source_basis_fingerprint is None:
-            raise ValueError("continuation capability basis requires source attribution")
-        if self.mcp_installation_id != self.execution_surface_identity.mcp_installation_id:
+            raise ValueError(
+                "continuation capability basis requires source attribution"
+            )
+        if (
+            self.mcp_installation_id
+            != self.execution_surface_identity.mcp_installation_id
+        ):
             raise ValueError("capability basis MCP installation mismatch")
         payload = self.model_dump(mode="json", exclude={"basis_fingerprint"})
         if self.basis_fingerprint != sha256_fingerprint(
@@ -513,9 +530,7 @@ def build_capability_resolve_basis(
     }
     return CapabilityResolveBasisFact(
         **payload,
-        basis_fingerprint=sha256_fingerprint(
-            "capability-resolve-basis:v1", payload
-        ),
+        basis_fingerprint=sha256_fingerprint("capability-resolve-basis:v1", payload),
     )
 
 
@@ -558,9 +573,7 @@ class CapabilityExposureSnapshotFact(BaseModel):
 
     exposure_id: str = Field(min_length=1)
     owner: CapabilityExposureOwnerFact
-    resolution_kind: Literal[
-        "initial", "continuation_reused", "continuation_narrowed"
-    ]
+    resolution_kind: Literal["initial", "continuation_reused", "continuation_narrowed"]
     resolve_basis: CapabilityResolveBasisFact
     semantic: CapabilityExposureSemanticFact
     authorization_entries: tuple[CapabilityAuthorizationEntryFact, ...]
@@ -579,7 +592,9 @@ class CapabilityExposureSnapshotFact(BaseModel):
             raise ValueError("capability authorization entries exceed safety cap")
         names = [entry.capability_name for entry in self.authorization_entries]
         if names != sorted(names) or len(names) != len(set(names)):
-            raise ValueError("capability authorization entries must be name-sorted and unique")
+            raise ValueError(
+                "capability authorization entries must be name-sorted and unique"
+            )
         expected_by_disposition = {
             disposition: tuple(
                 entry.capability_name
@@ -588,7 +603,12 @@ class CapabilityExposureSnapshotFact(BaseModel):
             )
             for disposition in ("direct", "deferred", "hidden")
         }
-        for field_name in ("direct_names", "deferred_names", "hidden_names", "callable_names"):
+        for field_name in (
+            "direct_names",
+            "deferred_names",
+            "hidden_names",
+            "callable_names",
+        ):
             values = getattr(self, field_name)
             if values != tuple(sorted(set(values))):
                 raise ValueError(f"{field_name} must be sorted and unique")
@@ -599,7 +619,9 @@ class CapabilityExposureSnapshotFact(BaseModel):
         if self.hidden_names != expected_by_disposition["hidden"]:
             raise ValueError("hidden capability names mismatch authorization entries")
         expected_callable = tuple(
-            entry.capability_name for entry in self.authorization_entries if entry.callable
+            entry.capability_name
+            for entry in self.authorization_entries
+            if entry.callable
         )
         if self.callable_names != expected_callable:
             raise ValueError("callable capability names mismatch authorization entries")
@@ -608,7 +630,10 @@ class CapabilityExposureSnapshotFact(BaseModel):
         )
         if self.semantic.authorization_fingerprint != authorization_fp:
             raise ValueError("capability semantic authorization fingerprint mismatch")
-        if self.exposure_semantic_fingerprint != self.semantic.exposure_semantic_fingerprint:
+        if (
+            self.exposure_semantic_fingerprint
+            != self.semantic.exposure_semantic_fingerprint
+        ):
             raise ValueError("capability exposure semantic fingerprint mismatch")
         continuation = self.resolution_kind != "initial"
         if continuation != (self.source_exposure_id is not None):
@@ -627,9 +652,7 @@ def build_capability_exposure_snapshot(
     *,
     exposure_id: str,
     owner: CapabilityExposureOwnerFact,
-    resolution_kind: Literal[
-        "initial", "continuation_reused", "continuation_narrowed"
-    ],
+    resolution_kind: Literal["initial", "continuation_reused", "continuation_narrowed"],
     resolve_basis: CapabilityResolveBasisFact,
     semantic: CapabilityExposureSemanticFact,
     authorization_entries: tuple[CapabilityAuthorizationEntryFact, ...],
@@ -669,7 +692,9 @@ def build_capability_exposure_snapshot(
         "hidden_names": list(hidden_names),
         "callable_names": list(callable_names),
         "exposure_semantic_fingerprint": semantic.exposure_semantic_fingerprint,
-        "diagnostics": [diagnostic.model_dump(mode="json") for diagnostic in diagnostics],
+        "diagnostics": [
+            diagnostic.model_dump(mode="json") for diagnostic in diagnostics
+        ],
     }
     return CapabilityExposureSnapshotFact(
         **payload,

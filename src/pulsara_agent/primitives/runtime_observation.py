@@ -173,7 +173,10 @@ class RuntimeObservationKindContractFact(FrozenFactBase):
         "never", "after_causal_close", "superseded_only", "long_horizon_rewrite"
     ]
     protection_policy: Literal[
-        "always", "protect_current_run", "protect_effective_head", "protect_until_closed"
+        "always",
+        "protect_current_run",
+        "protect_effective_head",
+        "protect_until_closed",
     ]
     instruction_policy: Literal[
         "fact_only_not_instruction",
@@ -228,18 +231,14 @@ class RuntimeObservationProtocolContractFact(FrozenFactBase):
     schema_version: Literal["runtime_observation_protocol_contract.v2"] = (
         "runtime_observation_protocol_contract.v2"
     )
-    protocol_id: Literal["pulsara.runtime-observation"] = (
-        "pulsara.runtime-observation"
-    )
+    protocol_id: Literal["pulsara.runtime-observation"] = "pulsara.runtime-observation"
     protocol_version: Literal["2"] = "2"
     wire_role: Literal["user"] = "user"
     codec_contract: RuntimeObservationCanonicalCodecContractFact
     ordered_kind_contracts: tuple[RuntimeObservationKindContractFact, ...]
     source_lifecycle_registry_contract_fingerprint: Fingerprint
     unknown_kind_policy: Literal["reject_before_adapter"] = "reject_before_adapter"
-    unknown_contract_policy: Literal["reject_before_adapter"] = (
-        "reject_before_adapter"
-    )
+    unknown_contract_policy: Literal["reject_before_adapter"] = "reject_before_adapter"
     protocol_contract_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -267,9 +266,9 @@ class HumanInputProtocolContractFact(FrozenFactBase):
     raw_text_policy: Literal["escaped_typed_text_field_only"] = (
         "escaped_typed_text_field_only"
     )
-    unsupported_multimodal_policy: Literal[
+    unsupported_multimodal_policy: Literal["reject_until_typed_block_contract"] = (
         "reject_until_typed_block_contract"
-    ] = "reject_until_typed_block_contract"
+    )
     maximum_text_utf8_bytes: PositiveInt
     protocol_contract_fingerprint: Fingerprint
 
@@ -336,9 +335,7 @@ class RuntimeRequestProtocolContractFact(FrozenFactBase):
     codec_contract_fingerprint: Fingerprint
     ordered_kind_contracts: tuple[RuntimeRequestKindContractFact, ...]
     unknown_kind_policy: Literal["reject_before_adapter"] = "reject_before_adapter"
-    unknown_contract_policy: Literal["reject_before_adapter"] = (
-        "reject_before_adapter"
-    )
+    unknown_contract_policy: Literal["reject_before_adapter"] = "reject_before_adapter"
     protocol_contract_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -474,12 +471,10 @@ class ContextSourceAppendObservationPayloadFact(FrozenFactBase):
     "context-source-replacement-observation-payload:v1",
 )
 class ContextSourceReplacementObservationPayloadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["context_source_replacement_observation_payload.v1"] = (
         "context_source_replacement_observation_payload.v1"
-    ] = "context_source_replacement_observation_payload.v1"
-    payload_kind: Literal[
-        "context_source_replacement"
-    ] = "context_source_replacement"
+    )
+    payload_kind: Literal["context_source_replacement"] = "context_source_replacement"
     source_id: ContextSourceId
     transition_kind: ObservationTransitionKind
     model_visible_content: str
@@ -514,9 +509,9 @@ class ContextSourceReplacementObservationPayloadFact(FrozenFactBase):
     "transcript-lifecycle-observation-payload:v1",
 )
 class TranscriptLifecycleObservationPayloadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["transcript_lifecycle_observation_payload.v1"] = (
         "transcript_lifecycle_observation_payload.v1"
-    ] = "transcript_lifecycle_observation_payload.v1"
+    )
     payload_kind: Literal["transcript_lifecycle"] = "transcript_lifecycle"
     lifecycle_segment: str = Field(min_length=1, max_length=128)
     model_visible_content: str
@@ -540,9 +535,9 @@ class TranscriptLifecycleObservationPayloadFact(FrozenFactBase):
     "derived-text-runtime-observation-payload:v1",
 )
 class DerivedTextRuntimeObservationPayloadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["derived_text_runtime_observation_payload.v1"] = (
         "derived_text_runtime_observation_payload.v1"
-    ] = "derived_text_runtime_observation_payload.v1"
+    )
     payload_kind: Literal["derived_text"] = "derived_text"
     derivation_kind: Literal[
         "compaction_replacement_summary", "long_horizon_rollup_observation"
@@ -569,9 +564,9 @@ class DerivedTextRuntimeObservationPayloadFact(FrozenFactBase):
     "terminal-monitor-runtime-observation-payload:v1",
 )
 class TerminalMonitorRuntimeObservationPayloadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["terminal_monitor_runtime_observation_payload.v1"] = (
         "terminal_monitor_runtime_observation_payload.v1"
-    ] = "terminal_monitor_runtime_observation_payload.v1"
+    )
     payload_kind: Literal["terminal_monitor"] = "terminal_monitor"
     process_id: str = Field(min_length=1)
     monitor_id: str | None
@@ -605,9 +600,9 @@ class TerminalMonitorRuntimeObservationPayloadFact(FrozenFactBase):
     "runtime-observation-rewrite-projection-payload:v2",
 )
 class RuntimeObservationRewriteProjectionPayloadFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_rewrite_projection_payload.v2"] = (
         "runtime_observation_rewrite_projection_payload.v2"
-    ] = "runtime_observation_rewrite_projection_payload.v2"
+    )
     payload_kind: Literal["rewrite_projection"] = "rewrite_projection"
     covered_direct_member_count: int = Field(ge=1)
     covered_kind_counts: tuple[tuple[str, int], ...]
@@ -631,7 +626,9 @@ class RuntimeObservationRewriteProjectionPayloadFact(FrozenFactBase):
         ):
             raise ValueError("rewrite projection direct member count mismatch")
         if self.covered_original_observation_count < self.covered_direct_member_count:
-            raise ValueError("rewrite projection transitive coverage undercounts members")
+            raise ValueError(
+                "rewrite projection transitive coverage undercounts members"
+            )
         return self
 
 
@@ -724,7 +721,10 @@ class RuntimeRequestWireSemanticFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _payload(self) -> "RuntimeRequestWireSemanticFact":
-        if self.payload_semantic_fingerprint != self.payload.payload_semantic_fingerprint:
+        if (
+            self.payload_semantic_fingerprint
+            != self.payload.payload_semantic_fingerprint
+        ):
             raise ValueError("runtime request payload semantic join mismatch")
         return self
 
@@ -858,11 +858,16 @@ class RuntimeObservationWireSemanticFact(FrozenFactBase):
     "runtime-observation-causal-placement-semantic:v1",
 )
 class RuntimeObservationCausalPlacementSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_causal_placement_semantic.v1"] = (
         "runtime_observation_causal_placement_semantic.v1"
-    ] = "runtime_observation_causal_placement_semantic.v1"
+    )
     causal_scope_kind: Literal[
-        "runtime_session", "run", "model_invocation", "workflow", "subagent", "operation"
+        "runtime_session",
+        "run",
+        "model_invocation",
+        "workflow",
+        "subagent",
+        "operation",
     ]
     causal_scope_semantic_id: Fingerprint
     placement_phase: Literal[
@@ -907,7 +912,9 @@ class RuntimeObservationSourceAttributionFact(FrozenFactBase):
             if self.transition_kind != self.producer.transition_kind:
                 raise ValueError("ContextSource observation transition is unauthorized")
         elif self.transition_kind is not None:
-            raise ValueError("derived observation cannot claim a ContextSource transition")
+            raise ValueError(
+                "derived observation cannot claim a ContextSource transition"
+            )
         return self
 
 
@@ -955,12 +962,12 @@ class PreparedRuntimeObservationProviderUnitFact(FrozenFactBase):
             ContextSourceObservationProducerFact,
         )
         if context_source != (self.source_id is not None):
-            raise ValueError("runtime observation ContextSource identity matrix mismatch")
+            raise ValueError(
+                "runtime observation ContextSource identity matrix mismatch"
+            )
         if context_source != (self.source_candidate_key is not None):
             raise ValueError("runtime observation candidate-key matrix mismatch")
-        if context_source != (
-            self.source_payload_semantic_fingerprint is not None
-        ):
+        if context_source != (self.source_payload_semantic_fingerprint is not None):
             raise ValueError("runtime observation source-payload matrix mismatch")
         if context_source and (
             self.source_attribution.producer.source_id is not self.source_id
@@ -994,10 +1001,20 @@ class ContextSourceLifecycleRegistryEntryFact(FrozenFactBase):
     )
     source_id: ContextSourceId
     lifecycle_class: Literal[
-        "generation_root", "immutable_append_once", "causal_append_once", "replacement_snapshot"
+        "generation_root",
+        "immutable_append_once",
+        "causal_append_once",
+        "replacement_snapshot",
     ]
     source_instance_scope: Literal[
-        "runtime_session", "continuity_cohort", "run", "turn", "workflow", "model_call", "subagent", "operation"
+        "runtime_session",
+        "continuity_cohort",
+        "run",
+        "turn",
+        "workflow",
+        "model_call",
+        "subagent",
+        "operation",
     ]
     absence_semantics: Literal["forbidden", "no_new_fact", "retain_effective_head"]
     closure_kind: Literal[
@@ -1060,9 +1077,9 @@ class ContextSourceLifecycleRegistryContractFact(FrozenFactBase):
     "runtime-observation-projection-physical-policy:v1",
 )
 class RuntimeObservationProjectionPhysicalPolicyFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_projection_physical_policy.v1"] = (
         "runtime_observation_projection_physical_policy.v1"
-    ] = "runtime_observation_projection_physical_policy.v1"
+    )
     leaf_max_entries: PositiveInt
     leaf_max_canonical_bytes: PositiveInt
     internal_max_fanout: PositiveInt
@@ -1080,7 +1097,9 @@ class RuntimeObservationProjectionPhysicalPolicyFact(FrozenFactBase):
         if self.maximum_tree_height > 8:
             raise ValueError("observation projection tree height exceeds V1 bound")
         if self.maximum_changed_nodes_per_rewrite < self.maximum_tree_height:
-            raise ValueError("observation rewrite node bound cannot cover one root path")
+            raise ValueError(
+                "observation rewrite node bound cannot cover one root path"
+            )
         return self
 
 
@@ -1090,9 +1109,9 @@ class RuntimeObservationProjectionPhysicalPolicyFact(FrozenFactBase):
     "runtime-observation-projection-set-node-reference:v1",
 )
 class RuntimeObservationProjectionSetNodeReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_projection_set_node_reference.v1"] = (
         "runtime_observation_projection_set_node_reference.v1"
-    ] = "runtime_observation_projection_set_node_reference.v1"
+    )
     node_kind: Literal["leaf", "internal"]
     height: PositiveInt
     member_count: PositiveInt
@@ -1114,7 +1133,13 @@ class RuntimeObservationProjectionSetReferenceFact(FrozenFactBase):
         "runtime_observation_projection_set_reference.v1"
     )
     set_kind: Literal[
-        "active", "protected", "eligible", "retained", "rewritten", "open_lifecycle", "pending_dependency"
+        "active",
+        "protected",
+        "eligible",
+        "retained",
+        "rewritten",
+        "open_lifecycle",
+        "pending_dependency",
     ]
     member_count: int = Field(ge=0)
     ordered_semantic_accumulator: Fingerprint
@@ -1140,9 +1165,9 @@ class RuntimeObservationProjectionSetReferenceFact(FrozenFactBase):
     "runtime-observation-effective-head-set-reference:v1",
 )
 class RuntimeObservationEffectiveHeadSetReferenceFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_effective_head_set_reference.v1"] = (
         "runtime_observation_effective_head_set_reference.v1"
-    ] = "runtime_observation_effective_head_set_reference.v1"
+    )
     head_count: int = Field(ge=0)
     ordered_head_accumulator: Fingerprint
     root_node_reference: RuntimeObservationProjectionSetNodeReferenceFact | None
@@ -1199,9 +1224,9 @@ class RuntimeObservationProjectionStableStateFact(FrozenFactBase):
     "runtime-observation-projection-partition-proof:v1",
 )
 class RuntimeObservationProjectionPartitionProofFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_projection_partition_proof.v1"] = (
         "runtime_observation_projection_partition_proof.v1"
-    ] = "runtime_observation_projection_partition_proof.v1"
+    )
     source_stable_state_fingerprint: Fingerprint
     active_set_reference: RuntimeObservationProjectionSetReferenceFact
     protected_set_reference: RuntimeObservationProjectionSetReferenceFact
@@ -1244,9 +1269,9 @@ class RuntimeObservationProjectionPartitionProofFact(FrozenFactBase):
     "runtime-observation-rewrite-coverage-semantic:v1",
 )
 class RuntimeObservationRewriteCoverageSemanticFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_rewrite_coverage_semantic.v1"] = (
         "runtime_observation_rewrite_coverage_semantic.v1"
-    ] = "runtime_observation_rewrite_coverage_semantic.v1"
+    )
     direct_member_count: PositiveInt
     transitive_original_observation_count: PositiveInt
     ordered_original_semantic_accumulator: Fingerprint
@@ -1279,9 +1304,9 @@ class RuntimeObservationRewriteUnitSemanticFact(FrozenFactBase):
     "runtime-observation-rewrite-unit-attribution:v1",
 )
 class RuntimeObservationRewriteUnitAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["runtime_observation_rewrite_unit_attribution.v1"] = (
         "runtime_observation_rewrite_unit_attribution.v1"
-    ] = "runtime_observation_rewrite_unit_attribution.v1"
+    )
     unit_semantic_fingerprint: Fingerprint
     rewritten_source_set_reference: RuntimeObservationProjectionSetReferenceFact
     source_stable_state_fingerprint: Fingerprint
@@ -1304,7 +1329,10 @@ class PreparedRuntimeObservationRewriteProjectionUnitFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _join(self) -> "PreparedRuntimeObservationRewriteProjectionUnitFact":
-        if self.semantic.unit_semantic_fingerprint != self.attribution.unit_semantic_fingerprint:
+        if (
+            self.semantic.unit_semantic_fingerprint
+            != self.attribution.unit_semantic_fingerprint
+        ):
             raise ValueError("rewrite unit semantic/attribution join mismatch")
         return self
 
@@ -1345,7 +1373,9 @@ class RuntimeObservationProjectionRewriteFact(FrozenFactBase):
     parent_long_horizon_rewrite_event_reference: ContextEventReferenceFact
     source_stable_state: RuntimeObservationProjectionStableStateFact
     partition_proof: RuntimeObservationProjectionPartitionProofFact
-    prepared_replacement_projection: PreparedRuntimeObservationRewriteProjectionReferenceFact
+    prepared_replacement_projection: (
+        PreparedRuntimeObservationRewriteProjectionReferenceFact
+    )
     resulting_effective_heads: RuntimeObservationEffectiveHeadSetReferenceFact
     coverage_lineage_contract_fingerprint: Fingerprint
     unified_ordered_projection_contract_fingerprint: Fingerprint
@@ -1377,7 +1407,8 @@ __all__ = [
     name
     for name in globals()
     if name.endswith("Fact")
-    or name in {
+    or name
+    in {
         "ObservationLifecycleClass",
         "ObservationTransitionKind",
         "RuntimeObservationProducerFact",

@@ -35,15 +35,27 @@ def direct_relation_rerank(
 def _direct_relation_bonus(view: CanonicalNodeView) -> tuple[float, tuple[str, ...]]:
     bonus = 0.0
     reasons: list[str] = []
-    support_count = sum(1 for predicate, _source_id in view.incoming if predicate == memory.SUPPORTS.name)
+    support_count = sum(
+        1
+        for predicate, _source_id in view.incoming
+        if predicate == memory.SUPPORTS.name
+    )
     if support_count:
         bonus += min(0.02, support_count * 0.005)
         reasons.append("evidence_support")
-    supersedes_count = sum(1 for predicate, _target_id in view.outgoing if predicate == memory.SUPERSEDES.name)
+    supersedes_count = sum(
+        1
+        for predicate, _target_id in view.outgoing
+        if predicate == memory.SUPERSEDES.name
+    )
     if supersedes_count:
         bonus += min(0.02, supersedes_count * 0.01)
         reasons.append("supersedes_edge")
-    contradiction_count = sum(1 for predicate, _ in (*view.incoming, *view.outgoing) if predicate == memory.CONTRADICTS.name)
+    contradiction_count = sum(
+        1
+        for predicate, _ in (*view.incoming, *view.outgoing)
+        if predicate == memory.CONTRADICTS.name
+    )
     if contradiction_count:
         reasons.append("contradiction_warning")
     return bonus, tuple(reasons)

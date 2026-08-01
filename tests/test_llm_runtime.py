@@ -68,6 +68,9 @@ from tests.conftest import open_test_root_rollout_run
 from pulsara_agent.llm.factory import build_llm_runtime
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
+from pulsara_agent.ports.stored_event import (
+    GroupingIndependentOwnedEventReducerAdapter,
+)
 from pulsara_agent.llm.user_carrier import (
     ROOT_USER_CARRIER_INTERPRETATION,
     RUNTIME_OBSERVATION_ENVELOPE_KEY,
@@ -1574,7 +1577,7 @@ def test_control_disposition_publication_after_commit_folds_full_before_permit(
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
 
         assert resolution.accepted_permit is not None
         assert await owner.permit_is_active(resolution.accepted_permit)
@@ -1659,7 +1662,7 @@ def test_control_disposition_precommit_failure_retries_exact_stable_candidate(
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
 
         assert len(attempts) == 2
         assert len(set(attempts)) == 1
@@ -1710,7 +1713,7 @@ def test_uncommitted_model_disposition_blocks_run_end_and_remains_retryable(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                            )
+            )
 
         assert len(attempted) == 3
         assert len(set(attempted)) == 1
@@ -1777,7 +1780,7 @@ def test_control_disposition_cancel_after_full_adopts_session_winner(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                            )
+            )
 
         durable = tuple(
             event
@@ -1892,7 +1895,7 @@ def test_control_disposition_observer_failure_does_not_revoke_durable_winner_or_
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
         for _ in range(20):
             if session.publisher.errors:
                 break
@@ -1922,7 +1925,9 @@ def test_control_disposition_reducer_failure_never_installs_execution_permit(
         session.register_committed_reducer(
             reducer_id="test:control-fold-failure",
             through_sequence=session.event_log.next_sequence() - 1,
-            apply_committed=fail_fold,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=fail_fold,
+            ),
         )
         with pytest.raises(
             RuntimeError,
@@ -1933,7 +1938,7 @@ def test_control_disposition_reducer_failure_never_installs_execution_permit(
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                            )
+            )
 
         assert session.reconciliation_required is True
         assert any(
@@ -1974,7 +1979,7 @@ def test_control_disposition_event_requires_exact_call_result_and_start_activati
                 model_call_index=1,
                 event_context=wrong_context,
                 runtime_session=session,
-                            )
+            )
 
         assert not any(
             event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
@@ -2019,7 +2024,7 @@ def test_control_disposition_partial_unknown_or_conflict_latches_and_blocks_exec
                 model_call_index=1,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
-                            )
+            )
 
         assert session.reconciliation_required is True
 
@@ -2043,7 +2048,7 @@ def test_termination_intent_wins_shared_control_lock_and_commits_suppressed_disp
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
 
         assert resolution.accepted_permit is None
         assert (
@@ -2069,7 +2074,7 @@ def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
         permit = resolution.accepted_permit
         assert permit is not None and await owner.permit_is_active(permit)
 
@@ -2081,7 +2086,7 @@ def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels
             model_call_index=1,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
-                    )
+        )
         assert repeated == resolution
         assert (
             repeated.disposition_event.disposition
@@ -2835,13 +2840,12 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     )
 
     assert payload["model"] == "pro"
-    assert payload["instructions"] == compose_provider_root_policy(
-        "You are Pulsara."
-    )
+    assert payload["instructions"] == compose_provider_root_policy("You are Pulsara.")
     assert payload["input"][0]["role"] == "user"
-    assert payload["input"][0]["content"] == encode_human_input(
-        "Use the tool."
-    ).canonical_text
+    assert (
+        payload["input"][0]["content"]
+        == encode_human_input("Use the tool.").canonical_text
+    )
     assert payload["tools"][0]["name"] == "lookup"
     assert payload["reasoning"] == {"effort": "medium"}
     assert payload["max_output_tokens"] == 128
@@ -4173,9 +4177,7 @@ def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier(
                         source_payload_schema_version=(
                             "recovery_observation_payload.v1"
                         ),
-                        source_payload_semantic_fingerprint=(
-                            "sha256:" + "2" * 64
-                        ),
+                        source_payload_semantic_fingerprint=("sha256:" + "2" * 64),
                         lifecycle_class="causal_append_once",
                     ),
                     observation_kind="recovery_guidance",

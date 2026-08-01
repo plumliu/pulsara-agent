@@ -38,7 +38,10 @@ from pulsara_agent.primitives.subagent import (
 from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor
 from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet
 from pulsara_agent.runtime.permission import preset_to_policy
-from pulsara_agent.runtime.run_entry import CapabilityResolveBasis, PreparedSubagentRunEntry
+from pulsara_agent.runtime.run_entry import (
+    CapabilityResolveBasis,
+    PreparedSubagentRunEntry,
+)
 from pulsara_agent.runtime.run_execution.factory import RunActivationFactory
 from pulsara_agent.ports.run_execution import (
     RunHandle,
@@ -85,7 +88,8 @@ class SubagentChildActivationService:
         system_prompt: str | None,
         capability_runtime: CapabilityRuntime,
         workspace_kind: str,
-        rollout_budget_feasibility_report: ProductionRolloutBudgetFeasibilityReport | None,
+        rollout_budget_feasibility_report: ProductionRolloutBudgetFeasibilityReport
+        | None,
         activation_factory: RunActivationFactory,
         subagent_runtime: SubagentRuntime,
     ) -> None:
@@ -115,9 +119,7 @@ class SubagentChildActivationService:
         if asyncio.get_running_loop().time() >= deadline_monotonic:
             raise TimeoutError("child activation deadline expired before admission")
         subagent_runtime = self._subagent_runtime
-        run_view = await subagent_runtime.hydrate_child_activation_run(
-            subagent_run_id
-        )
+        run_view = await subagent_runtime.hydrate_child_activation_run(subagent_run_id)
         run = run_view.fact
         capability_profile = run.capability_profile_value
         child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
@@ -185,9 +187,7 @@ class SubagentChildActivationService:
             primary_target=child_target,
             summarizer_target=child_summarizer_target,
         )
-        parent_run_start = self._run_long_horizon.store.run_start(
-            run.parent_run_id
-        )
+        parent_run_start = self._run_long_horizon.store.run_start(run.parent_run_id)
         if parent_run_start is None:
             raise RuntimeError("child rollout contract requires one parent RunStart")
         resolved_budget_event = self._run_ledger.get_event(
@@ -479,7 +479,10 @@ class SubagentChildActivationService:
             self._retire_common_run_owner(
                 composition, dispatch.run_handle.identity.run_id
             )
-        elif isinstance(outcome, RunTerminalOutcome) and outcome.output.status == "finished":
+        elif (
+            isinstance(outcome, RunTerminalOutcome)
+            and outcome.output.status == "finished"
+        ):
             child_run_id = outcome.owner_identity.run_id
             self._retire_common_run_owner(composition, child_run_id)
             submitted = subagent_runtime.submitted_result(run.subagent_run_id)
@@ -504,9 +507,7 @@ class SubagentChildActivationService:
                 ),
             )
             terminal = await dispatch.run_handle.wait_run_completion()
-            self._retire_common_run_owner(
-                composition, terminal.owner_identity.run_id
-            )
+            self._retire_common_run_owner(composition, terminal.owner_identity.run_id)
             await subagent_runtime.fail_from_native_child_terminal(
                 run.subagent_run_id,
                 child_run_id=terminal.owner_identity.run_id,
@@ -524,8 +525,7 @@ class SubagentChildActivationService:
             )
         elif isinstance(outcome, RunReconciliationRequired):
             raise RuntimeError(
-                "child activation requires reconciliation: "
-                f"{outcome.diagnostic_code}"
+                f"child activation requires reconciliation: {outcome.diagnostic_code}"
             )
         elif isinstance(outcome, RunTerminalOutcome):
             child_run_id = outcome.owner_identity.run_id

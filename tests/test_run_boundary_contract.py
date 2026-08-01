@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 from datetime import datetime, timezone
 
 import pytest
@@ -12,7 +14,6 @@ from pulsara_agent.event import (
     RunStartEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
@@ -440,7 +441,7 @@ def test_child_capability_basis_is_rebound_at_all_four_authority_layers() -> Non
         stored,
         stored_envelope=stored_envelope,
     )
-    wrong_ledger_envelope = RawStoredEventEnvelope.from_stored_event(
+    wrong_ledger_envelope = build_raw_stored_event_envelope(
         event=stored,
         runtime_session_id="runtime:wrong-ledger",
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,

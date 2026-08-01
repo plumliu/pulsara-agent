@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -23,7 +25,7 @@ from pulsara_agent.runtime.projection_jobs.compaction_budget import (
     BackgroundBudgetReserveOutcome,
     reserve_background_budget,
 )
-from pulsara_agent.event_log.protocol import (
+from pulsara_agent.primitives.stored_event import (
     RawStoredEventEnvelope,
     RawTranscriptDomainPrefixFact,
 )
@@ -1783,8 +1785,7 @@ class PostgresDurableProjectionRepository:
             or installation_guard.result_candidate_fingerprint
             != result_candidate.result_candidate_fingerprint
             or installation_guard.job_id != lease.job.job_id
-            or installation_guard.source_job_lease_generation
-            != lease.lease_generation
+            or installation_guard.source_job_lease_generation != lease.lease_generation
             or installation_guard.source_job_lease_fingerprint
             != lease.lease_fingerprint
         ):
@@ -1974,8 +1975,7 @@ class PostgresDurableProjectionRepository:
             or target_lease.owner_job_id != lease.job.job_id
             or target_lease.lease_generation != lease.lease_generation
             or target_lease.lease_owner_id != lease.lease_owner_id
-            or target_lease.lease_fingerprint
-            != str(target_row["lease_fingerprint"])
+            or target_lease.lease_fingerprint != str(target_row["lease_fingerprint"])
         ):
             raise ValueError("extraction target lease authority drifted")
         return result_candidate_installation_guard(
@@ -3372,8 +3372,7 @@ class PostgresDurableProjectionRepository:
                         DurableProjectionCommitConfirmation.FULL
                         if state.dispatch_attempt_count
                         == lease.dispatch_attempt_count + 1
-                        and state.state_revision
-                        == lease.expected_state_revision + 2
+                        and state.state_revision == lease.expected_state_revision + 2
                         and state.attempt_count == 0
                         and state.lease_generation == lease.lease_generation
                         and state.last_failure == failure
@@ -4231,7 +4230,9 @@ class PostgresDurableProjectionRepository:
         )
         if len(matching_bindings) != 1:
             raise ValueError("pre-activation source schema is not accepted")
-        decoded = bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decoded = decode_raw_stored_event_envelope(
+            bound.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         tool_call_id = (
             decoded.tool_call_id if isinstance(decoded, ToolResultEndEvent) else None
         )

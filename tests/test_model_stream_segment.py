@@ -109,7 +109,7 @@ def _envelope(
         (
             ProviderDataBlockDeltaDraft,
             (
-                {"block_id": "data", "media_type": "application/json", "data": "{\"a\":"},
+                {"block_id": "data", "media_type": "application/json", "data": '{"a":'},
                 {"block_id": "data", "media_type": "application/json", "data": "1}"},
             ),
             DataBlockSegmentEvent,
@@ -118,8 +118,8 @@ def _envelope(
         (
             ProviderToolCallDeltaDraft,
             (
-                {"tool_call_id": "call", "delta": "{\"query\":\""},
-                {"tool_call_id": "call", "delta": "value\"}"},
+                {"tool_call_id": "call", "delta": '{"query":"'},
+                {"tool_call_id": "call", "delta": 'value"}'},
             ),
             ToolCallArgumentsSegmentEvent,
             "arguments_json_fragment",
@@ -156,7 +156,10 @@ def test_segment_accumulator_coalesces_each_delta_kind_losslessly(
     )
     assert getattr(prepared.event, content_field) == expected
     assert prepared.source_item_count == len(payloads)
-    assert prepared.canonical_candidate_bytes <= MODEL_STREAM_SEGMENT_MAX_CANONICAL_EVENT_BYTES
+    assert (
+        prepared.canonical_candidate_bytes
+        <= MODEL_STREAM_SEGMENT_MAX_CANONICAL_EVENT_BYTES
+    )
 
 
 def test_canonical_json_expansion_seals_before_event_hard_cap() -> None:
@@ -187,8 +190,7 @@ def test_canonical_json_expansion_seals_before_event_hard_cap() -> None:
         ModelStreamSegmentSealReason.CANONICAL_EVENT_BYTE_BOUNDARY
     )
     assert all(
-        item.canonical_candidate_bytes
-        <= MODEL_STREAM_SEGMENT_MAX_CANONICAL_EVENT_BYTES
+        item.canonical_candidate_bytes <= MODEL_STREAM_SEGMENT_MAX_CANONICAL_EVENT_BYTES
         for item in emitted
     )
     assert "".join(item.event.data for item in emitted) == "\x00" * 60_000
@@ -238,7 +240,9 @@ def test_failed_seal_does_not_advance_durable_cursor() -> None:
         update={"max_canonical_event_bytes": 1}
     )
 
-    with pytest.raises(ModelStreamSegmentContractError, match="canonical event hard cap"):
+    with pytest.raises(
+        ModelStreamSegmentContractError, match="canonical event hard cap"
+    ):
         accumulator.seal(ModelStreamSegmentSealReason.STRUCTURAL_BOUNDARY)
 
     assert accumulator.has_open_segment is True

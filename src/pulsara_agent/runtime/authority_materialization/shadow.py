@@ -141,14 +141,10 @@ class AuthorityMaterializationShadowAccount:
             active_bytes = sum(
                 item.max_total_reserved_payload_bytes for item in self._active.values()
             )
-            used_events = self._through_sequence - min(
-                self._consumer_horizons.values()
-            )
+            used_events = self._through_sequence - min(self._consumer_horizons.values())
             used_bytes = self._charged_payload_bytes
             would_admit = (
-                used_events
-                + active_events
-                + contract.max_total_reserved_events
+                used_events + active_events + contract.max_total_reserved_events
                 <= self._limits.max_unreclaimable_ledger_events
                 - self._limits.maintenance_reserved_events
                 and used_bytes

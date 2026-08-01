@@ -273,13 +273,16 @@ class McpBindingDispatchBorrow:
         )
         if any(not value for value in required):
             raise ValueError("MCP dispatch borrow identity is incomplete")
-        if min(
-            self.config_epoch,
-            self.discovery_generation,
-            self.transport_generation,
-            self.dirty_signal_generation,
-            self.freshness_generation,
-        ) < 0:
+        if (
+            min(
+                self.config_epoch,
+                self.discovery_generation,
+                self.transport_generation,
+                self.dirty_signal_generation,
+                self.freshness_generation,
+            )
+            < 0
+        ):
             raise ValueError("MCP dispatch borrow generations must be non-negative")
         expected = context_fingerprint(
             "mcp-binding-dispatch-borrow:v2",

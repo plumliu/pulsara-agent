@@ -182,9 +182,7 @@ def long_horizon_context_diagnostics(
                     "The deterministic minimum projection remains above "
                     "the soft target but fits the resolved hard input budget."
                 ),
-                "target_projected_tokens": (
-                    target_unreachable.target_projected_tokens
-                ),
+                "target_projected_tokens": (target_unreachable.target_projected_tokens),
                 "minimum_projected_tokens": (
                     target_unreachable.minimum_projected_tokens
                 ),

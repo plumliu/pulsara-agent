@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from time import monotonic
 
@@ -180,7 +182,8 @@ class ProviderInputPreparationRecoveryService:
         return _RecoveryRead(
             through_sequence=through_sequence,
             events=tuple(
-                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw
+                decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for item in raw
             ),
         )
 

@@ -317,9 +317,7 @@ def _validated_job(
                 "lease_expires_at": row["lease_expires_at"],
                 "next_attempt_at": row["next_attempt_at"],
                 "last_failure": row["last_failure"],
-                "compaction_memory_deferral": row[
-                    "compaction_memory_deferral"
-                ],
+                "compaction_memory_deferral": row["compaction_memory_deferral"],
                 "result_receipt_reference": row["result_receipt_reference"],
                 "state_fingerprint": row["state_fingerprint"],
             }

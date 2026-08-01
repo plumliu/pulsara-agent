@@ -246,7 +246,9 @@ def project_recovery_from_events(
     )
 
 
-def project_recovery_from_state(state: RunActivationWorkingState) -> RecoveryProjection | None:
+def project_recovery_from_state(
+    state: RunActivationWorkingState,
+) -> RecoveryProjection | None:
     if state.in_run_recovery is None:
         return None
     return RecoveryProjection(

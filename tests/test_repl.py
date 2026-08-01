@@ -69,7 +69,9 @@ def test_interactive_repl_enables_async_history_and_suspend(tmp_path: Path) -> N
     assert prompt.session.enable_suspend is True
 
 
-def test_repl_history_falls_back_when_home_is_read_only(monkeypatch, tmp_path: Path) -> None:
+def test_repl_history_falls_back_when_home_is_read_only(
+    monkeypatch, tmp_path: Path
+) -> None:
     def _deny(*_args, **_kwargs):
         raise PermissionError("read only")
 

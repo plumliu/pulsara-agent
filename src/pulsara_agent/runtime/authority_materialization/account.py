@@ -23,7 +23,11 @@ from pulsara_agent.event import (
     SubagentGraphCheckpointCommittedEvent,
     EventContext,
 )
-from pulsara_agent.event_log.protocol import EventLog, EventLogTransactionCompanion
+from pulsara_agent.event_log.protocol import (
+    CandidateBatchBindableEventLogTransactionCompanion,
+    EventLog,
+    EventLogTransactionCompanion,
+)
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     canonical_event_payload_bytes,
@@ -60,6 +64,7 @@ from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.ports.mcp import McpContinuationTransactionIntent
+from pulsara_agent.ports.stored_event import StoredEventBatchCommitReceipt
 
 
 TransactionCompanionInput = (
@@ -79,9 +84,7 @@ class CheckpointDispatchBarrierActive(RuntimeError):
     """Producer admission is closed while a checkpoint barrier owns the ledger."""
 
 
-class MaterializationAccountReconciliationRequired(
-    MaterializationAccountContractError
-):
+class MaterializationAccountReconciliationRequired(MaterializationAccountContractError):
     """The atomic event/account outcome cannot be proven FULL or NONE."""
 
 
@@ -114,7 +117,7 @@ class CommittedPhysicalReservation:
     reservation: PhysicalOperationReservationFact
     reservation_event: PhysicalOperationReservationCreatedEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -154,7 +157,7 @@ class CommittedPhysicalReservationBatch:
     one_shot_reservation: PhysicalOperationReservationFact | None
     one_shot_settlement_event: PhysicalOperationReservationSettledEvent | None
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -164,7 +167,7 @@ class CommittedOneShotPhysicalOperation:
     reservation_event: PhysicalOperationReservationCreatedEvent
     settlement_event: PhysicalOperationReservationSettledEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -172,7 +175,7 @@ class CommittedOneShotPhysicalOperation:
 class CommittedPhysicalCharge:
     charge_event: PhysicalOperationChargeAppliedEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_reservation_state: ActivePhysicalReservationStateFact
     resulting_account_state: LedgerMaterializationAccountStateFact
 
@@ -181,7 +184,7 @@ class CommittedPhysicalCharge:
 class CommittedPhysicalSettlement:
     settlement_event: PhysicalOperationReservationSettledEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -189,7 +192,7 @@ class CommittedPhysicalSettlement:
 class CommittedPhysicalSuspension:
     suspension_event: PhysicalOperationReservationSuspendedEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_reservation_state: ActivePhysicalReservationStateFact
     resulting_account_state: LedgerMaterializationAccountStateFact
 
@@ -199,7 +202,7 @@ class CommittedLedgerGenesis:
     genesis_event: LedgerMaterializationAccountGenesisEvent
     consumer_events: tuple[LedgerMaterializationConsumerRegisteredEvent, ...]
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -208,7 +211,7 @@ class CommittedGraphConsumerCheckpoint:
     checkpoint_event: SubagentGraphCheckpointCommittedEvent
     horizon_event: LedgerMaterializationConsumerHorizonAdvancedEvent
     generation_event: LedgerMaterializationGenerationAdvancedEvent | None
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -221,7 +224,7 @@ class CommittedRunSeedConsumerRotation:
     reservation_event: PhysicalOperationReservationCreatedEvent
     settlement_event: PhysicalOperationReservationSettledEvent
     business_events: tuple[AgentEvent, ...]
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -249,9 +252,7 @@ def deterministic_ledger_charge(
         bound = bounds.get((str(event.type), schema.event_schema_version))
         if bound is not None:
             if str(event.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED":
-                dynamic_charge = (
-                    event.charge.charge_applied_event_charge_payload_bytes
-                )
+                dynamic_charge = event.charge.charge_applied_event_charge_payload_bytes
                 if dynamic_charge > bound.max_stored_envelope_bytes:
                     raise MaterializationAccountContractError(
                         "dynamic charge-applied quote exceeds its envelope bound"
@@ -261,7 +262,9 @@ def deterministic_ledger_charge(
                 charged_bytes += bound.max_stored_envelope_bytes
         else:
             charged_bytes += len(
-                canonical_event_payload_bytes(event.model_copy(update={"sequence": None}))
+                canonical_event_payload_bytes(
+                    event.model_copy(update={"sequence": None})
+                )
             ) + (
                 contract.fixed_sequence_wrapper_charge_bytes_per_event
                 + contract.fixed_schema_wrapper_charge_bytes_per_event
@@ -279,7 +282,9 @@ def deterministic_bookkeeping_charge(
     business_event_count: int | None = None,
 ) -> DeterministicLedgerCharge:
     matching = tuple(
-        item for item in contract.bookkeeping_event_bounds if item.event_type == event_type
+        item
+        for item in contract.bookkeeping_event_bounds
+        if item.event_type == event_type
     )
     if len(matching) != 1:
         raise MaterializationAccountContractError(
@@ -332,9 +337,7 @@ def canonical_empty_generation(
     runtime_session_id: str,
     charge_contract_fingerprint: str,
 ) -> LedgerMaterializationGenerationFact:
-    consumer_set = context_fingerprint(
-        "ledger-materialization-consumer-set:v1", ()
-    )
+    consumer_set = context_fingerprint("ledger-materialization-consumer-set:v1", ())
     return build_frozen_fact(
         LedgerMaterializationGenerationFact,
         schema_version="ledger_materialization_generation.v1",
@@ -437,7 +440,9 @@ def build_account_state(
     reconciliation_required: bool,
     reconciliation_reason_code: str | None,
 ) -> LedgerMaterializationAccountStateFact:
-    reservations = tuple(sorted(active_reservations, key=lambda item: item.reservation_id))
+    reservations = tuple(
+        sorted(active_reservations, key=lambda item: item.reservation_id)
+    )
     transition_ids = tuple(sorted(set(latest_transition_event_ids)))
     return build_frozen_fact(
         LedgerMaterializationAccountStateFact,
@@ -446,9 +451,7 @@ def build_account_state(
         generation=generation,
         ledger_through_sequence=ledger_through_sequence,
         ledger_event_count_through=ledger_through_sequence,
-        ledger_charged_payload_bytes_through=(
-            ledger_charged_payload_bytes_through
-        ),
+        ledger_charged_payload_bytes_through=(ledger_charged_payload_bytes_through),
         used_since_reclaimable_events=(
             ledger_through_sequence - generation.reclaimable_event_count_through
         ),
@@ -485,8 +488,7 @@ def account_with_committed_usage(
         generation=generation or source.generation,
         ledger_through_sequence=source.ledger_through_sequence + charge.event_count,
         ledger_charged_payload_bytes_through=(
-            source.ledger_charged_payload_bytes_through
-            + charge.charged_payload_bytes
+            source.ledger_charged_payload_bytes_through + charge.charged_payload_bytes
         ),
         active_reservations=(
             source.active_reservations
@@ -602,7 +604,10 @@ class LedgerMaterializationCoordinator:
 
         if genesis_profile not in {"host_first_run", "subagent_first_run"}:
             raise ValueError("unsupported ledger genesis profile")
-        if genesis_burst_contract.operation_kind is not PhysicalOperationKind.LEDGER_GENESIS:
+        if (
+            genesis_burst_contract.operation_kind
+            is not PhysicalOperationKind.LEDGER_GENESIS
+        ):
             raise ValueError("genesis requires the dedicated non-reservable contract")
         if not business_events:
             raise ValueError("ledger genesis requires first business facts")
@@ -655,9 +660,7 @@ class LedgerMaterializationCoordinator:
                     through_sequence=0,
                     ledger_event_count_through=0,
                     ledger_charged_payload_bytes_through=0,
-                    ledger_continuity_accumulator=(
-                        EMPTY_LEDGER_CONTINUITY_ACCUMULATOR
-                    ),
+                    ledger_continuity_accumulator=(EMPTY_LEDGER_CONTINUITY_ACCUMULATOR),
                     consumer_contract_fingerprint=context_fingerprint(
                         "ledger-materialization-consumer-contract:v1",
                         {
@@ -743,7 +746,10 @@ class LedgerMaterializationCoordinator:
                 ),
             )
             required_kinds = tuple(
-                sorted((item.consumer_kind for item in horizons), key=lambda item: item.value)
+                sorted(
+                    (item.consumer_kind for item in horizons),
+                    key=lambda item: item.value,
+                )
             )
             genesis_fact = build_frozen_fact(
                 LedgerMaterializationAccountGenesisFact,
@@ -761,9 +767,7 @@ class LedgerMaterializationCoordinator:
                     "ledger-genesis-batch-contract:v1",
                     {
                         "profile": genesis_profile,
-                        "consumer_kinds": tuple(
-                            item.value for item in required_kinds
-                        ),
+                        "consumer_kinds": tuple(item.value for item in required_kinds),
                         "business_event_types": tuple(
                             sorted(str(item.type) for item in prepared_business)
                         ),
@@ -828,7 +832,7 @@ class LedgerMaterializationCoordinator:
                 genesis_event=genesis_event,
                 consumer_events=consumer_events,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -900,9 +904,7 @@ class LedgerMaterializationCoordinator:
                 + reservation_charge.charged_payload_bytes
             )
             required_tail_events = burst_contract.terminal_tail_reserved_events
-            required_tail_bytes = (
-                burst_contract.terminal_tail_reserved_payload_bytes
-            )
+            required_tail_bytes = burst_contract.terminal_tail_reserved_payload_bytes
             if (
                 burst_contract.max_total_reserved_events
                 < initial_charge_events + required_tail_events
@@ -945,9 +947,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 source_ledger_through_sequence=source.ledger_through_sequence,
                 burst_contract_id=burst_contract.contract_id,
                 burst_contract_version=burst_contract.contract_version,
@@ -999,9 +999,7 @@ class LedgerMaterializationCoordinator:
                 ),
                 charged_events_lifetime=initial_charge_events,
                 charged_payload_bytes_lifetime=initial_charge_bytes,
-                remaining_events=(
-                    reservation.reserved_events - initial_charge_events
-                ),
+                remaining_events=(reservation.reserved_events - initial_charge_events),
                 remaining_payload_bytes=(
                     reservation.reserved_payload_bytes - initial_charge_bytes
                 ),
@@ -1016,8 +1014,7 @@ class LedgerMaterializationCoordinator:
                     source.ledger_through_sequence + initial_charge_events
                 ),
                 ledger_charged_payload_bytes_through=(
-                    source.ledger_charged_payload_bytes_through
-                    + initial_charge_bytes
+                    source.ledger_charged_payload_bytes_through + initial_charge_bytes
                 ),
                 active_reservations=(*source.active_reservations, active),
                 active_checkpoint_barrier=source.active_checkpoint_barrier,
@@ -1070,7 +1067,7 @@ class LedgerMaterializationCoordinator:
                 reservation=reservation,
                 reservation_event=reservation_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -1108,10 +1105,9 @@ class LedgerMaterializationCoordinator:
             owner_keys = tuple(
                 (item.burst_contract.operation_kind, item.owner_id) for item in requests
             )
-            if (
-                len(reservation_ids) != len(set(reservation_ids))
-                or len(owner_keys) != len(set(owner_keys))
-            ):
+            if len(reservation_ids) != len(set(reservation_ids)) or len(
+                owner_keys
+            ) != len(set(owner_keys)):
                 raise ValueError("dispatch batch reservation identities must be unique")
             if any(
                 item.burst_contract.operation_kind
@@ -1140,7 +1136,9 @@ class LedgerMaterializationCoordinator:
                 if not item.business_event_ids:
                     raise ValueError("dispatch owner requires assigned business facts")
                 try:
-                    assigned = tuple(by_id[event_id] for event_id in item.business_event_ids)
+                    assigned = tuple(
+                        by_id[event_id] for event_id in item.business_event_ids
+                    )
                 except KeyError as exc:
                     raise ValueError(
                         "dispatch owner references an unknown business event"
@@ -1154,7 +1152,9 @@ class LedgerMaterializationCoordinator:
                 if one_shot_request.burst_contract.operation_kind is not (
                     PhysicalOperationKind.RUNTIME_INTERNAL_WRITE
                 ):
-                    raise ValueError("one-shot dispatch companion must be runtime-internal")
+                    raise ValueError(
+                        "one-shot dispatch companion must be runtime-internal"
+                    )
                 self._validate_fixed_batch_contract(
                     burst_contract=one_shot_request.burst_contract,
                     business_events=tuple(
@@ -1163,13 +1163,11 @@ class LedgerMaterializationCoordinator:
                     ),
                 )
                 one_shot_events = tuple(
-                    by_id[event_id]
-                    for event_id in one_shot_request.business_event_ids
+                    by_id[event_id] for event_id in one_shot_request.business_event_ids
                 )
                 assigned_ids.extend(one_shot_request.business_event_ids)
-            if (
-                len(assigned_ids) != len(set(assigned_ids))
-                or set(assigned_ids) != set(by_id)
+            if len(assigned_ids) != len(set(assigned_ids)) or set(assigned_ids) != set(
+                by_id
             ):
                 raise ValueError(
                     "dispatch batch business facts must be partitioned exactly once"
@@ -1191,14 +1189,14 @@ class LedgerMaterializationCoordinator:
                     assigned,
                     contract=self.charge_contract,
                 )
-                initial_events = business_charge.event_count + reservation_charge.event_count
+                initial_events = (
+                    business_charge.event_count + reservation_charge.event_count
+                )
                 initial_bytes = (
                     business_charge.charged_payload_bytes
                     + reservation_charge.charged_payload_bytes
                 )
-                required_tail_events = (
-                    item.burst_contract.terminal_tail_reserved_events
-                )
+                required_tail_events = item.burst_contract.terminal_tail_reserved_events
                 required_tail_bytes = (
                     item.burst_contract.terminal_tail_reserved_payload_bytes
                 )
@@ -1399,9 +1397,7 @@ class LedgerMaterializationCoordinator:
                         + reservation_charge.charged_payload_bytes
                     ),
                     remaining_events=settlement_charge.event_count,
-                    remaining_payload_bytes=(
-                        settlement_charge.charged_payload_bytes
-                    ),
+                    remaining_payload_bytes=(settlement_charge.charged_payload_bytes),
                     latest_reservation_event_id=one_shot_reservation_id,
                     latest_lifecycle_event_id=one_shot_reservation_id,
                     latest_charge_applied_event_id=None,
@@ -1418,16 +1414,17 @@ class LedgerMaterializationCoordinator:
             bookkeeping_events = len(reservation_event_ids) + (
                 1 if one_shot_settlement_id is not None else 0
             )
-            bookkeeping_bytes = (
-                len(reservation_event_ids) * reservation_charge.charged_payload_bytes
-                + (
-                    settlement_charge.charged_payload_bytes
-                    if one_shot_settlement_id is not None
-                    else 0
-                )
+            bookkeeping_bytes = len(
+                reservation_event_ids
+            ) * reservation_charge.charged_payload_bytes + (
+                settlement_charge.charged_payload_bytes
+                if one_shot_settlement_id is not None
+                else 0
             )
             actual_events = global_business_charge.event_count + bookkeeping_events
-            actual_bytes = global_business_charge.charged_payload_bytes + bookkeeping_bytes
+            actual_bytes = (
+                global_business_charge.charged_payload_bytes + bookkeeping_bytes
+            )
             new_reserved_events = sum(
                 item.burst_contract.max_total_reserved_events for item in requests
             ) + (
@@ -1519,7 +1516,10 @@ class LedgerMaterializationCoordinator:
                 )
                 for event_id, reservation in zip(
                     reservation_event_ids,
-                    (*reservations, *((one_shot_reservation,) if one_shot_reservation else ())),
+                    (
+                        *reservations,
+                        *((one_shot_reservation,) if one_shot_reservation else ()),
+                    ),
                     strict=True,
                 )
             )
@@ -1634,7 +1634,7 @@ class LedgerMaterializationCoordinator:
                 one_shot_reservation=one_shot_reservation,
                 one_shot_settlement_event=one_shot_settlement_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -1749,7 +1749,9 @@ class LedgerMaterializationCoordinator:
                 contract=self.charge_contract,
                 business_event_count=len(prepared_business),
             )
-            charged_events = business_charge.event_count + charge_event_charge.event_count
+            charged_events = (
+                business_charge.event_count + charge_event_charge.event_count
+            )
             charged_bytes = (
                 business_charge.charged_payload_bytes
                 + charge_event_charge.charged_payload_bytes
@@ -1809,8 +1811,7 @@ class LedgerMaterializationCoordinator:
                     + business_charge.event_count
                 ),
                 charged_candidate_payload_bytes_lifetime=(
-                    active.charged_candidate_payload_bytes_lifetime
-                    + candidate_bytes
+                    active.charged_candidate_payload_bytes_lifetime + candidate_bytes
                 ),
                 charged_wrapper_bytes_lifetime=(
                     active.charged_wrapper_bytes_lifetime + wrapper_bytes
@@ -1881,9 +1882,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 predecessor_reservation_state_fingerprint=active.state_fingerprint,
                 charged_business_event_identities=tuple(
                     sorted(
@@ -1946,7 +1945,7 @@ class LedgerMaterializationCoordinator:
             return CommittedPhysicalCharge(
                 charge_event=charge_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_reservation_state=resulting_active,
                 resulting_account_state=resulting,
             )
@@ -1999,7 +1998,9 @@ class LedgerMaterializationCoordinator:
                 "PHYSICAL_OPERATION_RESERVATION_SETTLED",
                 contract=self.charge_contract,
             )
-            terminal_events = business_charge.event_count + settlement_charge.event_count
+            terminal_events = (
+                business_charge.event_count + settlement_charge.event_count
+            )
             terminal_bytes = (
                 business_charge.charged_payload_bytes
                 + settlement_charge.charged_payload_bytes
@@ -2018,7 +2019,8 @@ class LedgerMaterializationCoordinator:
             resulting = build_account_state(
                 runtime_session_id=self.runtime_session_id,
                 generation=source.generation,
-                ledger_through_sequence=source.ledger_through_sequence + terminal_events,
+                ledger_through_sequence=source.ledger_through_sequence
+                + terminal_events,
                 ledger_charged_payload_bytes_through=(
                     source.ledger_charged_payload_bytes_through + terminal_bytes
                 ),
@@ -2054,13 +2056,14 @@ class LedgerMaterializationCoordinator:
                 total_charge=business_charge,
             )
             charged_candidate_events = (
-                active.charged_candidate_events_lifetime
-                + business_charge.event_count
+                active.charged_candidate_events_lifetime + business_charge.event_count
             )
             charged_candidate_bytes = (
                 active.charged_candidate_payload_bytes_lifetime + candidate_bytes
             )
-            charged_wrapper_bytes = active.charged_wrapper_bytes_lifetime + wrapper_bytes
+            charged_wrapper_bytes = (
+                active.charged_wrapper_bytes_lifetime + wrapper_bytes
+            )
             charged_bookkeeping_events = (
                 active.charged_bookkeeping_events_lifetime
                 + settlement_charge.event_count
@@ -2096,9 +2099,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 owner_kind=reservation.owner_kind,
                 owner_id=reservation.owner_id,
                 reservation_fingerprint=reservation.reservation_fingerprint,
@@ -2136,9 +2137,7 @@ class LedgerMaterializationCoordinator:
                 model_stream_measurement_fingerprint=(
                     model_stream_measurement_fingerprint
                 ),
-                released_on_suspension_events_lifetime=(
-                    released_on_suspension_events
-                ),
+                released_on_suspension_events_lifetime=(released_on_suspension_events),
                 released_on_suspension_payload_bytes_lifetime=(
                     released_on_suspension_bytes
                 ),
@@ -2192,7 +2191,7 @@ class LedgerMaterializationCoordinator:
             return CommittedPhysicalSettlement(
                 settlement_event=settlement_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -2309,13 +2308,14 @@ class LedgerMaterializationCoordinator:
                 total_charge=business_charge,
             )
             charged_candidate_events = (
-                active.charged_candidate_events_lifetime
-                + business_charge.event_count
+                active.charged_candidate_events_lifetime + business_charge.event_count
             )
             charged_candidate_bytes = (
                 active.charged_candidate_payload_bytes_lifetime + candidate_bytes
             )
-            charged_wrapper_bytes = active.charged_wrapper_bytes_lifetime + wrapper_bytes
+            charged_wrapper_bytes = (
+                active.charged_wrapper_bytes_lifetime + wrapper_bytes
+            )
             charged_bookkeeping_events = (
                 active.charged_bookkeeping_events_lifetime
                 + suspension_charge.event_count
@@ -2431,9 +2431,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 owner_kind=reservation.owner_kind,
                 owner_id=reservation.owner_id,
                 reservation_fingerprint=reservation.reservation_fingerprint,
@@ -2460,9 +2458,7 @@ class LedgerMaterializationCoordinator:
                 companion_remaining_before_suspension_bytes=(
                     active.companion_payload_remaining_bytes
                 ),
-                companion_charged_on_suspension_bytes=(
-                    companion_payload_charge_bytes
-                ),
+                companion_charged_on_suspension_bytes=(companion_payload_charge_bytes),
                 companion_retained_after_suspension_bytes=(
                     resulting_active.companion_payload_remaining_bytes
                 ),
@@ -2497,7 +2493,7 @@ class LedgerMaterializationCoordinator:
             return CommittedPhysicalSuspension(
                 suspension_event=suspension_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_reservation_state=resulting_active,
                 resulting_account_state=resulting,
             )
@@ -2516,6 +2512,7 @@ class LedgerMaterializationCoordinator:
         owner_id: str,
         burst_contract: PhysicalBurstContractFact,
         deadline_monotonic: float | None = None,
+        transaction_companion: TransactionCompanionInput | None = None,
     ) -> CommittedRunSeedConsumerRotation:
         """Atomically rotate the run-scoped transcript consumer with RunStart."""
 
@@ -2543,8 +2540,7 @@ class LedgerMaterializationCoordinator:
             run_starts = tuple(
                 event
                 for event in prepared_business
-                if event.id == run_start_event_id
-                and isinstance(event, RunStartEvent)
+                if event.id == run_start_event_id and isinstance(event, RunStartEvent)
             )
             if len(run_starts) != 1:
                 raise ValueError("run-seed rotation requires one exact RunStart")
@@ -2639,6 +2635,9 @@ class LedgerMaterializationCoordinator:
             business_charge = deterministic_ledger_charge(
                 prepared_business, contract=self.charge_contract
             )
+            companion_charge_bytes, companion_charge_contract_fingerprint = (
+                _transaction_companion_charge(transaction_companion)
+            )
             bookkeeping_types = [
                 "LEDGER_MATERIALIZATION_CONSUMER_REGISTERED",
                 *(
@@ -2649,9 +2648,7 @@ class LedgerMaterializationCoordinator:
                 "PHYSICAL_OPERATION_RESERVATION_SETTLED",
             ]
             if minimum_advanced:
-                bookkeeping_types.append(
-                    "LEDGER_MATERIALIZATION_GENERATION_ADVANCED"
-                )
+                bookkeeping_types.append("LEDGER_MATERIALIZATION_GENERATION_ADVANCED")
             bookkeeping_charges = tuple(
                 deterministic_bookkeeping_charge(
                     event_type, contract=self.charge_contract
@@ -2818,9 +2815,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 source_ledger_through_sequence=source.ledger_through_sequence,
                 burst_contract_id=burst_contract.contract_id,
                 burst_contract_version=burst_contract.contract_version,
@@ -2833,6 +2828,10 @@ class LedgerMaterializationCoordinator:
                 terminal_tail_reserved_events=settlement_charge.event_count,
                 terminal_tail_reserved_payload_bytes=(
                     settlement_charge.charged_payload_bytes
+                ),
+                companion_payload_reserved_bytes=companion_charge_bytes,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
                 ),
             )
             business_candidate_bytes, business_wrapper_bytes = _candidate_charge_split(
@@ -2853,6 +2852,12 @@ class LedgerMaterializationCoordinator:
                 suspension_fingerprint=None,
                 reserved_events_total=total_events,
                 reserved_payload_bytes_total=total_bytes,
+                companion_payload_reserved_bytes_total=companion_charge_bytes,
+                companion_payload_charged_bytes_lifetime=0,
+                companion_payload_remaining_bytes=companion_charge_bytes,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
+                ),
                 charged_candidate_events_lifetime=business_charge.event_count,
                 charged_candidate_payload_bytes_lifetime=business_candidate_bytes,
                 charged_wrapper_bytes_lifetime=business_wrapper_bytes,
@@ -2860,8 +2865,7 @@ class LedgerMaterializationCoordinator:
                     before_settlement_events - business_charge.event_count
                 ),
                 charged_bookkeeping_bytes_lifetime=(
-                    before_settlement_bytes
-                    - business_charge.charged_payload_bytes
+                    before_settlement_bytes - business_charge.charged_payload_bytes
                 ),
                 charged_events_lifetime=before_settlement_events,
                 charged_payload_bytes_lifetime=before_settlement_bytes,
@@ -2893,9 +2897,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 owner_kind=reservation.owner_kind,
                 owner_id=owner_id,
                 reservation_fingerprint=reservation.reservation_fingerprint,
@@ -2930,6 +2932,12 @@ class LedgerMaterializationCoordinator:
                 released_on_suspension_payload_bytes_lifetime=0,
                 released_on_settlement_events=0,
                 released_on_settlement_payload_bytes=0,
+                predecessor_companion_remaining_bytes=companion_charge_bytes,
+                terminal_companion_charge_bytes=companion_charge_bytes,
+                released_on_settlement_companion_bytes=0,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
+                ),
                 resulting_reservation_state_fingerprint=context_fingerprint(
                     "settled-physical-reservation-state:v1",
                     reservation.reservation_fingerprint,
@@ -2960,6 +2968,7 @@ class LedgerMaterializationCoordinator:
                 resulting=resulting,
                 expected_last_sequence=source.ledger_through_sequence,
                 deadline_monotonic=deadline_monotonic,
+                transaction_companion=transaction_companion,
             )
             self.store.install_confirmed_state(resulting)
             return CommittedRunSeedConsumerRotation(
@@ -2970,7 +2979,7 @@ class LedgerMaterializationCoordinator:
                 reservation_event=reservation_event,
                 settlement_event=settlement_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -3079,6 +3088,9 @@ class LedgerMaterializationCoordinator:
                 "PHYSICAL_OPERATION_RESERVATION_SETTLED",
                 contract=self.charge_contract,
             )
+            companion_charge_bytes, companion_charge_contract_fingerprint = (
+                _transaction_companion_charge(transaction_companion)
+            )
             total_events = (
                 business_charge.event_count
                 + reservation_charge.event_count
@@ -3129,9 +3141,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 source_ledger_through_sequence=source.ledger_through_sequence,
                 burst_contract_id=burst_contract.contract_id,
                 burst_contract_version=burst_contract.contract_version,
@@ -3144,6 +3154,10 @@ class LedgerMaterializationCoordinator:
                 terminal_tail_reserved_events=settlement_charge.event_count,
                 terminal_tail_reserved_payload_bytes=(
                     settlement_charge.charged_payload_bytes
+                ),
+                companion_payload_reserved_bytes=companion_charge_bytes,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
                 ),
             )
             reservation_event_id = physical_reservation_event_id(reservation_id)
@@ -3195,7 +3209,9 @@ class LedgerMaterializationCoordinator:
                     ),
                 )
             )
-            initial_events = business_charge.event_count + reservation_charge.event_count
+            initial_events = (
+                business_charge.event_count + reservation_charge.event_count
+            )
             initial_bytes = (
                 business_charge.charged_payload_bytes
                 + reservation_charge.charged_payload_bytes
@@ -3217,6 +3233,12 @@ class LedgerMaterializationCoordinator:
                 suspension_fingerprint=None,
                 reserved_events_total=reservation.reserved_events,
                 reserved_payload_bytes_total=reservation.reserved_payload_bytes,
+                companion_payload_reserved_bytes_total=companion_charge_bytes,
+                companion_payload_charged_bytes_lifetime=0,
+                companion_payload_remaining_bytes=companion_charge_bytes,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
+                ),
                 charged_candidate_events_lifetime=business_charge.event_count,
                 charged_candidate_payload_bytes_lifetime=(
                     business_candidate_payload_bytes
@@ -3247,9 +3269,7 @@ class LedgerMaterializationCoordinator:
                 ledger_materialization_generation=(
                     source.generation.ledger_materialization_generation
                 ),
-                consumer_horizon_revision=(
-                    source.generation.consumer_horizon_revision
-                ),
+                consumer_horizon_revision=(source.generation.consumer_horizon_revision),
                 owner_kind=reservation.owner_kind,
                 owner_id=owner_id,
                 reservation_fingerprint=reservation.reservation_fingerprint,
@@ -3292,6 +3312,12 @@ class LedgerMaterializationCoordinator:
                     predecessor.remaining_payload_bytes
                     - settlement_charge.charged_payload_bytes
                 ),
+                predecessor_companion_remaining_bytes=companion_charge_bytes,
+                terminal_companion_charge_bytes=companion_charge_bytes,
+                released_on_settlement_companion_bytes=0,
+                companion_charge_contract_fingerprint=(
+                    companion_charge_contract_fingerprint
+                ),
                 resulting_reservation_state_fingerprint=context_fingerprint(
                     "settled-physical-reservation-state:v1",
                     reservation.reservation_fingerprint,
@@ -3332,7 +3358,7 @@ class LedgerMaterializationCoordinator:
                 reservation_event=reservation_event,
                 settlement_event=settlement_event,
                 business_events=prepared_business,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -3368,7 +3394,10 @@ class LedgerMaterializationCoordinator:
                     "fixed batch contains an event outside its contract"
                 ) from exc
             payload_bytes = len(canonical_event_payload_bytes(event))
-            if payload_bytes > event_contract.max_candidate_payload_bytes_per_occurrence:
+            if (
+                payload_bytes
+                > event_contract.max_candidate_payload_bytes_per_occurrence
+            ):
                 raise PhysicalHeadroomExceeded(
                     "fixed batch event payload exceeds its contract"
                 )
@@ -3410,13 +3439,16 @@ class LedgerMaterializationCoordinator:
             graph_consumers = tuple(
                 item
                 for item in source.generation.consumer_horizons
-                if item.consumer_kind is LedgerMaterializationConsumerKind.SUBAGENT_GRAPH
+                if item.consumer_kind
+                is LedgerMaterializationConsumerKind.SUBAGENT_GRAPH
             )
             if len(graph_consumers) != 1:
                 raise ValueError("ledger has no unique subagent-graph consumer")
             old_horizon = graph_consumers[0]
             if checkpoint.through_sequence <= old_horizon.through_sequence:
-                raise ValueError("graph checkpoint does not advance its consumer horizon")
+                raise ValueError(
+                    "graph checkpoint does not advance its consumer horizon"
+                )
             if checkpoint.through_sequence > source.ledger_through_sequence:
                 raise ValueError("graph checkpoint exceeds the committed ledger")
             if not (
@@ -3544,7 +3576,9 @@ class LedgerMaterializationCoordinator:
             resulting = build_account_state(
                 runtime_session_id=self.runtime_session_id,
                 generation=resulting_generation,
-                ledger_through_sequence=(source.ledger_through_sequence + charge.event_count),
+                ledger_through_sequence=(
+                    source.ledger_through_sequence + charge.event_count
+                ),
                 ledger_charged_payload_bytes_through=(
                     source.ledger_charged_payload_bytes_through
                     + charge.charged_payload_bytes
@@ -3616,7 +3650,7 @@ class LedgerMaterializationCoordinator:
                 resulting=resulting,
                 deadline_monotonic=deadline_monotonic,
             )
-            by_id = {event.id: event for event in stored}
+            by_id = {event.id: event for event in stored.owned_stored_events}
             stored_checkpoint = by_id[prepared_checkpoint.id]
             stored_horizon = by_id[horizon_event.id]
             stored_generation = (
@@ -3642,7 +3676,7 @@ class LedgerMaterializationCoordinator:
                 checkpoint_event=stored_checkpoint,
                 horizon_event=stored_horizon,
                 generation_event=stored_generation,
-                stored_events=stored,
+                stored_batch_receipt=stored,
                 resulting_account_state=resulting,
             )
 
@@ -3653,7 +3687,7 @@ class LedgerMaterializationCoordinator:
         events: Sequence[AgentEvent],
         resulting: LedgerMaterializationAccountStateFact,
         deadline_monotonic: float | None = None,
-    ) -> tuple[AgentEvent, ...]:
+    ) -> StoredEventBatchCommitReceipt:
         """Commit one prebuilt account transition after independent validation."""
 
         if not events:
@@ -3717,7 +3751,7 @@ class LedgerMaterializationCoordinator:
         expected_last_sequence: int,
         deadline_monotonic: float | None,
         transaction_companion: TransactionCompanionInput | None = None,
-    ) -> tuple[AgentEvent, ...]:
+    ) -> StoredEventBatchCommitReceipt:
         """Commit or prove the exact stable event/account candidate FULL or NONE."""
 
         candidates = tuple(events)
@@ -3726,23 +3760,28 @@ class LedgerMaterializationCoordinator:
             bound_companion = transaction_companion.bind_candidate_batch(
                 tuple(freeze_event_write_candidate(event) for event in candidates)
             )
+        elif isinstance(
+            transaction_companion,
+            CandidateBatchBindableEventLogTransactionCompanion,
+        ):
+            bound_companion = transaction_companion.bind_candidate_batch(
+                tuple(freeze_event_write_candidate(event) for event in candidates)
+            )
         else:
             bound_companion = transaction_companion
         try:
-            return tuple(
-                self.event_log.extend_with_materialization_state(
-                    candidates,
-                    expected_account_state_fingerprint=source_state_fingerprint,
-                    resulting_account_state=resulting,
-                    physical_charge_contract=self.charge_contract,
-                    transaction_companion=bound_companion,
-                    expected_last_sequence=expected_last_sequence,
-                    deadline_monotonic=deadline_monotonic,
-                )
+            return self.event_log.extend_with_materialization_state(
+                candidates,
+                expected_account_state_fingerprint=source_state_fingerprint,
+                resulting_account_state=resulting,
+                physical_charge_contract=self.charge_contract,
+                transaction_companion=bound_companion,
+                expected_last_sequence=expected_last_sequence,
+                deadline_monotonic=deadline_monotonic,
             )
         except BaseException as original:
             try:
-                confirmation = self.event_log.confirm_batch(
+                confirmation = self.event_log.confirm_stored_batch(
                     candidates,
                     deadline_monotonic=deadline_monotonic,
                 )
@@ -3754,24 +3793,18 @@ class LedgerMaterializationCoordinator:
                     "materialization batch confirmation is unavailable"
                 ) from confirmation_error
             if (
-                not confirmation.missing_event_ids
-                and len(confirmation.committed_events) == len(candidates)
+                confirmation.disposition == "full"
+                and confirmation.confirmed_full_batch is not None
                 and account is not None
                 and account.account_state_fingerprint
                 == resulting.account_state_fingerprint
             ):
-                return confirmation.committed_events
-            if (
-                not confirmation.committed_events
-                and confirmation.missing_event_ids
-                == tuple(item.id for item in candidates)
-                and (
-                    (account is None and source_state_fingerprint is None)
-                    or (
-                        account is not None
-                        and account.account_state_fingerprint
-                        == source_state_fingerprint
-                    )
+                return confirmation.confirmed_full_batch.receipt
+            if confirmation.disposition == "none" and (
+                (account is None and source_state_fingerprint is None)
+                or (
+                    account is not None
+                    and account.account_state_fingerprint == source_state_fingerprint
                 )
             ):
                 raise MaterializationAccountCommitFailed(
@@ -3802,6 +3835,37 @@ def _stored_sequence(event: AgentEvent) -> int:
     return event.sequence
 
 
+def _transaction_companion_charge(
+    companion: TransactionCompanionInput | None,
+) -> tuple[int, str | None]:
+    """Read the optional, closed auxiliary-materialization charge contract.
+
+    Most transaction companions predate auxiliary accounting and therefore
+    carry no charge. A companion opting in must expose all three immutable
+    fields; partial or malformed declarations fail before sequence allocation.
+    """
+
+    if companion is None:
+        return 0, None
+    charged = getattr(companion, "charged_payload_bytes", None)
+    contract = getattr(companion, "charge_contract_fingerprint", None)
+    plan = getattr(companion, "storage_mutation_plan_fingerprint", None)
+    if charged is None and contract is None and plan is None:
+        return 0, None
+    if (
+        not isinstance(charged, int)
+        or charged <= 0
+        or not isinstance(contract, str)
+        or not contract.startswith("sha256:")
+        or not isinstance(plan, str)
+        or not plan.startswith("sha256:")
+    ):
+        raise MaterializationAccountContractError(
+            "transaction companion charge declaration is incomplete"
+        )
+    return charged, contract
+
+
 def _transition_cause(
     event: AgentEvent,
     *,
@@ -3829,9 +3893,7 @@ def _transition(
         schema_version="ledger_materialization_account_transition.v2",
         runtime_session_id=source.runtime_session_id,
         source_generation=source.generation.ledger_materialization_generation,
-        source_consumer_horizon_revision=(
-            source.generation.consumer_horizon_revision
-        ),
+        source_consumer_horizon_revision=(source.generation.consumer_horizon_revision),
         result_generation=resulting.generation.ledger_materialization_generation,
         result_consumer_horizon_revision=(
             resulting.generation.consumer_horizon_revision

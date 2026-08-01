@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass, field
 from functools import partial
@@ -18,7 +20,8 @@ from pulsara_agent.event import (
     ModelCallTerminalProjectionCommittedEvent,
     RunStartEvent,
 )
-from pulsara_agent.event_log.protocol import EventLog, RawStoredEventEnvelope
+from pulsara_agent.event_log.protocol import EventLog
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm.derived_model_job import (
     LLMContext,
@@ -217,7 +220,7 @@ def _runtime_fact(cls, field_name: str, domain: str, **payload):
 def _stored_reference(
     envelope: RawStoredEventEnvelope,
 ) -> GovernanceStoredEventReferenceFact:
-    event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
     return build_frozen_fact(
         GovernanceStoredEventReferenceFact,
         schema_version="governance_stored_event_reference.v1",
@@ -374,9 +377,7 @@ class CompactionMemoryExtractionSessionDriver:
                 deadline_monotonic=deadline_monotonic,
             )
             if not claims:
-                await self.settlement_port.drain(
-                    deadline_monotonic=deadline_monotonic
-                )
+                await self.settlement_port.drain(deadline_monotonic=deadline_monotonic)
                 return
             for claim in claims:
                 await self.settle_result_candidate(
@@ -426,9 +427,7 @@ class CompactionMemoryExtractionSessionDriver:
                     self.repository.release_session_model_lease_without_attempt,
                     lease,
                     reason="safe_point_stale",
-                    deadline_monotonic=min(
-                        deadline_monotonic, monotonic() + 10.0
-                    ),
+                    deadline_monotonic=min(deadline_monotonic, monotonic() + 10.0),
                 )
             return
         try:
@@ -981,9 +980,7 @@ class CompactionMemoryExtractionSessionDriver:
             await self._defer_failed_model_attempt(
                 lease,
                 dispatch_attempt_ordinal=dispatch_ordinal,
-                failure_message=(
-                    "compaction memory extraction output contract failed"
-                ),
+                failure_message=("compaction memory extraction output contract failed"),
                 transition_name="output",
                 deadline_monotonic=deadline_monotonic,
             )
@@ -1353,7 +1350,9 @@ class CompactionMemoryExtractionSessionDriver:
             or envelope.payload_fingerprint != source.payload_fingerprint
         ):
             raise ValueError("extraction Request source authority drifted")
-        event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(
+            envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(event, ContextCompactionMemoryExtractionRequestedEvent):
             raise TypeError("extraction job source is not a Request event")
         delivery_policy = compaction_memory_delivery_policy_from_request(
@@ -1379,7 +1378,9 @@ class CompactionMemoryExtractionSessionDriver:
             or envelope.payload_fingerprint != reference.payload_fingerprint
         ):
             raise ValueError("human evidence source reference drifted")
-        event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(
+            envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(event, RunStartEvent):
             raise TypeError("human evidence source is not a RunStart")
         return ExactHumanEvidenceSource(

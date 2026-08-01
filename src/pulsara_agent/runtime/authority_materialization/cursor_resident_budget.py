@@ -22,11 +22,14 @@ class CursorResidentBudgetLimits:
     max_resident_cursors: int = 64
 
     def __post_init__(self) -> None:
-        if min(
-            self.max_resident_charge_bytes,
-            self.max_resident_chunks,
-            self.max_resident_cursors,
-        ) <= 0:
+        if (
+            min(
+                self.max_resident_charge_bytes,
+                self.max_resident_chunks,
+                self.max_resident_cursors,
+            )
+            <= 0
+        ):
             raise ValueError("cursor resident budget limits must be positive")
 
 
@@ -412,9 +415,7 @@ class CursorResidentBudgetManager:
         extra_candidate: VerifiedTranscriptProjectionCursorSnapshot | None = None,
         extra_replacement_id: str | None = None,
     ) -> tuple[CursorResidentHandle, ...]:
-        handles = {
-            entry_id: item.handle for entry_id, item in self._entries.items()
-        }
+        handles = {entry_id: item.handle for entry_id, item in self._entries.items()}
         for pending in self._pending.values():
             reservation = pending.reservation
             for entry_id in reservation.planned_eviction_entry_ids:
@@ -483,8 +484,7 @@ class CursorResidentBudgetManager:
                     continue
                 unique_chunks[object_identity] = (chunk, charge)
         return _ResidentAggregate(
-            charge_bytes=cursor_bytes
-            + sum(item[1] for item in unique_chunks.values()),
+            charge_bytes=cursor_bytes + sum(item[1] for item in unique_chunks.values()),
             chunk_count=len(unique_chunks),
             cursor_count=len(handles),
         )
@@ -509,9 +509,7 @@ class CursorResidentBudgetManager:
             (
                 item
                 for key, item in self._entries.items()
-                if key not in excluded
-                and item.borrow_count == 0
-                and not item.retired
+                if key not in excluded and item.borrow_count == 0 and not item.retired
             ),
             key=lambda item: (
                 item.lru_tick,
@@ -529,9 +527,7 @@ class CursorResidentBudgetManager:
                     extra_replacement_id=replacement_id,
                 )
                 if handle.resident_entry_id
-                not in {
-                    victim.handle.resident_entry_id for victim in victims
-                }
+                not in {victim.handle.resident_entry_id for victim in victims}
             )
             aggregate = self._resident_aggregate(handles=handles)
             if (
@@ -619,9 +615,7 @@ def _envelope_identity_utf8_bytes(envelope) -> int:
         "payload_fingerprint",
         "envelope_fingerprint",
     )
-    return sum(
-        len(getattr(envelope, field).encode("utf-8")) for field in string_fields
-    )
+    return sum(len(getattr(envelope, field).encode("utf-8")) for field in string_fields)
 
 
 _PROCESS_CURSOR_RESIDENT_BUDGET_LOCK = Lock()

@@ -102,12 +102,8 @@ class McpElicitationCapabilityFull:
         expected = context_fingerprint(
             "mcp-elicitation-capability-full:v1",
             {
-                "form_interaction": (
-                    self.form_interaction_port.contract_fingerprint
-                ),
-                "url_interaction": (
-                    self.external_browser_port.contract_fingerprint
-                ),
+                "form_interaction": (self.form_interaction_port.contract_fingerprint),
+                "url_interaction": (self.external_browser_port.contract_fingerprint),
                 "modes": ("form", "url"),
             },
         )

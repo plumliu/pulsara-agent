@@ -83,6 +83,8 @@ class HostRunControlView:
 
     run_id: str
     run_start_event_id: str
+    turn_id: str
+    reply_id: str
     lifecycle: str
     terminal_state: str
     finalized: bool
@@ -98,6 +100,7 @@ class HostRunControlView:
     run_completion_done: bool
     run_completion_failed: bool
     terminal_event_id: str
+    terminal_event_sequence: int | None
     terminal_candidate_id: str | None
     current_execution_handle_id: str | None
     retiring_execution_handle_count: int
@@ -189,6 +192,11 @@ class RunActivationService:
         owner = self._registry.require(run_id)
         return await asyncio.shield(owner.run_completion)
 
+    def capture_run_completion(self, run_id: str) -> asyncio.Future:
+        """Retain the exact completion before an operation may retire its owner."""
+
+        return self._registry.require(run_id).run_completion
+
     async def wait_active_driver(
         self,
         run_id: str,
@@ -271,6 +279,8 @@ class RunActivationService:
         return HostRunControlView(
             run_id=owner.identity.run_id,
             run_start_event_id=owner.identity.run_start_event_id,
+            turn_id=owner.entry.run_start_event.turn_id,
+            reply_id=owner.entry.run_start_event.reply_id,
             lifecycle=owner.lifecycle,
             terminal_state=owner.finalization_owner.commit_state,
             finalized=owner.finalization_slot.state == "completed",
@@ -294,6 +304,12 @@ class RunActivationService:
             run_completion_done=owner.run_completion.done(),
             run_completion_failed=failed,
             terminal_event_id=owner.finalization_owner.terminal_event_id,
+            terminal_event_sequence=(
+                owner.finalization_owner.confirmed_run_end_event_reference.sequence
+                if owner.finalization_owner.confirmed_run_end_event_reference
+                is not None
+                else None
+            ),
             terminal_candidate_id=(
                 owner.finalization_owner.run_end_candidate.id
                 if owner.finalization_owner.run_end_candidate is not None

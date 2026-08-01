@@ -1,4 +1,3 @@
-
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
@@ -6,7 +5,6 @@ from tests.support.postgres import connect_postgres_test_database as _connect_or
 
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage import RUNTIME_TRUTH_TABLES
-
 
 
 def test_psycopg_driver_is_available() -> None:

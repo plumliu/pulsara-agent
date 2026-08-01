@@ -149,13 +149,10 @@ class SemanticBatchCase(FrozenContract):
     @model_validator(mode="after")
     def _production_bound(self) -> "SemanticBatchCase":
         if (
-            self.max_business_events_per_commit
-            > PRODUCTION_SEMANTIC_BATCH_MAX_EVENTS
+            self.max_business_events_per_commit > PRODUCTION_SEMANTIC_BATCH_MAX_EVENTS
             and self.case_kind != "counterfactual_analysis"
         ):
-            raise ValueError(
-                "over-bound semantic batches must be counterfactual"
-            )
+            raise ValueError("over-bound semantic batches must be counterfactual")
         return self
 
 
@@ -205,9 +202,7 @@ class ModelSemanticBatchMatrixScenario(ScenarioBase):
             or baseline[0].case_kind != "production_valid"
             or baseline[0].case_id != "segment-v1"
         ):
-            raise ValueError(
-                "production baseline must identify the segment-v1 case"
-            )
+            raise ValueError("production baseline must identify the segment-v1 case")
         if len(reference) != 1 or reference[0].case_kind != "production_valid":
             raise ValueError(
                 "semantic reference must identify one production-valid case"

@@ -126,10 +126,5 @@ class ToolResultBlock(BaseModel):
 
 
 ContentBlock = (
-    TextBlock
-    | ThinkingBlock
-    | HintBlock
-    | ToolCallBlock
-    | ToolResultBlock
-    | DataBlock
+    TextBlock | ThinkingBlock | HintBlock | ToolCallBlock | ToolResultBlock | DataBlock
 )

@@ -71,7 +71,9 @@ class ProjectionBuilder:
 
         lines = [_OPENING, *(f"- {unit}" for unit in units), _CLOSING]
         summary = "\n".join(lines)
-        included = [item.memory_id for item in result.items if item.memory_id in included_ids]
+        included = [
+            item.memory_id for item in result.items if item.memory_id in included_ids
+        ]
         return {
             "summary": summary,
             # These are the exact complete text units present in summary, not

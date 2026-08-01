@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import run_end_contract_fields
+from tests.support.event_write import committed_event_write_result_fixture
 from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
 
@@ -37,7 +38,6 @@ from pulsara_agent.runtime.publication_maintenance import (
 )
 from pulsara_agent.runtime.session import (
     EventReconciliationRequired,
-    EventWriteResult,
 )
 
 
@@ -114,26 +114,23 @@ def test_accounted_physical_handoff_latches_critical_publication_unavailable(
         sequence=2,
         request=request,
     )
-    write_result = EventWriteResult(
-        committed_events=(critical_event,),
-        commit_status="committed",
-        reducer_high_waters={},
-        reconciliation_required=False,
-        reducer_errors=(),
+    write_result = committed_event_write_result_fixture(
+        (critical_event,),
+        runtime_session_id=runtime_session.runtime_session_id,
         publication_status="unavailable",
         publisher_enqueued_through_sequence=None,
     )
 
     def confirmed_attempt(
         self,
-        stored_events,
+        stored_batch_receipt,
         *,
         catch_up_through_sequence,
         await_delivery,
     ):
         del catch_up_through_sequence, await_delivery
         assert self is runtime_session
-        assert stored_events == (critical_event,)
+        assert stored_batch_receipt == write_result.stored_batch_receipt
         return SimpleNamespace(
             result=write_result,
             delivery_futures=(),
@@ -147,7 +144,7 @@ def test_accounted_physical_handoff_latches_critical_publication_unavailable(
     )
 
     runtime_session._handoff_accounted_business_batch_attempt(
-        stored_events=(critical_event,),
+        stored_batch_receipt=write_result.stored_batch_receipt,
         business_events=(critical_event,),
         deadline_monotonic=time.monotonic() + 1.0,
     )
@@ -191,13 +188,9 @@ def test_mandatory_audit_owner_retires_completed_attempt() -> None:
 
         async def write_event_with_deadline(self, event, **_kwargs):
             stored = event.model_copy(update={"sequence": 1})
-            return EventWriteResult(
-                committed_events=(stored,),
-                commit_status="committed",
-                reducer_high_waters={},
-                reconciliation_required=False,
-                reducer_errors=(),
-                publication_status="completed",
+            return committed_event_write_result_fixture(
+                (stored,),
+                runtime_session_id=self.runtime_session_id,
                 publisher_enqueued_through_sequence=1,
             )
 

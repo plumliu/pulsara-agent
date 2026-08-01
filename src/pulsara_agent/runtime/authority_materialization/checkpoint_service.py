@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass, field
 from threading import RLock
@@ -17,7 +19,7 @@ from pulsara_agent.event import (
     TranscriptProjectionCheckpointIntentEvent,
 )
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.event_log.protocol import (
+from pulsara_agent.primitives.stored_event import (
     RawStoredEventEnvelope,
     RawTranscriptDomainPrefixFact,
 )
@@ -283,7 +285,8 @@ class TranscriptProjectionCheckpointService:
                 "checkpoint recovery installation facts are incomplete or stale"
             )
         decoded = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for raw in snapshot.events
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for raw in snapshot.events
         )
         by_id = {event.id: event for event in decoded}
         intent = by_id.get(event_ids[0])
@@ -340,6 +343,7 @@ class TranscriptProjectionCheckpointService:
             turn_id=intent.turn_id,
             reply_id=intent.reply_id,
         )
+
         def recover() -> TerminatedTranscriptCheckpoint:
             terminated = commit_checkpoint_recovered_interrupted(
                 coordinator=self.runtime_session.materialization_coordinator,
@@ -353,7 +357,7 @@ class TranscriptProjectionCheckpointService:
                 checkpoint_id=barrier.checkpoint_id
             )
             self.runtime_session.accept_authority_materialization_transition(
-                terminated.stored_events
+                terminated.stored_batch_receipt
             )
             return terminated
 
@@ -494,9 +498,7 @@ class TranscriptProjectionCheckpointService:
         limits = self.runtime_session.authority_materialization_contracts.limits
         deadline = monotonic() + limits.operation_timeout_seconds
         async with self._cursor_advance_lock:
-            reducer_snapshot = (
-                self.runtime_session.transcript_projection_state_store.evidence_snapshot()
-            )
+            reducer_snapshot = self.runtime_session.transcript_projection_state_store.evidence_snapshot()
             live = reducer_snapshot.live_state
             if live.ledger_through_sequence < requested_through_sequence:
                 raise TranscriptCheckpointBlocked(
@@ -528,7 +530,9 @@ class TranscriptProjectionCheckpointService:
                     deadline_monotonic=deadline,
                 )
 
-            binding = self.runtime_session.authority_materialization_contracts.event_domain
+            binding = (
+                self.runtime_session.authority_materialization_contracts.event_domain
+            )
             if handle is not None:
                 lease = self._cursor_resident_budget.borrow(handle)
                 if lease is not None:
@@ -554,7 +558,10 @@ class TranscriptProjectionCheckpointService:
                         except ValueError:
                             self._discard_cursor(handle)
                         else:
-                            if cursor.verified_through_sequence == requested_through_sequence:
+                            if (
+                                cursor.verified_through_sequence
+                                == requested_through_sequence
+                            ):
                                 return self._prepared_from_cursor(
                                     cursor=cursor,
                                     reducer_snapshot=reducer_snapshot,
@@ -562,7 +569,10 @@ class TranscriptProjectionCheckpointService:
                                         ProjectionEvidenceCursorOutcome.SAME_HIGH_WATER_HIT
                                     ),
                                 )
-                            if cursor.verified_through_sequence < requested_through_sequence:
+                            if (
+                                cursor.verified_through_sequence
+                                < requested_through_sequence
+                            ):
                                 return await self._extend_cursor(
                                     token=token,
                                     anchor=anchor,
@@ -603,22 +613,27 @@ class TranscriptProjectionCheckpointService:
         after_sequence = cursor.verified_through_sequence
         delta = await self.runtime_session.context_input_io_service.execute(
             operation_name="transcript-projection-evidence-delta-read",
-            operation=lambda: self.runtime_session.event_log.read_transcript_domain_delta(
-                after_sequence=after_sequence,
-                through_sequence=requested_through_sequence,
-                max_events=limits.max_unreclaimable_ledger_events,
-                max_payload_bytes=limits.max_unreclaimable_charged_payload_bytes,
-                registry_contract_fingerprint=(
-                    self.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
-                ),
-                deadline_monotonic=deadline_monotonic,
+            operation=lambda: (
+                self.runtime_session.event_log.read_transcript_domain_delta(
+                    after_sequence=after_sequence,
+                    through_sequence=requested_through_sequence,
+                    max_events=limits.max_unreclaimable_ledger_events,
+                    max_payload_bytes=limits.max_unreclaimable_charged_payload_bytes,
+                    registry_contract_fingerprint=(
+                        self.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
             ),
             deadline_monotonic=deadline_monotonic,
         )
         latest_snapshot = (
             self.runtime_session.transcript_projection_state_store.evidence_snapshot()
         )
-        if latest_snapshot.live_state.ledger_through_sequence != requested_through_sequence:
+        if (
+            latest_snapshot.live_state.ledger_through_sequence
+            != requested_through_sequence
+        ):
             return await self._prepare_exact_projection_evidence(
                 requested_through_sequence=requested_through_sequence,
                 outcome=ProjectionEvidenceCursorOutcome.EXACT_RESTORE_LIVE_STORE_AHEAD,
@@ -677,15 +692,17 @@ class TranscriptProjectionCheckpointService:
         limits = self.runtime_session.authority_materialization_contracts.limits
         delta = await self.runtime_session.context_input_io_service.execute(
             operation_name="transcript-projection-evidence-read",
-            operation=lambda: self.runtime_session.event_log.read_transcript_domain_delta(
-                after_sequence=_anchor_base_sequence(anchor),
-                through_sequence=requested_through_sequence,
-                max_events=limits.max_unreclaimable_ledger_events,
-                max_payload_bytes=limits.max_unreclaimable_charged_payload_bytes,
-                registry_contract_fingerprint=(
-                    self.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
-                ),
-                deadline_monotonic=deadline_monotonic,
+            operation=lambda: (
+                self.runtime_session.event_log.read_transcript_domain_delta(
+                    after_sequence=_anchor_base_sequence(anchor),
+                    through_sequence=requested_through_sequence,
+                    max_events=limits.max_unreclaimable_ledger_events,
+                    max_payload_bytes=limits.max_unreclaimable_charged_payload_bytes,
+                    registry_contract_fingerprint=(
+                        self.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
             ),
             deadline_monotonic=deadline_monotonic,
         )
@@ -815,10 +832,8 @@ class TranscriptProjectionCheckpointService:
         reducer_snapshot: TranscriptProjectionReducerEvidenceSnapshot,
         outcome: ProjectionEvidenceCursorOutcome,
     ) -> PreparedTranscriptProjectionEvidence:
-        documents = (
-            self.runtime_session.transcript_projection_document_registry.freeze_references(
-                reducer_snapshot.required_projection_references
-            )
+        documents = self.runtime_session.transcript_projection_document_registry.freeze_references(
+            reducer_snapshot.required_projection_references
         )
         return PreparedTranscriptProjectionEvidence(
             projection_base=cursor.projection_base,
@@ -1177,7 +1192,7 @@ class TranscriptProjectionCheckpointService:
 
             def handoff_committed_terminal() -> None:
                 self.runtime_session.accept_authority_materialization_transition(
-                    committed_terminal.stored_events
+                    committed_terminal.stored_batch_receipt
                 )
 
             await self.runtime_session.event_write_service.execute(
@@ -1214,7 +1229,9 @@ class TranscriptProjectionCheckpointService:
                 owner.dispatch_drain = None
                 return None
 
-            drained_account = self.runtime_session.materialization_account_store.snapshot()
+            drained_account = (
+                self.runtime_session.materialization_account_store.snapshot()
+            )
             candidate = prepared.candidate
             if (
                 drained_account is None
@@ -1242,7 +1259,7 @@ class TranscriptProjectionCheckpointService:
                 gate.mark_durable_active(drain_token, installed_owner.barrier)
                 owner.installed = installed_owner
                 self.runtime_session.accept_authority_materialization_transition(
-                    installed_owner.stored_events
+                    installed_owner.stored_batch_receipt
                 )
                 return installed_owner
 
@@ -1336,7 +1353,7 @@ class TranscriptProjectionCheckpointService:
                 )
                 owner.committed_terminal = terminated
                 self.runtime_session.accept_authority_materialization_transition(
-                    terminated.stored_events
+                    terminated.stored_batch_receipt
                 )
                 return terminated
 
@@ -1373,7 +1390,7 @@ class TranscriptProjectionCheckpointService:
                 )
                 owner.committed_terminal = terminated
                 self.runtime_session.accept_authority_materialization_transition(
-                    terminated.stored_events
+                    terminated.stored_batch_receipt
                 )
                 return terminated
 
@@ -1406,7 +1423,7 @@ class TranscriptProjectionCheckpointService:
             )
             owner.committed_terminal = committed
             self.runtime_session.accept_authority_materialization_transition(
-                committed.stored_events
+                committed.stored_batch_receipt
             )
             return committed
 
@@ -1414,9 +1431,7 @@ class TranscriptProjectionCheckpointService:
             committed = await self.runtime_session.event_write_service.execute(
                 succeed,
                 deadline_monotonic=deadline,
-                admission_class=(
-                    LedgerWriteAdmissionClass.CHECKPOINT_BARRIER_CONTROL
-                ),
+                admission_class=(LedgerWriteAdmissionClass.CHECKPOINT_BARRIER_CONTROL),
                 checkpoint_id=owner.checkpoint_id,
             )
         except MaterializationAccountReconciliationRequired:
@@ -1448,35 +1463,33 @@ class TranscriptProjectionCheckpointService:
             )
         generation = committed.resulting_account_state.generation
         anchor = _CheckpointProjectionAnchor(
-                anchor_kind="checkpoint",
-                carrier=_carrier_identity(
-                    committed.committed_event,
-                    runtime_session_id=self.runtime_session.runtime_session_id,
-                ),
-                checkpoint_candidate_fingerprint=candidate.candidate_fingerprint,
-                seed_semantic=candidate.run_seed_semantic,
-                seed_reference=candidate.run_seed_reference,
-                stable_semantic_state=candidate.stable_semantic_state,
-                scope=candidate.scope,
-                checkpoint_id=candidate.checkpoint_id,
-                checkpoint_committed_event_id=committed.committed_event.id,
-                checkpoint_committed_event_sequence=(
-                    committed.committed_event.sequence
-                ),
-                checkpoint_candidate_ledger_through_sequence=(
-                    candidate.candidate_ledger_through_sequence
-                ),
-                checkpoint_candidate_ledger_continuity_accumulator=(
-                    candidate.candidate_ledger_continuity_accumulator
-                ),
-                checkpoint_materialization=candidate.materialization,
-                previous_checkpoint_id=candidate.previous_checkpoint_id,
-                ledger_materialization_generation=(
-                    generation.ledger_materialization_generation
-                ),
-                consumer_horizon_revision=generation.consumer_horizon_revision,
-                build_contract_fingerprint=candidate.build_contract_fingerprint,
-            )
+            anchor_kind="checkpoint",
+            carrier=_carrier_identity(
+                committed.committed_event,
+                runtime_session_id=self.runtime_session.runtime_session_id,
+            ),
+            checkpoint_candidate_fingerprint=candidate.candidate_fingerprint,
+            seed_semantic=candidate.run_seed_semantic,
+            seed_reference=candidate.run_seed_reference,
+            stable_semantic_state=candidate.stable_semantic_state,
+            scope=candidate.scope,
+            checkpoint_id=candidate.checkpoint_id,
+            checkpoint_committed_event_id=committed.committed_event.id,
+            checkpoint_committed_event_sequence=(committed.committed_event.sequence),
+            checkpoint_candidate_ledger_through_sequence=(
+                candidate.candidate_ledger_through_sequence
+            ),
+            checkpoint_candidate_ledger_continuity_accumulator=(
+                candidate.candidate_ledger_continuity_accumulator
+            ),
+            checkpoint_materialization=candidate.materialization,
+            previous_checkpoint_id=candidate.previous_checkpoint_id,
+            ledger_materialization_generation=(
+                generation.ledger_materialization_generation
+            ),
+            consumer_horizon_revision=generation.consumer_horizon_revision,
+            build_contract_fingerprint=candidate.build_contract_fingerprint,
+        )
         with self._anchor_state_lock:
             retired = self._verified_evidence_cursor_handle
             self._verified_evidence_cursor_handle = None
@@ -1778,9 +1791,7 @@ def _projection_base_from_anchor(
         ),
         ledger_through_sequence=requested_through_sequence,
         ledger_continuity_accumulator=delta_after.ledger_continuity_accumulator,
-        event_domain_registry_contract_fingerprint=(
-            registry_contract_fingerprint
-        ),
+        event_domain_registry_contract_fingerprint=(registry_contract_fingerprint),
         build_contract_fingerprint=anchor.build_contract_fingerprint,
     )
     return build_frozen_fact(

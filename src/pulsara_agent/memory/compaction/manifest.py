@@ -149,12 +149,15 @@ def _eligible_human_leaf(
     current_keep_after_sequence: int,
     event_lookup: Callable[[str], AgentEvent | None],
     runtime_session_id: str,
-) -> tuple[
-    CompactionHumanEvidenceLeafSemanticFact,
-    CompactionHumanEvidenceLeafAttributionFact,
-    CompactionHumanEvidenceSelectionProjectionFact,
-    PreparedManifestArtifact | None,
-] | None:
+) -> (
+    tuple[
+        CompactionHumanEvidenceLeafSemanticFact,
+        CompactionHumanEvidenceLeafAttributionFact,
+        CompactionHumanEvidenceSelectionProjectionFact,
+        PreparedManifestArtifact | None,
+    ]
+    | None
+):
     if not isinstance(entry, TranscriptMessageLeafEntryFact):
         return None
     provider = entry.semantic_identity.message_provider_semantic_identity
@@ -162,7 +165,9 @@ def _eligible_human_leaf(
         return None
     if not isinstance(entry.content, InlineNormalizedMessageContentFact):
         return None
-    refs = tuple(ref for ref in entry.source_event_refs if ref.event_type == "RUN_START")
+    refs = tuple(
+        ref for ref in entry.source_event_refs if ref.event_type == "RUN_START"
+    )
     if len(refs) != 1:
         return None
     ref = refs[0]
@@ -231,10 +236,12 @@ def _eligible_human_leaf(
         artifact = PreparedManifestArtifact(
             reference=content_ref,
             content=sanitized.text,
-            semantic_metadata=freeze_json({
-                "kind": "compaction-human-evidence-sanitized-content",
-                "selection_projection_fingerprint": projection.selection_projection_fingerprint,
-            }),
+            semantic_metadata=freeze_json(
+                {
+                    "kind": "compaction-human-evidence-sanitized-content",
+                    "selection_projection_fingerprint": projection.selection_projection_fingerprint,
+                }
+            ),
         )
     return leaf_semantic, attribution, projection, artifact
 
@@ -346,10 +353,12 @@ def build_human_evidence_manifest_plan(
             PreparedManifestArtifact(
                 reference=page_ref,
                 content=page_content,
-                semantic_metadata=freeze_json({
-                    "kind": "compaction-human-evidence-manifest-page",
-                    "page_fingerprint": page.page_fingerprint,
-                }),
+                semantic_metadata=freeze_json(
+                    {
+                        "kind": "compaction-human-evidence-manifest-page",
+                        "page_fingerprint": page.page_fingerprint,
+                    }
+                ),
             )
         )
         offset += count
@@ -442,10 +451,12 @@ def build_human_evidence_manifest_plan(
     root_artifact = PreparedManifestArtifact(
         reference=root_ref,
         content=root_content,
-        semantic_metadata=freeze_json({
-            "kind": "compaction-human-evidence-manifest-root",
-            "root_fingerprint": root.root_fingerprint,
-        }),
+        semantic_metadata=freeze_json(
+            {
+                "kind": "compaction-human-evidence-manifest-root",
+                "root_fingerprint": root.root_fingerprint,
+            }
+        ),
     )
     attribution = build_frozen_fact(
         CompactionHumanEvidenceManifestAttributionFact,
@@ -484,7 +495,9 @@ def build_human_evidence_manifest_plan(
             "compaction-human-evidence-manifest-plan:v1",
             {
                 "reference": reference.reference_fingerprint,
-                "artifacts": tuple(item.reference.reference_fingerprint for item in artifacts),
+                "artifacts": tuple(
+                    item.reference.reference_fingerprint for item in artifacts
+                ),
             },
         ),
     )
@@ -511,7 +524,9 @@ class ManifestPreparationOperation(CompactionHumanEvidenceManifestPreparationHan
         self._logical_state = "preparing"
         self._physical_state = "queued"
         self._completion_consumed = False
-        self._failure: CompactionHumanEvidenceManifestPreparationFailureSnapshot | None = None
+        self._failure: (
+            CompactionHumanEvidenceManifestPreparationFailureSnapshot | None
+        ) = None
         self._cancel_requested = False
         self._task: asyncio.Task[None] | None = None
         self._exit_callbacks: list[Callable[[], None]] = []
@@ -545,7 +560,9 @@ class ManifestPreparationOperation(CompactionHumanEvidenceManifestPreparationHan
     ) -> CompactionHumanEvidenceManifestConsumptionOutcome:
         with self._lock:
             if self._completion_consumed:
-                raise RuntimeError("manifest completion disposition was already consumed")
+                raise RuntimeError(
+                    "manifest completion disposition was already consumed"
+                )
             self._completion_consumed = True
             if self._logical_state == "full":
                 return _runtime_fact(
@@ -556,7 +573,10 @@ class ManifestPreparationOperation(CompactionHumanEvidenceManifestPreparationHan
                     manifest_reference=self._plan.reference,
                     pin_transfer_identity_fingerprint=context_fingerprint(
                         "compaction-human-evidence-manifest-pin-transfer:v1",
-                        (self._identity.identity_fingerprint, self._plan.reference.reference_fingerprint),
+                        (
+                            self._identity.identity_fingerprint,
+                            self._plan.reference.reference_fingerprint,
+                        ),
                     ),
                 )
             stage = (
@@ -691,7 +711,11 @@ async def _await_physical_exit(future: asyncio.Future[object]) -> object:
 
 
 def build_manifest_preparation_identity(
-    *, preparation_id: str, generation: int, plan: CompactionHumanEvidenceManifestPlan, deadline_monotonic: float
+    *,
+    preparation_id: str,
+    generation: int,
+    plan: CompactionHumanEvidenceManifestPlan,
+    deadline_monotonic: float,
 ) -> CompactionHumanEvidenceManifestPreparationIdentity:
     return _runtime_fact(
         CompactionHumanEvidenceManifestPreparationIdentity,

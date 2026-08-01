@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from tests.support.postgres import (
     guarded_postgres_test_connection,
     verified_postgres_provider,
@@ -293,11 +295,14 @@ def test_checkpoint_artifact_same_id_same_bytes_is_idempotent(tmp_path) -> None:
         ).events,
         reducer_binding=binding,
     )
+    preexisting_artifacts = set(runtime.archive.blobs)
 
     _write_checkpoint_artifact(runtime, prepared)
     _write_checkpoint_artifact(runtime, prepared)
 
-    assert tuple(runtime.archive.blobs) == (prepared.artifact.artifact_id,)
+    assert set(runtime.archive.blobs) - preexisting_artifacts == {
+        prepared.artifact.artifact_id
+    }
     assert (
         runtime.archive.get_text(
             prepared.artifact.artifact_id,
@@ -340,7 +345,9 @@ def test_raw_envelope_wrapper_schema_and_payload_identity_are_consistent() -> No
     stored = log.append(_non_graph("event:raw-wrapper"))
     raw = log.read_raw_events_by_id((stored.id,))[0]
 
-    assert raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) == stored
+    assert (
+        decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY) == stored
+    )
     with pytest.raises(ValueError, match="wrapper identity mismatch"):
         replace(raw, event_id="event:raw-wrapper-drift")
     with pytest.raises(ValueError, match="payload fingerprint mismatch"):
@@ -820,7 +827,9 @@ def test_historical_decoder_restores_old_schema_before_current_union() -> None:
         event_schema_version="agent-event:custom:legacy-v0",
     )
     payload = canonical_json_bytes(
-        LegacyProjectionRequestedEvent(legacy_value="historical").model_dump(mode="json")
+        LegacyProjectionRequestedEvent(legacy_value="historical").model_dump(
+            mode="json"
+        )
     )
     resolved = registry.resolve_historical_binding(
         event_type=str(EventType.PROJECTION_REQUESTED),
@@ -1581,8 +1590,10 @@ def test_checkpoint_close_drains_blocking_postgres_operation(
 
     class BlockingArchive(InMemoryArchiveStore):
         def put_text_if_absent_or_confirm_identical(self, *args, **kwargs):
-            started.set()
-            release.wait(timeout=5)
+            artifact_id = str(args[0])
+            if artifact_id.startswith("subagent_graph_checkpoint_artifact:"):
+                started.set()
+                release.wait(timeout=5)
             return super().put_text_if_absent_or_confirm_identical(*args, **kwargs)
 
     archive = BlockingArchive()
@@ -1715,7 +1726,9 @@ def test_postgres_raw_snapshot_returns_schema_envelope_without_current_union_dec
         assert raw.events[0].event_type == "LEGACY_ONLY_EVENT"
         assert raw.events[0].canonical_payload_bytes == canonical_json_bytes(payload)
         with pytest.raises(EventSchemaContractMismatch):
-            raw.events[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(
+                raw.events[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
     finally:
         _cleanup_postgres_session(dsn, runtime_session_id)
 

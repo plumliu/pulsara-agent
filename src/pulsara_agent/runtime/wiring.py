@@ -254,9 +254,7 @@ class AgentRuntimeWiring:
         if registry is None or repository is None:
             raise TypeError("projection service lacks extraction driver ownership")
         runtime_session = self.runtime_wiring.runtime_session
-        generation = registry.next_driver_generation(
-            runtime_session.runtime_session_id
-        )
+        generation = registry.next_driver_generation(runtime_session.runtime_session_id)
         driver = CompactionMemoryExtractionSessionDriver(
             runtime_session=runtime_session,
             llm_runtime=self.agent_runtime.llm_runtime,
@@ -680,9 +678,7 @@ def compose_agent_runtime_wiring(
             activation_factory=run_activation_factory,
             subagent_runtime=subagent_runtime,
         )
-        subagent_runtime.bind_child_activation_port(
-            child_activation_service
-        )
+        subagent_runtime.bind_child_activation_port(child_activation_service)
     return AgentRuntimeWiring(
         agent_runtime=parent_agent,
         runtime_wiring=runtime_wiring,
@@ -786,9 +782,9 @@ def _with_memory_governance_engine(
                         runtime_wiring.runtime_session.runtime_session_id
                     ),
                     memory_domain=runtime_wiring.memory_domain,
-                    resolved_model_target_factory=lambda: llm_runtime.resolve_target(
-                        role=ModelRole.FLASH
-                    ).fact,
+                    resolved_model_target_factory=lambda: (
+                        llm_runtime.resolve_target(role=ModelRole.FLASH).fact
+                    ),
                     physical_executor=auxiliary_io_executor(),
                 )
                 if runtime_wiring.memory_domain is not None

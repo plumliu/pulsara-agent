@@ -19,7 +19,9 @@ def test_embedded_text_is_deterministic_versioned_and_excludes_echo_fields() -> 
     }
 
     first = build_embedded_memory_text(node, document=document)
-    second = build_embedded_memory_text(node, document=dict(reversed(list(document.items()))))
+    second = build_embedded_memory_text(
+        node, document=dict(reversed(list(document.items())))
+    )
 
     assert first == second
     assert "Statement: Prefer concise summaries." in first.text
@@ -31,10 +33,18 @@ def test_embedded_text_is_deterministic_versioned_and_excludes_echo_fields() -> 
 
 def test_embedded_text_hash_changes_with_builder_input() -> None:
     before = build_embedded_memory_text(
-        {"memory_type": "Preference", "scope": "ctx:user", "statement": "Prefer concise."}
+        {
+            "memory_type": "Preference",
+            "scope": "ctx:user",
+            "statement": "Prefer concise.",
+        }
     )
     after = build_embedded_memory_text(
-        {"memory_type": "Preference", "scope": "ctx:user", "statement": "Prefer detail."}
+        {
+            "memory_type": "Preference",
+            "scope": "ctx:user",
+            "statement": "Prefer detail.",
+        }
     )
 
     assert before.text_hash != after.text_hash

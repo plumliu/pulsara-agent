@@ -149,9 +149,7 @@ def _unbootstrapped_stream_measurement() -> ModelStreamSettlementMeasurementFact
     provisional = ModelStreamSettlementMeasurementFact.model_construct(
         **payload, measurement_fingerprint="pending"
     )
-    canonical = provisional.model_dump(
-        mode="json", exclude={"measurement_fingerprint"}
-    )
+    canonical = provisional.model_dump(mode="json", exclude={"measurement_fingerprint"})
     return ModelStreamSettlementMeasurementFact(
         **canonical,
         measurement_fingerprint=sha256_fingerprint(
@@ -361,8 +359,7 @@ def test_burst_max_commit_batches_covers_charge_applied_transitions() -> None:
         + max_durable_events * contract.max_durable_event_wrapper_overhead_bytes
         + contract.max_commit_batches
         * contract.max_bookkeeping_base_payload_bytes_per_commit
-        + max_durable_events
-        * contract.max_bookkeeping_payload_bytes_per_business_event
+        + max_durable_events * contract.max_bookkeeping_payload_bytes_per_business_event
         + contract.max_structural_tail_payload_bytes
         + contract.max_terminal_recovery_payload_bytes
     )
@@ -436,9 +433,7 @@ def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
             for index in range(16)
         ),
     )
-    actual_stored_charge = len(
-        canonical_event_payload_bytes(charged.charge_event)
-    ) + (
+    actual_stored_charge = len(canonical_event_payload_bytes(charged.charge_event)) + (
         bundle.charge_contract.fixed_sequence_wrapper_charge_bytes_per_event
         + bundle.charge_contract.fixed_schema_wrapper_charge_bytes_per_event
     )
@@ -747,7 +742,9 @@ def test_default_authority_materialization_doctor_proves_all_operation_kinds() -
 def test_transcript_sparse_prefix_proves_semantic_delta_without_full_ledger() -> None:
     event_log = InMemoryEventLog(runtime_session_id="runtime:sparse-proof")
     context = EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1")
-    event_log.append(make_text_block_start_event(**context.event_fields(), block_id="block:1"))
+    event_log.append(
+        make_text_block_start_event(**context.event_fields(), block_id="block:1")
+    )
     event_log.append(
         PlanExitResolvedEvent(
             **context.event_fields(),
@@ -775,7 +772,9 @@ def test_transcript_sparse_prefix_proves_semantic_delta_without_full_ledger() ->
 def test_transcript_sparse_prefix_has_canonical_empty_range() -> None:
     event_log = InMemoryEventLog(runtime_session_id="runtime:sparse-empty")
     context = EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1")
-    event_log.append(make_text_block_start_event(**context.event_fields(), block_id="block:1"))
+    event_log.append(
+        make_text_block_start_event(**context.event_fields(), block_id="block:1")
+    )
     binding = build_default_authority_materialization_contract_bundle().event_domain
 
     raw = event_log.read_transcript_domain_delta(
@@ -888,7 +887,7 @@ def test_event_batch_and_materialization_account_commit_atomically() -> None:
         expected_last_sequence=0,
     )
 
-    assert stored[0].sequence == 1
+    assert stored.owned_stored_events[0].sequence == 1
     assert event_log.read_materialization_account_state() == resulting
 
     with pytest.raises(MaterializationAccountStateConflict):
@@ -941,7 +940,10 @@ def test_genesis_and_dispatch_reservation_share_one_account_cas() -> None:
         register_transcript_consumer=True,
     )
 
-    assert genesis.stored_events[-1].type == "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
+    assert (
+        genesis.stored_batch_receipt.owned_stored_events[-1].type
+        == "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
+    )
     assert len(genesis.resulting_account_state.generation.consumer_horizons) == 2
 
     dispatch = typed_non_transcript_event(
@@ -964,7 +966,10 @@ def test_genesis_and_dispatch_reservation_share_one_account_cas() -> None:
         business_window_generation=0,
     )
 
-    assert committed.stored_events[-1].type == "PHYSICAL_OPERATION_RESERVATION_CREATED"
+    assert (
+        committed.stored_batch_receipt.owned_stored_events[-1].type
+        == "PHYSICAL_OPERATION_RESERVATION_CREATED"
+    )
     assert len(committed.resulting_account_state.active_reservations) == 1
     assert event_log.read_materialization_account_state() == (
         committed.resulting_account_state
@@ -1025,12 +1030,16 @@ def test_one_shot_operation_advances_account_without_leaving_reservation() -> No
         business_window_generation=0,
     )
 
-    assert tuple(event.type for event in committed.stored_events) == (
+    assert tuple(
+        event.type for event in committed.stored_batch_receipt.owned_stored_events
+    ) == (
         "PROJECTION_REQUESTED",
         "PHYSICAL_OPERATION_RESERVATION_CREATED",
         "PHYSICAL_OPERATION_RESERVATION_SETTLED",
     )
-    assert committed.reservation.reserved_events == len(committed.stored_events)
+    assert committed.reservation.reserved_events == len(
+        committed.stored_batch_receipt.owned_stored_events
+    )
     assert (
         committed.settlement_event.settlement.total_charged_events
         == committed.reservation.reserved_events
@@ -1188,7 +1197,9 @@ def test_materialization_account_commit_then_raise_confirms_exact_candidate(
 
     assert calls == 1
     assert store.snapshot() == committed.resulting_account_state
-    assert event_log.next_sequence() - 1 == len(committed.stored_events)
+    assert event_log.next_sequence() - 1 == len(
+        committed.stored_batch_receipt.owned_stored_events
+    )
 
 
 def test_graph_checkpoint_atomically_advances_only_graph_consumer() -> None:
@@ -1261,15 +1272,21 @@ def test_graph_checkpoint_atomically_advances_only_graph_consumer() -> None:
         item.consumer_kind: item
         for item in committed.resulting_account_state.generation.consumer_horizons
     }
-    assert horizons[
-        LedgerMaterializationConsumerKind.SUBAGENT_GRAPH
-    ].through_sequence == source.ledger_through_sequence
-    assert horizons[
-        LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW
-    ].through_sequence == 0
-    assert committed.resulting_account_state.generation.reclaimable_through_sequence == 0
+    assert (
+        horizons[LedgerMaterializationConsumerKind.SUBAGENT_GRAPH].through_sequence
+        == source.ledger_through_sequence
+    )
+    assert (
+        horizons[LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW].through_sequence
+        == 0
+    )
+    assert (
+        committed.resulting_account_state.generation.reclaimable_through_sequence == 0
+    )
     assert committed.generation_event is None
-    assert tuple(event.id for event in committed.stored_events) == (
+    assert tuple(
+        event.id for event in committed.stored_batch_receipt.owned_stored_events
+    ) == (
         prepared.event.id,
         committed.horizon_event.id,
     )
@@ -1438,7 +1455,7 @@ def test_checkpoint_barrier_closes_new_producer_admission() -> None:
         runtime_session_id="runtime:barrier",
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    transcript_store.apply_committed(genesis.stored_events)
+    transcript_store.apply_live_committed(genesis.stored_batch_receipt)
     stable = transcript_store.snapshot().stable_semantic_state
     tree_contracts = build_default_transcript_projection_materialization_contracts(
         contracts.limits
@@ -1578,7 +1595,7 @@ def test_checkpoint_success_advances_horizon_and_reopens_admission() -> None:
         runtime_session_id="runtime:checkpoint-success",
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    transcript_store.apply_committed(genesis.stored_events)
+    transcript_store.apply_live_committed(genesis.stored_batch_receipt)
     tree_contracts = build_default_transcript_projection_materialization_contracts(
         contracts.limits
     )
@@ -1745,7 +1762,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         ).contract,
         register_transcript_consumer=True,
     )
-    transcript_store.apply_committed(genesis.stored_events)
+    transcript_store.apply_live_committed(genesis.stored_batch_receipt)
     initial = transcript_store.snapshot()
     seed = prepare_run_transcript_seed(
         runtime_session_id=runtime_session_id,
@@ -1776,8 +1793,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         consumer = next(
             item
             for item in account.generation.consumer_horizons
-            if item.consumer_kind
-            is LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW
+            if item.consumer_kind is LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW
         )
         prepared = prepare_transcript_checkpoint_candidate(
             checkpoint_id=checkpoint_id,
@@ -1810,7 +1826,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
             ).contract,
             terminal_contract=terminal_contract,
         )
-        transcript_store.apply_committed(installed.stored_events)
+        transcript_store.apply_live_committed(installed.stored_batch_receipt)
         deadline = monotonic() + 2
         persist_prepared_transcript_projection_materialization(
             prepared.materialization,
@@ -1833,7 +1849,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
             installed=installed,
             terminal_contract=terminal_contract,
         )
-        transcript_store.apply_committed(committed.stored_events)
+        transcript_store.apply_live_committed(committed.stored_batch_receipt)
         return committed
 
     first = commit_checkpoint_generation(
@@ -1865,10 +1881,9 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         business_window_id="seed",
         business_window_generation=0,
     )
-    transcript_store.apply_committed(lifecycle.stored_events)
+    transcript_store.apply_live_committed(lifecycle.stored_batch_receipt)
     first_artifacts = frozenset(
-        item.artifact_id
-        for item in first.installed.prepared.materialization.artifacts
+        item.artifact_id for item in first.installed.prepared.materialization.artifacts
     )
     second = commit_checkpoint_generation(
         checkpoint_id="checkpoint:fallback:second",
@@ -1921,7 +1936,7 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         business_window_id="seed",
         business_window_generation=0,
     )
-    transcript_store.apply_committed(later.stored_events)
+    transcript_store.apply_live_committed(later.stored_batch_receipt)
     third = commit_checkpoint_generation(
         checkpoint_id="checkpoint:fallback:third",
         previous_checkpoint_id=first.installed.checkpoint_id,
@@ -1946,17 +1961,16 @@ def test_missing_checkpoint_artifact_uses_previous_compatible_generation() -> No
         materialization_contracts=tree_contracts,
         retained_checkpoint_min_count=1,
     )
-    assert report.verified_fallback_checkpoint_ids == (
-        third.installed.checkpoint_id,
-    )
-    assert report.unavailable_checkpoint_ids == (
-        second.installed.checkpoint_id,
-    )
+    assert report.verified_fallback_checkpoint_ids == (third.installed.checkpoint_id,)
+    assert report.unavailable_checkpoint_ids == (second.installed.checkpoint_id,)
     assert first_root not in archive.blobs
-    assert sum(
-        isinstance(event, TranscriptProjectionCheckpointCommittedEvent)
-        for event in event_log.iter()
-    ) == 3
+    assert (
+        sum(
+            isinstance(event, TranscriptProjectionCheckpointCommittedEvent)
+            for event in event_log.iter()
+        )
+        == 3
+    )
 
 
 def test_transcript_restore_uses_shared_maintenance_read_lease() -> None:
@@ -2112,7 +2126,7 @@ def _installed_checkpoint_for_terminal_test(
         runtime_session_id=runtime_session_id,
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    transcript_store.apply_committed(genesis.stored_events)
+    transcript_store.apply_live_committed(genesis.stored_batch_receipt)
     tree_contracts = build_default_transcript_projection_materialization_contracts(
         contracts.limits
     )
@@ -2615,15 +2629,19 @@ def test_checkpoint_publication_failure_does_not_revoke_committed_checkpoint(
     original_accept = type(runtime).accept_authority_materialization_transition
     reject_once = True
 
-    def fail_first_terminal_handoff(self, events):
+    def fail_first_terminal_handoff(self, receipt):
         nonlocal reject_once
-        if self is runtime and reject_once and any(
-            str(event.type) == "TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED"
-            for event in events
+        if (
+            self is runtime
+            and reject_once
+            and any(
+                str(event.type) == "TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED"
+                for event in receipt.owned_stored_events
+            )
         ):
             reject_once = False
             raise RuntimeError("publication handoff unavailable")
-        return original_accept(self, events)
+        return original_accept(self, receipt)
 
     monkeypatch.setattr(
         type(runtime),
@@ -2694,10 +2712,8 @@ def test_projection_evidence_restores_requested_high_water_when_live_store_is_ah
         assert run_start.sequence is not None
         live = runtime.transcript_projection_state_store.snapshot()
 
-        evidence = await (
-            runtime.transcript_projection_checkpoint_service.prepare_projection_evidence(
-                requested_through_sequence=run_start.sequence
-            )
+        evidence = await runtime.transcript_projection_checkpoint_service.prepare_projection_evidence(
+            requested_through_sequence=run_start.sequence
         )
 
         assert evidence.semantic_source.semantic_source_event_count < (
@@ -2768,9 +2784,7 @@ def test_run_seed_restore_hydrates_terminal_documents_from_stable_entries(
     semantic_identity = build_frozen_fact(
         ProjectionBaseSemanticIdentityFact,
         schema_version="projection_base_semantic_identity.v2",
-        run_seed_semantic_fingerprint=(
-            seed.seed_semantic.seed_semantic_fingerprint
-        ),
+        run_seed_semantic_fingerprint=(seed.seed_semantic.seed_semantic_fingerprint),
         stable_state_semantic_fingerprint=stable_state.state_semantic_fingerprint,
     )
     projection_base = build_frozen_fact(
@@ -2790,9 +2804,7 @@ def test_run_seed_restore_hydrates_terminal_documents_from_stable_entries(
         event_log=runtime.event_log,
         archive=runtime.archive,
         runtime_session_id=runtime.runtime_session_id,
-        requested_through_sequence=(
-            seed.seed_reference.source_ledger_through_sequence
-        ),
+        requested_through_sequence=(seed.seed_reference.source_ledger_through_sequence),
         projection_base=projection_base,
         event_domain_binding=runtime.authority_materialization_contracts.event_domain,
         materialization_contracts=(
@@ -2892,11 +2904,8 @@ def test_full_source_doctor_rebuilds_checkpoint(tmp_path) -> None:
         runtime_session_id=event_log.runtime_session_id,
     )
     assert asyncio.run(
-        reopened.transcript_projection_checkpoint_service
-        .projection_delta_minimum_sequence()
-    ) == (
-        committed_checkpoint.checkpoint.candidate_ledger_through_sequence + 1
-    )
+        reopened.transcript_projection_checkpoint_service.projection_delta_minimum_sequence()
+    ) == (committed_checkpoint.checkpoint.candidate_ledger_through_sequence + 1)
     reopened.close()
 
     from pulsara_agent.inspector.service import (
@@ -3131,7 +3140,6 @@ def test_every_concrete_frozen_schema_has_one_unique_fingerprint_contract() -> N
         schemas[schema_version] = fact_type
 
     registered = {
-        item.schema_version
-        for item in DURABLE_FACT_FINGERPRINT_REGISTRY.snapshot()
+        item.schema_version for item in DURABLE_FACT_FINGERPRINT_REGISTRY.snapshot()
     }
     assert set(schemas) == registered

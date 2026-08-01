@@ -161,9 +161,7 @@ def build_provider_unit_semantic_document(
         lowering_contract_fingerprint=(
             unit.attribution.semantic.lowering_contract_fingerprint
         ),
-        wire_codec_contract_fingerprint=(
-            PROVIDER_UNIT_WIRE_CODEC_CONTRACT_FINGERPRINT
-        ),
+        wire_codec_contract_fingerprint=(PROVIDER_UNIT_WIRE_CODEC_CONTRACT_FINGERPRINT),
     )
     document_bytes = canonical_json_bytes(
         semantic_materialization.model_dump(mode="json")
@@ -171,30 +169,26 @@ def build_provider_unit_semantic_document(
     document_identity = build_frozen_fact(
         ProviderInputUnitSemanticDocumentIdentityFact,
         schema_version="provider_input_unit_semantic_document_identity.v1",
-        document_schema_version=(
-            "provider_input_unit_semantic_materialization.v1"
-        ),
+        document_schema_version=("provider_input_unit_semantic_materialization.v1"),
         document_contract_fingerprint=(
             PROVIDER_UNIT_SEMANTIC_DOCUMENT_CONTRACT_FINGERPRINT
         ),
         semantic_materialization_fingerprint=(
             semantic_materialization.semantic_materialization_fingerprint
         ),
-        canonical_document_sha256=(
-            f"sha256:{sha256(document_bytes).hexdigest()}"
-        ),
+        canonical_document_sha256=(f"sha256:{sha256(document_bytes).hexdigest()}"),
         canonical_document_bytes=len(document_bytes),
         canonical_wire_utf8_sha256=(
             semantic_materialization.canonical_wire_utf8_sha256
         ),
-        canonical_wire_utf8_bytes=(
-            semantic_materialization.canonical_wire_utf8_bytes
-        ),
+        canonical_wire_utf8_bytes=(semantic_materialization.canonical_wire_utf8_bytes),
     )
     return semantic_materialization, document_identity
 
 
-def freeze_provider_message_fragment(message: LLMMessage) -> ProviderMessageFragmentFact:
+def freeze_provider_message_fragment(
+    message: LLMMessage,
+) -> ProviderMessageFragmentFact:
     """Freeze one exact provider-visible message without placement attribution."""
 
     blocks = []
@@ -237,9 +231,7 @@ def freeze_provider_message_fragment(message: LLMMessage) -> ProviderMessageFrag
         name=message.name,
         tool_call_id=message.tool_call_id,
         content_blocks=tuple(blocks),
-        provider_user_carrier_binding=(
-            message.provider_user_carrier_binding
-        ),
+        provider_user_carrier_binding=(message.provider_user_carrier_binding),
     )
     return fragment
 
@@ -289,7 +281,11 @@ def ordered_transcript_unit_source_event_refs(
 ) -> tuple[ContextEventReferenceFact, ...]:
     attribution = unit.source_attribution
     if isinstance(attribution, DirectStableMessageSourceAttributionFact):
-        references = attribution.stable_leaf_reference.source_event_references
+        references = (
+            attribution.stable_leaf_reference.source_event_references
+            if attribution.stable_leaf_reference is not None
+            else ()
+        )
     elif isinstance(attribution, DerivedToolResultMessageSourceAttributionFact):
         references = (
             *attribution.tool_pair_leaf_reference.source_event_references,

@@ -749,9 +749,7 @@ def test_activation_settlement_failure_cannot_leave_an_active_run_owner(
         await session.run_turn("run pwd after approval")
 
         [run_end] = [
-            event
-            for event in session.replay_events()
-            if isinstance(event, RunEndEvent)
+            event for event in session.replay_events() if isinstance(event, RunEndEvent)
         ]
         service = session.wiring.run_activation_service
         assert service is not None

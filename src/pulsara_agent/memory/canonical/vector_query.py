@@ -48,7 +48,9 @@ class MemoryVectorQuery:
         if types:
             where.append("node.memory_type = ANY(%s)")
             params.append(list(types))
-        vector_literal = "[" + ",".join(format(float(value), ".9g") for value in query_vector) + "]"
+        vector_literal = (
+            "[" + ",".join(format(float(value), ".9g") for value in query_vector) + "]"
+        )
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
@@ -62,7 +64,7 @@ class MemoryVectorQuery:
                     FROM memory_vector_index AS vector
                     JOIN memory_nodes AS node
                       ON node.graph_id = vector.graph_id AND node.id = vector.memory_id
-                    WHERE {' AND '.join(where)}
+                    WHERE {" AND ".join(where)}
                     ORDER BY vector.embedding <=> %s::vector, vector.memory_id
                     LIMIT %s
                     """,

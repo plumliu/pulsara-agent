@@ -37,7 +37,9 @@ _PROJECTED_RELATION_PREDICATES = frozenset(
 )
 
 
-def refresh_document_projection(cursor, *, graph_id: str, node_id: str, document: dict[str, Any]) -> None:
+def refresh_document_projection(
+    cursor, *, graph_id: str, node_id: str, document: dict[str, Any]
+) -> None:
     projection = memory_node_projection(document)
     relation_rows = tuple(iter_relation_rows(document))
     cursor.execute(
@@ -106,7 +108,9 @@ def refresh_document_projection(cursor, *, graph_id: str, node_id: str, document
                 projection["expires_at"],
             ),
         )
-    sync_relations_from_document(cursor, graph_id=graph_id, source_id=node_id, rows=relation_rows)
+    sync_relations_from_document(
+        cursor, graph_id=graph_id, source_id=node_id, rows=relation_rows
+    )
 
 
 def sync_relations_from_document(
@@ -136,7 +140,9 @@ def memory_node_projection(document: dict[str, Any]) -> dict[str, Any] | None:
     memory_type = canonical_memory_type(document)
     if memory_type is None:
         return None
-    if any(not non_empty(document.get(key)) for key in _REQUIRED_MEMORY_PROJECTION_KEYS):
+    if any(
+        not non_empty(document.get(key)) for key in _REQUIRED_MEMORY_PROJECTION_KEYS
+    ):
         return None
     return {
         "memory_type": memory_type,
@@ -145,7 +151,9 @@ def memory_node_projection(document: dict[str, Any]) -> dict[str, Any] | None:
         "statement": str(document[memory.STATEMENT.name]),
         "summary": optional_str(document.get(memory.SUMMARY.name)),
         "source_authority": optional_str(document.get(memory.SOURCE_AUTHORITY.name)),
-        "verification_status": optional_str(document.get(memory.VERIFICATION_STATUS.name)),
+        "verification_status": optional_str(
+            document.get(memory.VERIFICATION_STATUS.name)
+        ),
         "confidence_level": optional_str(document.get(memory.CONFIDENCE_LEVEL.name)),
         "applies_when": optional_str(document.get(memory.APPLIES_WHEN.name)),
         "do_not_apply_when": optional_str(document.get(memory.DO_NOT_APPLY_WHEN.name)),

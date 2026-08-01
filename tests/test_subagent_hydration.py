@@ -92,7 +92,9 @@ def test_hydrator_missing_task_artifact_returns_incomplete_diagnostic(tmp_path) 
         ).hydrate_task(fact, max_chars=100)
         assert view.objective_text is None
         assert view.objective_text_complete is False
-        assert [item.code for item in view.diagnostics] == ["subagent_artifact_unavailable"]
+        assert [item.code for item in view.diagnostics] == [
+            "subagent_artifact_unavailable"
+        ]
 
     asyncio.run(run())
 
@@ -195,7 +197,9 @@ def test_child_log_multiple_native_runs_is_v1_error(tmp_path) -> None:
             max_chars=100,
         )
         assert view.child_run_id is None
-        assert [item.code for item in view.diagnostics] == ["multiple_child_native_runs"]
+        assert [item.code for item in view.diagnostics] == [
+            "multiple_child_native_runs"
+        ]
 
     asyncio.run(run())
 
@@ -238,7 +242,9 @@ def test_reported_and_native_child_run_id_must_match(tmp_path) -> None:
             max_chars=100,
         )
         assert view.child_run_id == child_ctx.run_id
-        assert [item.code for item in view.diagnostics] == ["child_run_attribution_mismatch"]
+        assert [item.code for item in view.diagnostics] == [
+            "child_run_attribution_mismatch"
+        ]
 
     asyncio.run(run())
 
@@ -253,7 +259,9 @@ def test_wait_result_hydration_is_bounded_and_artifact_backed(tmp_path) -> None:
             summary="summary",
             output_preview="0123456789",
         )
-        result = fold_subagent_graph(parent.event_log.iter()).results[completed.result_id]
+        result = fold_subagent_graph(parent.event_log.iter()).results[
+            completed.result_id
+        ]
         view = await SubagentGraphHydrator(
             archive=parent.archive,
             parent_runtime_session_id=parent.runtime_session_id,

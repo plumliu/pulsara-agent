@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from time import monotonic
-from typing import Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from pulsara_agent.event import AgentEvent
+from pulsara_agent.primitives.context import context_fingerprint
+
+if TYPE_CHECKING:
+    from pulsara_agent.ports.stored_event import StoredEventBatchCommitReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +84,9 @@ class EventPublicationError:
 @dataclass(frozen=True, slots=True)
 class EventWriteResult:
     committed_events: tuple[AgentEvent, ...]
+    accounting_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt | None
+    business_accounting_partition_fingerprint: str
     commit_status: Literal["committed"]
     reducer_high_waters: Mapping[str, int]
     reconciliation_required: bool
@@ -87,7 +94,43 @@ class EventWriteResult:
     publication_status: Literal["completed", "enqueued", "unavailable"]
     publisher_enqueued_through_sequence: int | None
     publication_errors: tuple[EventPublicationError, ...] = ()
-    accounting_events: tuple[AgentEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        business_ids = tuple(event.id for event in self.committed_events)
+        accounting_ids = tuple(event.id for event in self.accounting_events)
+        if set(business_ids).intersection(accounting_ids):
+            raise ValueError("business/accounting event partition overlaps")
+        if self.stored_batch_receipt is None:
+            if business_ids or accounting_ids:
+                raise ValueError(
+                    "non-empty event write result requires its storage receipt"
+                )
+            physical_ids: tuple[str, ...] = ()
+            receipt_fingerprint = None
+        else:
+            physical_ids = tuple(
+                event.id for event in self.stored_batch_receipt.owned_stored_events
+            )
+            if set((*business_ids, *accounting_ids)) != set(physical_ids) or len(
+                (*business_ids, *accounting_ids)
+            ) != len(physical_ids):
+                raise ValueError("business/accounting partition is not exhaustive")
+            for subset in (business_ids, accounting_ids):
+                positions = tuple(physical_ids.index(event_id) for event_id in subset)
+                if positions != tuple(sorted(positions)):
+                    raise ValueError("event write partition is not order-preserving")
+            receipt_fingerprint = self.stored_batch_receipt.ordered_join_fingerprint
+        expected = context_fingerprint(
+            "event-write-business-accounting-partition:v1",
+            {
+                "stored_batch_ordered_join_fingerprint": receipt_fingerprint,
+                "physical_event_ids": physical_ids,
+                "business_event_ids": business_ids,
+                "accounting_event_ids": accounting_ids,
+            },
+        )
+        if self.business_accounting_partition_fingerprint != expected:
+            raise ValueError("event write partition fingerprint mismatch")
 
     def require_reduced(self, reducer_id: str) -> tuple[AgentEvent, ...]:
         last_sequence = max(
@@ -108,6 +151,49 @@ class EventWriteResult:
                 f"{last_sequence}"
             )
         return self.committed_events
+
+    def with_partition(
+        self,
+        *,
+        business_events: tuple[AgentEvent, ...],
+        accounting_events: tuple[AgentEvent, ...],
+    ) -> "EventWriteResult":
+        return replace(
+            self,
+            committed_events=business_events,
+            accounting_events=accounting_events,
+            business_accounting_partition_fingerprint=(
+                business_accounting_partition_fingerprint(
+                    receipt=self.stored_batch_receipt,
+                    business_events=business_events,
+                    accounting_events=accounting_events,
+                )
+            ),
+        )
+
+
+def business_accounting_partition_fingerprint(
+    *,
+    receipt: StoredEventBatchCommitReceipt | None,
+    business_events: tuple[AgentEvent, ...],
+    accounting_events: tuple[AgentEvent, ...],
+) -> str:
+    physical_ids = (
+        tuple(event.id for event in receipt.owned_stored_events)
+        if receipt is not None
+        else ()
+    )
+    return context_fingerprint(
+        "event-write-business-accounting-partition:v1",
+        {
+            "stored_batch_ordered_join_fingerprint": (
+                receipt.ordered_join_fingerprint if receipt is not None else None
+            ),
+            "physical_event_ids": physical_ids,
+            "business_event_ids": tuple(event.id for event in business_events),
+            "accounting_event_ids": tuple(event.id for event in accounting_events),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +259,9 @@ class RuntimeEventWriteCancelled(asyncio.CancelledError):
         self.operation_result = operation_result
         self.operation_error = operation_error
         self.deadline_monotonic = deadline_monotonic
-        super().__init__("runtime event write caller cancelled after physical resolution")
+        super().__init__(
+            "runtime event write caller cancelled after physical resolution"
+        )
 
 
 def event_batch_commit_outcome_from_error(
@@ -207,5 +295,6 @@ __all__ = [
     "FrozenEventWriteCandidate",
     "PendingRuntimeEventWriteError",
     "RuntimeEventWriteCancelled",
+    "business_accounting_partition_fingerprint",
     "event_batch_commit_outcome_from_error",
 ]

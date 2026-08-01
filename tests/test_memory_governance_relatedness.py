@@ -200,12 +200,8 @@ def test_relatedness_rejects_candidate_payload_semantic_drift() -> None:
                     candidate_id="candidate:pool:drift",
                     statement="Likes coffee",
                     scope="ctx:user",
-                    source_authority=(
-                        memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION
-                    ),
-                    verification_status=(
-                        memory.VerificationStatus.USER_CONFIRMED
-                    ),
+                    source_authority=(memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION),
+                    verification_status=(memory.VerificationStatus.USER_CONFIRMED),
                 )
             )
         }

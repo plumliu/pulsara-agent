@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pulsara_agent.llm.adapters.openai.chat_completions import OpenAIChatCompletionsTransport
+from pulsara_agent.llm.adapters.openai.chat_completions import (
+    OpenAIChatCompletionsTransport,
+)
 from pulsara_agent.llm.adapters.openai.responses import OpenAIResponsesTransport
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.registry import LLMTransportRegistry

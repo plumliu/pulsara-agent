@@ -319,9 +319,7 @@ def _matching_predicate_code(
     return None
 
 
-MODEL_CALL_CONTROL_DOWNSTREAM_BINDINGS = (
-    ModelCallControlDownstreamBindingRegistry()
-)
+MODEL_CALL_CONTROL_DOWNSTREAM_BINDINGS = ModelCallControlDownstreamBindingRegistry()
 CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_BINDING = (
     MODEL_CALL_CONTROL_DOWNSTREAM_BINDINGS.register(
         contract_id="pulsara.model-control-downstream",
@@ -334,8 +332,9 @@ CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_CONTRACT = (
 )
 
 
-def build_model_call_control_downstream_contract(
-) -> ModelCallControlDownstreamPredicateContractFact:
+def build_model_call_control_downstream_contract() -> (
+    ModelCallControlDownstreamPredicateContractFact
+):
     return CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_CONTRACT.model_copy(deep=True)
 
 

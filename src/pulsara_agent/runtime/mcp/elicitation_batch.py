@@ -99,9 +99,10 @@ class McpElicitationBatchIdentity:
             or not self.request_set_fingerprint
         ):
             raise ValueError("MCP elicitation batch identity is incomplete")
-        if self.ordered_request_keys != tuple(
-            sorted(set(self.ordered_request_keys))
-        ) or not self.ordered_request_keys:
+        if (
+            self.ordered_request_keys != tuple(sorted(set(self.ordered_request_keys)))
+            or not self.ordered_request_keys
+        ):
             raise ValueError("MCP elicitation request keys must be ordered and unique")
 
 
@@ -153,7 +154,9 @@ class McpElicitationBatchOwner:
             raise ValueError("MCP batch request order differs from its identity")
         private_by_key = {item.request_key: item for item in private_url_payloads}
         expected_private = {
-            item.key for item in requests if isinstance(item, McpUrlElicitationRequestFact)
+            item.key
+            for item in requests
+            if isinstance(item, McpUrlElicitationRequestFact)
         }
         if set(private_by_key) != expected_private:
             raise ValueError("MCP URL private payload set does not match requests")
@@ -248,7 +251,9 @@ class McpElicitationBatchOwner:
                     == response._process_local_response_fingerprint
                 ):
                     return
-                raise RuntimeError("MCP form request has a conflicting terminal response")
+                raise RuntimeError(
+                    "MCP form request has a conflicting terminal response"
+                )
             self._replace_slot_and_freeze(
                 index,
                 replace(
@@ -284,7 +289,9 @@ class McpElicitationBatchOwner:
                     == response._process_local_response_fingerprint
                 ):
                     return
-                raise RuntimeError("MCP URL request has a conflicting terminal response")
+                raise RuntimeError(
+                    "MCP URL request has a conflicting terminal response"
+                )
             self._replace_slot_and_freeze(
                 index,
                 replace(

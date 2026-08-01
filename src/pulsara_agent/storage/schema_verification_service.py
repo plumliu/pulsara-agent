@@ -165,10 +165,7 @@ class PostgresSchemaVerificationService:
                 timeout=_remaining(deadline_monotonic),
             )
         except TimeoutError as exc:
-            if (
-                deadline_monotonic
-                >= attempt.operation_control.deadline_monotonic
-            ):
+            if deadline_monotonic >= attempt.operation_control.deadline_monotonic:
                 attempt.operation_control.cancel()
             raise PostgresSchemaError(
                 PostgresSchemaFailureCode.DEADLINE_EXCEEDED,

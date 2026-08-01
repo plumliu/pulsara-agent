@@ -178,9 +178,7 @@ def test_stateless_operation_lane_is_bounded_not_globally_serialized() -> None:
                 url="https://mcp.example.test",
             ),
         )
-        snapshot, _request_count, _page_count = await _discover(
-            pending_connection
-        )
+        snapshot, _request_count, _page_count = await _discover(pending_connection)
         manager = SdkMcpClientManager.from_connected_server(
             connection=pending_connection,
             snapshot=snapshot,
@@ -270,9 +268,7 @@ def test_stdio_operation_lane_serializes_modern_protocol() -> None:
         session = _DiscoverySession()
         session.release.set()
         pending_connection = _connection(session, tools=True)
-        snapshot, _request_count, _page_count = await _discover(
-            pending_connection
-        )
+        snapshot, _request_count, _page_count = await _discover(pending_connection)
         manager = SdkMcpClientManager.from_connected_server(
             connection=pending_connection,
             snapshot=snapshot,
@@ -310,10 +306,7 @@ def test_stdio_operation_lane_serializes_modern_protocol() -> None:
                 await release.wait()
                 entered -= 1
 
-        tasks = tuple(
-            asyncio.create_task(operation(index))
-            for index in range(2)
-        )
+        tasks = tuple(asyncio.create_task(operation(index)) for index in range(2))
         await asyncio.wait_for(first_entered.wait(), timeout=0.5)
         await asyncio.sleep(0)
         assert entered == maximum == 1
@@ -370,9 +363,7 @@ def test_unknown_result_type_fails_closed(
         session = _DiscoverySession()
         session.release.set()
         pending_connection = _connection(session, tools=True)
-        snapshot, _request_count, _page_count = await _discover(
-            pending_connection
-        )
+        snapshot, _request_count, _page_count = await _discover(pending_connection)
         manager = SdkMcpClientManager.from_connected_server(
             connection=pending_connection,
             snapshot=snapshot,
@@ -430,7 +421,12 @@ def test_unknown_result_type_fails_closed(
 
 
 def test_static_http_config_cannot_override_protocol_or_trace_headers() -> None:
-    for header in ("Mcp-Protocol-Version", "Mcp-Param-region", "traceparent", "baggage"):
+    for header in (
+        "Mcp-Protocol-Version",
+        "Mcp-Param-region",
+        "traceparent",
+        "baggage",
+    ):
         with pytest.raises(ValueError, match="protocol-managed"):
             McpStreamableHttpConfig(
                 url="https://mcp.example.test/api",

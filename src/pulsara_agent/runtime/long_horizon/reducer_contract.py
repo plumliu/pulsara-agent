@@ -11,7 +11,10 @@ from typing import Any, Callable, TypeVar, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
 
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.event_log.historical_decoder import (
+    decode_raw_stored_event_envelope,
+)
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     EventSchemaContractMismatch,
@@ -241,7 +244,7 @@ def _fold_raw_event(
         raise SubagentGraphReducerContractMismatch(
             "reducer declares a non-graph event as graph-domain"
         )
-    event = envelope.decode_owned(schema_registry)
+    event = decode_raw_stored_event_envelope(envelope, schema_registry)
     return apply_subagent_event(state, event)
 
 

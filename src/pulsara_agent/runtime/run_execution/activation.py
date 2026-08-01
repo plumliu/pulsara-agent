@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from pulsara_agent.event import AgentEvent, RunInteractionResumeBoundaryEvent, RunStartEvent
+from pulsara_agent.event import (
+    AgentEvent,
+    RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
+)
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.ports.run_authority import (
     HostRunGenesisEntry,

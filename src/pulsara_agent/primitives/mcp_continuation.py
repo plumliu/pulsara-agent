@@ -69,6 +69,7 @@ class McpFormElicitationRequestFact(FrozenFactBase):
     requested_schema_fingerprint: Fingerprint
     request_fingerprint: Fingerprint
 
+
 @_fact(
     "mcp_url_elicitation_request.v1",
     "request_fingerprint",
@@ -303,10 +304,14 @@ class McpContinuationCompanionChargeFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _zero_charge_matrix(self) -> "McpContinuationCompanionChargeFact":
-        if self.companion_kind in {
-            McpContinuationCompanionKind.DISPATCH_RESERVE,
-            McpContinuationCompanionKind.TERMINAL_DELETE,
-        } and self.charged_payload_bytes != 0:
+        if (
+            self.companion_kind
+            in {
+                McpContinuationCompanionKind.DISPATCH_RESERVE,
+                McpContinuationCompanionKind.TERMINAL_DELETE,
+            }
+            and self.charged_payload_bytes != 0
+        ):
             raise ValueError("control/delete companion payload charge must be zero")
         return self
 
@@ -418,11 +423,7 @@ def mcp_continuation_lifetime_reservation_bytes(
 ) -> int:
     """Reserve every immutable awaiting/replay envelope in one bounded operation."""
 
-    return (
-        bounds.maximum_stored_envelope_bytes
-        * bounds.maximum_rounds
-        * 2
-    )
+    return bounds.maximum_stored_envelope_bytes * bounds.maximum_rounds * 2
 
 
 def mcp_continuation_charge_contract_fingerprint(

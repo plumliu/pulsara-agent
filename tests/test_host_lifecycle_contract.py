@@ -9,6 +9,8 @@ linearization, off-lock teardown, and shared-capacity diagnostics.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import asyncio
 import json
 import threading
@@ -39,7 +41,6 @@ from pulsara_agent.event import (
     RunStartEvent,
 )
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.host import (
     DuplicateHostSessionError,
     HostCore,
@@ -1477,7 +1478,7 @@ def test_one_committed_run_uses_distinct_generations_for_two_resumes(
     async def rebuild_dormant_snapshot():
         dormant = materialize_dormant_run_owner(
             events=pre_terminal_events,
-            run_start_envelope=RawStoredEventEnvelope.from_stored_event(
+            run_start_envelope=build_raw_stored_event_envelope(
                 event=start,
                 runtime_session_id=runtime_session_id,
                 schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,

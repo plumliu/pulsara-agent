@@ -514,6 +514,50 @@ class HostCore:
                 mcp_supervisor=mcp_supervisor,
                 reopen_deadline_monotonic=reopen_deadline_monotonic,
             )
+
+            async def close_terminal_session(
+                source_host_session_id: str,
+                close_conversation: bool,
+            ) -> None:
+                await self.close_session(
+                    source_host_session_id,
+                    close_conversation=close_conversation,
+                )
+
+            async def create_terminal_successor(
+                source_runtime_session_id: str,
+                source_capacity_state_fingerprint: str,
+            ) -> tuple[str, str]:
+                if source_runtime_session_id != session.runtime_session_id:
+                    raise ValueError("successor request crosses runtime sessions")
+                current_capacity = session.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service.snapshot().active_head.capacity_state
+                if (
+                    current_capacity.capacity_state_fingerprint
+                    != source_capacity_state_fingerprint
+                ):
+                    raise ValueError("successor capacity authority changed")
+                successor_workspace = HostWorkspaceInput(
+                    workspace_kind=workspace.workspace_kind,
+                    workspace_root=workspace.workspace_root,
+                    display_label=workspace.display_label,
+                    memory_domain_id=workspace.memory_domain.memory_domain_id,
+                    cleanup_workspace_root_on_close=False,
+                )
+                successor = await self.open_session(
+                    successor_workspace,
+                    model_role=model_role,
+                    options=options,
+                    system_prompt=system_prompt,
+                    memory_reflection=memory_reflection,
+                    permission_policy=permission_policy,
+                )
+                return successor.host_session_id, successor.runtime_session_id
+
+            session.terminal_application_services.bind_host_lifecycle_callbacks(
+                detach_callback=self.detach_session,
+                close_callback=close_terminal_session,
+                successor_callback=create_terminal_successor,
+            )
             compaction_service = wiring.runtime_wiring.compaction_service
             if (
                 compaction_service is not None
@@ -531,6 +575,9 @@ class HostCore:
                     deadline_monotonic=runtime_open_deadline_monotonic
                 )
             await session.recover_terminal_monitor_owners_before_open(
+                deadline_monotonic=runtime_open_deadline_monotonic,
+            )
+            await session.recover_terminal_command_owners_before_open(
                 deadline_monotonic=runtime_open_deadline_monotonic,
             )
             wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
@@ -582,6 +629,11 @@ class HostCore:
                         )
                     await self.registry.publish(reservation, session)
                     self._session_leases[host_session_id] = lease
+                    # A partially-built/unpublished RuntimeSession must remain
+                    # synchronously closable. Activate the Foundation worker only
+                    # after Host publication owns the live session; commits made
+                    # during open remain in the tap and enter bounded bootstrap.
+                    wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service.start_background_if_possible()
             session.activate_terminal_notification_dispatch_after_open()
             if (
                 resources.governance_coordinator is not None

@@ -9,6 +9,8 @@ directly.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from collections.abc import Callable
 from dataclasses import replace
@@ -51,6 +53,9 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+from pulsara_agent.ports.stored_event import (
+    GroupingIndependentOwnedEventReducerAdapter,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
 from pulsara_agent.ports.tool_registry import McpToolBindingContract
@@ -219,8 +224,10 @@ class SubagentRuntime:
         self.parent_runtime_session.register_committed_reducer(
             reducer_id=self._graph_reducer_id,
             through_sequence=self._graph_store.through_sequence,
-            apply_committed=self._graph_store.apply_committed,
-            rebuild_committed=self._graph_store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self._graph_store.apply_committed,
+                reset_owned_events=lambda: self._graph_store.rebuild(()),
+            ),
         )
         self._hydrator = SubagentGraphHydrator(
             archive=self.parent_runtime_session.archive,
@@ -2381,7 +2388,7 @@ class SubagentRuntime:
                 deadline_monotonic=deadline_monotonic,
             )
             terminals = tuple(
-                raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for raw in lifecycle.events
             )
             if len(terminals) != 1:
@@ -2609,9 +2616,7 @@ class SubagentRuntime:
             )
             active_child_mcp = child_mcp_lifecycle.active_for_run(start.run_id)
             if active_child_mcp:
-                mcp_execution_port = (
-                    self.parent_runtime_session.mcp_tool_execution_port
-                )
+                mcp_execution_port = self.parent_runtime_session.mcp_tool_execution_port
                 if mcp_execution_port is None:
                     raise SubagentRuntimeError(
                         "child MCP recovery requires its continuation execution port"
@@ -3247,7 +3252,7 @@ class SubagentRuntime:
                     max_payload_bytes=1024 * 1024,
                 )
                 decoded_lifecycle = tuple(
-                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
                     for raw in lifecycle.events
                 )
                 starts = tuple(
@@ -3638,9 +3643,7 @@ class SubagentRuntime:
         self._require_run(subagent_run_id)
         owner = self._admission_registry.get(subagent_run_id)
         child_session = (
-            owner.child_composition_lease.child_session
-            if owner is not None
-            else None
+            owner.child_composition_lease.child_session if owner is not None else None
         )
         if child_session is None:
             raise SubagentNotReady(
@@ -3737,7 +3740,9 @@ class SubagentRuntime:
             and event.model_call_index == model_call_index
             for raw in starts.events
             if isinstance(
-                event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                event := decode_raw_stored_event_envelope(
+                    raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                ),
                 ModelCallStartEvent,
             )
         )
@@ -3931,7 +3936,7 @@ class SubagentRuntime:
                     max_payload_bytes=512 * 1024,
                 )
                 child_terminals = [
-                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
                     for raw in terminal_snapshot.events
                 ]
                 if child_terminals:
@@ -4620,7 +4625,10 @@ def _read_child_run_events(
         max_payload_bytes=16 * 1024 * 1024,
         deadline_monotonic=deadline_monotonic,
     )
-    return tuple(item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw)
+    return tuple(
+        decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
+        for item in raw
+    )
 
 
 def _mcp_binding_identities(

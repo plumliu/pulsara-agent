@@ -109,8 +109,7 @@ _SECRET_RE = re.compile(
     r"\s*[:=]\s*[^\s,;}]+"
 )
 _MAX_SINGLE_SOURCE_ITEM_CANONICAL_BYTES = (
-    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
-    .max_single_source_item_canonical_bytes
+    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_single_source_item_canonical_bytes
 )
 
 
@@ -119,7 +118,8 @@ def _contract() -> ProviderErrorSanitizationContractFact:
         "contract_id": "pulsara.provider-error-sanitizer",
         "contract_version": "v1",
         "stable_code_mapping_fingerprint": sha256_fingerprint(
-            "provider-error-code-map:v1", tuple(item.value for item in ProviderModelStreamErrorCode)
+            "provider-error-code-map:v1",
+            tuple(item.value for item in ProviderModelStreamErrorCode),
         ),
         "sensitive_key_policy_fingerprint": sha256_fingerprint(
             "provider-error-sensitive-keys:v1",
@@ -178,9 +178,7 @@ def _redact_url(match: re.Match[str]) -> str:
     host = parsed.hostname or ""
     if parsed.port is not None:
         host = f"{host}:{parsed.port}"
-    return urlunsplit(
-        SplitResult(parsed.scheme, host, parsed.path, "", "")
-    ) + trailing
+    return urlunsplit(SplitResult(parsed.scheme, host, parsed.path, "", "")) + trailing
 
 
 def sanitize_provider_failure(
@@ -195,7 +193,9 @@ def sanitize_provider_failure(
         raw = str(message)
         text = _URL_RE.sub(_redact_url, raw)
         text = _SECRET_RE.sub("[redacted]", text)
-        truncated = len(text) > DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
+        truncated = (
+            len(text) > DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
+        )
         text = text[: DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars]
         hint = (code_hint or "").casefold()
         if hint == "transport_source_item_limit_exceeded":
@@ -372,17 +372,11 @@ class SanitizingProviderTransportExecution:
                     ),
                 )
             await self._drain_after_failure()
-            report = (
-                self._usage
-                if self._collect_usage_while_draining_error
-                else None
-            )
+            report = self._usage if self._collect_usage_while_draining_error else None
             terminal = build_terminal_draft(
                 outcome="provider_error",
                 usage=report.usage if report is not None else None,
-                usage_status=(
-                    report.usage_status if report is not None else "missing"
-                ),
+                usage_status=(report.usage_status if report is not None else "missing"),
                 reported_model_id=(
                     report.reported_model_id if report is not None else None
                 ),
@@ -453,9 +447,7 @@ class SanitizingProviderTransportExecution:
             try:
                 semantic_state_after = self._preview_semantic_state(item)
                 draft = self._draft_from_raw_item(item, advance_cursor=False)
-                payload_bytes = len(
-                    canonical_json_bytes(draft.model_dump(mode="json"))
-                )
+                payload_bytes = len(canonical_json_bytes(draft.model_dump(mode="json")))
                 if payload_bytes > _MAX_SINGLE_SOURCE_ITEM_CANONICAL_BYTES:
                     self._pending_error = sanitize_provider_failure(
                         message="Provider source item exceeded the canonical byte cap.",
@@ -593,9 +585,7 @@ class SanitizingProviderTransportExecution:
         if semantic_state is not None:
             self._active_text_blocks = set(semantic_state.active_text_blocks)
             self._seen_text_blocks = set(semantic_state.seen_text_blocks)
-            self._active_thinking_blocks = set(
-                semantic_state.active_thinking_blocks
-            )
+            self._active_thinking_blocks = set(semantic_state.active_thinking_blocks)
             self._seen_thinking_blocks = set(semantic_state.seen_thinking_blocks)
             self._active_data_blocks = dict(semantic_state.active_data_blocks)
             self._seen_data_blocks = set(semantic_state.seen_data_blocks)
@@ -603,9 +593,7 @@ class SanitizingProviderTransportExecution:
             self._seen_tool_calls = set(semantic_state.seen_tool_calls)
         if envelope.counts_as_adapter_source_item:
             self._accepted_source_item_count += 1
-            self._accepted_source_payload_bytes += (
-                envelope.adapter_source_payload_bytes
-            )
+            self._accepted_source_payload_bytes += envelope.adapter_source_payload_bytes
         self.next_transport_sequence_index += 1
         self._source_accumulator = envelope.source_accumulator_after
         if isinstance(envelope.draft, ProviderErrorDraft):
@@ -757,9 +745,7 @@ class SanitizingProviderTransportExecution:
             self._seen_data_blocks if seen_data_blocks is None else seen_data_blocks
         )
         active_tool_calls = (
-            self._active_tool_calls
-            if active_tool_calls is None
-            else active_tool_calls
+            self._active_tool_calls if active_tool_calls is None else active_tool_calls
         )
         seen_tool_calls = (
             self._seen_tool_calls if seen_tool_calls is None else seen_tool_calls
@@ -866,7 +852,9 @@ class SanitizingProviderTransportExecution:
             if self._physical_completed
             else ProviderTransportPhysicalCompletionStatus.BLOCKED_UNTRUSTED
         )
-        diagnostic = None if self._physical_completed else "provider_physical_state_untrusted"
+        diagnostic = (
+            None if self._physical_completed else "provider_physical_state_untrusted"
+        )
         payload = {"status": status.value, "diagnostic_code": diagnostic}
         return ProviderTransportPhysicalCompletion(
             status=status,

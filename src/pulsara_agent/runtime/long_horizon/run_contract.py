@@ -145,12 +145,10 @@ def prepare_child_rollout_reservation(
         policy=policy,
     )
     tool_reserve = (
-        child_policy.max_tool_cost_units_per_child
-        * policy.tool_cost_unit_weight_milli
+        child_policy.max_tool_cost_units_per_child * policy.tool_cost_unit_weight_milli
     )
     profile_limit = (
-        primary_quote.reserved_milliunits
-        * child_policy.max_agent_model_calls_per_child
+        primary_quote.reserved_milliunits * child_policy.max_agent_model_calls_per_child
         + compaction_quote.reserved_milliunits
         * child_policy.max_window_compactions_per_child
         + tool_reserve
@@ -375,9 +373,7 @@ def _prepare(
     contract_payload = {
         "contract_version": "run-long-horizon:v1",
         "rollout_account_id": account_id,
-        "rollout_account_owner_runtime_session_id": (
-            account_owner_runtime_session_id
-        ),
+        "rollout_account_owner_runtime_session_id": (account_owner_runtime_session_id),
         "rollout_account_owner_run_id": account_owner_run_id,
         "inherited_rollout_reservation": inherited_rollout_reservation,
         "initial_window_id": window_id,
@@ -401,6 +397,6 @@ def _prepare(
         root_account=root_account,
         opening_batch_id=f"long_horizon_opening_batch:{uuid4().hex}",
     )
-    ResolvedChildRolloutBudgetFact,
-    RolloutBudgetStateFact,
-    RolloutReservationFact,
+    (ResolvedChildRolloutBudgetFact,)
+    (RolloutBudgetStateFact,)
+    (RolloutReservationFact,)

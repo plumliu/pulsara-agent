@@ -95,12 +95,11 @@ def test_infeasible_primary_slot_reports_every_reachable_affected_pair() -> None
     assert report.feasible is False
     assert len(report.infeasible_pairs) == 1 + len(PRODUCTION_SUBAGENT_PROFILE_IDS)
     assert {row.primary_target_slot for row in report.infeasible_pairs} == {"pro"}
-    assert {
-        row.reason_code for row in report.infeasible_pairs
-    } == {"exploration_allowance_non_positive"}
+    assert {row.reason_code for row in report.infeasible_pairs} == {
+        "exploration_allowance_non_positive"
+    }
     assert all(
-        row.exploration_allowance_milliunits <= 0
-        for row in report.infeasible_pairs
+        row.exploration_allowance_milliunits <= 0 for row in report.infeasible_pairs
     )
 
     with pytest.raises(ProductionRolloutBudgetConfigurationError) as exc_info:
@@ -166,9 +165,7 @@ def test_config_check_accepts_feasible_production_matrix(
 def test_pre_run_pair_rechecks_same_policy_and_model_fingerprints() -> None:
     runtime = build_llm_runtime(_llm_config())
     targets = resolve_production_model_targets(runtime)
-    report = evaluate_production_rollout_budget_feasibility(
-        targets_by_role=targets
-    )
+    report = evaluate_production_rollout_budget_feasibility(targets_by_role=targets)
 
     actual = require_prevalidated_production_rollout_pair(
         report=report,
@@ -191,9 +188,7 @@ def test_pre_run_pair_rechecks_same_policy_and_model_fingerprints() -> None:
 def test_pre_run_rejects_pair_that_drifted_since_configuration_validation() -> None:
     runtime = build_llm_runtime(_llm_config())
     targets = resolve_production_model_targets(runtime)
-    report = evaluate_production_rollout_budget_feasibility(
-        targets_by_role=targets
-    )
+    report = evaluate_production_rollout_budget_feasibility(targets_by_role=targets)
     drifted_targets = resolve_production_model_targets(
         build_llm_runtime(_llm_config(pro_model_id="model-pro-rebound"))
     )

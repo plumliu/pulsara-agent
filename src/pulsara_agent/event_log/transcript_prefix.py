@@ -23,6 +23,7 @@ TRANSCRIPT_SEMANTIC_EVENT_TYPES = frozenset(
     {
         EventType.RUN_START.value,
         EventType.RUN_END.value,
+        EventType.USER_STEER_COMMITTED.value,
         EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED.value,
         EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED.value,
         EventType.CAPABILITY_GATE_DECISION.value,
@@ -75,6 +76,7 @@ TRANSCRIPT_ACCELERATION_EVENT_TYPES = frozenset(
         EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED.value,
     }
 )
+
 
 def classify_transcript_event_type(event_type: str) -> TranscriptStorageDomain:
     if event_type in TRANSCRIPT_SEMANTIC_EVENT_TYPES:

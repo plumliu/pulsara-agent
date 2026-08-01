@@ -65,10 +65,8 @@ class PreparedTranscriptProjectionInput(PreparedRuntimeValueBase):
         if (
             authority.projection_base != evidence.projection_base
             or authority.semantic_source != evidence.semantic_source
-            or authority.domain_completeness_proof
-            != evidence.domain_completeness_proof
-            or authority.provider_projection
-            != self.provider_projection.projection_fact
+            or authority.domain_completeness_proof != evidence.domain_completeness_proof
+            or authority.provider_projection != self.provider_projection.projection_fact
             or authority.final_normalized_transcript_fingerprint
             != self.final_normalized_transcript.transcript.transcript_fingerprint
         ):
@@ -142,9 +140,7 @@ class PreparedTranscriptProjectionInput(PreparedRuntimeValueBase):
         expected_fingerprint = _prepared_projection_input_fingerprint(
             evidence=evidence,
             exact_named_authority_facts=self.exact_named_authority_facts,
-            exact_named_authority_artifacts=(
-                self.exact_named_authority_artifacts
-            ),
+            exact_named_authority_artifacts=(self.exact_named_authority_artifacts),
             normalized=self.final_normalized_transcript,
             provider_projection=self.provider_projection,
             authority=authority,
@@ -364,9 +360,7 @@ def prepare_transcript_projection_input(
         for entry in named_selection.entries
         for ref in entry.source_artifact_refs
     }
-    artifacts_by_id = {
-        item.reference.artifact_id: item for item in prepared_artifacts
-    }
+    artifacts_by_id = {item.reference.artifact_id: item for item in prepared_artifacts}
     if len(artifacts_by_id) != len(prepared_artifacts):
         raise ValueError("prepared named-fact artifact IDs are not unique")
     try:

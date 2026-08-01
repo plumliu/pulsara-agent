@@ -17,13 +17,17 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.long_horizon import EventSchemaDomainContractFact
 from pulsara_agent.primitives.frozen import StableEventIdentityFact, build_frozen_fact
+from pulsara_agent.primitives.stored_event import (
+    STORED_EVENT_ENVELOPE_VERSION,
+    RawStoredEventEnvelope,
+)
 from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
 from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 
 
 # This is a catalog migration version only.  Per-row decoder identity is the
 # event type/version/schema/domain tuple below.
-AGENT_EVENT_SCHEMA_VERSION = 8
+AGENT_EVENT_SCHEMA_VERSION = 9
 
 
 class EventSchemaRegistryConflict(RuntimeError):
@@ -47,9 +51,7 @@ def _schema_version(event_type: str) -> str:
     return f"agent-event:{event_type.lower()}:v1"
 
 
-_DISPLAY_ONLY_SCHEMA_KEYS = frozenset(
-    {"title", "description", "examples", "$comment"}
-)
+_DISPLAY_ONLY_SCHEMA_KEYS = frozenset({"title", "description", "examples", "$comment"})
 
 
 def _normalize_validation_schema(value: Any) -> Any:
@@ -269,7 +271,9 @@ class EventSchemaDomainRegistry:
             )
         return binding
 
-    def latest_contract_for_type(self, event_type: str) -> EventSchemaDomainContractFact:
+    def latest_contract_for_type(
+        self, event_type: str
+    ) -> EventSchemaDomainContractFact:
         try:
             return self._latest_by_type[event_type].schema_contract
         except KeyError as exc:
@@ -328,7 +332,9 @@ def stable_event_identity(
     *,
     runtime_session_id: str,
 ) -> StableEventIdentityFact:
-    candidate = freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
+    candidate = freeze_event_write_candidate(
+        event.model_copy(update={"sequence": None})
+    )
     return build_frozen_fact(
         StableEventIdentityFact,
         schema_version="stable_event_identity.v2",
@@ -352,9 +358,7 @@ def decode_event_write_candidate(
         event_type=candidate.event_type,
         event_schema_version=candidate.event_schema_version,
         event_schema_fingerprint=candidate.event_schema_fingerprint,
-        event_domain_contract_fingerprint=(
-            candidate.event_domain_contract_fingerprint
-        ),
+        event_domain_contract_fingerprint=(candidate.event_domain_contract_fingerprint),
     )
     event = binding.decode_owned_payload(candidate.canonical_payload_bytes)
     if not isinstance(event, BaseModel):
@@ -399,3 +403,116 @@ def payload_sha256(payload: bytes) -> str:
 
 def canonical_event_created_at(event: AgentEvent) -> str:
     return canonical_utc_timestamp(event.created_at)
+
+
+def _raw_envelope_from_values(
+    *,
+    runtime_session_id: str,
+    event_id: str,
+    run_id: str,
+    turn_id: str,
+    reply_id: str,
+    sequence: int,
+    created_at_utc: str,
+    event_type: str,
+    event_schema_version: str,
+    event_schema_fingerprint: str,
+    event_domain_contract_fingerprint: str,
+    canonical_payload: bytes,
+) -> RawStoredEventEnvelope:
+    values = {
+        "stored_envelope_version": STORED_EVENT_ENVELOPE_VERSION,
+        "event_id": event_id,
+        "runtime_session_id": runtime_session_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "reply_id": reply_id,
+        "sequence": sequence,
+        "created_at_utc": canonical_utc_timestamp(created_at_utc),
+        "event_type": event_type,
+        "event_schema_version": event_schema_version,
+        "event_schema_fingerprint": event_schema_fingerprint,
+        "event_domain_contract_fingerprint": event_domain_contract_fingerprint,
+        "canonical_payload_bytes": canonical_payload,
+        "payload_fingerprint": payload_sha256(canonical_payload),
+    }
+    return RawStoredEventEnvelope(
+        **values,
+        envelope_fingerprint=context_fingerprint(
+            "stored-agent-event-envelope:v1",
+            {
+                key: value
+                for key, value in values.items()
+                if key != "canonical_payload_bytes"
+            },
+        ),
+    )
+
+
+def build_raw_stored_event_envelope(
+    *,
+    event: AgentEvent,
+    runtime_session_id: str,
+    schema_registry: EventSchemaDomainRegistry = DEFAULT_EVENT_SCHEMA_REGISTRY,
+) -> RawStoredEventEnvelope:
+    """Encode a committed event exactly once at the current writer boundary."""
+
+    if event.sequence is None or event.sequence < 1:
+        raise ValueError("raw stored envelope requires a committed event")
+    contract = schema_registry.resolve_for_event(event).schema_contract
+    payload = canonical_event_payload_bytes(event)
+    return _raw_envelope_from_values(
+        runtime_session_id=runtime_session_id,
+        event_id=event.id,
+        run_id=event.run_id,
+        turn_id=event.turn_id,
+        reply_id=event.reply_id,
+        sequence=event.sequence,
+        created_at_utc=canonical_event_created_at(event),
+        event_type=str(event.type),
+        event_schema_version=contract.event_schema_version,
+        event_schema_fingerprint=contract.event_schema_fingerprint,
+        event_domain_contract_fingerprint=contract.domain_contract_fingerprint,
+        canonical_payload=payload,
+    )
+
+
+def hydrate_raw_stored_event_envelope_from_row(
+    row: Mapping[str, Any],
+) -> RawStoredEventEnvelope:
+    """Hydrate canonical row bytes without an AgentEvent encode round-trip."""
+
+    schema_identity = (
+        row.get("event_schema_version"),
+        row.get("event_schema_fingerprint"),
+        row.get("event_domain_contract_fingerprint"),
+    )
+    if any(value is None or not str(value) for value in schema_identity):
+        raise EventSchemaContractMismatch(
+            "stored event row lacks explicit per-event schema identity"
+        )
+    payload_value = row["payload"]
+    if isinstance(payload_value, bytes):
+        payload = payload_value
+    elif isinstance(payload_value, str):
+        payload = canonical_json_bytes(json.loads(payload_value))
+    else:
+        payload = canonical_json_bytes(payload_value)
+    created = row["created_at"]
+    created_text = (
+        created.isoformat() if hasattr(created, "isoformat") else str(created)
+    )
+    return _raw_envelope_from_values(
+        runtime_session_id=str(row["session_id"]),
+        event_id=str(row["id"]),
+        run_id=str(row["run_id"]),
+        turn_id=str(row["turn_id"]),
+        reply_id=str(row["reply_id"]),
+        sequence=int(row["sequence"]),
+        created_at_utc=created_text,
+        event_type=str(row["event_type"]),
+        event_schema_version=str(row["event_schema_version"]),
+        event_schema_fingerprint=str(row["event_schema_fingerprint"]),
+        event_domain_contract_fingerprint=str(row["event_domain_contract_fingerprint"]),
+        canonical_payload=payload,
+    )

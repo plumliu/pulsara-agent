@@ -174,7 +174,8 @@ def test_all_production_model_lifecycle_callers_supply_provider_input() -> None:
             "prepare_model_lifecycle_start_bundle",
         ),
         (
-            ROOT / "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+            ROOT
+            / "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
             "prepare_model_lifecycle_start_bundle",
         ),
         (
@@ -256,9 +257,9 @@ def test_provider_input_generation_hard_cut_has_no_remote_or_clock_ingress() -> 
 
         pure_modules = (
             ROOT / "src/pulsara_agent/llm/provider_input_materialization.py",
-        ROOT / "src/pulsara_agent/runtime/provider_input/planner.py",
-        ROOT / "src/pulsara_agent/runtime/provider_input/vector.py",
-    )
+            ROOT / "src/pulsara_agent/runtime/provider_input/planner.py",
+            ROOT / "src/pulsara_agent/runtime/provider_input/vector.py",
+        )
     for path in pure_modules:
         text = path.read_text(encoding="utf-8")
         assert "utc_now(" not in text
@@ -371,7 +372,8 @@ def test_provider_input_causal_order_hard_cut_cannot_regress() -> None:
     rollover = next(
         node
         for node in ast.walk(planner_tree)
-        if isinstance(node, ast.ClassDef) and node.name == "ProviderInputRolloverRequired"
+        if isinstance(node, ast.ClassDef)
+        and node.name == "ProviderInputRolloverRequired"
     )
     initializer = next(
         node

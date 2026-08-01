@@ -29,10 +29,7 @@ def jsonld_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return [jsonld_value(item) for item in value]
     if isinstance(value, dict):
-        return {
-            _key_name(key): jsonld_value(item)
-            for key, item in value.items()
-        }
+        return {_key_name(key): jsonld_value(item) for key, item in value.items()}
     return value
 
 

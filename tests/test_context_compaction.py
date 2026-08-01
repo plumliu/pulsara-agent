@@ -78,6 +78,7 @@ from tests.support import (
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from tests.support.model_call import model_call_end_fields, model_call_start_fields
+from tests.support.event_write import committed_event_write_result_fixture
 from tests.support.host import component_test_host_core
 from tests.support.mcp import (
     queue_ready_test_mcp_candidate,
@@ -392,23 +393,24 @@ class _CompactionRuntimeSessionTestFacade:
         publication_terminal_maintenance_lease=None,
     ) -> EventWriteResult:
         del deadline_monotonic, state, publication_terminal_maintenance_lease
-        stored_events = []
-        for event in events:
-            existing = self.event_log.get_by_id(event.id)
-            stored_events.append(
-                existing if existing is not None else self.event_log.append(event)
+        candidates = tuple(events)
+        confirmation = self.event_log.confirm_stored_batch(candidates)
+        if confirmation.disposition == "full":
+            assert confirmation.confirmed_full_batch is not None
+            receipt = confirmation.confirmed_full_batch.receipt
+        elif confirmation.disposition == "none":
+            receipt = self.event_log.commit_batch(candidates)
+        else:
+            raise AssertionError(
+                "compaction fixture requires an exact FULL or NONE batch; "
+                f"got {confirmation.disposition}"
             )
-        assert stored_events
-        assert stored_events[-1].sequence is not None
-        return EventWriteResult(
-            committed_events=tuple(stored_events),
-            commit_status="committed",
-            reducer_high_waters={},
-            reconciliation_required=False,
-            reducer_errors=(),
-            publication_status="completed",
+        stored_events = receipt.owned_stored_events
+        return committed_event_write_result_fixture(
+            stored_events,
+            runtime_session_id=self.runtime_session_id,
+            receipt=receipt,
             publisher_enqueued_through_sequence=stored_events[-1].sequence,
-            publication_errors=(),
         )
 
 
@@ -1475,16 +1477,13 @@ def test_compaction_confirmation_failure_transfers_late_commit_owner() -> None:
             del deadline_monotonic, state, publication_terminal_maintenance_lease
             entered.set()
             await release.wait()
-            stored = log.append(event)
-            return EventWriteResult(
-                committed_events=(stored,),
-                commit_status="committed",
-                reducer_high_waters={},
-                reconciliation_required=False,
-                reducer_errors=(),
-                publication_status="completed",
+            receipt = log.commit_batch((event,))
+            stored = receipt.owned_stored_events[0]
+            return committed_event_write_result_fixture(
+                (stored,),
+                runtime_session_id=log.runtime_session_id,
+                receipt=receipt,
                 publisher_enqueued_through_sequence=stored.sequence,
-                publication_errors=(),
             )
 
         def confirm_event_batch(self, _events):

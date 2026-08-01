@@ -41,7 +41,10 @@ from pulsara_agent.runtime.subagent.facts import (
     subagent_dependency_generation,
 )
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
-from pulsara_agent.runtime.subagent.reducer import apply_subagent_event, fold_subagent_graph
+from pulsara_agent.runtime.subagent.reducer import (
+    apply_subagent_event,
+    fold_subagent_graph,
+)
 
 
 CTX = EventContext(run_id="run:parent", turn_id="turn:parent", reply_id="reply:parent")
@@ -75,7 +78,11 @@ def _capability() -> dict[str, object]:
         "inherited_from_parent_context_id": None,
         "permission_mode": PermissionMode.READ_ONLY.value,
         "permission_policy": preset_to_policy(PermissionMode.READ_ONLY).to_dict(),
-        "allowed_tool_names": ["artifact_read", "report_agent_phase", "report_agent_result"],
+        "allowed_tool_names": [
+            "artifact_read",
+            "report_agent_phase",
+            "report_agent_result",
+        ],
         "allowed_descriptor_ids": [],
         "allowed_skill_names": [],
         "allowed_mcp_server_ids": [],
@@ -97,13 +104,13 @@ def _budget() -> dict[str, object]:
         "max_result_summary_chars_per_child": 4_000,
         "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
-        "child_rollout_policy": default_child_rollout_policy().model_dump(
-            mode="json"
-        ),
+        "child_rollout_policy": default_child_rollout_policy().model_dump(mode="json"),
     }
 
 
-def _task_created(task_id: str, *, depends_on: list[str] | None = None) -> SubagentTaskCreatedEvent:
+def _task_created(
+    task_id: str, *, depends_on: list[str] | None = None
+) -> SubagentTaskCreatedEvent:
     return SubagentTaskCreatedEvent(
         **CTX.event_fields(),
         task_id=task_id,
@@ -492,8 +499,18 @@ def _generated_legal_subagent_streams(*, seed: int) -> tuple[list[AgentEvent], .
 
 def _normalized_state(state: SubagentGraphState) -> tuple[object, ...]:
     return (
-        tuple(sorted((item.task_id, item.status, item.result_id) for item in state.tasks.values())),
-        tuple(sorted((item.subagent_run_id, item.status, item.result_id) for item in state.runs.values())),
+        tuple(
+            sorted(
+                (item.task_id, item.status, item.result_id)
+                for item in state.tasks.values()
+            )
+        ),
+        tuple(
+            sorted(
+                (item.subagent_run_id, item.status, item.result_id)
+                for item in state.runs.values()
+            )
+        ),
         tuple(sorted(state.results)),
         tuple(sorted(state.deliveries)),
         tuple(
@@ -508,9 +525,7 @@ def _normalized_state(state: SubagentGraphState) -> tuple[object, ...]:
 def _normalized_projection(state: SubagentGraphState) -> tuple[object, ...]:
     projection = project_subagent_graph("runtime:parent", state)
     result_ids = {
-        node.result_id
-        for node in projection.nodes
-        if node.result_id is not None
+        node.result_id for node in projection.nodes if node.result_id is not None
     }
     delivered = {
         node.result_id
@@ -525,11 +540,22 @@ def _normalized_projection(state: SubagentGraphState) -> tuple[object, ...]:
         (None, node.subagent_run_id, node.result_id)
         for node in projection.nodes
         if node.consumed_by_wait
-        and not any(task.current_run_id == node.subagent_run_id for task in projection.tasks)
+        and not any(
+            task.current_run_id == node.subagent_run_id for task in projection.tasks
+        )
     }
     return (
-        tuple(sorted((task.task_id, task.status, task.result_id) for task in projection.tasks)),
-        tuple(sorted((node.subagent_run_id, node.status, node.result_id) for node in projection.nodes)),
+        tuple(
+            sorted(
+                (task.task_id, task.status, task.result_id) for task in projection.tasks
+            )
+        ),
+        tuple(
+            sorted(
+                (node.subagent_run_id, node.status, node.result_id)
+                for node in projection.nodes
+            )
+        ),
         tuple(sorted(result_ids)),
         tuple(sorted(delivered)),
         tuple(sorted(consumed, key=lambda item: tuple(value or "" for value in item))),
@@ -556,7 +582,9 @@ def test_reducer_state_and_nested_dependency_facts_are_immutable() -> None:
         state.tasks["task:a"].dependency_status_snapshot["task:injected"] = "failed"  # type: ignore[index]
 
 
-def test_reducer_recursively_freezes_capability_snapshot_and_convenience_value() -> None:
+def test_reducer_recursively_freezes_capability_snapshot_and_convenience_value() -> (
+    None
+):
     stored = _StoredEvents()
     event = _run_started("subagent_run:immutable-profile")
     event = event.model_copy(
@@ -736,7 +764,9 @@ def test_reducer_transitive_blocker_snapshot_uses_planned_status() -> None:
             blocked_by_task_ids=["task:b"],
             dependency_status_snapshot={"task:b": "blocked_dependency_failed"},
             dependency_terminal_event_ids={"task:b": blocked_b.id},
-            dependency_generation=subagent_dependency_generation({"task:b": blocked_b.id}),
+            dependency_generation=subagent_dependency_generation(
+                {"task:b": blocked_b.id}
+            ),
         )
     )
     events.extend([failed, blocked_b, blocked_c])
@@ -745,14 +775,19 @@ def test_reducer_transitive_blocker_snapshot_uses_planned_status() -> None:
     assert state.tasks["task:c"].dependency_status_snapshot == {
         "task:b": "blocked_dependency_failed"
     }
-    assert state.tasks["task:c"].dependency_terminal_event_ids == {"task:b": blocked_b.id}
+    assert state.tasks["task:c"].dependency_terminal_event_ids == {
+        "task:b": blocked_b.id
+    }
 
 
 def test_reducer_run_started_message_enriches_spawn_edge() -> None:
     stored = _StoredEvents()
     run_id = "subagent_run:primitive"
     state = fold_subagent_graph(
-        [stored(_run_started(run_id)), stored(_message(run_id, artifact_id="artifact:task"))]
+        [
+            stored(_run_started(run_id)),
+            stored(_message(run_id, artifact_id="artifact:task")),
+        ]
     )
     assert state.consistent
     assert state.runs[run_id].task_artifact_id == "artifact:task"
@@ -993,10 +1028,7 @@ def test_reducer_rejects_run_terminal_session_attribution_mismatch() -> None:
         )
         assert not state.consistent
         assert state.runs[run_id].status == "running"
-        assert (
-            state.diagnostics[-1].code
-            == "subagent_task_run_attribution_mismatch"
-        )
+        assert state.diagnostics[-1].code == "subagent_task_run_attribution_mismatch"
 
 
 def test_reducer_rejects_runtime_and_child_run_attribution_drift() -> None:
@@ -1135,10 +1167,7 @@ def test_reducer_rejects_result_summary_and_source_cross_event_drift() -> None:
     )
     assert not delivery_state.consistent
     assert "result:a" not in delivery_state.deliveries
-    assert (
-        delivery_state.diagnostics[-1].code
-        == "subagent_result_cross_event_mismatch"
-    )
+    assert delivery_state.diagnostics[-1].code == "subagent_result_cross_event_mismatch"
 
     completed_run_prefix = _full_task_stream()[:-1]
     wrong_source_task_completion = SubagentTaskCompletedEvent(
@@ -1166,7 +1195,9 @@ def test_reducer_duplicate_event_id_is_idempotent() -> None:
 
 
 def test_reducer_rejects_known_event_id_at_new_sequence() -> None:
-    event = _run_started("subagent_run:sequence-reuse").model_copy(update={"sequence": 1})
+    event = _run_started("subagent_run:sequence-reuse").model_copy(
+        update={"sequence": 1}
+    )
     state = apply_subagent_event(SubagentGraphState.empty(), event)
 
     state = apply_subagent_event(state, event.model_copy(update={"sequence": 2}))
@@ -1234,9 +1265,9 @@ def test_reducer_rejects_spawn_and_message_edge_identity_collisions() -> None:
     run_a = stored(_run_started("subagent_run:message-edge-a"))
     run_b = stored(_run_started("subagent_run:message-edge-b"))
     conflicting_message = stored(
-        _message("subagent_run:message-edge-b", artifact_id="artifact:wrong-owner").model_copy(
-            update={"edge_id": "edge:subagent_run:message-edge-a:spawn"}
-        )
+        _message(
+            "subagent_run:message-edge-b", artifact_id="artifact:wrong-owner"
+        ).model_copy(update={"edge_id": "edge:subagent_run:message-edge-a:spawn"})
     )
     message_state = fold_subagent_graph([run_a, run_b, conflicting_message])
     assert not message_state.consistent
@@ -1274,10 +1305,7 @@ def test_reducer_running_task_terminal_requires_matching_terminal_owning_run() -
     assert not live_run_state.consistent
     assert live_run_state.tasks[task_id].status == "running"
     assert live_run_state.runs[run_id].status == "running"
-    assert (
-        live_run_state.diagnostics[-1].code
-        == "subagent_task_terminal_run_mismatch"
-    )
+    assert live_run_state.diagnostics[-1].code == "subagent_task_terminal_run_mismatch"
 
     run_failed = SubagentRunFailedEvent(
         **CTX.event_fields(),

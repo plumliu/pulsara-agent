@@ -134,11 +134,15 @@ from pulsara_agent.runtime.mcp.subscriptions import (
 DEFAULT_MCP_MAX_PAGES = 20
 DEFAULT_MCP_MAX_ITEMS = 2_000
 DEFAULT_MCP_INPUT_REQUIRED_TIMEOUT_SECONDS = 300.0
-_CALL_TOOL_RESULT_ADAPTER = TypeAdapter(types.CallToolResult | types.InputRequiredResult)
+_CALL_TOOL_RESULT_ADAPTER = TypeAdapter(
+    types.CallToolResult | types.InputRequiredResult
+)
 _READ_RESOURCE_RESULT_ADAPTER = TypeAdapter(
     types.ReadResourceResult | types.InputRequiredResult
 )
-_GET_PROMPT_RESULT_ADAPTER = TypeAdapter(types.GetPromptResult | types.InputRequiredResult)
+_GET_PROMPT_RESULT_ADAPTER = TypeAdapter(
+    types.GetPromptResult | types.InputRequiredResult
+)
 
 _SAFE_AMBIENT_ENV = {
     "HOME",
@@ -177,9 +181,9 @@ class _SdkServerConnection:
         default=None,
         repr=False,
     )
-    protocol_binding: (
-        McpSdkNegotiatedProtocolBinding | McpSdkProtocolBinding | None
-    ) = None
+    protocol_binding: McpSdkNegotiatedProtocolBinding | McpSdkProtocolBinding | None = (
+        None
+    )
     client_generation: McpSdkConformedClientGeneration | None = field(
         default=None,
         repr=False,
@@ -461,8 +465,12 @@ class SdkMcpClientManager(McpClientManager):
     max_pages: int = DEFAULT_MCP_MAX_PAGES
     max_items: int = DEFAULT_MCP_MAX_ITEMS
     _closed: bool = False
-    _active_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
-    _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _active_tasks: set[asyncio.Task[Any]] = field(
+        default_factory=set, init=False, repr=False
+    )
+    _close_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
     _wire_borrows: McpContinuationSecretBorrowIssuer = field(
         default_factory=lambda: McpContinuationSecretBorrowIssuer(
             f"mcp-sdk-wire:{uuid4().hex}"
@@ -485,10 +493,7 @@ class SdkMcpClientManager(McpClientManager):
         connection._closed = True  # ownership moves into the manager
         binding = raw.protocol_binding
         generation = raw.client_generation
-        if (
-            not isinstance(binding, McpSdkProtocolBinding)
-            or generation is None
-        ):
+        if not isinstance(binding, McpSdkProtocolBinding) or generation is None:
             raise RuntimeError("MCP manager requires a complete client generation")
         if (
             generation.sdk_protocol_binding is not binding
@@ -599,7 +604,10 @@ class SdkMcpClientManager(McpClientManager):
             connection.protocol_binding.protocol_semantic.behavior_era
             is McpProtocolBehaviorEra.STATELESS_PER_REQUEST
         )
-        if capabilities is not None and getattr(capabilities, "tools", None) is not None:
+        if (
+            capabilities is not None
+            and getattr(capabilities, "tools", None) is not None
+        ):
             discovery_operations.append(
                 (
                     "tools",
@@ -616,7 +624,10 @@ class SdkMcpClientManager(McpClientManager):
                     ),
                 )
             )
-        if capabilities is not None and getattr(capabilities, "resources", None) is not None:
+        if (
+            capabilities is not None
+            and getattr(capabilities, "resources", None) is not None
+        ):
             discovery_operations.extend(
                 (
                     (
@@ -651,7 +662,10 @@ class SdkMcpClientManager(McpClientManager):
                     ),
                 )
             )
-        if capabilities is not None and getattr(capabilities, "prompts", None) is not None:
+        if (
+            capabilities is not None
+            and getattr(capabilities, "prompts", None) is not None
+        ):
             discovery_operations.append(
                 (
                     "prompts",
@@ -696,7 +710,7 @@ class SdkMcpClientManager(McpClientManager):
         )
         all_tool_facts_list: list[McpDiscoveredTool] = []
         tool_rejections: list[McpToolDiscoveryRejectionFact] = []
-        for item in (tool_capture.items if tool_capture is not None else ()):
+        for item in tool_capture.items if tool_capture is not None else ():
             try:
                 all_tool_facts_list.append(
                     _tool_from_sdk(
@@ -705,9 +719,7 @@ class SdkMcpClientManager(McpClientManager):
                         source_page_receipt_fingerprint=(
                             item.source_page.page_receipt_fingerprint
                         ),
-                        listing_generation_fingerprint=(
-                            listing_generation_fingerprint
-                        ),
+                        listing_generation_fingerprint=(listing_generation_fingerprint),
                     )
                 )
             except McpSchemaContractError as exc:
@@ -745,9 +757,7 @@ class SdkMcpClientManager(McpClientManager):
         )
         resource_facts = tuple(
             _resource_from_sdk(config.server_id, item.value)
-            for item in (
-                captures["resources"].items if "resources" in captures else ()
-            )
+            for item in (captures["resources"].items if "resources" in captures else ())
         )
         template_facts = tuple(
             _resource_template_from_sdk(config.server_id, item.value)
@@ -848,7 +858,9 @@ class SdkMcpClientManager(McpClientManager):
                 discovery_ended_at_utc=ended_at_utc,
                 completed_at_utc=ended_at_utc,
                 connect_duration_seconds=connect_duration_seconds,
-                discovery_duration_seconds=max(0.0, ended_monotonic - discovery_started_monotonic),
+                discovery_duration_seconds=max(
+                    0.0, ended_monotonic - discovery_started_monotonic
+                ),
                 total_duration_seconds=max(0.0, ended_monotonic - queued_monotonic),
             ),
         )
@@ -923,7 +935,9 @@ class SdkMcpClientManager(McpClientManager):
                 resolved_ttl_ms=max(0, int(raw_ttl_ms or 0)),
                 raw_cache_scope=raw_cache_scope,
                 resolved_cache_scope=(
-                    raw_cache_scope if raw_cache_scope in {"public", "private"} else "private"
+                    raw_cache_scope
+                    if raw_cache_scope in {"public", "private"}
+                    else "private"
                 ),
                 hint_disposition=(
                     "negative_normalized"
@@ -1080,8 +1094,7 @@ class SdkMcpClientManager(McpClientManager):
                 operation_deadline_monotonic=(
                     operation_deadline_monotonic
                     if operation_deadline_monotonic is not None
-                    else time.monotonic()
-                    + DEFAULT_MCP_INPUT_REQUIRED_TIMEOUT_SECONDS
+                    else time.monotonic() + DEFAULT_MCP_INPUT_REQUIRED_TIMEOUT_SECONDS
                 ),
                 commitment_key_id=(
                     binding.commitment_key_id if binding is not None else "disabled"
@@ -1109,11 +1122,11 @@ class SdkMcpClientManager(McpClientManager):
             endpoint = connection.endpoint_attribution
             auth = connection.auth_attribution
             if protocol is None or endpoint is None or auth is None:
-                raise RuntimeError("MCP input-required result lacks negotiation authority")
+                raise RuntimeError(
+                    "MCP input-required result lacks negotiation authority"
+                )
             return McpClientInputRequired(
-                interaction_id=(
-                    interaction_id or f"mcp_input_required:{uuid4().hex}"
-                ),
+                interaction_id=(interaction_id or f"mcp_input_required:{uuid4().hex}"),
                 server_id=connection.config.server_id,
                 exact_protocol_revision=protocol.protocol_semantic.protocol_revision,
                 protocol_semantic_fingerprint=(
@@ -1241,7 +1254,9 @@ class SdkMcpClientManager(McpClientManager):
 
             refreshed_authority = refreshed.authority
             if refreshed_authority is None:
-                raise RuntimeError("MCP freshness revalidation lacks refreshed authority")
+                raise RuntimeError(
+                    "MCP freshness revalidation lacks refreshed authority"
+                )
             receipt = build_mcp_freshness_revalidation_receipt(
                 physical_operation_id=physical_operation_id,
                 server_id=connection.config.server_id,
@@ -1288,8 +1303,7 @@ class SdkMcpClientManager(McpClientManager):
                 freshness_generation = connection.freshness_generation
                 allow_expired = (
                     connection.freshness_deadline_monotonic is not None
-                    and time.monotonic()
-                    >= connection.freshness_deadline_monotonic
+                    and time.monotonic() >= connection.freshness_deadline_monotonic
                 )
             return _McpDispatchFreshnessPermit(
                 receipt=receipt,
@@ -1391,7 +1405,11 @@ class SdkMcpClientManager(McpClientManager):
         result, operation_id = driven
         if not isinstance(result, types.CallToolResult):
             return McpToolResult(
-                output=json.dumps(result.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2),
+                output=json.dumps(
+                    result.model_dump(mode="json", by_alias=True),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 metadata={"mcp_result_type": type(result).__name__},
             )
         raw_carrier = build_raw_tool_call_result_carrier(
@@ -1438,8 +1456,7 @@ class SdkMcpClientManager(McpClientManager):
                 timeout_ms=timeout_ms,
             ),
             name=(
-                "pulsara-mcp-resource-read:"
-                f"{binding_lease.binding_identity.server_id}"
+                f"pulsara-mcp-resource-read:{binding_lease.binding_identity.server_id}"
             ),
         )
 
@@ -1598,9 +1615,7 @@ class SdkMcpClientManager(McpClientManager):
         )
         if remaining_operation_seconds <= 0:
             raise TimeoutError("MCP continuation expired before physical dispatch")
-        operation_deadline_monotonic = (
-            time.monotonic() + remaining_operation_seconds
-        )
+        operation_deadline_monotonic = time.monotonic() + remaining_operation_seconds
         timeout_ms = min(
             timeout_ms,
             max(1, int(remaining_operation_seconds * 1000)),
@@ -1713,8 +1728,7 @@ class SdkMcpClientManager(McpClientManager):
             capabilities.prompts is not None and capabilities.prompts.list_changed
         )
         resources_changed = bool(
-            capabilities.resources is not None
-            and capabilities.resources.list_changed
+            capabilities.resources is not None and capabilities.resources.list_changed
         )
         if not (tools_changed or prompts_changed or resources_changed):
             return
@@ -1819,7 +1833,9 @@ class SdkMcpClientManager(McpClientManager):
                 timeout=max(0.001, deadline - time.monotonic()),
             )
         except TimeoutError as exc:
-            raise McpDrainError("timed out waiting for MCP SDK close ownership") from exc
+            raise McpDrainError(
+                "timed out waiting for MCP SDK close ownership"
+            ) from exc
         try:
             if self._closed:
                 return
@@ -1851,7 +1867,9 @@ class SdkMcpClientManager(McpClientManager):
                         timeout=max(0.001, deadline - time.monotonic()),
                     )
                 except TimeoutError as exc:
-                    raise McpDrainError("timed out draining active MCP SDK calls") from exc
+                    raise McpDrainError(
+                        "timed out draining active MCP SDK calls"
+                    ) from exc
             for server_id in tuple(self._connections):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1954,9 +1972,7 @@ def _build_sdk_client(
 ) -> tuple[Client, httpx2.AsyncClient | None]:
     transport = config.transport
     elicitation_callback = (
-        _reject_standalone_elicitation
-        if client_input_binding is not None
-        else None
+        _reject_standalone_elicitation if client_input_binding is not None else None
     )
     if isinstance(transport, McpStdioConfig):
         env = _safe_child_env(dict(transport.env))
@@ -2032,7 +2048,9 @@ async def _install_stable_negotiation_authority(
         raw_result = await connection.client.session.send_discover(revision)
         discover_result = types.DiscoverResult.model_validate(raw_result)
         if revision not in discover_result.supported_versions:
-            raise RuntimeError("final MCP discover dropped negotiated protocol revision")
+            raise RuntimeError(
+                "final MCP discover dropped negotiated protocol revision"
+            )
         connection.client.session.adopt(discover_result)
         receipt = build_mcp_protocol_fact(
             McpFinalDiscoverWireReceiptFact,
@@ -2257,7 +2275,12 @@ def _build_auth_attribution(
         client_identity_fingerprint=None,
         effective_scope_fingerprint=context_fingerprint(
             "mcp-auth-scope:v1",
-            tuple(sorted(key.casefold() for key in (*transport.headers, *transport.env_headers))),
+            tuple(
+                sorted(
+                    key.casefold()
+                    for key in (*transport.headers, *transport.env_headers)
+                )
+            ),
         )
         if auth_kind != "none"
         else None,
@@ -2523,7 +2546,9 @@ def _remaining_utc_seconds(value: str) -> float:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("MCP continuation expiry must be timezone-aware")
-    return (parsed.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+    return (
+        parsed.astimezone(timezone.utc) - datetime.now(timezone.utc)
+    ).total_seconds()
 
 
 async def _start_sdk_client_owner(
@@ -2633,9 +2658,7 @@ async def _mcp_operation_lane(
                 operation_id=operation_id,
             )
             permit_is_current = True
-            freshness_receipt_fingerprint = (
-                freshness_permit.receipt.receipt_fingerprint
-            )
+            freshness_receipt_fingerprint = freshness_permit.receipt.receipt_fingerprint
         deadline = connection.freshness_deadline_monotonic
         if (
             deadline is not None
@@ -2647,9 +2670,7 @@ async def _mcp_operation_lane(
             )
         ):
             was_clean = not connection.snapshot_dirty_reasons
-            connection.snapshot_dirty_reasons.add(
-                McpSnapshotDirtyReason.TTL_EXPIRED
-            )
+            connection.snapshot_dirty_reasons.add(McpSnapshotDirtyReason.TTL_EXPIRED)
             if was_clean:
                 dirty_signal = _build_dirty_signal(connection)
         dirty_reasons = _dirty_reason_values(connection)
@@ -2835,7 +2856,9 @@ def _http_headers(transport: McpStreamableHttpConfig) -> dict[str, str]:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         else:
-            raise RuntimeError(f"missing bearer token env var {transport.bearer_token_env_var}")
+            raise RuntimeError(
+                f"missing bearer token env var {transport.bearer_token_env_var}"
+            )
     return headers
 
 
@@ -2886,10 +2909,18 @@ def _tool_from_sdk(
         description=tool.description or tool.name,
         input_schema=thaw_json(conformed.semantic.input_schema),
         annotations=McpToolAnnotations(
-            read_only_hint=getattr(annotations, "read_only_hint", None) if annotations is not None else None,
-            destructive_hint=getattr(annotations, "destructive_hint", None) if annotations is not None else None,
-            open_world_hint=getattr(annotations, "open_world_hint", None) if annotations is not None else None,
-            title=getattr(annotations, "title", None) if annotations is not None else None,
+            read_only_hint=getattr(annotations, "read_only_hint", None)
+            if annotations is not None
+            else None,
+            destructive_hint=getattr(annotations, "destructive_hint", None)
+            if annotations is not None
+            else None,
+            open_world_hint=getattr(annotations, "open_world_hint", None)
+            if annotations is not None
+            else None,
+            title=getattr(annotations, "title", None)
+            if annotations is not None
+            else None,
         ),
         title=tool.title,
         output_schema=(
@@ -2903,7 +2934,9 @@ def _tool_from_sdk(
     )
 
 
-def _resource_from_sdk(server_id: str, resource: types.Resource) -> McpDiscoveredResource:
+def _resource_from_sdk(
+    server_id: str, resource: types.Resource
+) -> McpDiscoveredResource:
     semantic = build_mcp_protocol_fact(
         McpResourceSemanticFact,
         schema_version="mcp_resource_semantic.v1",
@@ -3036,7 +3069,9 @@ def mcp_tool_result_from_sdk(
     if structured_content_present is None:
         structured_content_present = "structured_content" in result.model_fields_set
     if structured_content_present:
-        structured_text = json.dumps(result.structured_content, ensure_ascii=False, indent=2, sort_keys=True)
+        structured_text = json.dumps(
+            result.structured_content, ensure_ascii=False, indent=2, sort_keys=True
+        )
         output_parts.append(f"[structured_content]\n{structured_text}")
         artifacts.append(
             McpContentArtifact(
@@ -3063,7 +3098,9 @@ def mcp_tool_result_from_sdk(
     )
 
 
-def mcp_read_resource_result_from_sdk(result: types.ReadResourceResult) -> McpToolResult:
+def mcp_read_resource_result_from_sdk(
+    result: types.ReadResourceResult,
+) -> McpToolResult:
     output_parts: list[str] = []
     artifacts: list[McpContentArtifact] = []
     for index, content in enumerate(result.contents):
@@ -3087,11 +3124,17 @@ def mcp_read_resource_result_from_sdk(result: types.ReadResourceResult) -> McpTo
                     metadata={"uri": content.uri, "mcp_content_kind": "blob_resource"},
                 )
             )
-            output_parts.append(f"[resource_blob:{content.uri}] {len(data)} bytes archived")
+            output_parts.append(
+                f"[resource_blob:{content.uri}] {len(data)} bytes archived"
+            )
     return McpToolResult(
-        output="\n\n".join(output_parts).strip() or "[MCP resource contained no model-visible text.]",
+        output="\n\n".join(output_parts).strip()
+        or "[MCP resource contained no model-visible text.]",
         artifacts=tuple(artifacts),
-        metadata={"mcp_result_type": "ReadResourceResult", "mcp_content_count": len(result.contents)},
+        metadata={
+            "mcp_result_type": "ReadResourceResult",
+            "mcp_content_count": len(result.contents),
+        },
     )
 
 
@@ -3108,7 +3151,10 @@ def mcp_get_prompt_result_from_sdk(result: types.GetPromptResult) -> McpToolResu
                 metadata={"mcp_content_kind": "prompt"},
             ),
         ),
-        metadata={"mcp_result_type": "GetPromptResult", "mcp_message_count": len(result.messages)},
+        metadata={
+            "mcp_result_type": "GetPromptResult",
+            "mcp_message_count": len(result.messages),
+        },
     )
 
 
@@ -3148,7 +3194,9 @@ def _append_content(
         return
     if isinstance(item, types.ResourceLink):
         payload = item.model_dump(mode="json", by_alias=True, exclude_none=True)
-        output_parts.append("[resource_link]\n" + json.dumps(payload, ensure_ascii=False, indent=2))
+        output_parts.append(
+            "[resource_link]\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+        )
         return
     if isinstance(item, types.EmbeddedResource):
         resource = item.resource
@@ -3159,7 +3207,10 @@ def _append_content(
                     role=f"{role_prefix}_embedded_resource",
                     media_type=resource.mime_type or "text/plain; charset=utf-8",
                     text=resource.text,
-                    metadata={"uri": resource.uri, "mcp_content_kind": "embedded_text_resource"},
+                    metadata={
+                        "uri": resource.uri,
+                        "mcp_content_kind": "embedded_text_resource",
+                    },
                 )
             )
         else:
@@ -3169,10 +3220,15 @@ def _append_content(
                     role=f"{role_prefix}_embedded_resource",
                     media_type=resource.mime_type or "application/octet-stream",
                     data=data,
-                    metadata={"uri": resource.uri, "mcp_content_kind": "embedded_blob_resource"},
+                    metadata={
+                        "uri": resource.uri,
+                        "mcp_content_kind": "embedded_blob_resource",
+                    },
                 )
             )
-            output_parts.append(f"[embedded_resource_blob:{resource.uri}] {len(data)} bytes archived")
+            output_parts.append(
+                f"[embedded_resource_blob:{resource.uri}] {len(data)} bytes archived"
+            )
 
 
 def _decode_base64(value: str) -> bytes:
@@ -3201,7 +3257,9 @@ def _generation() -> int:
 
 
 def _is_missing_auth(config: McpServerConfig, exc: Exception) -> bool:
-    return isinstance(config.transport, McpStreamableHttpConfig) and "missing bearer token" in str(exc)
+    return isinstance(
+        config.transport, McpStreamableHttpConfig
+    ) and "missing bearer token" in str(exc)
 
 
 def _redact_diagnostic(message: str, config: McpServerConfig) -> str:
@@ -3218,7 +3276,10 @@ def _redact_diagnostic(message: str, config: McpServerConfig) -> str:
         for value in transport.headers.values():
             if value:
                 redacted = redacted.replace(value, "<redacted>")
-        for env_var in [transport.bearer_token_env_var, *transport.env_headers.values()]:
+        for env_var in [
+            transport.bearer_token_env_var,
+            *transport.env_headers.values(),
+        ]:
             if env_var:
                 token = os.getenv(env_var)
                 if token:
@@ -3238,12 +3299,15 @@ def _redact_url(url: str) -> str:
     if parsed.username or parsed.password:
         host = f"<redacted-userinfo>@{host}"
     suffix = "<redacted-query-or-fragment>" if parsed.query or parsed.fragment else ""
-    return urlunsplit(
-        SplitResult(
-            scheme=parsed.scheme,
-            netloc=host,
-            path=parsed.path,
-            query="",
-            fragment="",
+    return (
+        urlunsplit(
+            SplitResult(
+                scheme=parsed.scheme,
+                netloc=host,
+                path=parsed.path,
+                query="",
+                fragment="",
+            )
         )
-    ) + suffix
+        + suffix
+    )

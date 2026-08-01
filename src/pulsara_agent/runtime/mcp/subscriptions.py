@@ -28,12 +28,15 @@ class McpServerDirtySignal:
     def __post_init__(self) -> None:
         if not self.server_id or not self.snapshot_id:
             raise ValueError("MCP dirty signal identity is required")
-        if min(
-            self.config_epoch,
-            self.discovery_generation,
-            self.transport_generation,
-            self.signal_generation,
-        ) < 0:
+        if (
+            min(
+                self.config_epoch,
+                self.discovery_generation,
+                self.transport_generation,
+                self.signal_generation,
+            )
+            < 0
+        ):
             raise ValueError("MCP dirty signal generations must be non-negative")
         if not self.dirty_reasons:
             raise ValueError("MCP dirty signal requires at least one reason")

@@ -11,8 +11,9 @@ from tests.support.events import typed_non_transcript_event
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, PlanExitResolvedEvent
+import pulsara_agent.runtime.authority_materialization.checkpoint_service as checkpoint_service_module
+
 from pulsara_agent.event_log.protocol import (
-    RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
 )
 from pulsara_agent.primitives import context_fingerprint
@@ -180,16 +181,16 @@ def test_evidence_cursor_same_high_water_and_delta_extension(
         )
         semantic_high_water = runtime.event_log.next_sequence() - 1
         decode_count = 0
-        original_decode = RawStoredEventEnvelope.decode_owned
+        original_decode = checkpoint_service_module.decode_raw_stored_event_envelope
 
-        def recording_decode(self, *args, **kwargs):
+        def recording_decode(*args, **kwargs):
             nonlocal decode_count
             decode_count += 1
-            return original_decode(self, *args, **kwargs)
+            return original_decode(*args, **kwargs)
 
         monkeypatch.setattr(
-            RawStoredEventEnvelope,
-            "decode_owned",
+            checkpoint_service_module,
+            "decode_raw_stored_event_envelope",
             recording_decode,
         )
         semantic_extension = await service.prepare_projection_evidence(
@@ -199,7 +200,9 @@ def test_evidence_cursor_same_high_water_and_delta_extension(
             ProjectionEvidenceCursorOutcome.DELTA_EXTENSION
         )
         assert reads[-1] == (next_high_water, semantic_high_water)
-        assert decode_count == 1
+        # Cursor extension carries canonical envelopes and joins them against
+        # the already-folded live reducer; it must not decode the event again.
+        assert decode_count == 0
 
     asyncio.run(scenario())
     runtime.close()
@@ -625,10 +628,8 @@ def test_new_run_anchor_cannot_answer_older_high_water(tmp_path) -> None:
             event_context=second,
             assistant_text="second reply",
         )
-        evidence = await (
-            runtime.transcript_projection_checkpoint_service.prepare_projection_evidence(
-                requested_through_sequence=old_high_water
-            )
+        evidence = await runtime.transcript_projection_checkpoint_service.prepare_projection_evidence(
+            requested_through_sequence=old_high_water
         )
         assert evidence.cursor_outcome is (
             ProjectionEvidenceCursorOutcome.EXACT_RESTORE_ANCHOR_CHANGED
@@ -658,9 +659,7 @@ def test_delta_read_cancellation_preserves_previous_cursor(
         )
         service = runtime.transcript_projection_checkpoint_service
         high_water = runtime.event_log.next_sequence() - 1
-        await service.prepare_projection_evidence(
-            requested_through_sequence=high_water
-        )
+        await service.prepare_projection_evidence(requested_through_sequence=high_water)
         original_handle = service._verified_evidence_cursor_handle  # noqa: SLF001
         assert original_handle is not None
         await runtime.emit(

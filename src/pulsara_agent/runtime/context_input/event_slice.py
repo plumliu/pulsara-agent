@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -12,10 +14,14 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Protocol, Sequence, overload
 
 from pulsara_agent.event.events import AgentEvent
+from pulsara_agent.event_log.historical_decoder import (
+    decode_raw_stored_event_envelope,
+)
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
+
 from pulsara_agent.event_log.protocol import (
     EventLog,
     RawEventLogReadSnapshot,
-    RawStoredEventEnvelope,
 )
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -53,9 +59,7 @@ class FrozenStoredEvent:
     envelope_fingerprint: str
 
     @classmethod
-    def from_raw_envelope(
-        cls, envelope: RawStoredEventEnvelope
-    ) -> "FrozenStoredEvent":
+    def from_raw_envelope(cls, envelope: RawStoredEventEnvelope) -> "FrozenStoredEvent":
         instance = object.__new__(cls)
         object.__setattr__(instance, "event_id", envelope.event_id)
         object.__setattr__(instance, "event_type", envelope.event_type)
@@ -97,7 +101,7 @@ class FrozenStoredEvent:
         *,
         runtime_session_id: str = "context-event-reference",
     ) -> "FrozenStoredEvent":
-        envelope = RawStoredEventEnvelope.from_stored_event(
+        envelope = build_raw_stored_event_envelope(
             event=event,
             runtime_session_id=runtime_session_id,
             schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -111,7 +115,7 @@ class FrozenStoredEvent:
         self._validate()
         envelope = self.to_raw_envelope()
         try:
-            return envelope.decode_owned(registry)
+            return decode_raw_stored_event_envelope(envelope, registry)
         except Exception as exc:
             raise ContextEventSliceError("historical event decode failed") from exc
 
@@ -162,9 +166,7 @@ class ChunkedFrozenEvents(Sequence[FrozenStoredEvent]):
     length: int
 
     @classmethod
-    def from_events(
-        cls, events: Sequence[FrozenStoredEvent]
-    ) -> "ChunkedFrozenEvents":
+    def from_events(cls, events: Sequence[FrozenStoredEvent]) -> "ChunkedFrozenEvents":
         chunk = tuple(events)
         return cls(
             chunks=(chunk,) if chunk else (),
@@ -172,9 +174,7 @@ class ChunkedFrozenEvents(Sequence[FrozenStoredEvent]):
             length=len(chunk),
         )
 
-    def append(
-        self, events: Sequence[FrozenStoredEvent]
-    ) -> "ChunkedFrozenEvents":
+    def append(self, events: Sequence[FrozenStoredEvent]) -> "ChunkedFrozenEvents":
         chunk = tuple(events)
         if not chunk:
             return self
@@ -275,9 +275,7 @@ class ContextEventSlice:
         expected_sequence = self.from_sequence
         for event in events:
             if event.sequence != expected_sequence:
-                raise ContextEventSliceError(
-                    "event slice sequences are not contiguous"
-                )
+                raise ContextEventSliceError("event slice sequences are not contiguous")
             expected_sequence += 1
         if expected_sequence - 1 != self.through_sequence:
             raise ContextEventSliceError("event slice sequences are not contiguous")
@@ -286,9 +284,7 @@ class ContextEventSlice:
             raise ContextEventSliceError("event slice IDs are not unique")
         for event in self.events:
             event._validate()
-        id_hasher = _sequence_prefix_hasher(
-            "context-event-slice-ids:v1", ids
-        )
+        id_hasher = _sequence_prefix_hasher("context-event-slice-ids:v1", ids)
         payload_hasher = _sequence_prefix_hasher(
             "context-event-slice-payloads:v1",
             tuple(event.payload_fingerprint for event in events),
@@ -400,9 +396,7 @@ class ContextEventSlice:
             ),
         )
 
-    def extend_snapshot(
-        self, snapshot: RawEventLogReadSnapshot
-    ) -> "ContextEventSlice":
+    def extend_snapshot(self, snapshot: RawEventLogReadSnapshot) -> "ContextEventSlice":
         if not snapshot.events:
             raise ContextEventSliceError("context slice delta cannot be empty")
         if snapshot.events[0].sequence != self.through_sequence + 1:
@@ -414,7 +408,9 @@ class ContextEventSlice:
         )
         id_hasher = self._id_prefix_hasher.copy()
         payload_hasher = self._payload_prefix_hasher.copy()
-        _append_sequence_values(id_hasher, (event.event_id for event in appended), len(self.events))
+        _append_sequence_values(
+            id_hasher, (event.event_id for event in appended), len(self.events)
+        )
         _append_sequence_values(
             payload_hasher,
             (event.payload_fingerprint for event in appended),
@@ -590,9 +586,9 @@ class InMemoryContextAuthoritySliceCache:
         self._entries: OrderedDict[tuple[str, str, int], ContextEventSlice] = (
             OrderedDict()
         )
-        self._sparse_cursors: OrderedDict[
-            tuple[str, str], SparseAuthorityCursor
-        ] = OrderedDict()
+        self._sparse_cursors: OrderedDict[tuple[str, str], SparseAuthorityCursor] = (
+            OrderedDict()
+        )
         self._payload_bytes = 0
         self._lock = RLock()
 
@@ -603,9 +599,7 @@ class InMemoryContextAuthoritySliceCache:
                 self._entries.move_to_end(key)
             return value
 
-    def get_sparse_cursor(
-        self, key: tuple[str, str]
-    ) -> SparseAuthorityCursor | None:
+    def get_sparse_cursor(self, key: tuple[str, str]) -> SparseAuthorityCursor | None:
         with self._lock:
             value = self._sparse_cursors.get(key)
             if value is not None:
@@ -644,9 +638,7 @@ class InMemoryContextAuthoritySliceCache:
             self._entries.move_to_end(key)
             return value
 
-    def put(
-        self, key: tuple[str, str, int], value: ContextEventSlice
-    ) -> None:
+    def put(self, key: tuple[str, str, int], value: ContextEventSlice) -> None:
         payload_bytes = _slice_payload_bytes(value)
         if payload_bytes > self._max_payload_bytes:
             return

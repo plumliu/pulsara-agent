@@ -119,9 +119,7 @@ class DurableProjectionJobService:
     connection_provider: VerifiedPostgresConnectionProviderProtocol
     executable_registry: DurableProjectionExecutableRegistry
     session_driver_registry: ProcessCompactionMemoryExtractionDriverRegistry = field(
-        default_factory=lambda: (
-            PROCESS_COMPACTION_MEMORY_EXTRACTION_DRIVER_REGISTRY
-        )
+        default_factory=lambda: PROCESS_COMPACTION_MEMORY_EXTRACTION_DRIVER_REGISTRY
     )
     surface_handlers: tuple[CanonicalMutationSurfaceHandler, ...] = ()
     repository: PostgresDurableProjectionRepository = field(init=False)
@@ -258,13 +256,8 @@ class DurableProjectionJobService:
             self._dirty_authority_hints.append(
                 (published.runtime_session_id, projection_kind)
             )
-            if (
-                projection_kind
-                is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION
-            ):
-                self.session_driver_registry.mark_dirty(
-                    published.runtime_session_id
-                )
+            if projection_kind is DurableProjectionKind.COMPACTION_MEMORY_EXTRACTION:
+                self.session_driver_registry.mark_dirty(published.runtime_session_id)
         self._wake_count += 1
         self._wake_event.set()
 
@@ -604,9 +597,7 @@ class DurableProjectionJobService:
         try:
             lease_remaining = max(
                 0.0,
-                (
-                    lease.lease_expires_at - datetime.now(timezone.utc)
-                ).total_seconds(),
+                (lease.lease_expires_at - datetime.now(timezone.utc)).total_seconds(),
             )
             await borrow.driver.execute_leased_job(
                 lease,
@@ -673,8 +664,7 @@ class DurableProjectionJobService:
             DurableProjectionCommitConfirmation.CONFLICT,
         }:
             raise RuntimeError(
-                "session-model driver failure settlement was "
-                f"{confirmation.value}"
+                f"session-model driver failure settlement was {confirmation.value}"
             ) from error
 
     async def _execute_session_model_settlement(
@@ -687,7 +677,9 @@ class DurableProjectionJobService:
         )
         if job is None:
             raise ValueError("extraction settlement job disappeared")
-        runtime_session_id = job.candidate.job_semantic.source_event_reference.runtime_session_id
+        runtime_session_id = (
+            job.candidate.job_semantic.source_event_reference.runtime_session_id
+        )
         borrow = self.session_driver_registry.borrow(runtime_session_id)
         if borrow is None:
             failure = build_bounded_runtime_failure_diagnostic(
@@ -771,9 +763,7 @@ class DurableProjectionJobService:
         if schedule.next_eligible_at is not None:
             remaining = max(
                 0.001,
-                (
-                    schedule.next_eligible_at - schedule.database_now
-                ).total_seconds(),
+                (schedule.next_eligible_at - schedule.database_now).total_seconds(),
             )
             self.session_driver_registry.defer(
                 runtime_session_id,

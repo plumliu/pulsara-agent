@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from time import monotonic
 from typing import Protocol
 
@@ -84,8 +86,7 @@ def garbage_collect_transcript_projection_artifacts(
             deadline_monotonic=deadline
         )
         if account is not None and (
-            account.active_checkpoint_barrier is not None
-            or account.active_reservations
+            account.active_checkpoint_barrier is not None or account.active_reservations
         ):
             raise RuntimeError(
                 "transcript checkpoint GC requires a drained materialization account"
@@ -198,9 +199,7 @@ def garbage_collect_transcript_projection_artifacts(
                 "semantic_metadata_fingerprint"
             )
             if not isinstance(semantic_metadata_fingerprint, str):
-                raise RuntimeError(
-                    "transcript artifact lacks its maintenance identity"
-                )
+                raise RuntimeError("transcript artifact lacks its maintenance identity")
             removed = archive.delete_if_identity(
                 artifact_id,
                 session_id=runtime_session_id,
@@ -241,7 +240,8 @@ def _read_typed_catalog(
     if len(raw_events) > max_events:
         raise RuntimeError("transcript checkpoint GC catalog bound exceeded")
     decoded = tuple(
-        raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for raw in raw_events
+        decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+        for raw in raw_events
     )
     if any(not isinstance(event, expected_type) for event in decoded):
         raise RuntimeError("transcript checkpoint GC catalog type mismatch")

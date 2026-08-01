@@ -346,9 +346,9 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
             child_session = runtime.child_runtime_session(child.subagent_run_id)
             await child_session.write_events(
                 (
-                        RunStartEvent(
-                            id=f"run_start:test:{native_run_id}",
-                            **native_context.event_fields(),
+                    RunStartEvent(
+                        id=f"run_start:test:{native_run_id}",
+                        **native_context.event_fields(),
                         **run_start_permission_fields(
                             native_run_id,
                             source="child_profile",

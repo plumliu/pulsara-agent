@@ -86,8 +86,8 @@ def make_model_stream_attribution(
     )
     source_span = ModelStreamSourceSpanFact(
         **canonical_span,
-            source_span_fingerprint=sha256_fingerprint(
-                "model-stream-source-span:v2", canonical_span
+        source_span_fingerprint=sha256_fingerprint(
+            "model-stream-source-span:v2", canonical_span
         ),
     )
     attribution_payload = {
@@ -162,7 +162,9 @@ class _FixtureEventMeta(type):
             kwargs.setdefault("content_utf8_bytes", len(encoded))
             kwargs.setdefault("content_sha256", f"sha256:{sha256(encoded).hexdigest()}")
             if cls.include_token_estimate:
-                kwargs.setdefault("estimated_tokens_v1", max(1, (len(content) + 3) // 4))
+                kwargs.setdefault(
+                    "estimated_tokens_v1", max(1, (len(content) + 3) // 4)
+                )
         return cls.event_type(**kwargs)
 
 

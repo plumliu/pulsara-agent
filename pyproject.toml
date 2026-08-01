@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "cachetools>=7.1.4",
     "psycopg-pool>=3.3.1",
+    "protobuf>=6.31.1",
 ]
 
 [project.scripts]

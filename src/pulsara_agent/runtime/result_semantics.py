@@ -65,9 +65,7 @@ def typed_terminal_result_semantic_fingerprint(
             artifact.model_dump(mode="json") for artifact in terminal.artifacts
         ),
         "render_contract_fingerprint": profile.render_contract_fingerprint,
-        "render_variant_fingerprint": (
-            profile.selected_variant.variant_fingerprint
-        ),
+        "render_variant_fingerprint": (profile.selected_variant.variant_fingerprint),
         "tool_origin": profile.tool_origin,
         "descriptor_semantics": (
             None

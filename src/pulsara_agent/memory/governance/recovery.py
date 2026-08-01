@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -56,8 +58,8 @@ class GovernanceBatchExecutionOwnerRegistry(Generic[T]):
                 )
                 self._tasks[governance_batch_id] = task
                 task.add_done_callback(
-                    lambda completed, batch_id=governance_batch_id: (
-                        self._retire(batch_id, completed)
+                    lambda completed, batch_id=governance_batch_id: self._retire(
+                        batch_id, completed
                     )
                 )
         return await asyncio.shield(task)
@@ -129,7 +131,9 @@ class MemoryGovernanceBatchRecoveryService:
         )
         raw = self.event_log.read_raw_events_by_id_snapshot(event_ids)
         events = {
-            envelope.event_id: envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            envelope.event_id: decode_raw_stored_event_envelope(
+                envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             for envelope in raw.events
         }
         output: list[RecoverableGovernanceBatch] = []
@@ -203,7 +207,9 @@ class MemoryGovernanceBatchRecoveryService:
             output.append(
                 RecoverableGovernanceBatch(
                     governance_batch_id=batch_id,
-                    claims=tuple(sorted(open_claims, key=lambda item: item.candidate_entry_id)),
+                    claims=tuple(
+                        sorted(open_claims, key=lambda item: item.candidate_entry_id)
+                    ),
                     preparation=preparation,
                     prepared_event=prepared,
                 )

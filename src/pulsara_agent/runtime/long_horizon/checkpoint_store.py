@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
@@ -102,9 +104,7 @@ class EventLogSubagentGraphCheckpointReadPort:
     ) -> SubagentGraphCheckpointReadResult:
         authority = self.maintenance_authority
         if authority is None:
-            authority = checkpoint_maintenance_authority_for_event_log(
-                self.event_log
-            )
+            authority = checkpoint_maintenance_authority_for_event_log(self.event_log)
         guard = (
             authority.acquire_shared(self.runtime_session_id)
             if authority is not None
@@ -132,9 +132,7 @@ class EventLogSubagentGraphCheckpointReadPort:
     ) -> SubagentGraphCheckpointReadResult:
         deadline = monotonic() + self.read_timeout_seconds
         catalog_snapshot = self.event_log.read_raw_checkpoint_ledger_snapshot(
-            checkpoint_event_type=str(
-                EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED
-            ),
+            checkpoint_event_type=str(EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED),
             requested_through_sequence=requested_through_sequence,
             graph_reducer_id=reducer_contract.graph_reducer_id,
             graph_reducer_version=reducer_contract.graph_reducer_version,
@@ -162,7 +160,7 @@ class EventLogSubagentGraphCheckpointReadPort:
                 saw_delta_bound = True
                 continue
             raw = candidate.checkpoint_event
-            event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             if not isinstance(event, SubagentGraphCheckpointCommittedEvent):
                 raise RuntimeError(
                     "checkpoint catalog decoder returned the wrong event type"
@@ -170,10 +168,8 @@ class EventLogSubagentGraphCheckpointReadPort:
             checkpoint = event.checkpoint
             if (
                 checkpoint.checkpoint_id != candidate.checkpoint_id
-                or checkpoint.through_sequence
-                != candidate.checkpoint_through_sequence
-                or checkpoint.graph_reducer_id
-                != reducer_contract.graph_reducer_id
+                or checkpoint.through_sequence != candidate.checkpoint_through_sequence
+                or checkpoint.graph_reducer_id != reducer_contract.graph_reducer_id
                 or checkpoint.graph_reducer_version
                 != reducer_contract.graph_reducer_version
                 or checkpoint.graph_reducer_contract_fingerprint
@@ -332,10 +328,14 @@ class SubagentGraphCheckpointService:
             ).state
 
         deadline = monotonic() + self.read_timeout_seconds
-        graph_types = tuple(sorted({
-            contract.event_type
-            for contract in self.reducer_binding.contract.supported_graph_events
-        }))
+        graph_types = tuple(
+            sorted(
+                {
+                    contract.event_type
+                    for contract in self.reducer_binding.contract.supported_graph_events
+                }
+            )
+        )
         try:
             graph_snapshot = self.runtime_session.event_log.read_raw_events_by_types(
                 graph_types,
@@ -608,18 +608,23 @@ class SubagentGraphCheckpointService:
                         "subagent graph checkpoint has no unique materialization consumer"
                     )
                 graph_horizon = graph_horizons[0]
-                if prepared.checkpoint.through_sequence <= graph_horizon.through_sequence:
+                if (
+                    prepared.checkpoint.through_sequence
+                    <= graph_horizon.through_sequence
+                ):
                     raise SubagentGraphCheckpointWriteBlocked(
                         "subagent graph checkpoint does not advance its consumer"
                     )
                 raw_delta = await self.runtime_session.context_input_io_service.execute(
                     operation_name="subagent-graph-horizon-charge-read",
-                    operation=lambda: self.runtime_session.event_log.read_raw_range_snapshot(
-                        minimum_sequence=graph_horizon.through_sequence + 1,
-                        through_sequence=prepared.checkpoint.through_sequence,
-                        max_events=self.policy.checkpoint_max_delta_events,
-                        max_payload_bytes=self.policy.checkpoint_max_delta_bytes,
-                        deadline_monotonic=deadline_monotonic,
+                    operation=lambda: (
+                        self.runtime_session.event_log.read_raw_range_snapshot(
+                            minimum_sequence=graph_horizon.through_sequence + 1,
+                            through_sequence=prepared.checkpoint.through_sequence,
+                            max_events=self.policy.checkpoint_max_delta_events,
+                            max_payload_bytes=self.policy.checkpoint_max_delta_bytes,
+                            deadline_monotonic=deadline_monotonic,
+                        )
                     ),
                     deadline_monotonic=deadline_monotonic,
                 )
@@ -639,12 +644,13 @@ class SubagentGraphCheckpointService:
 
                 delta_charge = deterministic_ledger_charge(
                     tuple(
-                        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                        decode_raw_stored_event_envelope(
+                            item, DEFAULT_EVENT_SCHEMA_REGISTRY
+                        )
                         for item in raw_delta.events
                     ),
                     contract=(
-                        self.runtime_session.authority_materialization_contracts
-                        .charge_contract
+                        self.runtime_session.authority_materialization_contracts.charge_contract
                     ),
                 )
                 charged_prefix = (
@@ -653,16 +659,17 @@ class SubagentGraphCheckpointService:
                 )
                 prefix = await self.runtime_session.context_input_io_service.execute(
                     operation_name="subagent-graph-horizon-prefix-read",
-                    operation=lambda: self.runtime_session.event_log.read_transcript_domain_delta(
-                        after_sequence=prepared.checkpoint.through_sequence,
-                        through_sequence=prepared.checkpoint.through_sequence,
-                        max_events=1,
-                        max_payload_bytes=1,
-                        registry_contract_fingerprint=(
-                            self.runtime_session.authority_materialization_contracts
-                            .event_domain.contract.registry_contract_fingerprint
-                        ),
-                        deadline_monotonic=deadline_monotonic,
+                    operation=lambda: (
+                        self.runtime_session.event_log.read_transcript_domain_delta(
+                            after_sequence=prepared.checkpoint.through_sequence,
+                            through_sequence=prepared.checkpoint.through_sequence,
+                            max_events=1,
+                            max_payload_bytes=1,
+                            registry_contract_fingerprint=(
+                                self.runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+                            ),
+                            deadline_monotonic=deadline_monotonic,
+                        )
                     ),
                     deadline_monotonic=deadline_monotonic,
                 )

@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import (
+    build_joined_raw_stored_event_range_proof,
+    decode_raw_stored_event_envelope,
+)
+
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import json
 from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Iterable
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
+from pulsara_agent.ports.stored_event import (
+    JoinedRawStoredEventRangeProof,
+    RestoredRangeSourceKind,
+    StoredEventBatchCommitReceipt,
+    build_encoder_stored_event_pair,
+    build_stored_event_batch_commit_receipt,
+)
+
 from pulsara_agent.event_log.protocol import (
     CandidateBoundEventLogTransactionCompanion,
     EventBatchConfirmation,
@@ -24,17 +40,20 @@ from pulsara_agent.event_log.protocol import (
     RawLedgerUsageSnapshot,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
-    RawRuntimeProjectionCheckpoint,
-    RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
-    RawTranscriptDomainPrefixFact,
+    StoredEventBatchConfirmation,
     EventLogWriteConflict,
     EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
+    classify_stored_event_candidate_batch,
     rebind_stored_candidate_batch,
     same_event_payload,
     same_event_raw_payload,
+)
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.event_log.transcript_prefix import (
     EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
@@ -79,6 +98,10 @@ class InMemoryEventLog:
     _materialization_account_state: LedgerMaterializationAccountStateFact | None = None
     _runtime_projection_checkpoints: dict[str, RawRuntimeProjectionCheckpoint] = field(
         default_factory=dict
+    )
+    _terminal_command_receipts: dict[tuple[str, str, str], object] = field(
+        default_factory=dict,
+        repr=False,
     )
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
@@ -172,7 +195,9 @@ class InMemoryEventLog:
                 None,
             )
             if existing is not None:
-                decoded = existing.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decoded = decode_raw_stored_event_envelope(
+                    existing, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
                 if same_event_payload(event, decoded):
                     return _owned_event(decoded)
                 raise EventIdConflict(event.id)
@@ -201,10 +226,27 @@ class InMemoryEventLog:
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
-        del deadline_monotonic
         event_list = list(events)
         if not event_list:
             return []
+        receipt = self.commit_batch(
+            event_list,
+            expected_last_sequence=expected_last_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return [_owned_event(event) for event in receipt.owned_stored_events]
+
+    def commit_batch(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> StoredEventBatchCommitReceipt:
+        del deadline_monotonic
+        event_list = list(events)
+        if not event_list:
+            raise ValueError("physical stored event batch cannot be empty")
         _validate_live_batch(event_list)
         with self._lock:
             actual_last_sequence = self._next_sequence - 1
@@ -237,7 +279,12 @@ class InMemoryEventLog:
             for stored, raw in zip(stored_events, raw_events, strict=True):
                 self._append_transcript_prefix(stored, raw)
             self._next_sequence += len(stored_events)
-            return [_owned_event(event) for event in stored_events]
+            return build_stored_event_batch_commit_receipt(
+                tuple(
+                    build_encoder_stored_event_pair(stored, raw)
+                    for stored, raw in zip(stored_events, raw_events, strict=True)
+                )
+            )
 
     def read_materialization_account_state(
         self,
@@ -279,7 +326,7 @@ class InMemoryEventLog:
         transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
-    ) -> list[AgentEvent]:
+    ) -> StoredEventBatchCommitReceipt:
         del deadline_monotonic
         event_list = list(events)
         if not event_list:
@@ -342,9 +389,7 @@ class InMemoryEventLog:
                     transaction_companion.prepared_candidate_batch_identity,
                     stored_events,
                 )
-                transaction_companion.accept_stored_candidate_rebind_receipt(
-                    receipt
-                )
+                transaction_companion.accept_stored_candidate_rebind_receipt(receipt)
             if transaction_companion is not None:
                 transaction_companion.apply_in_memory(stored_events)
             self._raw_events.extend(raw_events)
@@ -352,7 +397,12 @@ class InMemoryEventLog:
                 self._append_transcript_prefix(stored, raw)
             self._next_sequence += len(stored_events)
             self._materialization_account_state = resulting_account_state
-            return [_owned_event(event) for event in stored_events]
+            return build_stored_event_batch_commit_receipt(
+                tuple(
+                    build_encoder_stored_event_pair(stored, raw)
+                    for stored, raw in zip(stored_events, raw_events, strict=True)
+                )
+            )
 
     @staticmethod
     def _validate_stored_envelope_charge_bounds(
@@ -397,7 +447,7 @@ class InMemoryEventLog:
         del deadline_monotonic
         with self._lock:
             events = [
-                raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for raw in self._raw_events
             ]
         if after_sequence is not None:
@@ -426,7 +476,9 @@ class InMemoryEventLog:
             )
             if raw is None:
                 return None
-            return _owned_event(raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+            return _owned_event(
+                decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+            )
 
     def confirm_batch(
         self,
@@ -461,11 +513,29 @@ class InMemoryEventLog:
                     or not same_event_raw_payload(candidate, existing)
                 ):
                     raise EventIdConflict(candidate.id)
-                decoded = existing.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decoded = decode_raw_stored_event_envelope(
+                    existing, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
                 committed.append(_owned_event(decoded))
             return EventBatchConfirmation(
                 committed_events=tuple(committed),
                 missing_event_ids=tuple(missing),
+                actual_last_sequence=self._next_sequence - 1,
+            )
+
+    def confirm_stored_batch(
+        self,
+        candidates,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> StoredEventBatchConfirmation:
+        del deadline_monotonic
+        candidate_list = tuple(candidates)
+        with self._lock:
+            by_id = {event.event_id: event for event in self._raw_events}
+            return classify_stored_event_candidate_batch(
+                candidates=candidate_list,
+                raw_by_event_id=by_id,
                 actual_last_sequence=self._next_sequence - 1,
             )
 
@@ -499,7 +569,11 @@ class InMemoryEventLog:
         return EventLogReadSnapshot(
             through_sequence=raw.through_sequence,
             events=tuple(
-                _owned_event(event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+                _owned_event(
+                    decode_raw_stored_event_envelope(
+                        event, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
+                )
                 for event in raw.events
             ),
         )
@@ -552,6 +626,36 @@ class InMemoryEventLog:
                     "envelopes": tuple(event.envelope_fingerprint for event in events),
                 },
             ),
+        )
+
+    def read_joined_raw_range(
+        self,
+        *,
+        source_kind: RestoredRangeSourceKind,
+        from_sequence_exclusive: int,
+        through_sequence: int | None = None,
+        max_events: int | None = None,
+        max_payload_bytes: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> JoinedRawStoredEventRangeProof | None:
+        target = (
+            self.next_sequence() - 1 if through_sequence is None else through_sequence
+        )
+        if target == from_sequence_exclusive:
+            return None
+        snapshot = self.read_raw_range_snapshot(
+            minimum_sequence=from_sequence_exclusive + 1,
+            through_sequence=target,
+            max_events=max_events,
+            max_payload_bytes=max_payload_bytes,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return build_joined_raw_stored_event_range_proof(
+            runtime_session_id=self.runtime_session_id,
+            source_kind=source_kind,
+            from_sequence_exclusive=from_sequence_exclusive,
+            raw_stored_envelopes=snapshot.events,
+            registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
         )
 
     def read_raw_events_by_id(
@@ -1095,7 +1199,7 @@ def _owned_event(event: AgentEvent) -> AgentEvent:
 
 
 def _raw(event: AgentEvent, runtime_session_id: str) -> RawStoredEventEnvelope:
-    return RawStoredEventEnvelope.from_stored_event(
+    return build_raw_stored_event_envelope(
         event=event,
         runtime_session_id=runtime_session_id,
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,

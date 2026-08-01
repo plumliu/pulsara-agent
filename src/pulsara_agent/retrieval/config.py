@@ -16,7 +16,9 @@ import os
 from dataclasses import dataclass, field
 
 
-DEFAULT_DASHSCOPE_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_DASHSCOPE_EMBEDDING_BASE_URL = (
+    "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
 DEFAULT_DASHSCOPE_RERANK_BASE_URL = "https://dashscope.aliyuncs.com"
 
 
@@ -53,7 +55,9 @@ class EmbeddingBackendConfig:
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "EmbeddingBackendConfig":
         return cls(
-            provider=os.getenv(f"{prefix}_EMBEDDING_PROVIDER", "openai_compatible").strip()
+            provider=os.getenv(
+                f"{prefix}_EMBEDDING_PROVIDER", "openai_compatible"
+            ).strip()
             or "openai_compatible",
             api_key=_fallback_api_key(prefix, "EMBEDDING_API_KEY"),
             base_url=(
@@ -155,8 +159,12 @@ class GovernanceRelatednessConfig:
                 ).strip()
                 or "governance-relatedness-fixture:v1"
             ),
-            candidate_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_CANDIDATE_LIMIT", 5),
-            lexical_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_LEXICAL_LIMIT", 30),
+            candidate_limit=_env_int(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_CANDIDATE_LIMIT", 5
+            ),
+            lexical_limit=_env_int(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_LEXICAL_LIMIT", 30
+            ),
             vector_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_VECTOR_LIMIT", 30),
             rerank_top_m=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_RERANK_TOP_M", 20),
             dense_candidate_min_score=_env_float(

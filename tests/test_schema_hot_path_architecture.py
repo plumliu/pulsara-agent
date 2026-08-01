@@ -135,6 +135,7 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         "0008_tool_result_evidence_projection_activation.sql",
         "0009_compaction_memory_extraction_projection_activation.sql",
         "0010_mcp_continuation_secret_store.sql",
+        "0011_terminal_presentation_queue.sql",
     ]
     create_extension_owners = []
     for path in resources:

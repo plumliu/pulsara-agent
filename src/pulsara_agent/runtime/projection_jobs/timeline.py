@@ -111,8 +111,7 @@ class IncrementalRunTimelineReducer:
                 else None
             ),
             open_items={
-                str(key): _owned_open_item(value)
-                for key, value in raw_items.items()
+                str(key): _owned_open_item(value) for key, value in raw_items.items()
             },
         )
         reducer._refresh_status()
@@ -195,12 +194,8 @@ class IncrementalRunTimelineReducer:
             )
         elif isinstance(event, ReplyEndEvent):
             self._close(f"reply:{event.reply_id}", event, status="completed")
-            self._close_prefix(
-                f"text:{event.reply_id}:", event, status=None
-            )
-            self._close_prefix(
-                f"thinking:{event.reply_id}:", event, status=None
-            )
+            self._close_prefix(f"text:{event.reply_id}:", event, status=None)
+            self._close_prefix(f"thinking:{event.reply_id}:", event, status=None)
             self._close(f"model:{event.reply_id}", event, status="completed")
         elif isinstance(event, ModelCallStartEvent):
             self._open(
@@ -357,16 +352,12 @@ class IncrementalRunTimelineReducer:
                     kind="permission_request",
                     title="Permission request",
                     status="waiting",
-                    metadata={
-                        "tool_call_ids": [call.id for call in event.tool_calls]
-                    },
+                    metadata={"tool_call_ids": [call.id for call in event.tool_calls]},
                 ),
             )
         elif isinstance(event, UserConfirmResultEvent):
             self.waiting_user = False
-            self._close(
-                "permission-request", event, status="resolved"
-            )
+            self._close("permission-request", event, status="resolved")
         elif isinstance(event, RunErrorEvent):
             self.failed = True
             self.terminal_sequence = event.sequence
@@ -389,9 +380,7 @@ class IncrementalRunTimelineReducer:
                     summary=event.reason,
                     metadata={
                         "source": event.source,
-                        "previous_permission_mode": (
-                            event.previous_permission_mode
-                        ),
+                        "previous_permission_mode": (event.previous_permission_mode),
                     },
                 )
             )
@@ -409,8 +398,7 @@ class IncrementalRunTimelineReducer:
                         "question_id": event.question_id,
                         "tool_call_id": event.tool_call_id,
                         "options": [
-                            option.model_dump(mode="json")
-                            for option in event.options
+                            option.model_dump(mode="json") for option in event.options
                         ],
                         "allow_free_text": event.allow_free_text,
                     },
@@ -450,9 +438,7 @@ class IncrementalRunTimelineReducer:
             key = f"plan-exit:{event.exit_request_id}"
             item = self.open_items.get(key)
             if item is not None:
-                item["timeline_item"]["metadata"]["user_feedback"] = (
-                    event.user_feedback
-                )
+                item["timeline_item"]["metadata"]["user_feedback"] = event.user_feedback
             self._close(key, event, status=event.decision)
         elif isinstance(event, PlanModeExitedEvent):
             self._append_closed(
@@ -465,12 +451,8 @@ class IncrementalRunTimelineReducer:
                     metadata={
                         "source": event.source,
                         "exit_request_id": event.exit_request_id,
-                        "restored_permission_mode": (
-                            event.restored_permission_mode
-                        ),
-                        "accepted_plan_artifact_id": (
-                            event.accepted_plan_artifact_id
-                        ),
+                        "restored_permission_mode": (event.restored_permission_mode),
+                        "accepted_plan_artifact_id": (event.accepted_plan_artifact_id),
                     },
                 )
             )
@@ -590,17 +572,9 @@ class IncrementalRunTimelineReducer:
     ) -> None:
         for key in tuple(
             sorted(
-                (
-                    key
-                    for key in self.open_items
-                    if key.startswith(prefix)
-                ),
+                (key for key in self.open_items if key.startswith(prefix)),
                 key=lambda value: (
-                    int(
-                        self.open_items[value]["timeline_item"][
-                            "start_sequence"
-                        ]
-                    ),
+                    int(self.open_items[value]["timeline_item"]["start_sequence"]),
                     value,
                 ),
             )
@@ -612,11 +586,7 @@ class IncrementalRunTimelineReducer:
             sorted(
                 self.open_items,
                 key=lambda value: (
-                    int(
-                        self.open_items[value]["timeline_item"][
-                            "start_sequence"
-                        ]
-                    ),
+                    int(self.open_items[value]["timeline_item"]["start_sequence"]),
                     value,
                 ),
             )

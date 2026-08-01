@@ -102,6 +102,7 @@ from pulsara_agent.ports.model_lifecycle import (
     PreparedProviderInputStartBundlePort,
 )
 
+
 class LLMRuntime:
     def __init__(
         self,
@@ -355,16 +356,15 @@ class LLMRuntime:
                     start_bundle.compaction_memory_extraction_input_attribution
                 ),
                 provider_input_reference=provider_input_start.committed_reference,
-                active_run_monitor_delivery=(
-                    start_bundle.active_run_monitor_delivery
+                active_run_monitor_delivery=(start_bundle.active_run_monitor_delivery),
+                active_run_prompt_steer_guard=(
+                    start_bundle.active_run_prompt_steer_guard
                 ),
             )
-            active_run_monitor_companions = (
-                build_active_run_monitor_start_companions(
-                    bundle=start_bundle,
-                    start_event=start_event,
-                    runtime_session=runtime_session,
-                )
+            active_run_monitor_companions = build_active_run_monitor_start_companions(
+                bundle=start_bundle,
+                start_event=start_event,
+                runtime_session=runtime_session,
             )
             start_batch = (
                 *start_bundle.companion_candidates,

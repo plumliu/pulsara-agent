@@ -459,8 +459,7 @@ class McpToolResumeRequest:
             if (
                 rebind is None
                 or rebind.source_binding_identity != identity.binding_identity
-                or rebind.effective_binding_identity
-                != self.binding.binding_identity
+                or rebind.effective_binding_identity != self.binding.binding_identity
                 or rebind.source_suspension_event_reference
                 != self.source_suspension_event_reference
                 or rebind.source_suspension_fact_fingerprint

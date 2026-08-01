@@ -65,9 +65,7 @@ def _identity(
         "purpose": ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION,
         "resolved_model_call_id": resolved_model_call_id,
         "stable_primary_event_id": stable_primary_event_id,
-        "external_owner_reference_fingerprint": (
-            external_owner_reference_fingerprint
-        ),
+        "external_owner_reference_fingerprint": (external_owner_reference_fingerprint),
         "stable_candidate_fingerprint": stable_candidate_fingerprint,
     }
     return ModelLifecycleTransactionCompanionIdentityFact(
@@ -232,9 +230,7 @@ def _read_exact_extraction_request(cursor, lease: LeasedDurableProjectionJob):
     request = ContextCompactionMemoryExtractionRequestedEvent.model_validate(
         row["payload"]
     )
-    frozen = freeze_event_write_candidate(
-        request.model_copy(update={"sequence": None})
-    )
+    frozen = freeze_event_write_candidate(request.model_copy(update={"sequence": None}))
     comparisons = {
         "event_id": str(row["id"]) == source.event_id,
         "runtime_session_id": str(row["session_id"]) == source.runtime_session_id,
@@ -248,10 +244,8 @@ def _read_exact_extraction_request(cursor, lease: LeasedDurableProjectionJob):
             and frozen.event_schema_version == source.event_schema_version
         ),
         "event_schema_fingerprint": (
-            str(row["event_schema_fingerprint"])
-            == source.event_schema_fingerprint
-            and frozen.event_schema_fingerprint
-            == source.event_schema_fingerprint
+            str(row["event_schema_fingerprint"]) == source.event_schema_fingerprint
+            and frozen.event_schema_fingerprint == source.event_schema_fingerprint
         ),
         "event_domain_contract_fingerprint": (
             str(row["event_domain_contract_fingerprint"])
@@ -291,9 +285,7 @@ class CompactionMemoryExtractionModelStartCompanion:
         default=None, init=False
     )
 
-    def apply_postgres(
-        self, cursor, stored_events: Sequence[AgentEvent]
-    ) -> None:
+    def apply_postgres(self, cursor, stored_events: Sequence[AgentEvent]) -> None:
         starts = tuple(
             event
             for event in stored_events
@@ -425,8 +417,7 @@ class CompactionMemoryExtractionModelStartCompanion:
                 raise ValueError("background reservation identity conflict")
             account = _read_account(cursor, self.reservation.runtime_session_id)
             if (
-                account.account_revision
-                != self.reservation.source_account_revision + 1
+                account.account_revision != self.reservation.source_account_revision + 1
                 or account.open_reservation_count < 1
             ):
                 raise ValueError("background reservation/account confirmation failed")
@@ -512,9 +503,7 @@ class CompactionMemoryExtractionModelTerminalCompanion:
     )
     reconciliation_required: bool = field(default=False, init=False)
 
-    def apply_postgres(
-        self, cursor, stored_events: Sequence[AgentEvent]
-    ) -> None:
+    def apply_postgres(self, cursor, stored_events: Sequence[AgentEvent]) -> None:
         ends = tuple(
             event
             for event in stored_events

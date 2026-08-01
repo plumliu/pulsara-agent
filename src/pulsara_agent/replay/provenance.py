@@ -59,11 +59,15 @@ def runtime_event_span_from_events(
     matching = [
         event
         for event in events
-        if getattr(event, "tool_call_id", None) == tool_call_id and event.sequence is not None
+        if getattr(event, "tool_call_id", None) == tool_call_id
+        and event.sequence is not None
     ]
     if not matching:
         raise KeyError(f"No sequenced events found for tool_call_id: {tool_call_id}")
-    start = next((event for event in matching if isinstance(event, ToolResultStartEvent)), matching[0])
+    start = next(
+        (event for event in matching if isinstance(event, ToolResultStartEvent)),
+        matching[0],
+    )
     return RuntimeEventSpan(
         session_id=session_id,
         run_id=start.run_id,

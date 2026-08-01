@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -159,7 +161,9 @@ def finalize_context_authority_slice_plan(
     prior_transcript_through_sequence: int | None = None,
 ) -> ContextAuthoritySlicePlan:
     run_start_stored = event_slice.event_by_id(run_start_ref.event_id)
-    run_start = run_start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    run_start = decode_raw_stored_event_envelope(
+        run_start_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(run_start, RunStartEvent):
         raise ContextEventSliceError("run-start reference does not decode to RunStart")
     window_lifecycle = _active_window_compaction_lifecycle(
@@ -279,7 +283,9 @@ def finalize_context_authority_slice_plan(
             != latest_compaction_terminal_ref.payload_fingerprint
         ):
             raise ContextEventSliceError("compaction terminal reference mismatch")
-        terminal = terminal_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        terminal = decode_raw_stored_event_envelope(
+            terminal_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(terminal, ContextCompactionCompletedEvent):
             raise ContextEventSliceError(
                 "context window requires completed compaction terminal"
@@ -362,7 +368,10 @@ def _active_window_compaction_lifecycle(
     | None
 ):
     decoded = tuple(
-        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        (
+            stored,
+            decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY),
+        )
         for stored in event_slice.events
     )
     opened = tuple(
@@ -522,7 +531,9 @@ def _validate_replay_durable_joins(
     start_ref = start_stored.to_reference(event_slice.runtime_session_id)
     if start_ref != snapshot.run_entry.run_start:
         raise ContextEventSliceError("replay RunStart reference mismatch")
-    start = start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    start = decode_raw_stored_event_envelope(
+        start_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(start, RunStartEvent):
         raise ContextEventSliceError("replay run entry is not RunStart")
     entry = start.new_run_boundary or start.subagent_run_entry
@@ -546,7 +557,7 @@ def _validate_replay_durable_joins(
     durable_continuations: list[tuple[ContextEventReferenceFact, object]] = []
     exposures: list[CapabilityExposureResolvedEvent] = []
     for frozen in event_slice.events:
-        event = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if (
             isinstance(event, RunInteractionResumeBoundaryEvent)
             and event.run_id == start.run_id

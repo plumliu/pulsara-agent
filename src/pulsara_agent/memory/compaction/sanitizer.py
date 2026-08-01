@@ -132,7 +132,9 @@ def sanitize_compaction_evidence(text: str) -> SanitizedCompactionEvidence:
 
 
 def contains_compaction_secret(text: str) -> bool:
-    return sanitize_compaction_evidence(text).text != text.replace("\r\n", "\n").replace("\r", "\n")
+    return sanitize_compaction_evidence(text).text != text.replace(
+        "\r\n", "\n"
+    ).replace("\r", "\n")
 
 
 __all__ = [

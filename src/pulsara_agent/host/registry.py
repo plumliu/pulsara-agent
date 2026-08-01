@@ -127,15 +127,24 @@ class HostSessionRegistry:
                 + len(self._manifest_close_tombstones)
             )
             if live_count >= self.max_sessions:
-                raise RuntimeError(f"host session limit reached: max {self.max_sessions}")
+                raise RuntimeError(
+                    f"host session limit reached: max {self.max_sessions}"
+                )
             if (
                 host_session_id in self._sessions
                 or host_session_id in self._reserved_sessions
                 or host_session_id in self._manifest_close_tombstones
             ):
-                raise DuplicateHostSessionError(f"host_session_id already in use: {host_session_id}")
-            if conversation_id in self._by_conversation or conversation_id in self._reserved_conversations:
-                raise DuplicateHostSessionError(f"conversation_id already in use: {conversation_id}")
+                raise DuplicateHostSessionError(
+                    f"host_session_id already in use: {host_session_id}"
+                )
+            if (
+                conversation_id in self._by_conversation
+                or conversation_id in self._reserved_conversations
+            ):
+                raise DuplicateHostSessionError(
+                    f"conversation_id already in use: {conversation_id}"
+                )
             if any(
                 item.conversation_id == conversation_id
                 for item in self._manifest_close_tombstones.values()
@@ -168,11 +177,15 @@ class HostSessionRegistry:
                 runtime_session_id=runtime_session_id,
             )
 
-    async def publish(self, reservation: SessionReservation, session: HostSession) -> HostSession:
+    async def publish(
+        self, reservation: SessionReservation, session: HostSession
+    ) -> HostSession:
         async with self._lock:
             if (
-                self._reserved_sessions.get(reservation.host_session_id) != reservation.token
-                or self._reserved_conversations.get(reservation.conversation_id) != reservation.token
+                self._reserved_sessions.get(reservation.host_session_id)
+                != reservation.token
+                or self._reserved_conversations.get(reservation.conversation_id)
+                != reservation.token
                 or (
                     reservation.runtime_session_id is not None
                     and self._reserved_runtime_sessions.get(
@@ -181,16 +194,22 @@ class HostSessionRegistry:
                     != reservation.token
                 )
             ):
-                raise RuntimeError(f"reservation already consumed or released: {reservation.host_session_id}")
+                raise RuntimeError(
+                    f"reservation already consumed or released: {reservation.host_session_id}"
+                )
             if session.host_session_id != reservation.host_session_id:
                 raise RuntimeError("published session id does not match reservation")
             if session.conversation_id != reservation.conversation_id:
-                raise RuntimeError("published conversation id does not match reservation")
+                raise RuntimeError(
+                    "published conversation id does not match reservation"
+                )
             if (
                 reservation.runtime_session_id is not None
                 and session.runtime_session_id != reservation.runtime_session_id
             ):
-                raise RuntimeError("published runtime session id does not match reservation")
+                raise RuntimeError(
+                    "published runtime session id does not match reservation"
+                )
             runtime_owner = self._by_runtime_session.get(session.runtime_session_id)
             runtime_tombstoned = any(
                 item.runtime_session_id == session.runtime_session_id
@@ -203,18 +222,28 @@ class HostSessionRegistry:
             self._reserved_sessions.pop(reservation.host_session_id)
             self._reserved_conversations.pop(reservation.conversation_id)
             if reservation.runtime_session_id is not None:
-                self._reserved_runtime_sessions.pop(reservation.runtime_session_id, None)
+                self._reserved_runtime_sessions.pop(
+                    reservation.runtime_session_id, None
+                )
             self._sessions[session.host_session_id] = session
             self._by_conversation[session.conversation_id] = session.host_session_id
-            self._by_runtime_session[session.runtime_session_id] = session.host_session_id
+            self._by_runtime_session[session.runtime_session_id] = (
+                session.host_session_id
+            )
             return session
 
     async def release_reservation(self, reservation: SessionReservation) -> None:
         """Roll back this exact reservation without touching a newer ABA successor."""
         async with self._lock:
-            if self._reserved_sessions.get(reservation.host_session_id) == reservation.token:
+            if (
+                self._reserved_sessions.get(reservation.host_session_id)
+                == reservation.token
+            ):
                 self._reserved_sessions.pop(reservation.host_session_id)
-            if self._reserved_conversations.get(reservation.conversation_id) == reservation.token:
+            if (
+                self._reserved_conversations.get(reservation.conversation_id)
+                == reservation.token
+            ):
                 self._reserved_conversations.pop(reservation.conversation_id)
             if (
                 reservation.runtime_session_id is not None
@@ -254,12 +283,9 @@ class HostSessionRegistry:
                 raise RuntimeError(
                     "failed-open manifest finalization requires the current reservation"
                 )
-            if (
-                runtime_session_id in self._by_runtime_session
-                or any(
-                    item.runtime_session_id == runtime_session_id
-                    for item in self._manifest_close_tombstones.values()
-                )
+            if runtime_session_id in self._by_runtime_session or any(
+                item.runtime_session_id == runtime_session_id
+                for item in self._manifest_close_tombstones.values()
             ):
                 raise DuplicateHostSessionError(
                     "runtime_session_id already live or pending manifest close: "
@@ -498,7 +524,12 @@ class HostSessionRegistry:
         async with self._lock:
             sessions = list(self._sessions.values())
             idle = set(self._idle_with_live_processes)
-        return [self._summary(session, idle_with_live_processes=session.host_session_id in idle) for session in sessions]
+        return [
+            self._summary(
+                session, idle_with_live_processes=session.host_session_id in idle
+            )
+            for session in sessions
+        ]
 
     async def list_idle_candidates(self, *, now: float | None = None) -> list[str]:
         """Return ids eligible for idle close. Pure discovery, no side effects.
@@ -522,7 +553,10 @@ class HostSessionRegistry:
                 idle_for = now - session.last_active_at
                 if idle_for < self.idle_ttl_seconds:
                     continue
-                if session.has_live_processes and self.live_process_idle_ttl_seconds is None:
+                if (
+                    session.has_live_processes
+                    and self.live_process_idle_ttl_seconds is None
+                ):
                     self._idle_with_live_processes.add(session_id)
                     continue
                 if (
@@ -535,7 +569,9 @@ class HostSessionRegistry:
                 candidates.append(session_id)
         return candidates
 
-    def _summary(self, session: HostSession, *, idle_with_live_processes: bool) -> HostSessionSummary:
+    def _summary(
+        self, session: HostSession, *, idle_with_live_processes: bool
+    ) -> HostSessionSummary:
         data = session.summary()
         return HostSessionSummary(
             host_session_id=str(data["host_session_id"]),
@@ -547,7 +583,9 @@ class HostSessionRegistry:
             created_at=float(data["created_at"]),
             last_active_at=float(data["last_active_at"]),
             closed=bool(data["closed"]),
-            active_run_id=data["active_run_id"] if isinstance(data["active_run_id"], str) else None,
+            active_run_id=data["active_run_id"]
+            if isinstance(data["active_run_id"], str)
+            else None,
             has_live_processes=bool(data["has_live_processes"]),
             idle_with_live_processes=idle_with_live_processes,
         )

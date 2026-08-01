@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import model_validator
 
 from pulsara_agent.ports.event_write import FrozenEventWriteCandidate
-from pulsara_agent.primitives._context_base import ContextEventReferenceFact, context_fingerprint
+from pulsara_agent.primitives._context_base import (
+    ContextEventReferenceFact,
+    context_fingerprint,
+)
 from pulsara_agent.primitives.compaction import (
     CompactionPostCompletionExtensionAdmissionFailedFact,
     CompactionPostCompletionExtensionContractFact,
@@ -26,7 +29,9 @@ if TYPE_CHECKING:
     from pulsara_agent.event.events import ContextCompactionCompletedEvent, EventContext
 
 
-def _runtime_fingerprint(model: FrozenRuntimeStateBase, field_name: str, domain: str) -> None:
+def _runtime_fingerprint(
+    model: FrozenRuntimeStateBase, field_name: str, domain: str
+) -> None:
     expected = context_fingerprint(
         domain,
         model.model_dump(mode="json", exclude={field_name}),
@@ -128,7 +133,9 @@ class PreparedCompactionPostCompletionExtensionAdmissionFailure(FrozenRuntimeSta
     preparation_fingerprint: str
 
     @model_validator(mode="after")
-    def _fingerprint(self) -> "PreparedCompactionPostCompletionExtensionAdmissionFailure":
+    def _fingerprint(
+        self,
+    ) -> "PreparedCompactionPostCompletionExtensionAdmissionFailure":
         _runtime_fingerprint(
             self,
             "preparation_fingerprint",
@@ -211,9 +218,7 @@ class CompactionPostCompletionExtensionPort(Protocol):
         | CompactionPostCompletionExtensionAdmissionFailedFact
     ): ...
 
-    async def stop_admission_and_drain(
-        self, *, deadline_monotonic: float
-    ) -> None: ...
+    async def stop_admission_and_drain(self, *, deadline_monotonic: float) -> None: ...
 
 
 __all__ = [name for name in globals() if name.startswith(("Compaction", "Prepared"))]

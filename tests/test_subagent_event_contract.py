@@ -27,7 +27,11 @@ from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent import SubagentBudget
 
 
-CTX = EventContext(run_id="run:subagent-contract", turn_id="turn:subagent-contract", reply_id="reply:subagent-contract")
+CTX = EventContext(
+    run_id="run:subagent-contract",
+    turn_id="turn:subagent-contract",
+    reply_id="reply:subagent-contract",
+)
 
 
 def test_subagent_hard_cut_bumps_agent_event_schema_contract() -> None:
@@ -53,7 +57,11 @@ def _capability_snapshot() -> dict[str, object]:
         "inherited_from_parent_context_id": None,
         "permission_mode": PermissionMode.READ_ONLY.value,
         "permission_policy": preset_to_policy(PermissionMode.READ_ONLY).to_dict(),
-        "allowed_tool_names": ["artifact_read", "report_agent_phase", "report_agent_result"],
+        "allowed_tool_names": [
+            "artifact_read",
+            "report_agent_phase",
+            "report_agent_result",
+        ],
         "allowed_descriptor_ids": [],
         "allowed_skill_names": [],
         "allowed_mcp_server_ids": [],
@@ -75,9 +83,7 @@ def _budget_snapshot(**overrides: object) -> dict[str, object]:
         "max_result_summary_chars_per_child": 4_000,
         "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
-        "child_rollout_policy": default_child_rollout_policy().model_dump(
-            mode="json"
-        ),
+        "child_rollout_policy": default_child_rollout_policy().model_dump(mode="json"),
     }
     value.update(overrides)
     return value
@@ -111,9 +117,9 @@ def test_subagent_budget_snapshot_round_trip_is_immutable() -> None:
     loaded = load_agent_event(dump_agent_event(event))
     assert loaded == event
     assert isinstance(event.budget_snapshot, SubagentBudgetSnapshotEvent)
-    assert SubagentBudget.from_event_snapshot(event.budget_snapshot).to_event_value() == (
-        event.budget_snapshot.model_dump(mode="python")
-    )
+    assert SubagentBudget.from_event_snapshot(
+        event.budget_snapshot
+    ).to_event_value() == (event.budget_snapshot.model_dump(mode="python"))
     with pytest.raises(ValidationError):
         event.budget_snapshot.max_concurrent_children_per_parent_run = 5
 
@@ -150,14 +156,14 @@ def test_subagent_budget_snapshot_rejects_invalid_caps(
 
 def test_subagent_snapshot_models_forbid_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        SubagentBudgetSnapshotEvent.model_validate(
-            _budget_snapshot(unexpected=True)
-        )
+        SubagentBudgetSnapshotEvent.model_validate(_budget_snapshot(unexpected=True))
 
 
 def test_subagent_capability_snapshot_requires_preset_permission_expansion() -> None:
     payload = _capability_snapshot()
-    payload["permission_policy"] = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS).to_dict()
+    payload["permission_policy"] = preset_to_policy(
+        PermissionMode.BYPASS_PERMISSIONS
+    ).to_dict()
     with pytest.raises(ValidationError):
         SubagentCapabilityProfileSnapshotEvent.model_validate(payload)
 
@@ -228,7 +234,9 @@ def test_subagent_completion_requires_run_result_and_artifact() -> None:
         )
 
 
-def test_subagent_result_consumed_enforces_kind_target_and_terminal_invariants() -> None:
+def test_subagent_result_consumed_enforces_kind_target_and_terminal_invariants() -> (
+    None
+):
     fields = {
         **CTX.event_fields(),
         "consumption_id": "consumption:contract",

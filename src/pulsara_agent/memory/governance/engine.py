@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -115,6 +117,7 @@ from pulsara_agent.primitives.runtime_observation import (
     RuntimeClockObservationPayloadFact,
     RuntimeObservationWireSemanticFact,
 )
+
 
 class MemoryGovernanceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -711,7 +714,7 @@ class MemoryGovernanceEngine:
             ),
         )
         events = tuple(
-            envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw_events
         )
         starts = tuple(

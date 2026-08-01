@@ -109,7 +109,11 @@ class McpContinuationKeyMaterial:
     commitment_key: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not self.key_id or len(self.aead_key) != 32 or len(self.commitment_key) != 32:
+        if (
+            not self.key_id
+            or len(self.aead_key) != 32
+            or len(self.commitment_key) != 32
+        ):
             raise ValueError("MCP continuation key material is invalid")
         if self.aead_key == self.commitment_key:
             raise ValueError("MCP AEAD and commitment keys must be domain separated")
@@ -124,7 +128,9 @@ class McpContinuationKeyProvider:
         self._material = material
 
     @classmethod
-    def from_master_key(cls, *, key_id: str, master_key: bytes) -> "McpContinuationKeyProvider":
+    def from_master_key(
+        cls, *, key_id: str, master_key: bytes
+    ) -> "McpContinuationKeyProvider":
         if len(master_key) < 32:
             raise McpContinuationSecretKeyUnavailable(
                 "MCP continuation master key must contain at least 256 bits"
@@ -203,7 +209,11 @@ class McpContinuationAadContext:
     contract_version: str = "mcp-continuation-aad:v1"
 
     def __post_init__(self) -> None:
-        if not self.runtime_session_id or not self.interaction_id or not self.source_event_id:
+        if (
+            not self.runtime_session_id
+            or not self.interaction_id
+            or not self.source_event_id
+        ):
             raise ValueError("MCP continuation AAD identity is incomplete")
         if self.round_ordinal < 1:
             raise ValueError("MCP continuation AAD round must be positive")
@@ -265,11 +275,14 @@ class McpContinuationSecretCodec:
 
     def keyed_commitment(self, domain: str, payload: bytes) -> str:
         material = self._keys._material_for(self._keys.key_id)
-        return "hmac-sha256:" + hmac.new(
-            material.commitment_key,
-            domain.encode("utf-8") + b"\0" + payload,
-            sha256,
-        ).hexdigest()
+        return (
+            "hmac-sha256:"
+            + hmac.new(
+                material.commitment_key,
+                domain.encode("utf-8") + b"\0" + payload,
+                sha256,
+            ).hexdigest()
+        )
 
     def response_factory(
         self,
@@ -354,7 +367,9 @@ class McpContinuationSecretCodec:
         finally:
             borrow.revoke()
         if len(plaintext_bytes) > bounds.maximum_plaintext_bytes:
-            raise McpContinuationBoundsExceeded("MCP continuation plaintext exceeds bound")
+            raise McpContinuationBoundsExceeded(
+                "MCP continuation plaintext exceeds bound"
+            )
         material = self._keys._material_for(self._keys.key_id)
         commitment = self.keyed_commitment(
             "mcp-carrier-plaintext:v1",
@@ -371,7 +386,9 @@ class McpContinuationSecretCodec:
         nonce = os.urandom(12)
         ciphertext = AESGCM(material.aead_key).encrypt(nonce, plaintext_bytes, aad)
         if len(ciphertext) > bounds.maximum_ciphertext_bytes:
-            raise McpContinuationBoundsExceeded("MCP continuation ciphertext exceeds bound")
+            raise McpContinuationBoundsExceeded(
+                "MCP continuation ciphertext exceeds bound"
+            )
         envelope = build_mcp_continuation_storage_fact(
             McpStoredContinuationEnvelopeFact,
             schema_version="mcp_stored_continuation_envelope.v1",
@@ -438,7 +455,9 @@ class McpContinuationSecretCodec:
             aad.decode("utf-8"),
         )
         if envelope.aad_fingerprint != expected_aad:
-            raise McpContinuationAuthorityConflict("MCP continuation AAD identity drifted")
+            raise McpContinuationAuthorityConflict(
+                "MCP continuation AAD identity drifted"
+            )
         try:
             plaintext_bytes = AESGCM(material.aead_key).decrypt(
                 envelope.nonce_bytes,
@@ -446,7 +465,9 @@ class McpContinuationSecretCodec:
                 aad,
             )
         except Exception as exc:
-            raise McpContinuationDecryptFailed("MCP continuation AEAD verification failed") from exc
+            raise McpContinuationDecryptFailed(
+                "MCP continuation AEAD verification failed"
+            ) from exc
         observed_commitment = self.keyed_commitment(
             "mcp-carrier-plaintext:v1",
             plaintext_bytes,
@@ -464,8 +485,7 @@ class McpContinuationSecretCodec:
                     runtime_session_id=aad_context.runtime_session_id,
                     interaction_id=aad_context.interaction_id,
                     suspension_event_id=(
-                        plaintext_suspension_event_id
-                        or aad_context.source_event_id
+                        plaintext_suspension_event_id or aad_context.source_event_id
                     ),
                     round_ordinal=aad_context.round_ordinal,
                     operation_expires_at_utc=aad_context.operation_expires_at_utc,
@@ -487,7 +507,9 @@ class McpContinuationSecretCodec:
             else McpReplayReadyCarrierPlaintext
         )
         if not isinstance(plaintext, expected_type):
-            raise McpContinuationAuthorityConflict("MCP continuation carrier kind drifted")
+            raise McpContinuationAuthorityConflict(
+                "MCP continuation carrier kind drifted"
+            )
         return plaintext
 
     @staticmethod
@@ -538,9 +560,7 @@ class McpContinuationSecretCodec:
             "suspension_event_id": plaintext._suspension_event_id,
             "round_ordinal": plaintext._round_ordinal,
             "request_set_fingerprint": plaintext._request_set_fingerprint,
-            "protocol_semantic_fingerprint": (
-                plaintext._protocol_semantic_fingerprint
-            ),
+            "protocol_semantic_fingerprint": (plaintext._protocol_semantic_fingerprint),
             "endpoint_attribution_fingerprint": (
                 plaintext._endpoint_attribution_fingerprint
             ),
@@ -619,12 +639,9 @@ def prepare_mcp_awaiting_continuation(
         expiry = inherited_expiry
         if (
             expiry.resolved_operation_ttl_seconds > bounds.maximum_ttl_seconds
-            or _parse_utc(created_at_utc)
-            >= _parse_utc(expiry.operation_expires_at_utc)
+            or _parse_utc(created_at_utc) >= _parse_utc(expiry.operation_expires_at_utc)
         ):
-            raise McpContinuationBoundsExceeded(
-                "MCP successor continuation is expired"
-            )
+            raise McpContinuationBoundsExceeded("MCP successor continuation is expired")
     if _parse_utc(created_at_utc) >= _parse_utc(expiry.operation_expires_at_utc):
         raise McpContinuationBoundsExceeded("MCP continuation is expired")
     retry_commitment = codec.retryable_payload_commitment(
@@ -694,9 +711,7 @@ def prepare_mcp_awaiting_continuation(
             retryable_request_payload.source_method_schema_fingerprint
         ),
         request_set_fingerprint=request_set_fingerprint,
-        stored_envelope_fingerprint=(
-            prepared.envelope.stored_envelope_fingerprint
-        ),
+        stored_envelope_fingerprint=(prepared.envelope.stored_envelope_fingerprint),
         commitment_key_id=codec.key_id,
         bounds=bounds,
         protocol_semantic_fingerprint=protocol_semantic_fingerprint,
@@ -736,15 +751,25 @@ def prepare_mcp_replay_continuation(
 
     if not isinstance(current_round_input_responses, McpFrozenRoundInputResponses):
         raise TypeError("MCP replay preparation requires sealed round responses")
-    record = source.stored_record if isinstance(source, PreparedMcpAwaitingContinuation) else source
+    record = (
+        source.stored_record
+        if isinstance(source, PreparedMcpAwaitingContinuation)
+        else source
+    )
     awaiting = source_plaintext
-    if record.control.carrier_state is not McpContinuationCarrierState.AWAITING_CLIENT_INPUT:
-        raise McpContinuationAuthorityConflict("MCP source carrier is not awaiting input")
-    if _parse_utc(created_at_utc) >= _parse_utc(
-        awaiting._operation_expires_at_utc
+    if (
+        record.control.carrier_state
+        is not McpContinuationCarrierState.AWAITING_CLIENT_INPUT
     ):
+        raise McpContinuationAuthorityConflict(
+            "MCP source carrier is not awaiting input"
+        )
+    if _parse_utc(created_at_utc) >= _parse_utc(awaiting._operation_expires_at_utc):
         raise McpContinuationBoundsExceeded("MCP continuation is expired")
-    if current_round_input_responses.request_set_fingerprint != awaiting._request_set_fingerprint:
+    if (
+        current_round_input_responses.request_set_fingerprint
+        != awaiting._request_set_fingerprint
+    ):
         raise McpContinuationAuthorityConflict("MCP response/request set mismatch")
     replay_id = context_fingerprint(
         "mcp-continuation-replay-carrier:v1",
@@ -824,7 +849,9 @@ class PostgresMcpContinuationSecretStore:
 
     __slots__ = ("connection_provider",)
 
-    def __init__(self, connection_provider: VerifiedPostgresConnectionProviderProtocol) -> None:
+    def __init__(
+        self, connection_provider: VerifiedPostgresConnectionProviderProtocol
+    ) -> None:
         self.connection_provider = connection_provider
 
     def read(
@@ -936,10 +963,7 @@ class McpContinuationTransactionIntent:
             raise ValueError("MCP continuation source event is absent from full batch")
         with self._lock:
             if self._bound is not None:
-                if (
-                    self._bound.prepared_candidate_batch_identity
-                    != prepared
-                ):
+                if self._bound.prepared_candidate_batch_identity != prepared:
                     raise ValueError(
                         "MCP continuation intent cannot bind a different event batch"
                     )
@@ -969,7 +993,8 @@ class McpContinuationTransactionIntent:
                     self.resulting_record.envelope.continuation_carrier_id
                     if self.resulting_record is not None
                     else self.source_carrier_id
-                    if self.mutation_kind is McpContinuationMutationKind.RESERVE_DISPATCH
+                    if self.mutation_kind
+                    is McpContinuationMutationKind.RESERVE_DISPATCH
                     else None
                 ),
                 expected_row_state=(
@@ -1113,9 +1138,16 @@ class McpContinuationTransactionCompanion:
         if receipt.exact_ordered_batch_fingerprint != (
             self.prepared_candidate_batch_identity.exact_ordered_batch_fingerprint
         ):
-            raise ValueError("MCP companion stored rebind receipt belongs to another batch")
-        if self._stored_rebind_receipt is not None and self._stored_rebind_receipt != receipt:
-            raise ValueError("MCP companion received conflicting stored rebind receipts")
+            raise ValueError(
+                "MCP companion stored rebind receipt belongs to another batch"
+            )
+        if (
+            self._stored_rebind_receipt is not None
+            and self._stored_rebind_receipt != receipt
+        ):
+            raise ValueError(
+                "MCP companion received conflicting stored rebind receipts"
+            )
         self._stored_rebind_receipt = receipt
 
     def apply_postgres(self, cursor: Any, stored_events: Sequence[AgentEvent]) -> None:
@@ -1192,10 +1224,17 @@ class McpContinuationTransactionCompanion:
         if source is None:
             if self.mutation_kind is McpContinuationMutationKind.DELETE_TERMINAL:
                 return
-            raise McpContinuationAuthorityConflict("MCP source continuation row is absent")
+            raise McpContinuationAuthorityConflict(
+                "MCP source continuation row is absent"
+            )
         observed = _record_from_row(source)
-        if self.expected_control is not None and observed.control != self.expected_control:
-            raise McpContinuationAuthorityConflict("MCP continuation control CAS failed")
+        if (
+            self.expected_control is not None
+            and observed.control != self.expected_control
+        ):
+            raise McpContinuationAuthorityConflict(
+                "MCP continuation control CAS failed"
+            )
         if self.mutation_kind is McpContinuationMutationKind.RESERVE_DISPATCH:
             assert self.resulting_control is not None
             cursor.execute(
@@ -1237,9 +1276,16 @@ class McpContinuationTransactionCompanion:
         if observed is None:
             if self.mutation_kind is McpContinuationMutationKind.DELETE_TERMINAL:
                 return
-            raise McpContinuationAuthorityConflict("MCP source continuation row is absent")
-        if self.expected_control is not None and observed.control != self.expected_control:
-            raise McpContinuationAuthorityConflict("MCP continuation control CAS failed")
+            raise McpContinuationAuthorityConflict(
+                "MCP source continuation row is absent"
+            )
+        if (
+            self.expected_control is not None
+            and observed.control != self.expected_control
+        ):
+            raise McpContinuationAuthorityConflict(
+                "MCP continuation control CAS failed"
+            )
         if self.mutation_kind is McpContinuationMutationKind.RESERVE_DISPATCH:
             assert self.resulting_control is not None
             records[self.source_carrier_id] = McpContinuationStoredRecord(
@@ -1367,7 +1413,9 @@ def _record_from_row(row: Mapping[str, Any]) -> McpContinuationStoredRecord:
         expiry_fingerprint=str(row["expiry_fingerprint"]),
     )
     if envelope.stored_envelope_fingerprint != str(row["stored_envelope_fingerprint"]):
-        raise McpContinuationAuthorityConflict("stored MCP envelope fingerprint drifted")
+        raise McpContinuationAuthorityConflict(
+            "stored MCP envelope fingerprint drifted"
+        )
     control = build_mcp_continuation_storage_fact(
         McpContinuationCarrierControlFact,
         schema_version="mcp_continuation_carrier_control.v1",
@@ -1429,8 +1477,7 @@ def build_mcp_continuation_transaction_intent(
     interaction_id: str,
     round_ordinal: int,
     source_event_id: str,
-    repository: PostgresMcpContinuationSecretStore
-    | InMemoryMcpContinuationSecretStore,
+    repository: PostgresMcpContinuationSecretStore | InMemoryMcpContinuationSecretStore,
     issuer_id: str,
     issuer_generation: int,
     charge_contract_fingerprint: str,

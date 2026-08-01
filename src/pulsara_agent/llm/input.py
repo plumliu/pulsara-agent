@@ -82,7 +82,9 @@ class LLMMessage:
         binding = self.provider_user_carrier_binding
         if expected is None:
             if semantic is not None or binding is not None:
-                raise ValueError("non-user provider message cannot carry user authority")
+                raise ValueError(
+                    "non-user provider message cannot carry user authority"
+                )
             return
         if (
             not isinstance(semantic, expected)
@@ -90,9 +92,10 @@ class LLMMessage:
             or len(self.content) != 1
         ):
             raise ValueError("typed provider-user message lacks exact semantic owner")
-        if rebind_provider_user_carrier_semantic(
-            self.content[0], binding=binding
-        ) != semantic:
+        if (
+            rebind_provider_user_carrier_semantic(self.content[0], binding=binding)
+            != semantic
+        ):
             raise ValueError("typed provider-user message wire/semantic mismatch")
 
     @classmethod
@@ -158,7 +161,9 @@ class LLMMessage:
         tool_calls: tuple[LLMToolCall, ...] = (),
     ) -> "LLMMessage":
         content = (text,) if text else ()
-        thinking_parts = (thinking,) if isinstance(thinking, str) and thinking else tuple(thinking)
+        thinking_parts = (
+            (thinking,) if isinstance(thinking, str) and thinking else tuple(thinking)
+        )
         return cls(
             role=MessageRole.ASSISTANT,
             content=content,
@@ -177,7 +182,9 @@ class LLMMessage:
 
     @classmethod
     def tool_result(cls, text: str, *, tool_call_id: str | None = None) -> "LLMMessage":
-        return cls(role=MessageRole.TOOL_RESULT, content=(text,), tool_call_id=tool_call_id)
+        return cls(
+            role=MessageRole.TOOL_RESULT, content=(text,), tool_call_id=tool_call_id
+        )
 
     @classmethod
     def runtime_request(
@@ -255,9 +262,7 @@ class LLMMessage:
             canonical_utf8_bytes=semantic.canonical_wire_utf8_bytes,
             semantic_fingerprint=semantic.wire_semantic_fingerprint,
             semantic_fact=semantic,
-            occurrence_semantic_fingerprint=(
-                causal_occurrence_semantic_fingerprint
-            ),
+            occurrence_semantic_fingerprint=(causal_occurrence_semantic_fingerprint),
         )
         return cls.from_provider_user_carrier(
             role=MessageRole.RUNTIME_OBSERVATION,

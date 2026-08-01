@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import json
 from dataclasses import dataclass
 from hashlib import sha256
@@ -500,7 +502,9 @@ def _prepare_projection(
             target_key=target_key,
         )
     else:
-        decoded = source_bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decoded = decode_raw_stored_event_envelope(
+            source_bound.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(decoded, ToolResultEndEvent):
             raise ValueError("evidence source is not ToolResultEndEvent")
         target_key = projection_target_key(
@@ -890,14 +894,15 @@ def _prepare_evidence_documents(
     )
     if len(rows) > _EVIDENCE_EVENT_READS:
         raise ValueError("tool evidence exact event bound exceeded")
+    bound_rows = tuple(_bound_event_from_row(row) for row in rows)
     decoded = tuple(
         (
-            _bound_event_from_row(row),
-            _bound_event_from_row(row).envelope.decode_owned(
-                DEFAULT_EVENT_SCHEMA_REGISTRY
+            bound,
+            decode_raw_stored_event_envelope(
+                bound.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
             ),
         )
-        for row in rows
+        for bound in bound_rows
     )
     call_starts = tuple(
         item for item in decoded if isinstance(item[1], ToolCallStartEvent)
@@ -1047,9 +1052,10 @@ def _prepare_evidence_documents(
     )
     if projection_row is None:
         raise LookupError("tool terminal projection event is absent")
-    projection_event = _bound_event_from_row(
-        dict(projection_row)
-    ).envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    projection_bound = _bound_event_from_row(dict(projection_row))
+    projection_event = decode_raw_stored_event_envelope(
+        projection_bound.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if (
         not isinstance(projection_event, ToolResultTerminalProjectionCommittedEvent)
         or stable_event_identity(
@@ -1368,7 +1374,9 @@ def drain_pre_activation_kind(
             latest: dict[str, tuple[dict[str, object], object]] = {}
             for row in trigger_rows:
                 bound = _bound_event_from_row(row)
-                decoded = bound.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decoded = decode_raw_stored_event_envelope(
+                    bound.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
                 tool_call_id = (
                     decoded.tool_call_id
                     if isinstance(decoded, ToolResultEndEvent)

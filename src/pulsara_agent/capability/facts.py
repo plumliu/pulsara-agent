@@ -36,9 +36,7 @@ def build_capability_projection_fact(
     persist_artifacts: bool = True,
 ) -> CapabilityProjectionFact:
     source_entry_count = 0
-    entry_by_provider_name: dict[
-        tuple[str, str], CapabilityProjectionEntryFact
-    ] = {}
+    entry_by_provider_name: dict[tuple[str, str], CapabilityProjectionEntryFact] = {}
     fragment_inputs: list[
         tuple[
             str,
@@ -288,9 +286,7 @@ def narrow_capability_projection_fact(
             == entry.content_fingerprint
         )
     )
-    retained_entry_ids = {
-        entry.projection_entry_id for entry in retained_entries
-    }
+    retained_entry_ids = {entry.projection_entry_id for entry in retained_entries}
     retained_containers = {
         fragment.container_id
         for fragment in original.rendered_fragments
@@ -434,7 +430,10 @@ def _provider_rendered_projection(
             ),
             source_entry_count=1,
         ),
-        (*payloads, (stable_name, "provider_prompt_fragment", source_kind, provider_payload)),
+        (
+            *payloads,
+            (stable_name, "provider_prompt_fragment", source_kind, provider_payload),
+        ),
     )
 
 

@@ -356,7 +356,11 @@ def prepare_window_compaction_source_document(
             if isinstance(block, TranscriptToolResultRefFact):
                 unit = unit_by_id.get(block.tool_result_unit_id)
                 fragment = fragment_by_id.get(block.tool_result_unit_id)
-                if unit is None or fragment is None or unit.tool_call_id != block.tool_call_id:
+                if (
+                    unit is None
+                    or fragment is None
+                    or unit.tool_call_id != block.tool_call_id
+                ):
                     raise ValueError("window compaction result ref is not normalized")
                 entry = _source_entry(
                     source_entry_id=_source_entry_id(
@@ -389,9 +393,9 @@ def prepare_window_compaction_source_document(
                     ),
                     timing=timing,
                 )
-                tool_call_entry_id_by_call[
-                    (message.message_id, block.tool_call_id)
-                ] = entry.source_entry_id
+                tool_call_entry_id_by_call[(message.message_id, block.tool_call_id)] = (
+                    entry.source_entry_id
+                )
             elif isinstance(block, TranscriptTextBlockFact):
                 entry = _source_entry(
                     source_entry_id=_source_entry_id(
@@ -451,7 +455,9 @@ def prepare_window_compaction_source_document(
         pairs_by_message.items(),
         key=lambda item: min(pair.call_sequence for pair in item[1]),
     ):
-        ordered_pairs = tuple(sorted(group_pairs, key=lambda pair: pair.call_block_index))
+        ordered_pairs = tuple(
+            sorted(group_pairs, key=lambda pair: pair.call_block_index)
+        )
         assistant = message_by_id.get(assistant_message_id)
         if assistant is None or assistant.role != "assistant":
             raise ValueError("window compaction pair group lacks assistant message")
@@ -506,11 +512,7 @@ def prepare_window_compaction_source_document(
         )
 
     first_retained_group = next(
-        (
-            index
-            for index, group in enumerate(pair_groups)
-            if group.protection_classes
-        ),
+        (index for index, group in enumerate(pair_groups) if group.protection_classes),
         len(pair_groups),
     )
     summarized_groups = tuple(pair_groups[:first_retained_group])
@@ -534,7 +536,9 @@ def prepare_window_compaction_source_document(
                 summarized_entry_ids.add(entry_id)
 
     for rollup in prepared_rollups:
-        member_units = tuple(unit_by_id[item] for item in rollup.ordered_member_unit_ids)
+        member_units = tuple(
+            unit_by_id[item] for item in rollup.ordered_member_unit_ids
+        )
         refs = tuple(
             sorted(
                 {
@@ -556,7 +560,9 @@ def prepare_window_compaction_source_document(
             timing=None,
         )
         entries.append(entry)
-        if all(unit.unit_id in _group_unit_ids(summarized_groups) for unit in member_units):
+        if all(
+            unit.unit_id in _group_unit_ids(summarized_groups) for unit in member_units
+        ):
             summarized_entry_ids.add(entry.source_entry_id)
         else:
             retained_entry_ids.add(entry.source_entry_id)
@@ -595,7 +601,9 @@ def prepare_window_compaction_source_document(
         "entries": tuple(entries),
         "pair_groups": tuple(pair_groups),
         "summarized_entry_ids": tuple(
-            entry_id for entry_id in ordered_entry_ids if entry_id in summarized_entry_ids
+            entry_id
+            for entry_id in ordered_entry_ids
+            if entry_id in summarized_entry_ids
         ),
         "retained_entry_ids": tuple(
             entry_id for entry_id in ordered_entry_ids if entry_id in retained_entry_ids
@@ -631,9 +639,7 @@ def prepare_window_compaction_source_document(
     summarized_units = _group_unit_ids(summarized_groups)
     retained_units = _group_unit_ids(retained_groups)
     protected_units = tuple(
-        unit.unit_id
-        for unit in units
-        if protection_by_id[unit.unit_id].classes
+        unit.unit_id for unit in units if protection_by_id[unit.unit_id].classes
     )
     return PreparedWindowCompactionSourceDocument(
         fact=fact,

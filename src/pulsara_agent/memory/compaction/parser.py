@@ -13,7 +13,10 @@ from pulsara_agent.memory.compaction.contracts import (
     CompactionMemoryPreferenceProposalFact,
 )
 from pulsara_agent.memory.compaction.sanitizer import contains_compaction_secret
-from pulsara_agent.primitives._context_base import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives._context_base import (
+    canonical_json_bytes,
+    context_fingerprint,
+)
 
 
 PARSER_CONTRACT_FINGERPRINT = context_fingerprint(
@@ -86,11 +89,17 @@ def parse_compaction_memory_extraction_output(
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise CompactionMemoryExtractionOutputError("invalid extraction JSON") from exc
     if not isinstance(payload, dict):
-        raise CompactionMemoryExtractionOutputError("extraction output must be an object")
+        raise CompactionMemoryExtractionOutputError(
+            "extraction output must be an object"
+        )
     try:
-        parsed = TypeAdapter(CompactionMemoryExtractionOutputFact).validate_python(payload)
+        parsed = TypeAdapter(CompactionMemoryExtractionOutputFact).validate_python(
+            payload
+        )
     except ValidationError as exc:
-        raise CompactionMemoryExtractionOutputError("invalid extraction output schema") from exc
+        raise CompactionMemoryExtractionOutputError(
+            "invalid extraction output schema"
+        ) from exc
 
     allowed = set(allowed_evidence_node_ids)
     causal_index = {item: index for index, item in enumerate(allowed_evidence_node_ids)}
@@ -101,13 +110,24 @@ def parse_compaction_memory_extraction_output(
             "NFC", proposal.statement.replace("\r\n", "\n").replace("\r", "\n")
         ).strip()
         if not statement or len(statement.encode("utf-8")) > 1000:
-            raise CompactionMemoryExtractionOutputError("candidate statement is invalid")
+            raise CompactionMemoryExtractionOutputError(
+                "candidate statement is invalid"
+            )
         if contains_compaction_secret(statement):
-            raise CompactionMemoryExtractionOutputError("candidate statement contains secret-like text")
+            raise CompactionMemoryExtractionOutputError(
+                "candidate statement contains secret-like text"
+            )
         if any(item not in allowed for item in proposal.evidence_node_ids):
-            raise CompactionMemoryExtractionOutputError("candidate cites unknown evidence")
-        if tuple(sorted(proposal.evidence_node_ids, key=causal_index.__getitem__)) != proposal.evidence_node_ids:
-            raise CompactionMemoryExtractionOutputError("candidate evidence is not in causal order")
+            raise CompactionMemoryExtractionOutputError(
+                "candidate cites unknown evidence"
+            )
+        if (
+            tuple(sorted(proposal.evidence_node_ids, key=causal_index.__getitem__))
+            != proposal.evidence_node_ids
+        ):
+            raise CompactionMemoryExtractionOutputError(
+                "candidate evidence is not in causal order"
+            )
         semantic = context_fingerprint(
             "compaction-memory-output-proposal-semantic:v1",
             {"kind": "Preference", "statement": statement},
@@ -122,7 +142,9 @@ def parse_compaction_memory_extraction_output(
         statement, refs = collapsed[semantic]
         ordered_refs = tuple(sorted(refs, key=causal_index.__getitem__))
         if len(ordered_refs) > 8:
-            raise CompactionMemoryExtractionOutputError("collapsed evidence exceeds hard bound")
+            raise CompactionMemoryExtractionOutputError(
+                "collapsed evidence exceeds hard bound"
+            )
         normalized.append(
             CompactionMemoryPreferenceProposalFact(
                 statement=statement,

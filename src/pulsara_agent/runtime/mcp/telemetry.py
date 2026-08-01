@@ -41,18 +41,33 @@ class McpOperationTraceContext:
         match = _TRACEPARENT_RE.fullmatch(self.traceparent)
         if match is None:
             raise ValueError("invalid W3C traceparent")
-        if int(match.group("trace_id"), 16) == 0 or int(match.group("span_id"), 16) == 0:
+        if (
+            int(match.group("trace_id"), 16) == 0
+            or int(match.group("span_id"), 16) == 0
+        ):
             raise ValueError("W3C trace identifiers cannot be all zero")
-        if self.tracestate is not None and _TRACESTATE_RE.fullmatch(self.tracestate) is None:
+        if (
+            self.tracestate is not None
+            and _TRACESTATE_RE.fullmatch(self.tracestate) is None
+        ):
             raise ValueError("invalid W3C tracestate")
-        normalized = tuple(sorted((str(key), str(value)) for key, value in self.baggage))
-        if normalized != self.baggage or len({key for key, _ in normalized}) != len(normalized):
+        normalized = tuple(
+            sorted((str(key), str(value)) for key, value in self.baggage)
+        )
+        if normalized != self.baggage or len({key for key, _ in normalized}) != len(
+            normalized
+        ):
             raise ValueError("MCP trace baggage must be ordered and unique")
         for key, value in normalized:
-            if key not in _ALLOWED_BAGGAGE_KEYS or _BAGGAGE_KEY_RE.fullmatch(key) is None:
+            if (
+                key not in _ALLOWED_BAGGAGE_KEYS
+                or _BAGGAGE_KEY_RE.fullmatch(key) is None
+            ):
                 raise ValueError("MCP trace baggage key is not allowlisted")
-            if not value or len(value.encode("utf-8")) > 256 or any(
-                char in value for char in "\r\n"
+            if (
+                not value
+                or len(value.encode("utf-8")) > 256
+                or any(char in value for char in "\r\n")
             ):
                 raise ValueError("MCP trace baggage value is invalid")
 

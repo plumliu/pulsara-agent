@@ -141,16 +141,12 @@ def resolve_run_rollout_binding(
     entry = run_start.subagent_run_entry
     if (
         entry is None
-        or
-        parent_reservation.semantic_fingerprint
-        != reference.reservation_fingerprint
+        or parent_reservation.semantic_fingerprint != reference.reservation_fingerprint
         or parent_reservation.owner_kind != "subagent_run"
         or parent_reservation.owner_id != entry.subagent_run_id
     ):
         raise ChildRolloutAccountingError("child parent reservation identity mismatch")
-    child_state = runtime_session.long_horizon_state_store.child_rollout_state(
-        run_id
-    )
+    child_state = runtime_session.long_horizon_state_store.child_rollout_state(run_id)
     if child_state is None or child_state.subaccount != child_subaccount:
         raise ChildRolloutAccountingError("child rollout state is unavailable")
     return RunRolloutBinding(
@@ -268,7 +264,10 @@ def apply_child_rollout_event(
             raise ChildRolloutAccountingError(
                 "child local reservation root-account mismatch"
             )
-        if reservation.reservation_id in active or reservation.reservation_id in settled_ids:
+        if (
+            reservation.reservation_id in active
+            or reservation.reservation_id in settled_ids
+        ):
             raise ChildRolloutAccountingError(
                 "child ledger contains a duplicate reservation identity"
             )

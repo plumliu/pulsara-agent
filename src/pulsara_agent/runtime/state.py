@@ -12,7 +12,9 @@ from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 
 if TYPE_CHECKING:
-    from pulsara_agent.capability.execution_surface import FrozenCapabilityExecutionSurface
+    from pulsara_agent.capability.execution_surface import (
+        FrozenCapabilityExecutionSurface,
+    )
     from pulsara_agent.replay.provenance import RuntimeEventSpan
     from pulsara_agent.primitives.capability import CapabilityResolveBasisFact
     from pulsara_agent.primitives.context import ContextEventReferenceFact
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
         StopRequest,
     )
     from pulsara_agent.runtime.run_entry import RunWorkingSet
+
 
 class LoopStatus(StrEnum):
     RUNNING = "running"
@@ -105,9 +108,9 @@ class RunExecutionResourceState:
     current_user_message_fact: CurrentUserMessageFact | None = None
     resume_activation_blocked: bool = False
     resume_boundary_attempts: dict[str, int] = field(default_factory=dict)
-    latest_mcp_input_required_resolution_reference: (
-        ContextEventReferenceFact | None
-    ) = None
+    latest_mcp_input_required_resolution_reference: ContextEventReferenceFact | None = (
+        None
+    )
 
 
 @dataclass(slots=True)
@@ -129,9 +132,7 @@ class RunActivationWorkingState:
     pending_tool_calls: list[ToolCallBlock] = field(default_factory=list)
     pending_interaction_kind: str | None = None
     pending_interaction_payload: dict[str, Any] = field(default_factory=dict)
-    pending_interaction_source_event_reference: (
-        ContextEventReferenceFact | None
-    ) = None
+    pending_interaction_source_event_reference: ContextEventReferenceFact | None = None
     pending_interaction_source_event_candidate: FrozenEventWriteCandidate | None = None
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     memory_projection: dict[str, Any] | None = None

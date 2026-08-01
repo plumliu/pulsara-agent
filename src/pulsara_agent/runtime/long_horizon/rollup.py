@@ -74,7 +74,9 @@ class InMemoryObservationRollupContentCache:
                 self._chars -= len(previous)
             self._entries[key] = text
             self._chars += len(text)
-            while len(self._entries) > self._max_entries or self._chars > self._max_chars:
+            while (
+                len(self._entries) > self._max_entries or self._chars > self._max_chars
+            ):
                 _, evicted = self._entries.popitem(last=False)
                 self._chars -= len(evicted)
 
@@ -87,9 +89,7 @@ class InMemoryPreparedObservationRollupCache:
             raise ValueError("prepared rollup cache bounds must be positive")
         self._max_entries = max_entries
         self._max_chars = max_chars
-        self._entries: OrderedDict[str, PreparedObservationRollupUnit] = (
-            OrderedDict()
-        )
+        self._entries: OrderedDict[str, PreparedObservationRollupUnit] = OrderedDict()
         self._chars = 0
         self._lock = RLock()
 
@@ -110,7 +110,9 @@ class InMemoryPreparedObservationRollupCache:
                 self._chars -= previous.compile_unit.inline_chars
             self._entries[key] = value
             self._chars += chars
-            while len(self._entries) > self._max_entries or self._chars > self._max_chars:
+            while (
+                len(self._entries) > self._max_entries or self._chars > self._max_chars
+            ):
                 _, evicted = self._entries.popitem(last=False)
                 self._chars -= evicted.compile_unit.inline_chars
 
@@ -176,9 +178,7 @@ class ObservationRollupRendererRegistry:
     """Exact semantic-contract registry; process build identity is diagnostic."""
 
     def __init__(self) -> None:
-        self._bindings: dict[
-            tuple[str, str], ObservationRollupRendererBinding
-        ] = {}
+        self._bindings: dict[tuple[str, str], ObservationRollupRendererBinding] = {}
 
     def register(self, binding: ObservationRollupRendererBinding) -> None:
         key = (binding.contract.renderer_id, binding.contract.renderer_version)
@@ -288,9 +288,7 @@ class _CanonicalObservationRollupRenderer:
         )
 
 
-def default_observation_rollup_renderer_registry() -> (
-    ObservationRollupRendererRegistry
-):
+def default_observation_rollup_renderer_registry() -> ObservationRollupRendererRegistry:
     registry = ObservationRollupRendererRegistry()
     contract = default_observation_rollup_renderer_contract()
     registry.register(
@@ -472,17 +470,14 @@ def prepare_observation_rollup_artifact(
         policy=policy,
         token_estimator=token_estimator,
     )
-    artifact_id = (
-        "artifact:observation-rollup:"
-        + context_fingerprint(
-            "observation-rollup-artifact-id:v1",
-            {
-                "rollup_id": rollup_id,
-                "content_sha256": rendered.content_sha256,
-                "renderer_contract_fingerprint": renderer_contract_fingerprint,
-            },
-        ).removeprefix("sha256:")
-    )
+    artifact_id = "artifact:observation-rollup:" + context_fingerprint(
+        "observation-rollup-artifact-id:v1",
+        {
+            "rollup_id": rollup_id,
+            "content_sha256": rendered.content_sha256,
+            "renderer_contract_fingerprint": renderer_contract_fingerprint,
+        },
+    ).removeprefix("sha256:")
     payload = {
         "schema_version": "observation_rollup.v1",
         "rollup_id": rollup_id,

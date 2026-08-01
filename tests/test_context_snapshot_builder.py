@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from tests.support.runtime_owner import runtime_session_for_test
 
 from tests.support.runtime_owner import build_test_agent_runtime
 
 
 import asyncio
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 
@@ -108,15 +110,17 @@ def test_context_event_slice_is_canonical_and_projectors_get_owned_events() -> N
     assert event_slice.through_sequence == 2
     assert tuple(item.sequence for item in event_slice.events) == (1, 2)
 
-    first_projection = event_slice.events[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    first_projection = decode_raw_stored_event_envelope(
+        event_slice.events[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     second_projection = event_slice.events[0].decode_owned(
         DEFAULT_EVENT_SCHEMA_REGISTRY
     )
     first_projection.metadata["nested"]["items"].append(99)
     assert second_projection.metadata["nested"]["items"] == [1]
-    assert event_slice.events[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY).metadata[
-        "nested"
-    ]["items"] == [1]
+    assert decode_raw_stored_event_envelope(
+        event_slice.events[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+    ).metadata["nested"]["items"] == [1]
 
 
 def test_context_event_slice_delta_extension_preserves_canonical_fingerprints() -> None:
@@ -196,14 +200,8 @@ def test_frozen_stored_event_rejects_wrapper_payload_split_brain() -> None:
         _event(1).model_copy(update={"sequence": 1})
     )
     corrupt = object.__new__(FrozenStoredEvent)
-    for field_name in (
-        "event_id",
-        "event_type",
-        "sequence",
-        "created_at_utc",
-        "canonical_payload_bytes",
-        "payload_fingerprint",
-    ):
+    for field in fields(FrozenStoredEvent):
+        field_name = field.name
         object.__setattr__(corrupt, field_name, getattr(frozen, field_name))
     object.__setattr__(corrupt, "sequence", 2)
     with pytest.raises(ContextEventSliceError, match="wrapper identity"):

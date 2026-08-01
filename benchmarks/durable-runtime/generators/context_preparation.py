@@ -1527,9 +1527,7 @@ def _bind_subagent_agent(
         system_prompt=agent.system_prompt,
         capability_runtime=capability_runtime,
         workspace_kind=agent.workspace_kind,
-        rollout_budget_feasibility_report=(
-            agent.rollout_budget_feasibility_report
-        ),
+        rollout_budget_feasibility_report=(agent.rollout_budget_feasibility_report),
         activation_factory=activation_factory,
         subagent_runtime=agent.subagent_runtime,
     )
@@ -2013,9 +2011,7 @@ async def _prepare_compile_point(
         rendered_tool_results=rendered,
         prepared_rollups=(),
         section_candidates=prepared.prepared_candidates,
-        context_source_hydrated_contents=(
-            prepared.context_source_hydrated_contents
-        ),
+        context_source_hydrated_contents=(prepared.context_source_hydrated_contents),
         transcript_stable_entries=(
             prepared.transcript_projection_evidence.stable_entries
         ),

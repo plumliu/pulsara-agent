@@ -189,7 +189,14 @@ from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessMonitorTerminationSemanticFact,
     TerminalProcessLifecycleOutcomeFact,
 )
+from pulsara_agent.primitives.prompt_queue import (
+    PreparedPromptQueueContentFact,
+    PromptQueueReservationFact,
+    PromptQueueTransitionHeadFact,
+    UserSteerSemanticFact,
+)
 from pulsara_agent.primitives.host_ingress import (
+    ActiveRunPromptSteerCommitGuardFact,
     HostActiveRunMonitorDeliveryFact,
     HostIngressAdmissionProofFact,
     HostRunIngressFact,
@@ -407,6 +414,18 @@ class EventType(StrEnum):
     TERMINAL_NOTIFICATION_RESERVATION_RELEASED = (
         "TERMINAL_NOTIFICATION_RESERVATION_RELEASED"
     )
+    PROMPT_QUEUE_ACCEPTED = "PROMPT_QUEUE_ACCEPTED"
+    PROMPT_QUEUE_RESERVATION_INSTALLED = "PROMPT_QUEUE_RESERVATION_INSTALLED"
+    PROMPT_QUEUE_RESERVATION_RELEASED = "PROMPT_QUEUE_RESERVATION_RELEASED"
+    PROMPT_QUEUE_DELIVERY_REJECTED = "PROMPT_QUEUE_DELIVERY_REJECTED"
+    PROMPT_QUEUE_COMMITTED_TO_RUN = "PROMPT_QUEUE_COMMITTED_TO_RUN"
+    PROMPT_QUEUE_COMMITTED_TO_PROVIDER_INPUT = (
+        "PROMPT_QUEUE_COMMITTED_TO_PROVIDER_INPUT"
+    )
+    PROMPT_QUEUE_CANCELLED = "PROMPT_QUEUE_CANCELLED"
+    PROMPT_QUEUE_RECONCILIATION_REQUIRED = "PROMPT_QUEUE_RECONCILIATION_REQUIRED"
+    PROMPT_QUEUE_CONTENT_RETIRED = "PROMPT_QUEUE_CONTENT_RETIRED"
+    USER_STEER_COMMITTED = "USER_STEER_COMMITTED"
     PLAN_MODE_ENTERED = "PLAN_MODE_ENTERED"
     PLAN_QUESTION_ASKED = "PLAN_QUESTION_ASKED"
     PLAN_QUESTION_ANSWERED = "PLAN_QUESTION_ANSWERED"
@@ -1207,6 +1226,7 @@ class ModelCallStartEvent(EventBase):
         CompactionMemoryExtractionModelInputAttributionFact | None
     ) = None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None = None
+    active_run_prompt_steer_guard: ActiveRunPromptSteerCommitGuardFact | None = None
 
     @model_validator(mode="after")
     def _validate_call_context(self) -> "ModelCallStartEvent":
@@ -1247,8 +1267,7 @@ class ModelCallStartEvent(EventBase):
             ):
                 raise ValueError("governance model Start attribution drifted")
         is_extraction = (
-            self.resolved_call.purpose
-            is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
+            self.resolved_call.purpose is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
         )
         extraction = self.compaction_memory_extraction_input_attribution
         if is_extraction != (extraction is not None):
@@ -1271,6 +1290,14 @@ class ModelCallStartEvent(EventBase):
         ):
             raise ValueError(
                 "active-run monitor delivery requires a follow-up compiled model call"
+            )
+        if self.active_run_prompt_steer_guard is not None and (
+            self.resolved_call.context_mode != "compiled"
+            or self.model_call_index is None
+            or self.model_call_index < 2
+        ):
+            raise ValueError(
+                "active-run prompt steer requires a follow-up compiled model call"
             )
         return self
 
@@ -2489,8 +2516,7 @@ class McpInputRequiredResolutionSubmittedEvent(EventBase):
             != self.continuation.response_attribution_fingerprint
             or self.continuation.operation_expires_at_utc
             != self.source.operation_expires_at_utc
-            or self.continuation.expiry_fingerprint
-            != self.source.expiry_fingerprint
+            or self.continuation.expiry_fingerprint != self.source.expiry_fingerprint
         ):
             raise ValueError("MCP resolution submission authority mismatch")
         return self
@@ -3673,9 +3699,9 @@ class ContextCompactionCompletedEvent(EventBase):
 class ContextCompactionMemoryExtractionRequestedEvent(EventBase):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal[
+    type: Literal[EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED] = (
         EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
-    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_REQUESTED
+    )
     extension_link: CompactionPostCompletionExtensionLinkFact
     human_evidence_manifest_reference: CompactionHumanEvidenceManifestReferenceFact
     memory_domain_id: str = Field(min_length=1)
@@ -3695,9 +3721,9 @@ class ContextCompactionMemoryExtractionRequestedEvent(EventBase):
 class ContextCompactionMemoryExtractionCompletedEvent(EventBase):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal[
+    type: Literal[EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED] = (
         EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
-    ] = EventType.CONTEXT_COMPACTION_MEMORY_EXTRACTION_COMPLETED
+    )
     result_semantic: CompactionMemoryExtractionResultSemanticFact
     occurrence_attribution: CompactionMemoryExtractionOccurrenceAttributionFact
     ordered_candidate_attributions: tuple[
@@ -4806,6 +4832,167 @@ class LedgerMaterializationConsumerRegisteredEvent(EventBase):
     resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class PromptQueueAcceptedEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_ACCEPTED] = EventType.PROMPT_QUEUE_ACCEPTED
+    command_id: str
+    client_instance_id: str
+    client_submission_id: str
+    requested_delivery_mode: Literal["auto", "steer", "follow_up"]
+    resolved_delivery_mode: Literal["pending"]
+    prepared_content: PreparedPromptQueueContentFact
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueReservationInstalledEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_RESERVATION_INSTALLED] = (
+        EventType.PROMPT_QUEUE_RESERVATION_INSTALLED
+    )
+    command_id: str
+    reservation: PromptQueueReservationFact
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueReservationReleasedEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_RESERVATION_RELEASED] = (
+        EventType.PROMPT_QUEUE_RESERVATION_RELEASED
+    )
+    command_id: str
+    source_reservation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    release_reason: Literal[
+        "preflight_retryable",
+        "target_unavailable",
+        "safe_point_missed_auto_requeue",
+        "caller_cancelled_before_dispatch",
+    ]
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueDeliveryRejectedEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_DELIVERY_REJECTED] = (
+        EventType.PROMPT_QUEUE_DELIVERY_REJECTED
+    )
+    command_id: str
+    source_reservation_fingerprint: str | None = None
+    rejection_reason: Literal[
+        "explicit_steer_safe_point_missed",
+        "invalid_target",
+        "history_capacity_rejected",
+        "content_unavailable",
+        "session_closing",
+    ]
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueCommittedToRunEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_COMMITTED_TO_RUN] = (
+        EventType.PROMPT_QUEUE_COMMITTED_TO_RUN
+    )
+    command_id: str
+    source_reservation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    committed_run_start_event_identity: StableEventIdentityFact
+    transition: PromptQueueTransitionHeadFact
+
+    @model_validator(mode="after")
+    def _run_start_join(self) -> "PromptQueueCommittedToRunEvent":
+        identity = self.committed_run_start_event_identity
+        if (
+            identity.runtime_session_id != self.transition.runtime_session_id
+            or identity.event_type != EventType.RUN_START.value
+            or identity.event_id == self.id
+        ):
+            raise ValueError("queue follow-up does not bind one RunStart candidate")
+        return self
+
+
+class PromptQueueCommittedToProviderInputEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_COMMITTED_TO_PROVIDER_INPUT] = (
+        EventType.PROMPT_QUEUE_COMMITTED_TO_PROVIDER_INPUT
+    )
+    command_id: str
+    source_reservation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    provider_input_append_event_identity: StableEventIdentityFact
+    user_steer_event_identity: StableEventIdentityFact
+    transition: PromptQueueTransitionHeadFact
+
+    @model_validator(mode="after")
+    def _provider_input_join(self) -> "PromptQueueCommittedToProviderInputEvent":
+        identity = self.provider_input_append_event_identity
+        if (
+            identity.runtime_session_id != self.transition.runtime_session_id
+            or identity.event_type != EventType.PROVIDER_INPUT_APPEND_COMMITTED.value
+            or identity.event_id == self.id
+            or self.user_steer_event_identity.runtime_session_id
+            != self.transition.runtime_session_id
+            or self.user_steer_event_identity.event_type
+            != EventType.USER_STEER_COMMITTED.value
+            or self.user_steer_event_identity.event_id == self.id
+        ):
+            raise ValueError(
+                "queue steer does not bind one ProviderInput append candidate"
+            )
+        return self
+
+
+class UserSteerCommittedEvent(EventBase):
+    """Canonical current-run user intent admitted beside one provider append."""
+
+    type: Literal[EventType.USER_STEER_COMMITTED] = EventType.USER_STEER_COMMITTED
+    command_id: str
+    queue_item_id: str
+    source_reservation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    steer: UserSteerSemanticFact
+    provider_input_append_event_identity: StableEventIdentityFact
+
+    @model_validator(mode="after")
+    def _append_join(self) -> "UserSteerCommittedEvent":
+        identity = self.provider_input_append_event_identity
+        if (
+            identity.event_type != EventType.PROVIDER_INPUT_APPEND_COMMITTED.value
+            or identity.event_id == self.id
+        ):
+            raise ValueError("user steer does not bind one ProviderInput append")
+        return self
+
+
+class PromptQueueCancelledEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_CANCELLED] = EventType.PROMPT_QUEUE_CANCELLED
+    command_id: str
+    cancellation_reason: Literal["client_cancel", "session_close", "replaced"]
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueReconciliationRequiredEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_RECONCILIATION_REQUIRED] = (
+        EventType.PROMPT_QUEUE_RECONCILIATION_REQUIRED
+    )
+    command_id: str
+    repair_owner_id: str
+    stable_reason_code: Literal[
+        "UNKNOWN_COMMIT",
+        "ROW_EVENT_MISMATCH",
+        "CHECKPOINT_MISMATCH",
+        "ARTIFACT_HOLD_MISMATCH",
+    ]
+    transition: PromptQueueTransitionHeadFact
+
+
+class PromptQueueContentRetiredEvent(EventBase):
+    type: Literal[EventType.PROMPT_QUEUE_CONTENT_RETIRED] = (
+        EventType.PROMPT_QUEUE_CONTENT_RETIRED
+    )
+    command_id: str
+    preparation_id: str | None
+    artifact_identity_fingerprint: str | None
+    retention_policy_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    retirement_reason: Literal[
+        "terminal_delivery",
+        "cancelled",
+        "rejected",
+        "operator_retirement",
+    ]
+    transition: PromptQueueTransitionHeadFact
+
+
 class LedgerMaterializationConsumerHorizonAdvancedEvent(EventBase):
     type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED] = (
         EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
@@ -4980,6 +5167,16 @@ AgentEvent: TypeAlias = (
     | TerminalProcessObservationDeliveryDeferredEvent
     | TerminalNotificationReservationCreatedEvent
     | TerminalNotificationReservationReleasedEvent
+    | PromptQueueAcceptedEvent
+    | PromptQueueReservationInstalledEvent
+    | PromptQueueReservationReleasedEvent
+    | PromptQueueDeliveryRejectedEvent
+    | PromptQueueCommittedToRunEvent
+    | PromptQueueCommittedToProviderInputEvent
+    | PromptQueueCancelledEvent
+    | PromptQueueReconciliationRequiredEvent
+    | PromptQueueContentRetiredEvent
+    | UserSteerCommittedEvent
     | PlanModeEnteredEvent
     | PlanQuestionAskedEvent
     | PlanQuestionAnsweredEvent

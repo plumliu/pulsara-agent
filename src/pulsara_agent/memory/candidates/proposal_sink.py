@@ -48,9 +48,13 @@ class MemoryProposalSink:
     def deposit(self, candidate: CandidatePoolProposal) -> None:
         self.deposit_valid(candidate, candidate.intent_fingerprint)
 
-    def deposit_valid(self, candidate: CandidatePoolProposal, intent_fingerprint: str | None) -> None:
+    def deposit_valid(
+        self, candidate: CandidatePoolProposal, intent_fingerprint: str | None
+    ) -> None:
         if intent_fingerprint is not None:
-            candidate = candidate.model_copy(update={"intent_fingerprint": intent_fingerprint})
+            candidate = candidate.model_copy(
+                update={"intent_fingerprint": intent_fingerprint}
+            )
         with self._lock:
             if intent_fingerprint:
                 self._invalid_by_intent.pop(intent_fingerprint, None)
@@ -58,8 +62,12 @@ class MemoryProposalSink:
                 self._satisfied_intents.add(intent_fingerprint)
             self._valid_candidates.append(candidate)
 
-    def record_invalid(self, candidate: CandidatePoolProposal, intent_fingerprint: str) -> MemoryRetryState:
-        candidate = candidate.model_copy(update={"intent_fingerprint": intent_fingerprint})
+    def record_invalid(
+        self, candidate: CandidatePoolProposal, intent_fingerprint: str
+    ) -> MemoryRetryState:
+        candidate = candidate.model_copy(
+            update={"intent_fingerprint": intent_fingerprint}
+        )
         with self._lock:
             retry_count = self._retry_counts_by_intent.get(intent_fingerprint, 0) + 1
             self._retry_counts_by_intent[intent_fingerprint] = retry_count

@@ -526,6 +526,26 @@ class DirectStableMessageSemanticSourceFact(FrozenFactBase):
 
 
 @_fact(
+    "same_batch_user_steer_attribution.v1",
+    "attribution_fingerprint",
+    "same-batch-user-steer-attribution:v1",
+)
+class SameBatchUserSteerAttributionFact(FrozenFactBase):
+    """Physical attribution for a steer committed beside its provider append."""
+
+    schema_version: Literal["same_batch_user_steer_attribution.v1"] = (
+        "same_batch_user_steer_attribution.v1"
+    )
+    runtime_session_id: str = Field(min_length=1)
+    queue_item_id: str = Field(min_length=1)
+    reservation_fingerprint: Fingerprint
+    expected_user_steer_event_id: str = Field(min_length=1)
+    canonical_message_id: str = Field(min_length=1)
+    content_semantic_fingerprint: Fingerprint
+    attribution_fingerprint: Fingerprint
+
+
+@_fact(
     "derived_tool_result_message_semantic_source.v1",
     "source_semantic_fingerprint",
     "derived-tool-result-message-semantic-source:v1",
@@ -627,9 +647,18 @@ class DirectStableMessageSourceAttributionFact(FrozenFactBase):
         "direct_stable_message_source_attribution.v1"
     )
     source_kind: Literal["direct_stable_message"] = "direct_stable_message"
-    stable_leaf_reference: TranscriptProjectionLeafEntryReferenceFact
+    stable_leaf_reference: TranscriptProjectionLeafEntryReferenceFact | None = None
+    same_batch_user_steer: SameBatchUserSteerAttributionFact | None = None
     source_semantic_fingerprint: Fingerprint
     fact_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _authority(self) -> "DirectStableMessageSourceAttributionFact":
+        if (self.stable_leaf_reference is None) == (self.same_batch_user_steer is None):
+            raise ValueError(
+                "direct stable-message attribution requires exactly one authority"
+            )
+        return self
 
 
 @_fact(
@@ -2697,5 +2726,6 @@ __all__ = [
     or name.startswith("Existing")
     or name.startswith("Rollover")
     or name.startswith("Session")
+    or name.startswith("SameBatch")
     or name.startswith("OneShot")
 ]

@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
-from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery, MemoryRelationEdge
+from pulsara_agent.memory.canonical.query import (
+    CanonicalNodeView,
+    MemoryQuery,
+    MemoryRelationEdge,
+)
 from pulsara_agent.memory.recall.candidates import CandidateBatch, ChannelCandidate
 from pulsara_agent.ontology import memory
 
@@ -81,7 +85,9 @@ class GraphCandidateService:
         suppressed = suppressed_ids or set()
         seed_views = {
             view.id: view
-            for view in self.memory_query.fetch_nodes(seed_ids[: self.max_seeds], graph_id=graph_id)
+            for view in self.memory_query.fetch_nodes(
+                seed_ids[: self.max_seeds], graph_id=graph_id
+            )
         }
         seeds = [
             memory_id
@@ -102,7 +108,9 @@ class GraphCandidateService:
         truncated = False
 
         for hop in range(1, max_hops + 1):
-            frontier_ids = tuple(dict.fromkeys(current_id for _, current_id, _, _ in frontier))
+            frontier_ids = tuple(
+                dict.fromkeys(current_id for _, current_id, _, _ in frontier)
+            )
             # Per-source SQL ceiling is a coarse supernode safety valve, NOT the
             # fine-grained fanout cap. It sits at max_examined_edges (well above
             # fanout_per_node) so a high-degree node can't pull thousands of rows
@@ -114,7 +122,9 @@ class GraphCandidateService:
                 max_per_source=self.max_examined_edges,
             )
             edges_by_id = _edges_by_endpoint(edges)
-            expanded: list[tuple[str, str, tuple[RecallPathStep, ...], tuple[str, ...]]] = []
+            expanded: list[
+                tuple[str, str, tuple[RecallPathStep, ...], tuple[str, ...]]
+            ] = []
             for seed_id, current_id, steps, visited in frontier:
                 adjacent = edges_by_id.get(current_id, ())[: self.fanout_per_node]
                 if len(edges_by_id.get(current_id, ())) > self.fanout_per_node:
@@ -132,39 +142,54 @@ class GraphCandidateService:
                     next_steps = (*steps, step)
                     if hop == 2 and not _allowed_two_hop_motif(next_steps):
                         continue
-                    expanded.append((seed_id, step.to_id, next_steps, (*visited, step.to_id)))
+                    expanded.append(
+                        (seed_id, step.to_id, next_steps, (*visited, step.to_id))
+                    )
                 if examined_edges >= self.max_examined_edges:
                     break
             if not expanded:
                 break
 
-            next_ids = tuple(dict.fromkeys(current_id for _, current_id, _, _ in expanded))
+            next_ids = tuple(
+                dict.fromkeys(current_id for _, current_id, _, _ in expanded)
+            )
             node_views = {
-                view.id: view for view in self.memory_query.fetch_nodes(next_ids, graph_id=graph_id)
+                view.id: view
+                for view in self.memory_query.fetch_nodes(next_ids, graph_id=graph_id)
             }
-            next_frontier: list[tuple[str, str, tuple[RecallPathStep, ...], tuple[str, ...]]] = []
+            next_frontier: list[
+                tuple[str, str, tuple[RecallPathStep, ...], tuple[str, ...]]
+            ] = []
             for seed_id, current_id, steps, visited in expanded:
                 view = node_views.get(current_id)
                 if view is None:
                     if hop < max_hops and steps[-1].predicate in _EVIDENCE_PREDICATES:
                         next_frontier.append((seed_id, current_id, steps, visited))
                     continue
-                if current_id in suppressed or not self._visible(view, scopes=scopes, types=types):
+                if current_id in suppressed or not self._visible(
+                    view, scopes=scopes, types=types
+                ):
                     continue
                 if current_id != seed_id and _is_result_path(steps):
-                    path = RecallPath(seed_memory_id=seed_id, target_memory_id=current_id, steps=steps)
+                    path = RecallPath(
+                        seed_memory_id=seed_id, target_memory_id=current_id, steps=steps
+                    )
                     paths = paths_by_id.setdefault(current_id, [])
                     if path not in paths and len(paths) < self.max_paths_per_candidate:
                         paths.append(path)
                     score = _path_score(seed_rank=seeds.index(seed_id) + 1, steps=steps)
-                    scores_by_id[current_id] = max(scores_by_id.get(current_id, 0.0), score)
+                    scores_by_id[current_id] = max(
+                        scores_by_id.get(current_id, 0.0), score
+                    )
                 if hop < max_hops:
                     next_frontier.append((seed_id, current_id, steps, visited))
             frontier = next_frontier
             if examined_edges >= self.max_examined_edges:
                 break
 
-        ordered = sorted(scores_by_id, key=lambda memory_id: (-scores_by_id[memory_id], memory_id))
+        ordered = sorted(
+            scores_by_id, key=lambda memory_id: (-scores_by_id[memory_id], memory_id)
+        )
         if len(ordered) > self.max_candidates:
             truncated = True
             ordered = ordered[: self.max_candidates]
@@ -184,14 +209,18 @@ class GraphCandidateService:
                 "graph_max_hops": max_hops,
                 "graph_seed_ids": seeds,
                 "graph_candidate_ids": ordered,
-                "graph_path_count": sum(len(paths_by_id[memory_id]) for memory_id in ordered),
+                "graph_path_count": sum(
+                    len(paths_by_id[memory_id]) for memory_id in ordered
+                ),
                 "graph_examined_edges": examined_edges,
                 "graph_truncated": truncated,
             },
         )
         return GraphCandidateOutcome(
             batch=batch,
-            paths_by_id={memory_id: tuple(paths_by_id[memory_id]) for memory_id in ordered},
+            paths_by_id={
+                memory_id: tuple(paths_by_id[memory_id]) for memory_id in ordered
+            },
         )
 
     def _visible(
@@ -223,7 +252,9 @@ def metadata_batch(*, max_hops: int, seed_ids: Sequence[str]) -> CandidateBatch:
     )
 
 
-def _edges_by_endpoint(edges: Sequence[MemoryRelationEdge]) -> dict[str, tuple[MemoryRelationEdge, ...]]:
+def _edges_by_endpoint(
+    edges: Sequence[MemoryRelationEdge],
+) -> dict[str, tuple[MemoryRelationEdge, ...]]:
     mutable: dict[str, list[MemoryRelationEdge]] = {}
     for edge in edges:
         if edge.predicate not in _TRAVERSABLE_PREDICATES:
@@ -232,7 +263,11 @@ def _edges_by_endpoint(edges: Sequence[MemoryRelationEdge]) -> dict[str, tuple[M
         if edge.target_id != edge.source_id:
             mutable.setdefault(edge.target_id, []).append(edge)
     return {
-        node_id: tuple(sorted(rows, key=lambda edge: (edge.predicate, edge.source_id, edge.target_id)))
+        node_id: tuple(
+            sorted(
+                rows, key=lambda edge: (edge.predicate, edge.source_id, edge.target_id)
+            )
+        )
         for node_id, rows in mutable.items()
     }
 
@@ -263,7 +298,10 @@ def _allowed_two_hop_motif(steps: Sequence[RecallPathStep]) -> bool:
     if len(steps) != 2:
         return False
     first, second = steps
-    if first.predicate in _EVIDENCE_PREDICATES and second.predicate in _EVIDENCE_PREDICATES:
+    if (
+        first.predicate in _EVIDENCE_PREDICATES
+        and second.predicate in _EVIDENCE_PREDICATES
+    ):
         return True
     if first.predicate in _BASIS_PREDICATES and second.predicate in _BASIS_PREDICATES:
         return first.traversal != second.traversal
@@ -282,10 +320,15 @@ def _is_result_path(steps: Sequence[RecallPathStep]) -> bool:
 
 def _path_score(*, seed_rank: int, steps: Sequence[RecallPathStep]) -> float:
     if len(steps) == 1:
-        relation_weight = 0.95 if steps[0].predicate in {
-            memory.CONTRADICTS.name,
-            memory.SUPERSEDES.name,
-        } else 0.8
+        relation_weight = (
+            0.95
+            if steps[0].predicate
+            in {
+                memory.CONTRADICTS.name,
+                memory.SUPERSEDES.name,
+            }
+            else 0.8
+        )
     elif all(step.predicate == memory.SUPERSEDES.name for step in steps):
         relation_weight = 0.75
     else:

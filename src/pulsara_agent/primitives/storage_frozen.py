@@ -75,9 +75,7 @@ class DurableStorageFactFingerprintRegistry:
             return tuple(self._by_schema[key] for key in sorted(self._by_schema))
 
 
-DURABLE_STORAGE_FACT_FINGERPRINT_REGISTRY = (
-    DurableStorageFactFingerprintRegistry()
-)
+DURABLE_STORAGE_FACT_FINGERPRINT_REGISTRY = DurableStorageFactFingerprintRegistry()
 
 
 class FrozenStorageFactBase(BaseModel):

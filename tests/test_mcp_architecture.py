@@ -54,10 +54,7 @@ def test_mcp_sdk_and_worker_do_not_import_capability_or_host_mutation_layers() -
 
 
 def test_mcp_removed_production_symbols_do_not_reappear() -> None:
-    source_text = "\n".join(
-        path.read_text()
-        for path in SRC.rglob("*.py")
-    )
+    source_text = "\n".join(path.read_text() for path in SRC.rglob("*.py"))
     removed_symbols = (
         "McpCapabilityBindingBundle",
         "build_mcp_bundle",
@@ -135,7 +132,9 @@ def test_mcp_storage_vocabulary_is_not_event_safe_vocabulary() -> None:
         assert not issubclass(storage_type, FrozenFactBase)
 
 
-def test_mcp_dispatch_and_companion_contracts_keep_guards_out_of_durable_payload() -> None:
+def test_mcp_dispatch_and_companion_contracts_keep_guards_out_of_durable_payload() -> (
+    None
+):
     dispatch_fields = set(McpContinuationDispatchReservationFact.model_fields)
     assert "expected_materialization_account_revision" not in dispatch_fields
     assert "expected_materialization_account_fingerprint" not in dispatch_fields

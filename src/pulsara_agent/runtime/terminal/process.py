@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import os
 import pty
 import shlex
@@ -1064,10 +1066,9 @@ def _completion_event_reference(
         runtime_session_id = state.origin_runtime_session_id
     if event is None or event.sequence is None or runtime_session_id is None:
         return None
-    from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
     from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 
-    raw = RawStoredEventEnvelope.from_stored_event(
+    raw = build_raw_stored_event_envelope(
         event=event,
         runtime_session_id=runtime_session_id,
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,

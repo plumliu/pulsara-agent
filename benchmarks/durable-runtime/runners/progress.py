@@ -182,9 +182,7 @@ class BenchmarkProgressReporter:
         if eta_seconds is not None:
             fields.append(f"eta={_format_duration(eta_seconds)}")
         if error_type is not None:
-            fields.extend(
-                (f"error_type={error_type}", f"reason={reason_code}")
-            )
+            fields.extend((f"error_type={error_type}", f"reason={reason_code}"))
         print(" ".join(fields), file=self._stream, flush=True)
         if self._jsonl_path is not None:
             with self._jsonl_path.open("a", encoding="utf-8") as handle:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from pulsara_agent.event import (
     AgentEvent,
     DataBlockSegmentEvent,
@@ -55,8 +57,7 @@ class ModelStreamMaterializationError(RuntimeError):
 
 
 MAX_MODEL_CALL_MATERIALIZATION_EVENTS = (
-    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL
-    + MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS
+    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL + MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS
 )
 MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES = (
     MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
@@ -78,7 +79,7 @@ def _materialize_committed_model_call_result_from_raw_event_log(
     )
     return _materialize_committed_model_call_result_from_raw_events(
         tuple(
-            envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw
         ),
         resolved_model_call_id=resolved_model_call_id,
@@ -155,9 +156,7 @@ def _materialize_committed_model_call_result_from_raw_events(
         elif isinstance(event, DataBlockEndEvent):
             data.end(event.block_id, _sequence(event))
         elif isinstance(event, ToolCallStartEvent):
-            tools.start(
-                event.tool_call_id, event.tool_call_name, _sequence(event)
-            )
+            tools.start(event.tool_call_id, event.tool_call_name, _sequence(event))
         elif isinstance(event, ToolCallArgumentsSegmentEvent):
             tools.delta(event.tool_call_id, event.arguments_json_fragment)
         elif isinstance(event, ToolCallEndEvent):
@@ -260,7 +259,11 @@ def materialize_committed_model_call_result_from_terminal_projection(
             "projection result requires one Start, projection commit, and End"
         )
     start, end, projection_event = starts[0], ends[0], committed[0]
-    if start.sequence is None or end.sequence is None or projection_event.sequence is None:
+    if (
+        start.sequence is None
+        or end.sequence is None
+        or projection_event.sequence is None
+    ):
         raise ModelStreamMaterializationError(
             "projection result requires committed lifecycle sequences"
         )
@@ -432,9 +435,7 @@ class _TextAccumulator:
     def facts(self, *, completed: bool, thinking: bool):
         output = []
         fact_type = (
-            CommittedModelThinkingBlockFact
-            if thinking
-            else CommittedModelTextBlockFact
+            CommittedModelThinkingBlockFact if thinking else CommittedModelTextBlockFact
         )
         for block_id in self._order:
             value = self._values[block_id]

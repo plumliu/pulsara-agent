@@ -235,9 +235,7 @@ class LongHorizonStateStore:
                 for state in self._rollout_states.values()
             )
 
-    def projection_state(
-        self, window_id: str
-    ) -> ContextWindowProjectionState | None:
+    def projection_state(self, window_id: str) -> ContextWindowProjectionState | None:
         with self._lock:
             return self._projection_reducer.state(window_id)
 
@@ -349,9 +347,7 @@ class LongHorizonStateStore:
             clone._window_compaction_attempt_max = dict(
                 self._window_compaction_attempt_max
             )
-            clone._pending_window_compactions = dict(
-                self._pending_window_compactions
-            )
+            clone._pending_window_compactions = dict(self._pending_window_compactions)
             clone._window_compaction_terminal_ids = set(
                 self._window_compaction_terminal_ids
             )
@@ -403,7 +399,10 @@ class LongHorizonStateStore:
                     "window compaction has multiple terminal facts"
                 )
             if event.started_event_id is not None:
-                if self._pending_window_compactions.pop(event.compaction_id, None) is None:
+                if (
+                    self._pending_window_compactions.pop(event.compaction_id, None)
+                    is None
+                ):
                     raise LongHorizonReducerApplyError(
                         "window compaction failure lacks its Started fact"
                     )
@@ -431,11 +430,9 @@ class LongHorizonStateStore:
                     initial_child_rollout_state,
                 )
 
-                self._child_rollout_states[event.run_id] = (
-                    initial_child_rollout_state(
-                        subaccount=event.child_rollout_subaccount,
-                        through_sequence=sequence,
-                    )
+                self._child_rollout_states[event.run_id] = initial_child_rollout_state(
+                    subaccount=event.child_rollout_subaccount,
+                    through_sequence=sequence,
                 )
         elif isinstance(event, RunEndEvent):
             self._completed_window_compactions = {
@@ -443,7 +440,9 @@ class LongHorizonStateStore:
                 for key, item in self._completed_window_compactions.items()
                 if item.run_id != event.run_id
             }
-        if isinstance(event, (ContextWindowOpenedEvent, ContextWindowClosedEvent, RunEndEvent)):
+        if isinstance(
+            event, (ContextWindowOpenedEvent, ContextWindowClosedEvent, RunEndEvent)
+        ):
             state = self._window_states.get(event.run_id)
             if state is None:
                 raise LongHorizonReducerApplyError(
@@ -461,9 +460,7 @@ class LongHorizonStateStore:
                 self._remember_closed_window(event.run_id, next_state)
                 start = self._run_starts.pop(event.run_id, None)
                 if start is not None:
-                    self._remember_closed(
-                        self._closed_run_starts, event.run_id, start
-                    )
+                    self._remember_closed(self._closed_run_starts, event.run_id, start)
                 child_state = self._child_rollout_states.pop(event.run_id, None)
                 if child_state is not None:
                     self._remember_closed(
@@ -475,7 +472,10 @@ class LongHorizonStateStore:
         child_state = self._child_rollout_states.get(event.run_id)
         if child_state is not None and isinstance(
             event,
-            (RolloutBudgetReservationCreatedEvent, RolloutBudgetReservationSettledEvent),
+            (
+                RolloutBudgetReservationCreatedEvent,
+                RolloutBudgetReservationSettledEvent,
+            ),
         ):
             from pulsara_agent.runtime.long_horizon.accounting import (
                 apply_child_rollout_event,
@@ -540,7 +540,9 @@ class LongHorizonStateStore:
             return event.reservation.account_id
         if isinstance(event, RolloutBudgetReservationSettledEvent):
             return self._reservation_accounts.get(event.reservation_id)
-        if isinstance(event, (RolloutPhaseTransitionedEvent, RolloutBudgetAccountClosedEvent)):
+        if isinstance(
+            event, (RolloutPhaseTransitionedEvent, RolloutBudgetAccountClosedEvent)
+        ):
             return event.account_id
         return None
 

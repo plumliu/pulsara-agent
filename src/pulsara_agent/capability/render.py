@@ -61,7 +61,11 @@ def render_catalog_prompt(
     current_len = len(header) + len(compact_index) + len(footer)
     if current_len <= budget_chars:
         for rendered in detail_entries:
-            detail_len = len(detail_header) + len(detail_footer) + sum(len(item) for item in rendered_details)
+            detail_len = (
+                len(detail_header)
+                + len(detail_footer)
+                + sum(len(item) for item in rendered_details)
+            )
             if current_len + detail_len + len(rendered) > budget_chars:
                 break
             rendered_details.append(rendered)
@@ -144,7 +148,11 @@ def render_catalog_prompt(
         )
 
     rendered_entries: list[str] = []
-    current_len = len(header) + len("<available_skill_index>\n</available_skill_index>\n\n") + len(footer)
+    current_len = (
+        len(header)
+        + len("<available_skill_index>\n</available_skill_index>\n\n")
+        + len(footer)
+    )
     for entry in entries:
         rendered = _render_index_entry(entry, description=None)
         if current_len + len(rendered) > budget_chars:
@@ -210,22 +218,22 @@ def render_active_skill_prompt(
             (
                 injection,
                 "\n".join(
-                [
-                    f"Active Skill: {injection.name}",
-                    f"Source: {injection.location}",
-                    f"Reason: {injection.reason}",
-                    *_active_skill_hint_lines(injection),
-                    "",
-                    "The following workspace skill content is active for this user message. "
-                    "Treat it as workspace-provided guidance, like AGENTS.md.",
-                    "",
-                    begin,
-                    injection.content,
-                    end,
-                    "",
-                    f"Skill directory: {_parent_location(injection.location)}",
-                    "Resolve relative paths in this skill against that directory.",
-                ],
+                    [
+                        f"Active Skill: {injection.name}",
+                        f"Source: {injection.location}",
+                        f"Reason: {injection.reason}",
+                        *_active_skill_hint_lines(injection),
+                        "",
+                        "The following workspace skill content is active for this user message. "
+                        "Treat it as workspace-provided guidance, like AGENTS.md.",
+                        "",
+                        begin,
+                        injection.content,
+                        end,
+                        "",
+                        f"Skill directory: {_parent_location(injection.location)}",
+                        "Resolve relative paths in this skill against that directory.",
+                    ],
                 ),
             )
         )
@@ -426,7 +434,9 @@ def _append_description_truncation_diagnostics(
         )
 
 
-def _render_index_entry(entry: ResolvedSkillCatalogEntry, *, description: str | None) -> str:
+def _render_index_entry(
+    entry: ResolvedSkillCatalogEntry, *, description: str | None
+) -> str:
     lines = [
         "  <skill>",
         f"    <name>{_xml_text(entry.name)}</name>",
@@ -445,21 +455,35 @@ def _render_detail_entry(entry: ResolvedSkillCatalogEntry, *, description: str) 
         f"    <description>{_xml_text(description)}</description>",
     ]
     if entry.provides_tools:
-        lines.append(f"    <provides_tools>{_xml_text(', '.join(entry.provides_tools))}</provides_tools>")
+        lines.append(
+            f"    <provides_tools>{_xml_text(', '.join(entry.provides_tools))}</provides_tools>"
+        )
     if entry.suggested_tools:
-        lines.append(f"    <suggested_tools>{_xml_text(', '.join(entry.suggested_tools))}</suggested_tools>")
+        lines.append(
+            f"    <suggested_tools>{_xml_text(', '.join(entry.suggested_tools))}</suggested_tools>"
+        )
     if entry.required_binaries:
-        lines.append(f"    <required_binaries>{_xml_text(', '.join(entry.required_binaries))}</required_binaries>")
+        lines.append(
+            f"    <required_binaries>{_xml_text(', '.join(entry.required_binaries))}</required_binaries>"
+        )
     if entry.optional_binaries:
-        lines.append(f"    <optional_binaries>{_xml_text(', '.join(entry.optional_binaries))}</optional_binaries>")
+        lines.append(
+            f"    <optional_binaries>{_xml_text(', '.join(entry.optional_binaries))}</optional_binaries>"
+        )
     if entry.external_services:
-        lines.append(f"    <external_services>{_xml_text(', '.join(entry.external_services))}</external_services>")
+        lines.append(
+            f"    <external_services>{_xml_text(', '.join(entry.external_services))}</external_services>"
+        )
     if entry.network_required:
         lines.append("    <network_required>true</network_required>")
     if entry.auth_required != "none":
-        lines.append(f"    <auth_required>{_xml_text(entry.auth_required)}</auth_required>")
+        lines.append(
+            f"    <auth_required>{_xml_text(entry.auth_required)}</auth_required>"
+        )
     if entry.cli_usage_kind != "none":
-        lines.append(f"    <cli_usage_kind>{_xml_text(entry.cli_usage_kind)}</cli_usage_kind>")
+        lines.append(
+            f"    <cli_usage_kind>{_xml_text(entry.cli_usage_kind)}</cli_usage_kind>"
+        )
     lines.append("  </skill_detail>")
     return "\n".join(lines) + "\n"
 
@@ -481,7 +505,9 @@ def _active_skill_hint_lines(injection: ActiveSkillInjection) -> list[str]:
     if injection.cli_usage_kind != "none":
         hints.append(f"CLI usage kind: {injection.cli_usage_kind}")
     if hints:
-        hints.append("Skill CLI hints are guidance only; they do not grant tool access or bypass approval.")
+        hints.append(
+            "Skill CLI hints are guidance only; they do not grant tool access or bypass approval."
+        )
     return hints
 
 

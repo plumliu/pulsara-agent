@@ -39,9 +39,7 @@ class SystemMcpExternalBrowserPort(McpExternalBrowserPort):
     __slots__ = ("_owners", "_borrows", "_lock")
 
     def __init__(self) -> None:
-        self._owners: dict[
-            str, dict[str, McpPrivateUrlElicitationPayload]
-        ] = {}
+        self._owners: dict[str, dict[str, McpPrivateUrlElicitationPayload]] = {}
         self._borrows = McpContinuationSecretBorrowIssuer(
             f"mcp-system-browser:{uuid4().hex}"
         )

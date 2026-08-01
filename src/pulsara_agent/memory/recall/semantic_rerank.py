@@ -52,7 +52,9 @@ class RecallRerankService:
                 replace(
                     item,
                     score=item.score + score,
-                    why=tuple(dict.fromkeys((*item.why, f"reranker:{self.provider.model_id}"))),
+                    why=tuple(
+                        dict.fromkeys((*item.why, f"reranker:{self.provider.model_id}"))
+                    ),
                     channel_scores={**item.channel_scores, "reranker": score},
                 )
             )

@@ -289,8 +289,7 @@ def build_responses_payload(
     model = call.target.model_profile
     options = call.target.effective_options
     if any(
-        message.role
-        in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
+        message.role in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
         for message in context.messages
     ):
         carrier = call.target.fact.runtime_observation_carrier

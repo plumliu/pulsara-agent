@@ -213,7 +213,10 @@ class RunActivationIdentity(FrozenRuntimeStateBase):
                 raise ValueError("initial activation RunStart mismatch")
         elif isinstance(source, HostResumeBoundaryActivationSource):
             expected_owner = source.source_resume_boundary_event_reference.event_id
-            if source.source_resume_boundary.identity.run_id != self.owner_identity.run_id:
+            if (
+                source.source_resume_boundary.identity.run_id
+                != self.owner_identity.run_id
+            ):
                 raise ValueError("resume activation run mismatch")
         else:
             expected_owner = source.source_run_start_event_reference.event_id
@@ -261,9 +264,7 @@ class RunTerminationIntent:
         from pulsara_agent.primitives.run_entry import canonical_utc_timestamp
 
         canonical_utc_timestamp(self.requested_at_utc)
-        if (self.target_segment_id is None) != (
-            self.target_segment_generation is None
-        ):
+        if (self.target_segment_id is None) != (self.target_segment_generation is None):
             raise ValueError("termination target segment identity is all-or-none")
         if (
             self.target_segment_generation is not None
@@ -866,7 +867,12 @@ class RunTerminalOutputPending(FrozenRuntimeStateBase):
 class RunReconciliationRequired(FrozenRuntimeStateBase):
     outcome_kind: Literal["reconciliation_required"] = "reconciliation_required"
     fault_domain: Literal[
-        "boundary", "authority", "activation", "interaction", "terminalization", "output"
+        "boundary",
+        "authority",
+        "activation",
+        "interaction",
+        "terminalization",
+        "output",
     ]
     owner_identity: RunOwnerIdentity
     stable_owner_fingerprint: Fingerprint

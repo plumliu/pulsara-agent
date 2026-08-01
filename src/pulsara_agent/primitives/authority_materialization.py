@@ -155,9 +155,13 @@ class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
     @model_validator(mode="after")
     def _covers_segmented_burst(self) -> "TransportSegmentedBurstContractFact":
         if self.max_durable_events_per_source_item != 1:
-            raise ValueError("V1 model segmentation requires one event/source worst case")
+            raise ValueError(
+                "V1 model segmentation requires one event/source worst case"
+            )
         if self.max_synthetic_semantic_tail_events != 1:
-            raise ValueError("V1 model segmentation permits one synthetic semantic tail")
+            raise ValueError(
+                "V1 model segmentation permits one synthetic semantic tail"
+            )
         if self.max_start_commit_batches != 1 or self.max_terminal_commit_batches != 1:
             raise ValueError("V1 model lifecycle has one start and terminal batch")
         max_durable_events = (
@@ -179,12 +183,10 @@ class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
         required_bytes = (
             self.max_source_payload_bytes
             + self.max_synthetic_semantic_tail_payload_bytes
-            + max_durable_events
-            * self.max_durable_event_wrapper_overhead_bytes
+            + max_durable_events * self.max_durable_event_wrapper_overhead_bytes
             + required_commit_batches
             * self.max_bookkeeping_base_payload_bytes_per_commit
-            + max_durable_events
-            * self.max_bookkeeping_payload_bytes_per_business_event
+            + max_durable_events * self.max_bookkeeping_payload_bytes_per_business_event
             + self.max_structural_tail_payload_bytes
             + self.max_terminal_recovery_payload_bytes
         )
@@ -434,7 +436,8 @@ class TranscriptEventDomainRegistryContractFact(FrozenFactBase):
     @model_validator(mode="after")
     def _canonical_entries(self) -> "TranscriptEventDomainRegistryContractFact":
         keys = tuple(
-            (item.event_type, item.event_schema_version) for item in self.supported_events
+            (item.event_type, item.event_schema_version)
+            for item in self.supported_events
         )
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise ValueError("event domain registry entries must be sorted and unique")
@@ -480,7 +483,9 @@ class TranscriptProjectionLiveAssemblyState(FrozenRuntimeStateBase):
         for group in groups:
             _require_sorted_unique(group, context="live assembly identifiers")
         if self.checkpointable and any(groups):
-            raise ValueError("checkpointable live assembly cannot contain pending state")
+            raise ValueError(
+                "checkpointable live assembly cannot contain pending state"
+            )
         return self
 
 
@@ -728,7 +733,8 @@ class LedgerGenesisBatchContractFact(FrozenFactBase):
     @model_validator(mode="after")
     def _canonical_matrix(self) -> "LedgerGenesisBatchContractFact":
         keys = tuple(
-            (item.event_type, item.event_schema_version) for item in self.event_contracts
+            (item.event_type, item.event_schema_version)
+            for item in self.event_contracts
         )
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise ValueError("genesis event contracts must be sorted and unique")
@@ -754,15 +760,18 @@ class LedgerMaterializationAccountGenesisFact(FrozenFactBase):
         generation = self.empty_account
         if generation.runtime_session_id != self.runtime_session_id:
             raise ValueError("genesis runtime session mismatch")
-        if any(
-            (
-                generation.ledger_materialization_generation,
-                generation.consumer_horizon_revision,
-                generation.reclaimable_through_sequence,
-                generation.reclaimable_event_count_through,
-                generation.reclaimable_charged_payload_bytes_through,
+        if (
+            any(
+                (
+                    generation.ledger_materialization_generation,
+                    generation.consumer_horizon_revision,
+                    generation.reclaimable_through_sequence,
+                    generation.reclaimable_event_count_through,
+                    generation.reclaimable_charged_payload_bytes_through,
+                )
             )
-        ) or generation.consumer_horizons:
+            or generation.consumer_horizons
+        ):
             raise ValueError("genesis requires the canonical empty generation")
         values = tuple(item.value for item in self.required_initial_consumer_kinds)
         if values != tuple(sorted(values)) or len(values) != len(set(values)):
@@ -775,9 +784,7 @@ class ActivePhysicalReservationStateFact(FrozenFactBase):
     reservation_id: str = Field(min_length=1, max_length=128)
     owner_kind: ReservablePhysicalOperationKind
     owner_id: str = Field(min_length=1, max_length=128)
-    lifecycle_status: Literal[
-        "active", "suspended_tail", "reconciliation_required"
-    ]
+    lifecycle_status: Literal["active", "suspended_tail", "reconciliation_required"]
     reservation_fingerprint: Fingerprint
     suspension_fingerprint: Fingerprint | None
     reserved_events_total: PositiveInt
@@ -804,9 +811,13 @@ class ActivePhysicalReservationStateFact(FrozenFactBase):
     def _suspension_identity(self) -> "ActivePhysicalReservationStateFact":
         if self.lifecycle_status == "suspended_tail":
             if self.suspension_fingerprint is None:
-                raise ValueError("suspended reservation requires suspension fingerprint")
+                raise ValueError(
+                    "suspended reservation requires suspension fingerprint"
+                )
         elif self.suspension_fingerprint is not None:
-            raise ValueError("non-suspended reservation cannot carry suspension fingerprint")
+            raise ValueError(
+                "non-suspended reservation cannot carry suspension fingerprint"
+            )
         if self.charged_events_lifetime != (
             self.charged_candidate_events_lifetime
             + self.charged_bookkeeping_events_lifetime
@@ -818,16 +829,21 @@ class ActivePhysicalReservationStateFact(FrozenFactBase):
             + self.charged_bookkeeping_bytes_lifetime
         ):
             raise ValueError("active reservation charged byte split mismatch")
-        if self.charged_events_lifetime + self.remaining_events > self.reserved_events_total:
+        if (
+            self.charged_events_lifetime + self.remaining_events
+            > self.reserved_events_total
+        ):
             raise ValueError("active reservation event balance exceeds total")
         if (
             self.charged_payload_bytes_lifetime + self.remaining_payload_bytes
             > self.reserved_payload_bytes_total
         ):
             raise ValueError("active reservation byte balance exceeds total")
-        if self.companion_payload_charged_bytes_lifetime + (
-            self.companion_payload_remaining_bytes
-        ) != self.companion_payload_reserved_bytes_total:
+        if (
+            self.companion_payload_charged_bytes_lifetime
+            + (self.companion_payload_remaining_bytes)
+            != self.companion_payload_reserved_bytes_total
+        ):
             raise ValueError("active reservation companion byte balance mismatch")
         if (self.companion_payload_reserved_bytes_total > 0) != (
             self.companion_charge_contract_fingerprint is not None
@@ -917,7 +933,9 @@ class LedgerMaterializationAccountStateFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _canonical_account(self) -> "LedgerMaterializationAccountStateFact":
-        reservation_ids = tuple(item.reservation_id for item in self.active_reservations)
+        reservation_ids = tuple(
+            item.reservation_id for item in self.active_reservations
+        )
         _require_sorted_unique(reservation_ids, context="active reservations")
         _require_sorted_unique(
             self.latest_transition_event_ids,
@@ -1212,8 +1230,7 @@ class PhysicalOperationChargeAppliedFact(FrozenFactBase):
         ):
             raise ValueError("charge-applied byte balance mismatch")
         if self.companion_remaining_after_bytes != (
-            self.companion_remaining_before_bytes
-            - self.companion_charge_payload_bytes
+            self.companion_remaining_before_bytes - self.companion_charge_payload_bytes
         ):
             raise ValueError("charge-applied companion byte balance mismatch")
         if self.companion_charge_contract_fingerprint is None and any(
@@ -1291,40 +1308,172 @@ class PhysicalStoredEnvelopeObservation(FrozenRuntimeStateBase):
 
 
 _OWN_FINGERPRINTS: tuple[tuple[str, str, str], ...] = (
-    ("fixed_batch_event_contract.v1", "event_contract_fingerprint", "fixed-batch-event-contract:v1"),
-    ("transport_segmented_burst_contract.v1", "contract_fingerprint", "transport-segmented-burst-contract:v1"),
-    ("tool_delta_burst_contract.v2", "contract_fingerprint", "tool-delta-burst-contract:v2"),
-    ("fixed_batch_burst_contract.v1", "contract_fingerprint", "fixed-batch-burst-contract:v1"),
-    ("stored_envelope_identity_bounds.v1", "bounds_contract_fingerprint", "stored-envelope-identity-bounds:v1"),
-    ("physical_bookkeeping_event_bound.v1", "bound_fingerprint", "physical-bookkeeping-event-bound:v1"),
-    ("physical_charge_contract.v1", "contract_fingerprint", "physical-charge-contract:v1"),
-    ("transcript_semantic_event_contract.v1", "supported_event_fingerprint", "transcript-semantic-event-contract:v1"),
-    ("transcript_acceleration_event_contract.v1", "supported_event_fingerprint", "transcript-acceleration-event-contract:v1"),
-    ("non_transcript_event_contract.v1", "supported_event_fingerprint", "non-transcript-event-contract:v1"),
-    ("transcript_event_domain_registry.v1", "registry_contract_fingerprint", "transcript-event-domain-registry:v1"),
-    ("transcript_projection_stable_semantic_state.v1", "state_semantic_fingerprint", "transcript-projection-stable-state:v1"),
-    ("transcript_domain_prefix.v1", "prefix_fingerprint", "transcript-domain-prefix:v1"),
-    ("transcript_domain_sparse_read_proof.v1", "completeness_fingerprint", "transcript-domain-sparse-read-proof:v1"),
-    ("authority_materialization_limits.v2", "limits_contract_fingerprint", "authority-materialization-limits:v2"),
-    ("checkpoint_dispatch_barrier.v2", "barrier_fingerprint", "checkpoint-dispatch-barrier:v2"),
-    ("ledger_materialization_consumer_horizon.v1", "horizon_fingerprint", "ledger-materialization-consumer-horizon:v1"),
-    ("ledger_materialization_generation.v1", "generation_fingerprint", "ledger-materialization-generation:v1"),
-    ("ledger_genesis_event_contract.v1", "event_bound_fingerprint", "ledger-genesis-event-contract:v1"),
-    ("ledger_genesis_batch_contract.v1", "contract_fingerprint", "ledger-genesis-batch-contract:v1"),
-    ("ledger_materialization_account_genesis.v1", "genesis_fingerprint", "ledger-materialization-account-genesis:v1"),
-    ("active_physical_reservation_state.v1", "state_fingerprint", "active-physical-reservation-state:v1"),
-    ("ledger_materialization_transition_cause_identity.v1", "cause_fingerprint", "ledger-materialization-transition-cause-identity:v1"),
-    ("ledger_materialization_account_transition.v2", "transition_fingerprint", "ledger-materialization-account-transition:v2"),
-    ("ledger_materialization_account_state.v1", "account_state_fingerprint", "ledger-materialization-account-state:v1"),
-    ("physical_operation_reservation.v2", "reservation_fingerprint", "physical-operation-reservation:v2"),
-    ("physical_operation_suspension_tail.v2", "suspension_fingerprint", "physical-operation-suspension-tail:v2"),
-    ("physical_operation_settlement.v2", "settlement_fingerprint", "physical-operation-settlement:v2"),
-    ("physical_operation_charge_applied.v1", "charge_fingerprint", "physical-operation-charge-applied:v1"),
+    (
+        "fixed_batch_event_contract.v1",
+        "event_contract_fingerprint",
+        "fixed-batch-event-contract:v1",
+    ),
+    (
+        "transport_segmented_burst_contract.v1",
+        "contract_fingerprint",
+        "transport-segmented-burst-contract:v1",
+    ),
+    (
+        "tool_delta_burst_contract.v2",
+        "contract_fingerprint",
+        "tool-delta-burst-contract:v2",
+    ),
+    (
+        "fixed_batch_burst_contract.v1",
+        "contract_fingerprint",
+        "fixed-batch-burst-contract:v1",
+    ),
+    (
+        "stored_envelope_identity_bounds.v1",
+        "bounds_contract_fingerprint",
+        "stored-envelope-identity-bounds:v1",
+    ),
+    (
+        "physical_bookkeeping_event_bound.v1",
+        "bound_fingerprint",
+        "physical-bookkeeping-event-bound:v1",
+    ),
+    (
+        "physical_charge_contract.v1",
+        "contract_fingerprint",
+        "physical-charge-contract:v1",
+    ),
+    (
+        "transcript_semantic_event_contract.v1",
+        "supported_event_fingerprint",
+        "transcript-semantic-event-contract:v1",
+    ),
+    (
+        "transcript_acceleration_event_contract.v1",
+        "supported_event_fingerprint",
+        "transcript-acceleration-event-contract:v1",
+    ),
+    (
+        "non_transcript_event_contract.v1",
+        "supported_event_fingerprint",
+        "non-transcript-event-contract:v1",
+    ),
+    (
+        "transcript_event_domain_registry.v1",
+        "registry_contract_fingerprint",
+        "transcript-event-domain-registry:v1",
+    ),
+    (
+        "transcript_projection_stable_semantic_state.v1",
+        "state_semantic_fingerprint",
+        "transcript-projection-stable-state:v1",
+    ),
+    (
+        "transcript_domain_prefix.v1",
+        "prefix_fingerprint",
+        "transcript-domain-prefix:v1",
+    ),
+    (
+        "transcript_domain_sparse_read_proof.v1",
+        "completeness_fingerprint",
+        "transcript-domain-sparse-read-proof:v1",
+    ),
+    (
+        "authority_materialization_limits.v2",
+        "limits_contract_fingerprint",
+        "authority-materialization-limits:v2",
+    ),
+    (
+        "checkpoint_dispatch_barrier.v2",
+        "barrier_fingerprint",
+        "checkpoint-dispatch-barrier:v2",
+    ),
+    (
+        "ledger_materialization_consumer_horizon.v1",
+        "horizon_fingerprint",
+        "ledger-materialization-consumer-horizon:v1",
+    ),
+    (
+        "ledger_materialization_generation.v1",
+        "generation_fingerprint",
+        "ledger-materialization-generation:v1",
+    ),
+    (
+        "ledger_genesis_event_contract.v1",
+        "event_bound_fingerprint",
+        "ledger-genesis-event-contract:v1",
+    ),
+    (
+        "ledger_genesis_batch_contract.v1",
+        "contract_fingerprint",
+        "ledger-genesis-batch-contract:v1",
+    ),
+    (
+        "ledger_materialization_account_genesis.v1",
+        "genesis_fingerprint",
+        "ledger-materialization-account-genesis:v1",
+    ),
+    (
+        "active_physical_reservation_state.v1",
+        "state_fingerprint",
+        "active-physical-reservation-state:v1",
+    ),
+    (
+        "ledger_materialization_transition_cause_identity.v1",
+        "cause_fingerprint",
+        "ledger-materialization-transition-cause-identity:v1",
+    ),
+    (
+        "ledger_materialization_account_transition.v2",
+        "transition_fingerprint",
+        "ledger-materialization-account-transition:v2",
+    ),
+    (
+        "ledger_materialization_account_state.v1",
+        "account_state_fingerprint",
+        "ledger-materialization-account-state:v1",
+    ),
+    (
+        "physical_operation_reservation.v2",
+        "reservation_fingerprint",
+        "physical-operation-reservation:v2",
+    ),
+    (
+        "physical_operation_suspension_tail.v2",
+        "suspension_fingerprint",
+        "physical-operation-suspension-tail:v2",
+    ),
+    (
+        "physical_operation_settlement.v2",
+        "settlement_fingerprint",
+        "physical-operation-settlement:v2",
+    ),
+    (
+        "physical_operation_charge_applied.v1",
+        "charge_fingerprint",
+        "physical-operation-charge-applied:v1",
+    ),
     ("run_seed_consumer_cause.v1", "cause_fingerprint", "run-seed-consumer-cause:v1"),
-    ("ledger_genesis_consumer_cause.v1", "cause_fingerprint", "ledger-genesis-consumer-cause:v1"),
-    ("reducer_registration_cause.v1", "cause_fingerprint", "reducer-registration-cause:v1"),
-    ("checkpoint_consumer_cause.v1", "cause_fingerprint", "checkpoint-consumer-cause:v1"),
-    ("consumer_retirement_cause.v1", "cause_fingerprint", "consumer-retirement-cause:v1"),
+    (
+        "ledger_genesis_consumer_cause.v1",
+        "cause_fingerprint",
+        "ledger-genesis-consumer-cause:v1",
+    ),
+    (
+        "reducer_registration_cause.v1",
+        "cause_fingerprint",
+        "reducer-registration-cause:v1",
+    ),
+    (
+        "checkpoint_consumer_cause.v1",
+        "cause_fingerprint",
+        "checkpoint-consumer-cause:v1",
+    ),
+    (
+        "consumer_retirement_cause.v1",
+        "cause_fingerprint",
+        "consumer-retirement-cause:v1",
+    ),
 )
 
 for _schema_version, _fingerprint_field, _domain in _OWN_FINGERPRINTS:

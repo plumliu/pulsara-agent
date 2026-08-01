@@ -38,6 +38,14 @@ class ArchiveBlob:
 @dataclass(slots=True)
 class InMemoryArchiveStore:
     blobs: dict[str, ArchiveBlob] = field(default_factory=dict)
+    # Storage-only terminal queue relations live beside the artifact rows so a
+    # replacement RuntimeSession over the same in-memory archive observes the
+    # same PREPARED/CONSUMED/RELEASED authority.  Production uses the matching
+    # PostgreSQL relations from migration 0011.
+    prompt_queue_artifact_holds: dict[str, dict[str, Any]] = field(default_factory=dict)
+    prompt_queue_content_references: dict[tuple[str, str], dict[str, Any]] = field(
+        default_factory=dict
+    )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def put_text(

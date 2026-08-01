@@ -82,9 +82,7 @@ from scenario_contracts import (  # noqa: E402
 )
 
 
-DEFAULT_MANIFEST = (
-    RUNNER_DIRECTORY.parent / "datasets" / "v1" / "manifest.json"
-)
+DEFAULT_MANIFEST = RUNNER_DIRECTORY.parent / "datasets" / "v1" / "manifest.json"
 _EXECUTABLE_CONTEXT_SCENARIO_IDS = frozenset(
     {
         "artifact-heavy-tools",
@@ -352,12 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         cases = select_case_kind(cases, case_kind=args.case_kind)
         if args.command == "benchmark-writer" and args.case_id:
             selected_case_ids = frozenset(args.case_id)
-            cases = tuple(
-                case for case in cases if case.case_id in selected_case_ids
-            )
-            missing_case_ids = selected_case_ids - {
-                case.case_id for case in cases
-            }
+            cases = tuple(case for case in cases if case.case_id in selected_case_ids)
+            missing_case_ids = selected_case_ids - {case.case_id for case in cases}
             if missing_case_ids:
                 raise DatasetContractError(
                     "unknown or filtered benchmark case IDs: "
@@ -393,12 +387,8 @@ def main(argv: list[str] | None = None) -> int:
                 postgres_dsn=args.postgres_dsn,
                 postgres_admin_dsn=args.postgres_admin_dsn,
                 template_database=args.template_database,
-                diagnostic_warmup_iterations=(
-                    args.diagnostic_warmup_iterations
-                ),
-                diagnostic_measured_iterations=(
-                    args.diagnostic_measured_iterations
-                ),
+                diagnostic_warmup_iterations=(args.diagnostic_warmup_iterations),
+                diagnostic_measured_iterations=(args.diagnostic_measured_iterations),
                 case_filter_applied=bool(args.case_id),
                 output=args.output,
             )
@@ -410,12 +400,8 @@ def main(argv: list[str] | None = None) -> int:
                 postgres_dsn=args.postgres_dsn,
                 postgres_admin_dsn=args.postgres_admin_dsn,
                 template_database=args.template_database,
-                diagnostic_warmup_iterations=(
-                    args.diagnostic_warmup_iterations
-                ),
-                diagnostic_measured_iterations=(
-                    args.diagnostic_measured_iterations
-                ),
+                diagnostic_warmup_iterations=(args.diagnostic_warmup_iterations),
+                diagnostic_measured_iterations=(args.diagnostic_measured_iterations),
                 output=args.output,
                 progress_log=args.progress_log,
                 replace_incomplete=args.replace_incomplete,
@@ -428,12 +414,8 @@ def main(argv: list[str] | None = None) -> int:
                 postgres_dsn=args.postgres_dsn,
                 postgres_admin_dsn=args.postgres_admin_dsn,
                 template_database=args.template_database,
-                diagnostic_warmup_iterations=(
-                    args.diagnostic_warmup_iterations
-                ),
-                diagnostic_measured_iterations=(
-                    args.diagnostic_measured_iterations
-                ),
+                diagnostic_warmup_iterations=(args.diagnostic_warmup_iterations),
+                diagnostic_measured_iterations=(args.diagnostic_measured_iterations),
                 output_directory=args.output_directory,
                 progress_log=args.progress_log,
             )
@@ -468,15 +450,13 @@ def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _print_validation(dataset_id: str, scenarios: tuple[Any, ...], cases: tuple[Any, ...]) -> None:
+def _print_validation(
+    dataset_id: str, scenarios: tuple[Any, ...], cases: tuple[Any, ...]
+) -> None:
     writer_count = sum(scenario.group == "writer" for scenario in scenarios)
     context_count = sum(scenario.group == "context" for scenario in scenarios)
-    production_count = sum(
-        case.case_kind == "production_valid" for case in cases
-    )
-    sensitivity_count = sum(
-        case.case_kind == "sensitivity_analysis" for case in cases
-    )
+    production_count = sum(case.case_kind == "production_valid" for case in cases)
+    sensitivity_count = sum(case.case_kind == "sensitivity_analysis" for case in cases)
     counterfactual_count = sum(
         case.case_kind == "counterfactual_analysis" for case in cases
     )
@@ -589,9 +569,7 @@ def _smoke_worker(
             completed_at_utc=datetime.now(UTC),
             external_network_access="forbidden",
             allowed_local_services=("postgresql",),
-            production_acceptance_eligible=(
-                case.production_acceptance_eligible
-            ),
+            production_acceptance_eligible=(case.production_acceptance_eligible),
             semantic_grade_status="not_applicable_contract_smoke",
             environment=environment,
         )
@@ -679,15 +657,14 @@ def _run_writer_benchmark(
         if item.case_kind in selected_case_kinds
     }
     measurement_contract_adhered = (
-        warmups == configured_warmups and measured == configured_measured
+        warmups == configured_warmups
+        and measured == configured_measured
         and {case.case_id for case in cases} == expected_case_ids
         and not case_filter_applied
     )
     output_path = output.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    benchmark_run_id = _benchmark_run_id(
-        manifest.manifest_contract_fingerprint
-    )
+    benchmark_run_id = _benchmark_run_id(manifest.manifest_contract_fingerprint)
     environment = _capture_verified_benchmark_environment(
         postgres_dsn=postgres_dsn,
         template_database=template,
@@ -696,9 +673,10 @@ def _run_writer_benchmark(
     sample_ordinal = 0
     database_ordinal = 0
     started = perf_counter()
-    with external_network_guard(), tempfile.TemporaryDirectory(
-        prefix="pulsara-durable-runtime-"
-    ) as workspace:
+    with (
+        external_network_guard(),
+        tempfile.TemporaryDirectory(prefix="pulsara-durable-runtime-") as workspace,
+    ):
         workspace_root = Path(workspace)
         for phase, iteration_count in (
             ("warmup", warmups),
@@ -717,9 +695,7 @@ def _run_writer_benchmark(
                         admin_dsn=admin_dsn,
                         template_database=template,
                         benchmark_run_id=benchmark_run_id,
-                        case_contract_fingerprint=(
-                            case.case_contract_fingerprint
-                        ),
+                        case_contract_fingerprint=(case.case_contract_fingerprint),
                         iteration=database_ordinal,
                     )
                     database_ordinal += 1
@@ -762,15 +738,9 @@ def _run_writer_benchmark(
                             semantic_grade=semantic_grade,
                             sample_ordinal=sample_ordinal,
                             matrix_iteration=matrix_iteration,
-                            configured_warmup_iterations=(
-                                configured_warmups
-                            ),
-                            configured_measured_iterations=(
-                                configured_measured
-                            ),
-                            measurement_contract_adhered=(
-                                measurement_contract_adhered
-                            ),
+                            configured_warmup_iterations=(configured_warmups),
+                            configured_measured_iterations=(configured_measured),
+                            measurement_contract_adhered=(measurement_contract_adhered),
                             environment=environment,
                         )
                     )
@@ -791,17 +761,13 @@ def _run_writer_benchmark(
         schema_version="pulsara.durable-runtime.run-summary.v1",
         benchmark_run_id=benchmark_run_id,
         dataset_id=manifest.dataset_id,
-        manifest_contract_fingerprint=(
-            manifest.manifest_contract_fingerprint
-        ),
+        manifest_contract_fingerprint=(manifest.manifest_contract_fingerprint),
         scenario_id=scenario.scenario_id,
         case_contract_fingerprints=tuple(
             case.case_contract_fingerprint for case in cases
         ),
         sample_count=len(sample_rows),
-        raw_sample_vector_sha256=(
-            f"sha256:{sha256(encoded_rows).hexdigest()}"
-        ),
+        raw_sample_vector_sha256=(f"sha256:{sha256(encoded_rows).hexdigest()}"),
         percentile_contract="nearest_rank_v1",
         case_aggregates=_aggregate_writer_samples(sample_rows),
         measurement_contract_adhered=measurement_contract_adhered,
@@ -845,8 +811,7 @@ def _run_context_suite(
 ) -> None:
     if not postgres_dsn.strip():
         raise DatasetContractError(
-            "benchmark-context-suite requires --postgres-dsn or "
-            "PULSARA_POSTGRES_DSN"
+            "benchmark-context-suite requires --postgres-dsn or PULSARA_POSTGRES_DSN"
         )
     if not cases:
         raise DatasetContractError("benchmark-context-suite selected no cases")
@@ -856,8 +821,7 @@ def _run_context_suite(
             "context suite includes a scenario without a production adapter"
         )
     formal_run = (
-        diagnostic_warmup_iterations is None
-        and diagnostic_measured_iterations is None
+        diagnostic_warmup_iterations is None and diagnostic_measured_iterations is None
     )
     if formal_run and set(scenario_ids) != _EXECUTABLE_CONTEXT_SCENARIO_IDS:
         raise DatasetContractError(
@@ -873,9 +837,7 @@ def _run_context_suite(
         template_database=template,
     )
     if formal_run and environment.git.dirty:
-        raise DatasetContractError(
-            "formal context suite requires a clean Git worktree"
-        )
+        raise DatasetContractError("formal context suite requires a clean Git worktree")
     output_root = _repository_external_output_directory(output_directory)
     if output_root.exists() and any(output_root.iterdir()):
         raise FileExistsError(
@@ -889,9 +851,7 @@ def _run_context_suite(
     )
     _require_repository_external_path(actual_progress_log)
     grouped = {
-        scenario_id: tuple(
-            case for case in cases if case.scenario_id == scenario_id
-        )
+        scenario_id: tuple(case for case in cases if case.scenario_id == scenario_id)
         for scenario_id in scenario_ids
     }
     total_trajectories = sum(
@@ -909,9 +869,7 @@ def _run_context_suite(
     suite_journal = ContextSuiteJournal(
         output_directory=output_root,
         dataset_id=manifest.dataset_id,
-        manifest_contract_fingerprint=(
-            manifest.manifest_contract_fingerprint
-        ),
+        manifest_contract_fingerprint=(manifest.manifest_contract_fingerprint),
         git_commit=environment.git.commit,
         expected_scenario_ids=scenario_ids,
         total_trajectories=total_trajectories,
@@ -920,8 +878,7 @@ def _run_context_suite(
     try:
         for scenario_id in scenario_ids:
             output_path = (
-                output_root
-                / f"{scenario_id}-{environment.git.commit[:8]}.jsonl"
+                output_root / f"{scenario_id}-{environment.git.commit[:8]}.jsonl"
             )
             result = _run_context_benchmark(
                 manifest=manifest,
@@ -929,12 +886,8 @@ def _run_context_suite(
                 postgres_dsn=postgres_dsn,
                 postgres_admin_dsn=postgres_admin_dsn,
                 template_database=template_database,
-                diagnostic_warmup_iterations=(
-                    diagnostic_warmup_iterations
-                ),
-                diagnostic_measured_iterations=(
-                    diagnostic_measured_iterations
-                ),
+                diagnostic_warmup_iterations=(diagnostic_warmup_iterations),
+                diagnostic_measured_iterations=(diagnostic_measured_iterations),
                 output=output_path,
                 progress_log=None,
                 replace_incomplete=False,
@@ -949,9 +902,7 @@ def _run_context_suite(
                 ),
                 benchmark_run_id=result.summary.benchmark_run_id,
                 sample_count=result.summary.sample_count,
-                raw_sample_vector_sha256=(
-                    result.summary.raw_sample_vector_sha256
-                ),
+                raw_sample_vector_sha256=(result.summary.raw_sample_vector_sha256),
                 measurement_contract_adhered=(
                     result.summary.measurement_contract_adhered
                 ),
@@ -1063,9 +1014,7 @@ def _run_context_benchmark(
     )
     output_path = output.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    benchmark_run_id = _benchmark_run_id(
-        manifest.manifest_contract_fingerprint
-    )
+    benchmark_run_id = _benchmark_run_id(manifest.manifest_contract_fingerprint)
     environment = _capture_verified_benchmark_environment(
         postgres_dsn=postgres_dsn,
         template_database=template,
@@ -1088,9 +1037,10 @@ def _run_context_benchmark(
     database_ordinal = 0
     started = perf_counter()
     try:
-        with external_network_guard(), tempfile.TemporaryDirectory(
-            prefix="pulsara-durable-context-"
-        ) as workspace:
+        with (
+            external_network_guard(),
+            tempfile.TemporaryDirectory(prefix="pulsara-durable-context-") as workspace,
+        ):
             workspace_root = Path(workspace)
             for phase, iteration_count in (
                 ("warmup", warmups),
@@ -1160,9 +1110,7 @@ def _run_context_benchmark(
                                     semantic_grade=semantic_grade,
                                     sample_ordinal=sample_ordinal,
                                     matrix_iteration=matrix_iteration,
-                                    configured_warmup_iterations=(
-                                        configured_warmups
-                                    ),
+                                    configured_warmup_iterations=(configured_warmups),
                                     configured_measured_iterations=(
                                         configured_measured
                                     ),
@@ -1182,9 +1130,7 @@ def _run_context_benchmark(
             schema_version="pulsara.durable-runtime.run-summary.v1",
             benchmark_run_id=benchmark_run_id,
             dataset_id=manifest.dataset_id,
-            manifest_contract_fingerprint=(
-                manifest.manifest_contract_fingerprint
-            ),
+            manifest_contract_fingerprint=(manifest.manifest_contract_fingerprint),
             scenario_id=scenario_id,
             case_contract_fingerprints=tuple(
                 case.case_contract_fingerprint for case in cases
@@ -1196,9 +1142,7 @@ def _run_context_benchmark(
             measurement_contract_adhered=measurement_contract_adhered,
             production_acceptance_passed=(
                 measurement_contract_adhered
-                and all(
-                    row.production_acceptance_eligible for row in sample_rows
-                )
+                and all(row.production_acceptance_eligible for row in sample_rows)
             ),
             counterfactual_samples_excluded=True,
             environment=environment,
@@ -1284,12 +1228,10 @@ def _context_sample_result(
     environment: BenchmarkEnvironmentFact,
 ) -> ContextBenchmarkSampleResultFact:
     prepare_values = tuple(
-        point.context_prepare_wall_seconds
-        for point in observation.compile_points
+        point.context_prepare_wall_seconds for point in observation.compile_points
     )
     compile_values = tuple(
-        point.context_compile_wall_seconds
-        for point in observation.compile_points
+        point.context_compile_wall_seconds for point in observation.compile_points
     )
     final = observation.compile_points[-1]
     metrics = (
@@ -1417,9 +1359,7 @@ def _context_sample_result(
                 active_window_id=point.active_window_id,
                 active_window_generation=point.active_window_generation,
                 source_summary_artifact_id=point.source_summary_artifact_id,
-                selected_subagent_result_count=(
-                    point.selected_subagent_result_count
-                ),
+                selected_subagent_result_count=(point.selected_subagent_result_count),
                 subagent_graph_semantic_fingerprint=(
                     point.subagent_graph_semantic_fingerprint
                 ),
@@ -1464,16 +1404,10 @@ def _grade_context_observation(
             == 1,
             "semantic_delta_total_exact": (
                 observation.generated_semantic_delta_count
-                == sum(
-                    case.scenario_contract.ledger.semantic_delta_events_per_call
-                )
+                == sum(case.scenario_contract.ledger.semantic_delta_events_per_call)
             ),
-            "authority_manifest_fingerprints_valid": common[
-                "fingerprints_valid"
-            ],
-            "normalized_transcript_equal": common[
-                "repeated_semantics_equal"
-            ],
+            "authority_manifest_fingerprints_valid": common["fingerprints_valid"],
+            "normalized_transcript_equal": common["repeated_semantics_equal"],
         }
     elif isinstance(case.scenario_contract, IncrementalActiveWindowScenario):
         ledger = case.scenario_contract.ledger
@@ -1484,12 +1418,9 @@ def _grade_context_observation(
             ),
             "delta_increment_exact": (
                 observation.generated_semantic_delta_count
-                == ledger.model_calls
-                * ledger.semantic_delta_events_per_call
+                == ledger.model_calls * ledger.semantic_delta_events_per_call
             ),
-            "provider_transcript_deterministic": common[
-                "repeated_semantics_equal"
-            ],
+            "provider_transcript_deterministic": common["repeated_semantics_equal"],
             "durable_delta_references_complete": (
                 points[-1].terminal_projection_source_delta_count
                 >= observation.generated_semantic_delta_count
@@ -1508,9 +1439,7 @@ def _grade_context_observation(
                 points[-1].max_stable_entry_bytes
                 < case.scenario_contract.ledger.tool_results.canonical_result_characters
             ),
-            "authority_fingerprint_stable": common[
-                "repeated_semantics_equal"
-            ],
+            "authority_fingerprint_stable": common["repeated_semantics_equal"],
         }
     elif isinstance(case.scenario_contract, CheckpointRebaseRestartScenario):
         selected_ids = tuple(point.projection_base_id for point in points)
@@ -1521,8 +1450,7 @@ def _grade_context_observation(
             "rebase_selection_deterministic": (
                 observation.expected_selected_checkpoint_id is not None
                 and selected_ids
-                and selected_ids[0]
-                == observation.expected_selected_checkpoint_id
+                and selected_ids[0] == observation.expected_selected_checkpoint_id
                 and all(
                     selected == observation.expected_selected_checkpoint_id
                     for selected in selected_ids
@@ -1536,9 +1464,7 @@ def _grade_context_observation(
                 and max(point.semantic_delta_event_count for point in points)
                 < observation.generated_semantic_delta_count
             ),
-            "provider_semantic_identity_stable": common[
-                "repeated_semantics_equal"
-            ],
+            "provider_semantic_identity_stable": common["repeated_semantics_equal"],
         }
     elif isinstance(case.scenario_contract, SingleLongCompactionScenario):
         generations = tuple(point.active_window_generation for point in points)
@@ -1549,13 +1475,11 @@ def _grade_context_observation(
                 and generations[1:] == (2, 2, 2)
                 and points[0].source_summary_artifact_id is None
                 and all(
-                    point.source_summary_artifact_id is not None
-                    for point in points[1:]
+                    point.source_summary_artifact_id is not None for point in points[1:]
                 )
             ),
             "post_compaction_authority_bounded": (
-                points[1].authority_event_count
-                < points[0].authority_event_count
+                points[1].authority_event_count < points[0].authority_event_count
                 and points[-1].semantic_delta_event_count
                 < observation.generated_semantic_delta_count
             ),
@@ -1563,15 +1487,13 @@ def _grade_context_observation(
                 observation.compaction_status == "compacted"
                 and observation.compaction_source_artifact_verified is True
             ),
-            "cold_warm_transcript_equal": common[
-                "repeated_semantics_equal"
-            ],
+            "cold_warm_transcript_equal": common["repeated_semantics_equal"],
         }
     elif isinstance(case.scenario_contract, SubagentTwoChildrenScenario):
         child_points = {
-            point.point_id: point for point in points if point.point_id.startswith(
-                "after_child_"
-            )
+            point.point_id: point
+            for point in points
+            if point.point_id.startswith("after_child_")
         }
         assertions = {
             "ledger_identity_isolated": (
@@ -1597,17 +1519,12 @@ def _grade_context_observation(
                     "after_child_verify_result"
                 ].selected_subagent_result_count
                 == 2
-                and max(
-                    point.selected_subagent_result_count for point in points
-                )
-                == 2
+                and max(point.selected_subagent_result_count for point in points) == 2
                 and len(set(observation.child_result_ids)) == 2
             ),
         }
     else:
-        raise DatasetContractError(
-            f"unsupported context grader: {case.scenario_id}"
-        )
+        raise DatasetContractError(f"unsupported context grader: {case.scenario_id}")
     return grade_semantic_assertions(
         grader_id=contract.grader_id,
         grader_version=contract.grader_version,
@@ -1637,9 +1554,7 @@ def _aggregate_context_samples(
     aggregates: list[BenchmarkCaseAggregateFact] = []
     for case_id in sorted(grouped):
         case_samples = grouped[case_id]
-        fingerprints = {
-            sample.case_contract_fingerprint for sample in case_samples
-        }
+        fingerprints = {sample.case_contract_fingerprint for sample in case_samples}
         if len(fingerprints) != 1:
             raise DatasetContractError(
                 f"context aggregate case fingerprint drifted: {case_id}"
@@ -1865,9 +1780,7 @@ def _grade_batch_observation(
                 == observation.raw_reference_semantic_content_fingerprint
             ),
             "physical_settlement_valid": observation.physical_settlement_valid,
-            "accounted_writer_path_only": (
-                observation.accounted_writer_path_only
-            ),
+            "accounted_writer_path_only": (observation.accounted_writer_path_only),
             "segment_layout_within_contract": (
                 observation.source_item_count == 8_194
                 and 4 <= observation.durable_text_segment_count <= 8
@@ -1878,6 +1791,7 @@ def _grade_batch_observation(
             ),
         },
     )
+
 
 _AGGREGATED_WRITER_METRIC_IDS = frozenset(
     {
@@ -1902,13 +1816,9 @@ def _aggregate_writer_samples(
     aggregates: list[BenchmarkCaseAggregateFact] = []
     for case_id in sorted(grouped):
         case_samples = grouped[case_id]
-        fingerprints = {
-            sample.case_contract_fingerprint for sample in case_samples
-        }
+        fingerprints = {sample.case_contract_fingerprint for sample in case_samples}
         if len(fingerprints) != 1:
-            raise DatasetContractError(
-                f"aggregate case fingerprint drifted: {case_id}"
-            )
+            raise DatasetContractError(f"aggregate case fingerprint drifted: {case_id}")
         metric_rows: dict[str, list[BenchmarkMetricValueFact]] = {}
         for sample in case_samples:
             for metric in sample.metric_values:
@@ -1960,9 +1870,7 @@ def _rotated_cases(
 
 
 def _benchmark_run_id(manifest_fingerprint: str) -> str:
-    payload = (
-        f"{manifest_fingerprint}:{datetime.now(UTC).isoformat()}:{os.getpid()}"
-    )
+    payload = f"{manifest_fingerprint}:{datetime.now(UTC).isoformat()}:{os.getpid()}"
     return f"benchmark:{sha256(payload.encode('utf-8')).hexdigest()[:24]}"
 
 
@@ -1975,12 +1883,9 @@ def _case_payload(case: ResolvedBenchmarkCase) -> dict[str, Any]:
         "group": case.group,
         "scenario_path": str(case.scenario_path),
         "scenario_id": case.scenario_id,
-        "scenario_contract_fingerprint": (
-            case.scenario_contract_fingerprint
-        ),
+        "scenario_contract_fingerprint": (case.scenario_contract_fingerprint),
         "resolved_workload": (
-            scenario_payload.get("workload")
-            or scenario_payload.get("ledger")
+            scenario_payload.get("workload") or scenario_payload.get("ledger")
         ),
         "execution_case": case.execution_case.model_dump(mode="json"),
         "case_id": case.case_id,
@@ -1999,9 +1904,7 @@ def _case_payload(case: ResolvedBenchmarkCase) -> dict[str, Any]:
         "generator_contract": case.generator_contract.model_dump(mode="json"),
         "grader_contract": case.grader_contract.model_dump(mode="json"),
         "case_contract_fingerprint": case.case_contract_fingerprint,
-        "production_acceptance_eligible": (
-            case.production_acceptance_eligible
-        ),
+        "production_acceptance_eligible": (case.production_acceptance_eligible),
         "case_key": case.case_key,
     }
 
@@ -2018,12 +1921,8 @@ def _runner_build_fingerprint() -> str:
                 RUNNER_DIRECTORY / "network_guard.py",
                 RUNNER_DIRECTORY / "postgres_sandbox.py",
                 BENCHMARK_ROOT / "graders" / "semantic.py",
-                BENCHMARK_ROOT
-                / "generators"
-                / "model_semantic_batch.py",
-                BENCHMARK_ROOT
-                / "generators"
-                / "context_preparation.py",
+                BENCHMARK_ROOT / "generators" / "model_semantic_batch.py",
+                BENCHMARK_ROOT / "generators" / "context_preparation.py",
                 BENCHMARK_ROOT / "generators" / "runtime_fixture.py",
             )
         }

@@ -148,5 +148,7 @@ def message_text(message: Msg) -> str:
         if isinstance(block, TextBlock):
             parts.append(block.text)
         else:
-            parts.append(f"[{getattr(block, 'type', 'non_text_block')}:{getattr(block, 'id', '')}]")
+            parts.append(
+                f"[{getattr(block, 'type', 'non_text_block')}:{getattr(block, 'id', '')}]"
+            )
     return "\n".join(part for part in parts if part)

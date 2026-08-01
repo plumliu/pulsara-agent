@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import pickle
 from dataclasses import dataclass
 from time import monotonic
@@ -85,6 +87,7 @@ from pulsara_agent.runtime.projection_jobs.registry import (
     DURABLE_PROJECTION_TRIGGER_REGISTRY,
 )
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.support.event_write import restore_transcript_projection_fixture
 from tests.support.model_call import test_model_limits, test_resolved_target_fact
 
 
@@ -135,7 +138,7 @@ def _selected_input(
         runtime_session_id=runtime_session_id,
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    reducer.apply_committed(tuple(committed))
+    restore_transcript_projection_fixture(event_log=log, reducer=reducer)
     authority = reducer.capture_governance_authority_snapshot()
     through = authority.ledger_through_sequence
     plan = build_human_evidence_manifest_plan(
@@ -169,7 +172,9 @@ def _selected_input(
 
     def resolve(reference):
         envelope = raw_by_id[reference.event_id]
-        event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(
+            envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         assert isinstance(event, RunStartEvent)
         stored = build_frozen_fact(
             GovernanceStoredEventReferenceFact,
@@ -266,8 +271,7 @@ def test_extraction_parser_rejects_noncanonical_json(payload: str) -> None:
 
 def test_extraction_parser_accepts_empty_and_rejects_bad_evidence() -> None:
     parsed = parse_compaction_memory_extraction_output(
-        '{"schema_version":"compaction_memory_extraction_output.v1",'
-        '"candidates":[]}',
+        '{"schema_version":"compaction_memory_extraction_output.v1","candidates":[]}',
         allowed_evidence_node_ids=("e:1", "e:2"),
     )
     assert parsed.output.candidates == ()
@@ -297,9 +301,7 @@ def test_request_policy_is_the_extraction_execution_authority() -> None:
 
     assert policy.maximum_attempts == 3
     assert delivery.retry_policy.maximum_attempts == policy.maximum_attempts
-    assert delivery.retry_policy.policy_fingerprint == (
-        policy.retry_policy_fingerprint
-    )
+    assert delivery.retry_policy.policy_fingerprint == (policy.retry_policy_fingerprint)
     assert delivery.physical_policy.maximum_physical_attempt_seconds == (
         policy.provider_timeout_seconds
     )

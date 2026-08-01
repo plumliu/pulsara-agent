@@ -1,0 +1,821 @@
+syntax = "proto3";
+
+package pulsara.terminal.v1;
+
+// Renderer-neutral local protocol. Durable storage rows and rendering details
+// never cross this boundary.
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  string schema_contract_fingerprint = 3;
+  uint32 minimum_compatible_minor = 4;
+}
+
+message ProtocolVersionRange {
+  uint32 major = 1;
+  uint32 minimum_minor = 2;
+  uint32 maximum_minor = 3;
+  string schema_contract_fingerprint = 4;
+}
+
+enum AttachmentRole {
+  ATTACHMENT_ROLE_UNSPECIFIED = 0;
+  ATTACHMENT_ROLE_OBSERVER = 1;
+  ATTACHMENT_ROLE_CONTROLLER = 2;
+}
+
+message HelloRequest {
+  string request_id = 1;
+  ProtocolVersionRange supported_version_range = 2;
+  string client_instance_id = 3;
+  string client_build_identity = 4;
+  repeated string supported_capabilities = 5;
+  AttachmentRole requested_attachment_mode = 6;
+  bytes launch_capability = 7;
+}
+
+message NegotiatedLimits {
+  uint32 maximum_frame_bytes = 1;
+  uint32 maximum_history_page_cells = 2;
+  uint32 maximum_history_page_decoded_bytes = 3;
+  uint32 maximum_observation_wait_ms = 4;
+  uint32 secret_frame_maximum_bytes = 5;
+}
+
+message HeartbeatPolicy {
+  uint32 interval_ms = 1;
+  uint32 grace_ms = 2;
+  uint32 maximum_missed_count = 3;
+}
+
+message HelloResponse {
+  string request_id = 1;
+  ProtocolVersion selected_protocol = 2;
+  string server_build_identity = 3;
+  string server_runtime_identity = 4;
+  NegotiatedLimits negotiated_limits = 5;
+  bytes attachment_challenge = 6;
+  repeated string supported_capabilities = 7;
+  string hello_transcript_fingerprint = 8;
+}
+
+message AttachRequest {
+  string request_id = 1;
+  string hello_transcript_fingerprint = 2;
+  string host_session_id = 3;
+  AttachmentRole requested_role = 4;
+  bytes attachment_challenge = 5;
+}
+
+message AttachmentIdentity {
+  string client_instance_id = 1;
+  string connection_id = 2;
+  string attachment_id = 3;
+  string runtime_session_id = 4;
+  uint64 attachment_generation = 5;
+  AttachmentRole role = 6;
+  uint64 controller_generation = 7;
+  string issued_at_utc = 8;
+  string expires_at_utc = 9;
+  string identity_fingerprint = 10;
+}
+
+message AttachResponse {
+  string request_id = 1;
+  AttachmentIdentity attachment = 2;
+  string controller_disposition = 3;
+  string bootstrap_requirement = 4;
+  HeartbeatPolicy heartbeat_policy = 5;
+}
+
+message HeartbeatRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+}
+
+message HeartbeatResponse {
+  string request_id = 1;
+  AttachmentIdentity attachment = 2;
+}
+
+message EventReferenceView {
+  string runtime_session_id = 1;
+  string event_id = 2;
+  uint64 sequence = 3;
+  string event_type = 4;
+  string payload_fingerprint = 5;
+}
+
+message PresentationTextBlock {
+  string text = 1;
+  uint64 text_utf8_bytes = 2;
+  string semantic_role = 3;
+  string block_fingerprint = 4;
+}
+
+message PresentationDataBlock {
+  string media_type = 1;
+  string public_canonical_text = 2;
+  uint64 public_utf8_bytes = 3;
+  string block_fingerprint = 4;
+}
+
+message PresentationContentBlock {
+  oneof block {
+    PresentationTextBlock text = 1;
+    PresentationDataBlock data = 2;
+  }
+}
+
+message DurableCellCommon {
+  string stable_cell_id = 1;
+  uint64 semantic_revision = 2;
+  repeated EventReferenceView ordered_source_event_references = 3;
+  string source_accumulator = 4;
+  string visibility_policy = 5;
+  repeated PresentationContentBlock content_blocks = 6;
+  optional string semantic_group_id = 7;
+  string cell_fingerprint = 8;
+}
+
+message UserPromptCell { DurableCellCommon common = 1; }
+message AssistantMessageCell { DurableCellCommon common = 1; }
+message ToolTerminalCell {
+  DurableCellCommon common = 1;
+  string tool_call_id = 2;
+  string tool_name = 3;
+  string result_state = 4;
+}
+message ErrorCell {
+  DurableCellCommon common = 1;
+  string stable_error_code = 2;
+}
+message InteractionCell {
+  DurableCellCommon common = 1;
+  string interaction_kind = 2;
+  string interaction_state = 3;
+}
+message CompactionBoundaryCell { DurableCellCommon common = 1; }
+message RecoveryCell {
+  DurableCellCommon common = 1;
+  string recovery_kind = 2;
+}
+message AuditCell {
+  DurableCellCommon common = 1;
+  string audit_kind = 2;
+  string severity = 3;
+}
+message SystemNoticeCell {
+  DurableCellCommon common = 1;
+  string notice_kind = 2;
+}
+
+message DurableHistoryCell {
+  oneof cell {
+    UserPromptCell user_prompt = 1;
+    AssistantMessageCell assistant_message = 2;
+    ToolTerminalCell tool_terminal = 3;
+    ErrorCell error = 4;
+    InteractionCell interaction = 5;
+    CompactionBoundaryCell compaction_boundary = 6;
+    RecoveryCell recovery = 7;
+    AuditCell audit = 8;
+    SystemNoticeCell system_notice = 9;
+  }
+}
+
+message CanonicalTranscriptSourceView {
+  string transcript_leaf_id = 1;
+  string transcript_leaf_fingerprint = 2;
+  string transcript_anchor_slot_key = 3;
+  string transcript_anchor_fingerprint = 4;
+  string transcript_reducer_id = 5;
+  string transcript_reducer_version = 6;
+  string transcript_reducer_contract_fingerprint = 7;
+  string source_fold_delta_fingerprint = 8;
+  uint64 source_leaf_change_ordinal = 9;
+  string source_fingerprint = 10;
+}
+
+message DurableAuditSourceView {
+  string audit_cell_id = 1;
+  uint64 audit_cell_semantic_revision = 2;
+  string audit_cell_fingerprint = 3;
+  repeated EventReferenceView ordered_source_event_references = 4;
+  string presentation_policy_fingerprint = 5;
+  string extractor_id = 6;
+  string extractor_version = 7;
+  string extractor_contract_fingerprint = 8;
+  uint64 extractor_output_ordinal = 9;
+  string audit_anchor_kind = 10;
+  string audit_anchor_fingerprint = 11;
+  string source_fingerprint = 12;
+}
+
+message HistorySourceView {
+  oneof source {
+    CanonicalTranscriptSourceView canonical_transcript = 1;
+    DurableAuditSourceView durable_audit = 2;
+  }
+}
+
+message PresentationHistoryPlacementKey {
+  string placement_key_contract_id = 1;
+  string placement_key_contract_version = 2;
+  string placement_key_contract_fingerprint = 3;
+  optional uint64 canonical_spine_left_coordinate = 4;
+  optional uint64 canonical_spine_right_coordinate = 5;
+  string relative_position_kind = 6;
+  uint64 source_ledger_sequence_or_zero = 7;
+  uint32 relative_local_ordinal = 8;
+  string stable_source_tiebreaker = 9;
+  bytes canonical_comparable_key_bytes = 10;
+  string placement_key_fingerprint = 11;
+}
+
+message PresentationHistoryEntry {
+  string runtime_session_id = 1;
+  string history_entry_id = 2;
+  PresentationHistoryPlacementKey placement_key = 3;
+  HistorySourceView source = 4;
+  DurableHistoryCell durable_history_cell = 5;
+  string entry_fingerprint = 6;
+}
+
+message ConfirmedRootRankBasis {
+  string history_root_identity_fingerprint = 1;
+  string rank_basis_fingerprint = 2;
+}
+message ActiveHeadRankBasis {
+  string history_active_head_fingerprint = 1;
+  uint64 through_authority_sequence = 2;
+  string rank_basis_fingerprint = 3;
+}
+message HistoryRankBasis {
+  oneof basis {
+    ConfirmedRootRankBasis confirmed_root = 1;
+    ActiveHeadRankBasis active_head = 2;
+  }
+}
+
+message PresentationHistoryRankedEntry {
+  PresentationHistoryEntry entry = 1;
+  uint64 root_local_display_rank = 2;
+  HistoryRankBasis rank_basis = 3;
+  string ranked_view_fingerprint = 4;
+}
+
+message PresentationHistoryRootIdentity {
+  string runtime_session_id = 1;
+  string history_projection_contract_fingerprint = 2;
+  string materialization_policy_fingerprint = 3;
+  string tree_contract_fingerprint = 4;
+  string placement_key_contract_id = 5;
+  string placement_key_contract_version = 6;
+  string placement_key_contract_fingerprint = 7;
+  uint64 checkpoint_generation = 8;
+  string checkpoint_fingerprint = 9;
+  uint64 projection_generation = 10;
+  string projection_root_fingerprint = 11;
+  uint64 through_authority_sequence = 12;
+  uint64 presentation_source_segment_count = 13;
+  string presentation_source_prefix_accumulator = 14;
+  string presentation_policy_registry_contract_fingerprint = 15;
+  string audit_extractor_registry_contract_fingerprint = 16;
+  string root_identity_fingerprint = 17;
+}
+
+message PresentationHistoryCursor {
+  string runtime_session_id = 1;
+  PresentationHistoryRootIdentity root_identity = 2;
+  optional string anchor_history_entry_id = 3;
+  optional PresentationHistoryPlacementKey anchor_placement_key = 4;
+  string cursor_fingerprint = 5;
+}
+
+message PresentationHistoryLatestRootCursorPair {
+  PresentationHistoryRootIdentity root_identity = 1;
+  optional PresentationHistoryCursor before_cursor = 2;
+  optional PresentationHistoryCursor after_cursor = 3;
+  string cursor_pair_fingerprint = 4;
+}
+
+message AvailableHistoryCapacity {
+  uint64 confirmed_entry_count = 1;
+  uint64 current_tail_worst_case_entry_count = 2;
+  uint64 active_growth_reservation_remaining_entry_count = 3;
+  uint64 projected_ordinary_entry_count = 4;
+  uint64 soft_rotation_threshold_entries = 5;
+  uint64 minimum_ordinary_growth_quote_entries = 6;
+  string capacity_state_fingerprint = 7;
+}
+message HistorySessionRotationRequired {
+  uint64 confirmed_entry_count = 1;
+  uint64 current_tail_worst_case_entry_count = 2;
+  uint64 active_growth_reservation_remaining_entry_count = 3;
+  uint64 projected_ordinary_entry_count = 4;
+  uint64 soft_rotation_threshold_entries = 5;
+  string stable_reason = 6;
+  string capacity_state_fingerprint = 7;
+}
+message HistoryTreeCapacityExhausted {
+  uint64 observed_entry_count = 1;
+  uint64 maximum_representable_entries = 2;
+  string stable_fault_code = 3;
+  string capacity_state_fingerprint = 4;
+}
+message HistoryCapacityReconciliationRequired {
+  string stable_fault_code = 1;
+  optional string trusted_active_head_fingerprint = 2;
+  string capacity_state_fingerprint = 3;
+}
+message PresentationHistoryCapacityState {
+  oneof state {
+    AvailableHistoryCapacity available = 1;
+    HistorySessionRotationRequired session_rotation_required = 2;
+    HistoryTreeCapacityExhausted tree_capacity_exhausted = 3;
+    HistoryCapacityReconciliationRequired reconciliation_required = 4;
+  }
+}
+
+message PresentationHistoryActiveHeadIdentity {
+  string runtime_session_id = 1;
+  PresentationHistoryRootIdentity confirmed_root_identity = 2;
+  uint64 tail_from_sequence_exclusive = 3;
+  uint64 through_authority_sequence = 4;
+  string tail_source_range_accumulator = 5;
+  uint64 tail_segment_count = 6;
+  string ordered_tail_segment_accumulator = 7;
+  uint64 tail_mutation_count = 8;
+  string ordered_tail_mutation_accumulator = 9;
+  uint64 resulting_resident_entry_count = 10;
+  string resulting_resident_entry_accumulator = 11;
+  PresentationHistoryCapacityState capacity_state = 12;
+  string active_head_fingerprint = 13;
+}
+
+message QueueItemView {
+  string queue_item_id = 1;
+  uint64 accepted_ordinal = 2;
+  string delivery_state = 3;
+  string content_retention_state = 4;
+  string requested_delivery_mode = 5;
+  string resolved_delivery_mode = 6;
+  string public_preview = 7;
+  string head_event_id = 8;
+  uint64 item_revision = 9;
+  string view_fingerprint = 10;
+}
+
+message ToolApproval { string tool_call_id = 1; string tool_name = 2; }
+message ApprovalInteraction {
+  string interaction_id = 1;
+  string run_id = 2;
+  repeated ToolApproval tool_calls = 3;
+  string view_fingerprint = 4;
+}
+message PlanOption { string label = 1; string description = 2; }
+message PlanQuestionInteraction {
+  string interaction_id = 1;
+  string run_id = 2;
+  string question = 3;
+  repeated PlanOption options = 4;
+  bool allow_free_text = 5;
+  string view_fingerprint = 6;
+}
+message PlanExitInteraction {
+  string interaction_id = 1;
+  string run_id = 2;
+  string summary = 3;
+  optional string plan_artifact_id = 4;
+  string view_fingerprint = 5;
+}
+message McpInputPublicRequest {
+  string request_key = 1;
+  string mode = 2;
+  string public_prompt = 3;
+  bool schema_or_url_present = 4;
+}
+message McpInteraction {
+  string interaction_id = 1;
+  string run_id = 2;
+  string tool_call_id = 3;
+  string tool_name = 4;
+  string server_id = 5;
+  repeated McpInputPublicRequest requests = 6;
+  string view_fingerprint = 7;
+}
+message PendingInteraction {
+  oneof interaction {
+    ApprovalInteraction approval = 1;
+    PlanQuestionInteraction plan_question = 2;
+    PlanExitInteraction plan_exit = 3;
+    McpInteraction mcp_input = 4;
+  }
+}
+
+message ProjectionSnapshotRequest { string request_id = 1; }
+message ProjectionSnapshotFrame {
+  string request_id = 1;
+  string host_session_id = 2;
+  string runtime_session_id = 3;
+  string lifecycle = 4;
+  uint64 authority_high_water = 5;
+  uint64 projection_revision = 6;
+  string projection_contract_fingerprint = 7;
+  PresentationHistoryActiveHeadIdentity active_head = 8;
+  repeated PresentationHistoryRankedEntry ordered_resident_entries = 9;
+  PresentationHistoryLatestRootCursorPair latest_root_cursor_pair = 10;
+  optional PendingInteraction pending_interaction = 11;
+  repeated QueueItemView queue_items = 12;
+  optional string queue_head_event_id = 13;
+  uint64 queue_account_revision = 14;
+  optional string active_run_id = 15;
+  optional string suspended_run_id = 16;
+  optional string stopping_run_id = 17;
+  string snapshot_fingerprint = 18;
+}
+
+message OperationalActivityCommon {
+  string owner_kind = 1;
+  string owner_id = 2;
+  uint64 owner_generation = 3;
+  uint64 operational_generation = 4;
+  uint64 operational_cursor = 5;
+  string coalesce_key = 6;
+  string replacement_semantics = 7;
+  string bounded_public_text = 8;
+  string activity_fingerprint = 9;
+}
+message ModelActivityCell { OperationalActivityCommon common = 1; }
+message ToolActivityCell { OperationalActivityCommon common = 1; }
+message TerminalProcessActivityCell { OperationalActivityCommon common = 1; }
+message SubagentActivityCell { OperationalActivityCommon common = 1; }
+message OperationalActivityCell {
+  oneof activity {
+    ModelActivityCell model_activity = 1;
+    ToolActivityCell tool_activity = 2;
+    TerminalProcessActivityCell terminal_process_activity = 3;
+    SubagentActivityCell subagent_activity = 4;
+  }
+}
+message OperationalActivityRemove {
+  uint64 operational_generation = 1;
+  uint64 operational_cursor = 2;
+  string owner_kind = 3;
+  string owner_id = 4;
+  uint64 owner_generation = 5;
+  string coalesce_key = 6;
+  string expected_activity_fingerprint = 7;
+  string removal_reason = 8;
+  string removal_fingerprint = 9;
+}
+message OperationalActivityChange {
+  oneof change {
+    OperationalActivityCell upsert = 1;
+    OperationalActivityRemove remove = 2;
+  }
+}
+message OperationalSnapshotRequest { string request_id = 1; }
+message OperationalSnapshotFrame {
+  string request_id = 1;
+  uint64 operational_generation = 2;
+  uint64 operational_cursor = 3;
+  repeated OperationalActivityCell ordered_activity_cells = 4;
+  string snapshot_fingerprint = 5;
+}
+
+message ObserveNextRequest {
+  string request_id = 1;
+  uint64 after_authority_high_water = 2;
+  uint64 after_projection_revision = 3;
+  uint64 after_operational_generation = 4;
+  uint64 after_operational_cursor = 5;
+  uint32 maximum_wait_ms = 6;
+}
+
+message HistoryEntryUpsert {
+  string history_entry_id = 1;
+  PresentationHistoryPlacementKey placement_key = 2;
+  optional string expected_previous_entry_fingerprint = 3;
+  PresentationHistoryRankedEntry resulting_ranked_entry = 4;
+  string change_fingerprint = 5;
+}
+message HistoryEntryRemove {
+  string history_entry_id = 1;
+  PresentationHistoryPlacementKey placement_key = 2;
+  string expected_previous_entry_fingerprint = 3;
+  string change_fingerprint = 4;
+}
+message HistoryEntryChange {
+  oneof change {
+    HistoryEntryUpsert upsert = 1;
+    HistoryEntryRemove remove = 2;
+  }
+}
+message ProjectionDeltaFrame {
+  string request_id = 1;
+  uint64 base_projection_revision = 2;
+  uint64 resulting_projection_revision = 3;
+  uint64 resulting_authority_high_water = 4;
+  PresentationHistoryActiveHeadIdentity resulting_active_head = 5;
+  repeated HistoryEntryChange ordered_history_changes = 6;
+  string delta_fingerprint = 7;
+}
+message AuthorityAdvanceFrame {
+  string request_id = 1;
+  uint64 projection_revision = 2;
+  string base_active_head_fingerprint = 3;
+  PresentationHistoryActiveHeadIdentity resulting_active_head = 4;
+  string frame_fingerprint = 5;
+}
+message PresentationHistoryRootCursorRelation {
+  PresentationHistoryRootIdentity previous_root_identity = 1;
+  PresentationHistoryRootIdentity resulting_root_identity = 2;
+  string relation_kind = 3;
+  string previous_cursor_disposition = 4;
+  uint64 shared_prefix_entry_count = 5;
+  string shared_prefix_accumulator = 6;
+  string relation_fingerprint = 7;
+}
+message ResidentEntriesUnchanged {
+  string before_resident_vector_fingerprint = 1;
+  string after_resident_vector_fingerprint = 2;
+  string exact_equivalence_proof_fingerprint = 3;
+  string transition_fingerprint = 4;
+}
+message PresentationHistoryResidentUpsert {
+  string history_entry_id = 1;
+  PresentationHistoryPlacementKey placement_key = 2;
+  optional string expected_previous_entry_fingerprint = 3;
+  PresentationHistoryRankedEntry resulting_ranked_entry = 4;
+  string change_fingerprint = 5;
+}
+message PresentationHistoryResidentRemove {
+  string history_entry_id = 1;
+  PresentationHistoryPlacementKey placement_key = 2;
+  string expected_previous_entry_fingerprint = 3;
+  string change_fingerprint = 4;
+}
+message PresentationHistoryResidentChange {
+  oneof change {
+    PresentationHistoryResidentUpsert upsert = 1;
+    PresentationHistoryResidentRemove remove = 2;
+  }
+}
+message BoundedOrderedResidentChanges {
+  string before_resident_vector_fingerprint = 1;
+  string after_resident_vector_fingerprint = 2;
+  repeated PresentationHistoryResidentChange ordered_changes = 3;
+  uint64 change_count = 4;
+  uint64 encoded_change_bytes = 5;
+  string transition_limits_policy_fingerprint = 6;
+  string ordered_change_accumulator = 7;
+  string transition_fingerprint = 8;
+}
+message ResidentHistoryRebaseRequired {
+  string before_resident_vector_fingerprint = 1;
+  PresentationHistoryRootIdentity target_root_identity = 2;
+  string target_active_head_fingerprint = 3;
+  string stable_reason = 4;
+  string bounded_rebase_or_snapshot_token = 5;
+  uint64 token_generation = 6;
+  string expires_at_utc = 7;
+  string transition_fingerprint = 8;
+}
+message PresentationHistoryRootResidentTransition {
+  oneof transition {
+    ResidentEntriesUnchanged unchanged = 1;
+    BoundedOrderedResidentChanges bounded_changes = 2;
+    ResidentHistoryRebaseRequired rebase_required = 3;
+  }
+}
+message PresentationHistoryRootAdvancedFrame {
+  string request_id = 1;
+  uint64 base_projection_revision = 2;
+  uint64 resulting_projection_revision = 3;
+  string previous_active_head_fingerprint = 4;
+  PresentationHistoryActiveHeadIdentity resulting_active_head = 5;
+  PresentationHistoryLatestRootCursorPair latest_root_cursor_pair = 6;
+  PresentationHistoryRootCursorRelation previous_root_relation = 7;
+  PresentationHistoryRootResidentTransition resident_transition = 8;
+  string consumed_checkpoint_candidate_cut_fingerprint = 9;
+  uint64 consumed_tail_prefix_through_sequence = 10;
+  string consumed_tail_prefix_source_range_accumulator = 11;
+  uint64 consumed_tail_prefix_segment_count = 12;
+  string consumed_tail_prefix_segment_accumulator = 13;
+  uint64 consumed_tail_prefix_mutation_count = 14;
+  string consumed_tail_prefix_mutation_accumulator = 15;
+  uint64 retained_tail_suffix_from_sequence_exclusive = 16;
+  uint64 retained_tail_suffix_through_sequence = 17;
+  string retained_tail_suffix_source_range_accumulator = 18;
+  uint64 retained_tail_suffix_segment_count = 19;
+  string retained_tail_suffix_segment_accumulator = 20;
+  uint64 retained_tail_suffix_mutation_count = 21;
+  string retained_tail_suffix_mutation_accumulator = 22;
+  string checkpoint_full_confirmation_fingerprint = 23;
+  string frame_fingerprint = 24;
+}
+message ObservationGap {
+  string request_id = 1;
+  uint64 latest_authority_high_water = 2;
+  uint64 latest_projection_revision = 3;
+  uint64 latest_operational_generation = 4;
+  uint64 latest_operational_cursor = 5;
+  string reason = 6;
+}
+message ObservationNoChange { string request_id = 1; }
+message OperationalDeltaFrame {
+  string request_id = 1;
+  uint64 operational_generation = 2;
+  uint64 operational_cursor = 3;
+  repeated OperationalActivityChange ordered_changes = 4;
+}
+message ObservationResponse {
+  oneof outcome {
+    ProjectionDeltaFrame projection_delta = 1;
+    AuthorityAdvanceFrame authority_advance = 2;
+    PresentationHistoryRootAdvancedFrame root_advanced = 3;
+    OperationalDeltaFrame operational_delta = 4;
+    ObservationGap gap = 5;
+    ObservationNoChange no_change = 6;
+  }
+}
+
+message HistoryPageRequest {
+  string request_id = 1;
+  string runtime_session_id = 2;
+  PresentationHistoryCursor cursor = 3;
+  enum Direction { DIRECTION_UNSPECIFIED = 0; BEFORE = 1; AFTER = 2; }
+  Direction direction = 4;
+  uint32 maximum_cells = 5;
+  uint32 maximum_decoded_bytes = 6;
+  string expected_projection_contract_fingerprint = 7;
+}
+message HistoryPageData {
+  string request_id = 1;
+  string validated_input_cursor_fingerprint = 2;
+  HistoryPageRequest.Direction validated_request_direction = 3;
+  PresentationHistoryRootIdentity validated_root_identity = 4;
+  repeated PresentationHistoryRankedEntry ordered_history_entries = 5;
+  string ordered_history_entry_accumulator = 6;
+  string continuity_proof_fingerprint = 7;
+  optional PresentationHistoryCursor before_cursor = 8;
+  optional PresentationHistoryCursor after_cursor = 9;
+  bool has_more_before = 10;
+  bool has_more_after = 11;
+  string response_fingerprint = 12;
+}
+message HistoryCursorStale {
+  string request_id = 1;
+  string requested_cursor_fingerprint = 2;
+  PresentationHistoryRootIdentity latest_root_identity = 3;
+  optional PresentationHistoryCursor replacement_cursor = 4;
+  optional string replacement_cursor_anchor_proof_fingerprint = 5;
+  string response_fingerprint = 6;
+}
+message HistoryRebaseRequired {
+  string request_id = 1;
+  string requested_cursor_fingerprint = 2;
+  PresentationHistoryRootIdentity latest_root_identity = 3;
+  string bounded_snapshot_or_rebase_token = 4;
+  string response_fingerprint = 5;
+}
+message HistoryReconciliationRequired {
+  string request_id = 1;
+  string requested_cursor_fingerprint = 2;
+  string fault_code = 3;
+  string reconciliation_owner_identity = 4;
+  optional uint32 retry_after_ms = 5;
+  optional PresentationHistoryRootIdentity trusted_latest_root_identity_hint = 6;
+  string response_fingerprint = 7;
+}
+message HistoryPageResponse {
+  oneof outcome {
+    HistoryPageData page = 1;
+    HistoryCursorStale stale = 2;
+    HistoryRebaseRequired rebase = 3;
+    HistoryReconciliationRequired reconciliation = 4;
+  }
+}
+
+message CommandBinding {
+  string client_instance_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string command_id = 4;
+  string runtime_session_id = 5;
+  string expected_target_id = 6;
+  uint64 expected_target_generation = 7;
+  uint64 expected_controller_generation = 8;
+  string request_semantic_fingerprint = 9;
+}
+message SubmitPromptCommand {
+  CommandBinding binding = 1;
+  string client_submission_id = 2;
+  string text = 3;
+  enum DeliveryMode { DELIVERY_MODE_UNSPECIFIED = 0; AUTO = 1; STEER = 2; FOLLOW_UP = 3; }
+  DeliveryMode requested_delivery_mode = 4;
+}
+message StopRunCommand { CommandBinding binding = 1; }
+message ApprovalDecision { string tool_call_id = 1; bool confirmed = 2; }
+message ResolveApprovalCommand { CommandBinding binding = 1; string approval_id = 2; repeated ApprovalDecision decisions = 3; }
+message ResolvePlanQuestionCommand { CommandBinding binding = 1; string interaction_id = 2; string answer_text = 3; optional string selected_option = 4; }
+message ResolvePlanExitCommand { CommandBinding binding = 1; string interaction_id = 2; string decision = 3; string user_feedback = 4; }
+message ResolveMcpInteractionCommand { CommandBinding binding = 1; string interaction_id = 2; string sealed_response_handle_id = 3; }
+message CancelMcpInteractionCommand { CommandBinding binding = 1; string interaction_id = 2; }
+message QueueCancelCommand { CommandBinding binding = 1; string queue_item_id = 2; }
+message StartSuccessorSessionCommand { CommandBinding binding = 1; string source_capacity_state_fingerprint = 2; }
+message DetachSessionCommand { CommandBinding binding = 1; }
+message CloseSessionCommand { CommandBinding binding = 1; bool close_conversation = 2; }
+message ControllerTakeoverCommand { CommandBinding binding = 1; uint64 expected_previous_controller_generation = 2; }
+message MutationCommand {
+  string request_id = 1;
+  oneof command {
+    SubmitPromptCommand submit_prompt = 2;
+    StopRunCommand stop_run = 3;
+    ResolveApprovalCommand resolve_approval = 4;
+    ResolvePlanQuestionCommand resolve_plan_question = 5;
+    ResolvePlanExitCommand resolve_plan_exit = 6;
+    ResolveMcpInteractionCommand resolve_mcp_interaction = 7;
+    CancelMcpInteractionCommand cancel_mcp_interaction = 8;
+    QueueCancelCommand queue_cancel = 9;
+    StartSuccessorSessionCommand start_successor_session = 10;
+    DetachSessionCommand detach_session = 11;
+    CloseSessionCommand close_session = 12;
+    ControllerTakeoverCommand controller_takeover = 13;
+  }
+}
+message CommandOutcome {
+  string request_id = 1;
+  string status = 2;
+  string command_id = 3;
+  string target_id = 4;
+  uint64 target_generation = 5;
+  string public_result_code = 6;
+  string public_result_text = 7;
+  repeated string durable_reference_ids = 8;
+  string query_token = 9;
+  string outcome_fingerprint = 10;
+}
+message QueryCommandRequest {
+  string request_id = 1;
+  string runtime_session_id = 2;
+  string original_client_instance_id = 3;
+  string command_id = 4;
+}
+message QueryCommandResponse { string request_id = 1; bool found = 2; optional CommandOutcome outcome = 3; }
+
+message TerminalSecretLeaseIdentity {
+  string attachment_id = 1;
+  uint64 attachment_generation = 2;
+  uint64 controller_generation = 3;
+  string interaction_id = 4;
+  string request_key = 5;
+  string secret_kind = 6;
+  uint64 owner_epoch = 7;
+  uint64 lease_generation = 8;
+  string expires_at_utc = 9;
+  string identity_fingerprint = 10;
+}
+message SecretRevealRequest { string request_id = 1; CommandBinding binding = 2; string interaction_id = 3; string request_key = 4; }
+message SecretRevealResult { string request_id = 1; TerminalSecretLeaseIdentity lease_identity = 2; bytes private_url = 3; }
+message SecretFormSubmit { string request_id = 1; CommandBinding binding = 2; string interaction_id = 3; string request_key = 4; bytes response_json = 5; }
+message SecretSubmitReceipt { string request_id = 1; string sealed_response_handle_id = 2; }
+message SecretLeaseRevoked { string request_id = 1; string lease_identity_fingerprint = 2; string stable_reason = 3; }
+
+message ClientFrame {
+  oneof request {
+    HelloRequest hello = 1;
+    AttachRequest attach = 2;
+    HeartbeatRequest heartbeat = 3;
+    ProjectionSnapshotRequest snapshot = 4;
+    ObserveNextRequest observe_next = 5;
+    HistoryPageRequest history_page = 6;
+    MutationCommand mutation = 7;
+    QueryCommandRequest query_command = 8;
+    SecretRevealRequest secret_reveal = 9;
+    SecretFormSubmit secret_form_submit = 10;
+    OperationalSnapshotRequest operational_snapshot = 11;
+  }
+}
+message ProtocolError { string request_id = 1; string stable_code = 2; string public_message = 3; }
+message ServerFrame {
+  oneof response {
+    HelloResponse hello = 1;
+    AttachResponse attach = 2;
+    HeartbeatResponse heartbeat = 3;
+    ProjectionSnapshotFrame snapshot = 4;
+    OperationalSnapshotFrame operational_snapshot = 5;
+    ObservationResponse observation = 6;
+    HistoryPageResponse history_page = 7;
+    CommandOutcome command_outcome = 8;
+    QueryCommandResponse query_command = 9;
+    SecretRevealResult secret_reveal = 10;
+    SecretSubmitReceipt secret_submit = 11;
+    SecretLeaseRevoked secret_revoked = 12;
+    ProtocolError error = 13;
+  }
+}

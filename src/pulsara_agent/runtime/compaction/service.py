@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 import math
 from contextvars import ContextVar
@@ -425,12 +427,12 @@ class CompactionTerminalizationOwner:
     pending_started_commit: PendingCompactionEventCommit | None = None
     pending_terminal_batch_commit: PendingCompactionEventBatchCommit | None = None
     terminal_batch_candidates: tuple[AgentEvent, ...] | None = None
-    prepared_extension_batch: (
-        PreparedCompactionPostCompletionExtensionBatch | None
-    ) = None
-    extension_private_handle: (
-        CompactionPostCompletionExtensionPrivateHandle | None
-    ) = None
+    prepared_extension_batch: PreparedCompactionPostCompletionExtensionBatch | None = (
+        None
+    )
+    extension_private_handle: CompactionPostCompletionExtensionPrivateHandle | None = (
+        None
+    )
     deadline_budget: RuntimeEventOperationDeadlineBudget | None = None
     state: Literal[
         "started_commit_pending",
@@ -499,7 +501,7 @@ class ContextCompactionService:
             deadline_monotonic=deadline,
         )
         events = tuple(
-            event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for event in snapshot.events
         )
         terminal_started_ids = {
@@ -550,7 +552,7 @@ class ContextCompactionService:
         if not checkpoint_rows and self.event_log.next_sequence() == 1:
             return []
         for raw in checkpoint_rows:
-            event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             if not isinstance(event, ContextCompactionCompletedEvent):
                 raise ValueError(
                     "compaction checkpoint query returned another event type"
@@ -572,7 +574,7 @@ class ContextCompactionService:
             deadline_monotonic=deadline,
         )
         return [
-            event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for event in snapshot.events
         ]
 
@@ -1004,7 +1006,11 @@ class ContextCompactionService:
         if collector is None:
             return
         terminal = next(
-            (event for event in result.committed_events if event.id == terminal_event_id),
+            (
+                event
+                for event in result.committed_events
+                if event.id == terminal_event_id
+            ),
             None,
         )
         if not isinstance(terminal, ContextCompactionCompletedEvent):
@@ -1133,7 +1139,9 @@ class ContextCompactionService:
                 event
                 for raw in rows
                 if isinstance(
-                    event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                    event := decode_raw_stored_event_envelope(
+                        raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    ),
                     ContextCompiledEvent,
                 )
                 and event.resolved_call.target.target_fingerprint
@@ -1437,25 +1445,19 @@ class ContextCompactionService:
                 )
             authority_snapshot = self.runtime_session.transcript_projection_state_store.capture_governance_authority_snapshot()
             events_by_id = {event.id: event for event in events}
-            extension_preparation = (
-                self.post_completion_extension.prepare_intent(
-                    runtime_session_id=self.runtime_session_id,
-                    event_context=context,
-                    compaction_id=compaction_id,
-                    completed_event_id=terminal_event_id,
-                    trigger=trigger,
-                    phase=phase,
-                    previous_keep_after_sequence=(
-                        plan.previous_keep_after_sequence
-                    ),
-                    current_keep_after_sequence=plan.keep_after_sequence,
-                    current_through_sequence=plan.through_sequence,
-                    predecessor_completed_event_id=(
-                        plan.predecessor_completed_event_id
-                    ),
-                    transcript_authority_snapshot=authority_snapshot,
-                    event_lookup=events_by_id.get,
-                )
+            extension_preparation = self.post_completion_extension.prepare_intent(
+                runtime_session_id=self.runtime_session_id,
+                event_context=context,
+                compaction_id=compaction_id,
+                completed_event_id=terminal_event_id,
+                trigger=trigger,
+                phase=phase,
+                previous_keep_after_sequence=(plan.previous_keep_after_sequence),
+                current_keep_after_sequence=plan.keep_after_sequence,
+                current_through_sequence=plan.through_sequence,
+                predecessor_completed_event_id=(plan.predecessor_completed_event_id),
+                transcript_authority_snapshot=authority_snapshot,
+                event_lookup=events_by_id.get,
             )
         failure_stage = "summarizer_resolution"
         summarizer_target = None
@@ -1879,10 +1881,13 @@ class ContextCompactionService:
             self._consecutive_failures = 0
             return stored
         except BaseException as exc:
-            if isinstance(
-                extension_preparation,
-                PreparedCompactionPostCompletionExtensionIntent,
-            ) and extension_preparation.private_handle.active:
+            if (
+                isinstance(
+                    extension_preparation,
+                    PreparedCompactionPostCompletionExtensionIntent,
+                )
+                and extension_preparation.private_handle.active
+            ):
                 try:
                     extension_preparation.private_handle.abandon_before_write(
                         reason="compaction_failed_before_completed_batch"

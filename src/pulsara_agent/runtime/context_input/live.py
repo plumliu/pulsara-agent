@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from contextlib import contextmanager
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -24,12 +26,15 @@ from pulsara_agent.event import (
     SubagentRunStartedEvent,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.primitives.stored_event import (
+    RawStoredEventEnvelope,
+    RawTranscriptDomainPrefixFact,
+)
+
 from pulsara_agent.event_log.protocol import (
     RawContextAuthorityBundleRequest,
     RawEventLogReadSnapshot,
     RawEventSelectionBounds,
-    RawStoredEventEnvelope,
-    RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.context import (
@@ -529,7 +534,9 @@ def _run_and_continuation_refs(
     ContextContinuationReferenceFact | None,
 ]:
     start_stored = event_slice.event_by_id(working_set.run_start_event_id)
-    start = start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    start = decode_raw_stored_event_envelope(
+        start_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(start, RunStartEvent):
         raise ContextEventSliceError("working-set RunStart reference is not RunStart")
     if start.sequence != working_set.run_start_sequence:
@@ -547,7 +554,9 @@ def _run_and_continuation_refs(
     for frozen in event_slice.events:
         if frozen.event_type != EventType.RUN_INTERACTION_RESUME_BOUNDARY:
             continue
-        decoded = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decoded = decode_raw_stored_event_envelope(
+            frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if (
             isinstance(decoded, RunInteractionResumeBoundaryEvent)
             and decoded.run_id == start.run_id
@@ -900,7 +909,11 @@ def collect_context_projection_references(
             EventType.PROJECTION_FAILED,
         }
         if isinstance(
-            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                event := decode_raw_stored_event_envelope(
+                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             ProjectionRequestedEvent | ProjectionReadyEvent | ProjectionFailedEvent,
         )
         and event.run_id == run_id
@@ -973,7 +986,11 @@ def collect_context_projection_references(
             (frozen, event)
             for frozen in subagent_authority_events
             if isinstance(
-                (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+                (
+                    event := decode_raw_stored_event_envelope(
+                        frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
+                ),
                 SubagentRunCompletedEvent,
             )
             and event.result_id in selected
@@ -1173,7 +1190,9 @@ async def prepare_live_context_snapshot(
         for result, frozen in zip(
             selected_results, subagent_authority_events, strict=True
         ):
-            event = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            event = decode_raw_stored_event_envelope(
+                frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             if (
                 frozen.sequence > full_slice.through_sequence
                 or not isinstance(event, SubagentRunCompletedEvent)
@@ -1847,8 +1866,8 @@ async def _read_live_primary_event_slice(
             )
             if len(run_start_rows) != 1:
                 raise ContextEventSliceError("live snapshot RunStart is not durable")
-            decoded_start = run_start_rows[0].decode_owned(
-                DEFAULT_EVENT_SCHEMA_REGISTRY
+            decoded_start = decode_raw_stored_event_envelope(
+                run_start_rows[0], DEFAULT_EVENT_SCHEMA_REGISTRY
             )
             start = decoded_start if isinstance(decoded_start, RunStartEvent) else None
         if (
@@ -2024,8 +2043,8 @@ async def _read_live_primary_event_slice(
                 else "live context exact authority is unavailable"
             )
         if checkpoint_terminal_id is not None:
-            terminal = bundle_by_id[checkpoint_terminal_id].decode_owned(
-                DEFAULT_EVENT_SCHEMA_REGISTRY
+            terminal = decode_raw_stored_event_envelope(
+                bundle_by_id[checkpoint_terminal_id], DEFAULT_EVENT_SCHEMA_REGISTRY
             )
             if not isinstance(terminal, ContextCompactionCompletedEvent):
                 raise ContextEventSliceError(
@@ -2190,7 +2209,9 @@ async def _child_named_context_slices(
                     for raw in relevant.events
                     if raw.event_type == EventType.SUBAGENT_RUN_STARTED
                     and isinstance(
-                        decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                        decoded := decode_raw_stored_event_envelope(
+                            raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                        ),
                         SubagentRunStartedEvent,
                     )
                     and decoded.subagent_run_id == entry.subagent_run_id
@@ -2268,7 +2289,11 @@ async def _child_named_context_slices(
         for parent_slice in parent_slices
         for frozen in parent_slice.events
         if isinstance(
-            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                event := decode_raw_stored_event_envelope(
+                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             SubagentRunStartedEvent,
         )
         and event.subagent_run_id == entry.subagent_run_id

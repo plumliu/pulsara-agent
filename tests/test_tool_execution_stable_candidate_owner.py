@@ -6,6 +6,7 @@ from time import monotonic
 import pytest
 
 from tests.conftest import tool_result_end_contract_fields
+from tests.support.event_write import committed_event_write_result_fixture
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.support.mcp import prepare_test_mcp_input_required_suspension
 
@@ -32,7 +33,7 @@ from pulsara_agent.primitives.mcp import McpBindingIdentityFact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     McpInputRequiredSuspensionFact,
 )
-from pulsara_agent.runtime.session import EventBatchCommitOutcome, EventWriteResult
+from pulsara_agent.runtime.session import EventBatchCommitOutcome
 from pulsara_agent.runtime.tool_execution import ToolExecutionCommitContractError
 
 
@@ -141,13 +142,9 @@ def _full_outcome(event) -> EventBatchCommitOutcome:
     return EventBatchCommitOutcome(
         status="full",
         deadline_monotonic=monotonic() + 1.0,
-        result=EventWriteResult(
-            committed_events=(committed,),
-            commit_status="committed",
-            reducer_high_waters={},
-            reconciliation_required=False,
-            reducer_errors=(),
-            publication_status="completed",
+        result=committed_event_write_result_fixture(
+            (committed,),
+            runtime_session_id="runtime:stable-candidate",
             publisher_enqueued_through_sequence=1,
         ),
     )

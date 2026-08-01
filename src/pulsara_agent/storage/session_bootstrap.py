@@ -371,6 +371,15 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
                 account.account_fingerprint,
             ),
         )
+        from pulsara_agent.storage.prompt_queue_bootstrap import (
+            install_prompt_queue_genesis,
+        )
+
+        install_prompt_queue_genesis(
+            connection,
+            runtime_session_id=candidate.session_owner.runtime_session_id,
+            require_empty_queue_chain=True,
+        )
 
     @staticmethod
     def _expected_cutovers(
@@ -553,6 +562,25 @@ class PostgresRuntimeSessionOwnerBootstrapPort:
             budget_row[0] != candidate.background_budget_policy.model_dump(mode="json")
             or str(budget_row[1])
             != candidate.background_budget_policy.policy_fingerprint
+        ):
+            return None
+        from pulsara_agent.storage.prompt_queue_bootstrap import (
+            read_prompt_queue_genesis,
+        )
+
+        queue_account, queue_checkpoint = read_prompt_queue_genesis(
+            connection,
+            runtime_session_id=candidate.session_owner.runtime_session_id,
+        )
+        if (
+            queue_account is None
+            or queue_checkpoint is None
+            or queue_account.checkpoint_generation
+            != queue_checkpoint.checkpoint_generation
+            or queue_account.checkpoint_through_sequence
+            != queue_checkpoint.through_sequence
+            or queue_account.checkpoint_fingerprint
+            != queue_checkpoint.checkpoint_fingerprint
         ):
             return None
         try:

@@ -128,7 +128,9 @@ class McpServerProtocolSemanticFact(FrozenFactBase):
         expected = behavior_era_for_protocol_revision(self.protocol_revision)
         if self.behavior_era is not expected:
             raise ValueError("MCP protocol behavior-era mismatch")
-        extension_ids = tuple(item.extension_id for item in self.ordered_extension_contracts)
+        extension_ids = tuple(
+            item.extension_id for item in self.ordered_extension_contracts
+        )
         if extension_ids != tuple(sorted(extension_ids)) or len(extension_ids) != len(
             set(extension_ids)
         ):
@@ -164,7 +166,10 @@ class McpClientCapabilityPolicyFact(FrozenFactBase):
                 raise ValueError("SDK v2 elicitation requires form and URL modes")
             if self.elicitation_host_contract_fingerprint is None:
                 raise ValueError("elicitation advertisement requires Host contract")
-        elif self.elicitation_modes or self.elicitation_host_contract_fingerprint is not None:
+        elif (
+            self.elicitation_modes
+            or self.elicitation_host_contract_fingerprint is not None
+        ):
             raise ValueError("disabled elicitation cannot carry Host authority")
         if self.sampling_advertised or self.roots_advertised or self.logging_advertised:
             raise ValueError("MCP2 V1 does not advertise sampling, roots, or logging")
@@ -238,7 +243,10 @@ class McpEndpointAttributionFact(FrozenFactBase):
     @model_validator(mode="after")
     def _transport_shape(self) -> "McpEndpointAttributionFact":
         if self.transport_kind == "stdio":
-            if self.executable_identity_fingerprint is None or self.tls_policy_fingerprint is not None:
+            if (
+                self.executable_identity_fingerprint is None
+                or self.tls_policy_fingerprint is not None
+            ):
                 raise ValueError("stdio endpoint attribution shape mismatch")
         elif self.executable_identity_fingerprint is not None:
             raise ValueError("HTTP endpoint cannot carry executable identity")
@@ -356,7 +364,10 @@ class McpProviderSchemaProjectionFact(FrozenFactBase):
     @model_validator(mode="after")
     def _projection_matrix(self) -> "McpProviderSchemaProjectionFact":
         if self.disposition is McpProviderProjectionDisposition.NOT_EXPOSABLE:
-            if self.projected_schema is not None or self.lossless_proof_fingerprint is not None:
+            if (
+                self.projected_schema is not None
+                or self.lossless_proof_fingerprint is not None
+            ):
                 raise ValueError("rejected provider projection cannot expose schema")
             if self.reason_code is None:
                 raise ValueError("rejected provider projection requires reason")
@@ -512,10 +523,14 @@ class McpDiscoveryPageSetAttributionFact(FrozenFactBase):
         for ordinal, page in enumerate(self.ordered_pages):
             if page.method is not self.method or page.page_ordinal != ordinal:
                 raise ValueError("MCP discovery page attribution mismatch")
-            expected_cursor = None if ordinal == 0 else self.ordered_pages[ordinal - 1].next_cursor
+            expected_cursor = (
+                None if ordinal == 0 else self.ordered_pages[ordinal - 1].next_cursor
+            )
             if page.request_cursor != expected_cursor:
                 raise ValueError("MCP discovery cursor chain mismatch")
-        if self.started_from_cursor_none != (self.ordered_pages[0].request_cursor is None):
+        if self.started_from_cursor_none != (
+            self.ordered_pages[0].request_cursor is None
+        ):
             raise ValueError("MCP page-set start attribution mismatch")
         if self.complete_capture != (self.ordered_pages[-1].next_cursor is None):
             raise ValueError("MCP page-set completion attribution mismatch")
@@ -546,9 +561,15 @@ class McpDiscoveryAttributionFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _negotiation_join(self) -> "McpDiscoveryAttributionFact":
-        if self.negotiation.endpoint_attribution_fingerprint != self.endpoint.attribution_fingerprint:
+        if (
+            self.negotiation.endpoint_attribution_fingerprint
+            != self.endpoint.attribution_fingerprint
+        ):
             raise ValueError("MCP negotiation endpoint attribution mismatch")
-        if self.negotiation.auth_attribution_fingerprint != self.auth.attribution_fingerprint:
+        if (
+            self.negotiation.auth_attribution_fingerprint
+            != self.auth.attribution_fingerprint
+        ):
             raise ValueError("MCP negotiation auth attribution mismatch")
         methods = tuple(item.method.value for item in self.page_set_receipts)
         if methods != tuple(sorted(methods)) or len(methods) != len(set(methods)):
@@ -572,12 +593,19 @@ class McpServerSnapshotAuthorityFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _authority_join(self) -> "McpServerSnapshotAuthorityFact":
-        if self.surface_semantic_fingerprint != self.surface_semantic.surface_semantic_fingerprint:
+        if (
+            self.surface_semantic_fingerprint
+            != self.surface_semantic.surface_semantic_fingerprint
+        ):
             raise ValueError("MCP surface semantic fingerprint mismatch")
         if self.discovery_attribution.snapshot_id == "":
             raise ValueError("MCP snapshot attribution requires identity")
-        tool_fingerprints = {item.tool_semantic_fingerprint for item in self.surface_semantic.tools}
-        projected = tuple(item.tool_semantic_fingerprint for item in self.ordered_provider_projections)
+        tool_fingerprints = {
+            item.tool_semantic_fingerprint for item in self.surface_semantic.tools
+        }
+        projected = tuple(
+            item.tool_semantic_fingerprint for item in self.ordered_provider_projections
+        )
         if set(projected) != tool_fingerprints or len(projected) != len(set(projected)):
             raise ValueError("MCP provider projection coverage mismatch")
         return self

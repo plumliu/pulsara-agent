@@ -363,9 +363,7 @@ def grade_durable_evidence(
             f"all_sources_direct_human={input_projection.get('all_sources_direct_human')}",
         )
         final_run_events = (
-            tuple(root_run_reports[-1].get("events") or ())
-            if root_run_reports
-            else ()
+            tuple(root_run_reports[-1].get("events") or ()) if root_run_reports else ()
         )
         continuation_start = next(
             (

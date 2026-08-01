@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import (
+    build_joined_raw_stored_event_range_proof,
+    decode_raw_stored_event_envelope,
+)
+
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 from dataclasses import dataclass, field
-from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Iterable
@@ -21,14 +27,21 @@ from pulsara_agent.event.events import (
 )
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
-    EventSchemaContractMismatch,
-    canonical_event_payload_bytes,
-    dump_agent_event,
+    hydrate_raw_stored_event_envelope_from_row,
 )
 from pulsara_agent.event_log.postgres_pool import (
     PostgresConnectionLane,
     postgres_event_connection,
 )
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
+from pulsara_agent.ports.stored_event import (
+    JoinedRawStoredEventRangeProof,
+    RestoredRangeSourceKind,
+    StoredEventBatchCommitReceipt,
+    build_encoder_stored_event_pair,
+    build_stored_event_batch_commit_receipt,
+)
+
 from pulsara_agent.event_log.protocol import (
     CandidateBoundEventLogTransactionCompanion,
     EventBatchConfirmation,
@@ -45,17 +58,20 @@ from pulsara_agent.event_log.protocol import (
     RawEventSelectionBounds,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
-    RawRuntimeProjectionCheckpoint,
-    RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
-    RawTranscriptDomainPrefixFact,
+    StoredEventBatchConfirmation,
     EventLogWriteConflict,
     EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
+    classify_stored_event_candidate_batch,
     rebind_stored_candidate_batch,
     same_event_payload,
     same_event_raw_payload,
+)
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.event_log.transcript_prefix import (
     EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
@@ -64,11 +80,7 @@ from pulsara_agent.event_log.transcript_prefix import (
     advance_transcript_semantic_accumulator,
     classify_transcript_event_type,
 )
-from pulsara_agent.primitives.context import (
-    canonical_json_bytes,
-    canonical_utc_timestamp,
-    context_fingerprint,
-)
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationAccountStateFact,
     PhysicalChargeContractFact,
@@ -178,7 +190,12 @@ class PostgresEventLog:
                         cursor, [event]
                     )
                     stored, _ = self._with_canonical_sequence(event, next_sequence)
-                    self._insert_event(cursor, stored)
+                    raw = build_raw_stored_event_envelope(
+                        event=stored,
+                        runtime_session_id=self.runtime_session_id,
+                        schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+                    )
+                    self._insert_event(cursor, stored, raw)
                     self._sync_run_projection(cursor, stored)
             self._session_parent_confirmed = True
             self._confirmed_parent_run_ids.update(ensured_runs)
@@ -197,6 +214,24 @@ class PostgresEventLog:
         event_list = list(events)
         if not event_list:
             return []
+        return list(
+            self.commit_batch(
+                event_list,
+                expected_last_sequence=expected_last_sequence,
+                deadline_monotonic=deadline_monotonic,
+            ).owned_stored_events
+        )
+
+    def commit_batch(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> StoredEventBatchCommitReceipt:
+        event_list = list(events)
+        if not event_list:
+            raise ValueError("physical stored event batch cannot be empty")
         _validate_live_batch(event_list)
         deadline = self._write_deadline(deadline_monotonic)
 
@@ -231,7 +266,15 @@ class PostgresEventLog:
                             event, next_sequence
                         )
                         stored_events.append(stored)
-                    self._insert_events(cursor, stored_events)
+                    raw_events = tuple(
+                        build_raw_stored_event_envelope(
+                            event=stored,
+                            runtime_session_id=self.runtime_session_id,
+                            schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+                        )
+                        for stored in stored_events
+                    )
+                    self._insert_events(cursor, stored_events, raw_events)
                     for stored in stored_events:
                         self._sync_run_projection(cursor, stored)
             self._session_parent_confirmed = True
@@ -239,7 +282,12 @@ class PostgresEventLog:
             self._confirmed_parent_turn_runs.update(
                 (turn_id, event.run_id) for turn_id, event in ensured_turns
             )
-            return stored_events
+            return build_stored_event_batch_commit_receipt(
+                tuple(
+                    build_encoder_stored_event_pair(stored, raw)
+                    for stored, raw in zip(stored_events, raw_events, strict=True)
+                )
+            )
 
     def read_materialization_account_state(
         self,
@@ -311,6 +359,44 @@ class PostgresEventLog:
             validation_base_state_payload=dict(row["validation_base_state_payload"]),
             state_payload=dict(row["state_payload"]),
             payload_fingerprint=str(row["payload_fingerprint"]),
+        )
+
+    def read_prompt_queue_restore_bundle(
+        self,
+        *,
+        max_delta_events: int,
+        max_delta_payload_bytes: int,
+        deadline_monotonic: float | None = None,
+    ):
+        from pulsara_agent.event_log.postgres_prompt_queue import (
+            read_prompt_queue_restore_bundle,
+        )
+
+        return read_prompt_queue_restore_bundle(
+            self,
+            max_delta_events=max_delta_events,
+            max_delta_payload_bytes=max_delta_payload_bytes,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def commit_prompt_queue_checkpoint(
+        self,
+        *,
+        candidate,
+        checkpoint,
+        guard,
+        deadline_monotonic: float | None = None,
+    ):
+        from pulsara_agent.event_log.postgres_prompt_queue import (
+            commit_prompt_queue_checkpoint,
+        )
+
+        return commit_prompt_queue_checkpoint(
+            self,
+            candidate=candidate,
+            checkpoint=checkpoint,
+            guard=guard,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def write_runtime_projection_checkpoint(
@@ -454,7 +540,7 @@ class PostgresEventLog:
         transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
-    ) -> list[AgentEvent]:
+    ) -> StoredEventBatchCommitReceipt:
         event_list = list(events)
         if not event_list:
             raise ValueError("materialization state commit requires events")
@@ -527,6 +613,14 @@ class PostgresEventLog:
                             event, next_sequence
                         )
                         stored_events.append(stored)
+                    raw_events = tuple(
+                        build_raw_stored_event_envelope(
+                            event=stored,
+                            runtime_session_id=self.runtime_session_id,
+                            schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+                        )
+                        for stored in stored_events
+                    )
                     if isinstance(
                         transaction_companion,
                         CandidateBoundEventLogTransactionCompanion,
@@ -540,9 +634,10 @@ class PostgresEventLog:
                         )
                     self._validate_materialization_envelope_charge_bounds(
                         stored_events,
+                        raw_events,
                         physical_charge_contract,
                     )
-                    self._insert_events(cursor, stored_events)
+                    self._insert_events(cursor, stored_events, raw_events)
                     for stored in stored_events:
                         self._sync_run_projection(cursor, stored)
 
@@ -618,25 +713,31 @@ class PostgresEventLog:
             self._confirmed_parent_turn_runs.update(
                 (turn_id, event.run_id) for turn_id, event in ensured_turns
             )
-            return stored_events
+            return build_stored_event_batch_commit_receipt(
+                tuple(
+                    build_encoder_stored_event_pair(stored, raw)
+                    for stored, raw in zip(stored_events, raw_events, strict=True)
+                )
+            )
 
     def _validate_materialization_envelope_charge_bounds(
         self,
         stored_events: list[AgentEvent],
+        raw_events: tuple[RawStoredEventEnvelope, ...],
         contract: PhysicalChargeContractFact,
     ) -> None:
         bounds = {
             (item.event_type, item.event_schema_version): item
             for item in contract.bookkeeping_event_bounds
         }
-        for stored in stored_events:
+        for stored, raw in zip(stored_events, raw_events, strict=True):
             binding = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
                 stored
             ).schema_contract
             bound = bounds.get((str(stored.type), binding.event_schema_version))
             if bound is None:
                 continue
-            actual = len(canonical_event_payload_bytes(stored)) + (
+            actual = len(raw.canonical_payload_bytes) + (
                 contract.fixed_sequence_wrapper_charge_bytes_per_event
                 + contract.fixed_schema_wrapper_charge_bytes_per_event
             )
@@ -773,7 +874,9 @@ class PostgresEventLog:
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(query, params)
                 return [
-                    self._raw_from_row(row).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(
+                        self._raw_from_row(row), DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
                     for row in cursor.fetchall()
                 ]
 
@@ -831,10 +934,41 @@ class PostgresEventLog:
                         or not same_event_raw_payload(candidate, raw)
                     ):
                         raise EventIdConflict(candidate.id)
-                    committed.append(raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+                    committed.append(
+                        decode_raw_stored_event_envelope(
+                            raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                        )
+                    )
                 return EventBatchConfirmation(
                     committed_events=tuple(committed),
                     missing_event_ids=tuple(missing),
+                    actual_last_sequence=self._next_sequence(cursor) - 1,
+                )
+
+    def confirm_stored_batch(
+        self,
+        candidates,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> StoredEventBatchConfirmation:
+        candidate_list = tuple(candidates)
+        deadline = self._write_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.connection_provider,
+            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                self._lock_session(cursor)
+                by_id = {
+                    candidate.id: raw
+                    for candidate in candidate_list
+                    if (raw := self._get_raw_by_id(cursor, candidate.id)) is not None
+                }
+                return classify_stored_event_candidate_batch(
+                    candidates=candidate_list,
+                    raw_by_event_id=by_id,
                     actual_last_sequence=self._next_sequence(cursor) - 1,
                 )
 
@@ -853,7 +987,7 @@ class PostgresEventLog:
         return EventLogReadSnapshot(
             through_sequence=raw.through_sequence,
             events=tuple(
-                event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for event in raw.events
             ),
         )
@@ -938,6 +1072,36 @@ class PostgresEventLog:
                     "envelopes": tuple(event.envelope_fingerprint for event in events),
                 },
             ),
+        )
+
+    def read_joined_raw_range(
+        self,
+        *,
+        source_kind: RestoredRangeSourceKind,
+        from_sequence_exclusive: int,
+        through_sequence: int | None = None,
+        max_events: int | None = None,
+        max_payload_bytes: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> JoinedRawStoredEventRangeProof | None:
+        target = (
+            self.next_sequence() - 1 if through_sequence is None else through_sequence
+        )
+        if target == from_sequence_exclusive:
+            return None
+        snapshot = self.read_raw_range_snapshot(
+            minimum_sequence=from_sequence_exclusive + 1,
+            through_sequence=target,
+            max_events=max_events,
+            max_payload_bytes=max_payload_bytes,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return build_joined_raw_stored_event_range_proof(
+            runtime_session_id=self.runtime_session_id,
+            source_kind=source_kind,
+            from_sequence_exclusive=from_sequence_exclusive,
+            raw_stored_envelopes=snapshot.events,
+            registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
         )
 
     def read_raw_events_by_id(
@@ -1310,7 +1474,7 @@ class PostgresEventLog:
         count = before.semantic_event_count
         accumulator = before.semantic_accumulator
         for raw in semantic_events:
-            event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             count += 1
             accumulator = advance_transcript_semantic_accumulator(
                 accumulator,
@@ -2072,8 +2236,13 @@ class PostgresEventLog:
                 f"and run {run_id!r}"
             )
 
-    def _insert_event(self, cursor, stored: AgentEvent) -> None:
-        prefix = self._transcript_prefix_rows(cursor, [stored])[0]
+    def _insert_event(
+        self,
+        cursor,
+        stored: AgentEvent,
+        raw: RawStoredEventEnvelope,
+    ) -> None:
+        prefix = self._transcript_prefix_rows(cursor, [stored], (raw,))[0]
         cursor.execute(
             """
             insert into agent_events (
@@ -2100,24 +2269,32 @@ class PostgresEventLog:
                 %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s
             )
             """,
-            self._event_insert_params(stored, prefix),
+            self._event_insert_params(stored, raw, prefix),
         )
 
-    def _insert_events(self, cursor, stored_events: list[AgentEvent]) -> None:
+    def _insert_events(
+        self,
+        cursor,
+        stored_events: list[AgentEvent],
+        raw_events: tuple[RawStoredEventEnvelope, ...],
+    ) -> None:
         row_template = (
             "(%s, %s, %s, %s, %s, %s, %s, %s, "
             "%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)"
         )
-        prefix_rows = self._transcript_prefix_rows(cursor, stored_events)
+        prefix_rows = self._transcript_prefix_rows(cursor, stored_events, raw_events)
         # Keep well below PostgreSQL's parameter ceiling while preserving one
         # physical INSERT for the normal model-stream/event batch.
         for offset in range(0, len(stored_events), 1_000):
             chunk = stored_events[offset : offset + 1_000]
+            raw_chunk = raw_events[offset : offset + 1_000]
             prefix_chunk = prefix_rows[offset : offset + 1_000]
             parameters = tuple(
                 value
-                for stored, prefix in zip(chunk, prefix_chunk, strict=True)
-                for value in self._event_insert_params(stored, prefix)
+                for stored, raw, prefix in zip(
+                    chunk, raw_chunk, prefix_chunk, strict=True
+                )
+                for value in self._event_insert_params(stored, raw, prefix)
             )
             cursor.execute(
                 """
@@ -2139,12 +2316,9 @@ class PostgresEventLog:
     def _event_insert_params(
         self,
         stored: AgentEvent,
+        raw: RawStoredEventEnvelope,
         prefix: tuple[str, RawTranscriptDomainPrefixFact],
     ) -> tuple[object, ...]:
-        payload = dump_agent_event(stored)
-        contract = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
-            stored
-        ).schema_contract
         return (
             stored.id,
             self.runtime_session_id,
@@ -2153,31 +2327,29 @@ class PostgresEventLog:
             stored.reply_id,
             stored.sequence,
             str(stored.type),
-            contract.event_schema_version,
-            contract.event_schema_fingerprint,
-            contract.domain_contract_fingerprint,
+            raw.event_schema_version,
+            raw.event_schema_fingerprint,
+            raw.event_domain_contract_fingerprint,
             prefix[0],
             prefix[1].semantic_event_count,
             prefix[1].semantic_accumulator,
             prefix[1].ledger_continuity_accumulator,
             prefix[1].ledger_payload_bytes,
-            stored.created_at,
-            Jsonb(payload),
+            raw.created_at_utc,
+            Jsonb(
+                raw.canonical_payload_bytes.decode("utf-8"), dumps=lambda value: value
+            ),
         )
 
     def _transcript_prefix_rows(
         self,
         cursor,
         stored_events: list[AgentEvent],
+        raw_events: tuple[RawStoredEventEnvelope, ...],
     ) -> list[tuple[str, RawTranscriptDomainPrefixFact]]:
         previous = self._read_transcript_prefix(cursor, sequence=None)
         rows: list[tuple[str, RawTranscriptDomainPrefixFact]] = []
-        for stored in stored_events:
-            raw = RawStoredEventEnvelope.from_stored_event(
-                event=stored,
-                runtime_session_id=self.runtime_session_id,
-                schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
-            )
+        for stored, raw in zip(stored_events, raw_events, strict=True):
             domain = classify_transcript_event_type(raw.event_type)
             semantic_count = previous.semantic_event_count
             semantic_accumulator = previous.semantic_accumulator
@@ -2282,7 +2454,7 @@ class PostgresEventLog:
         raw = self._get_raw_by_id(cursor, event_id)
         if raw is None:
             return None
-        return raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        return decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
 
     def _get_raw_by_id(self, cursor, event_id: str) -> RawStoredEventEnvelope | None:
         cursor.execute(
@@ -2319,45 +2491,7 @@ class PostgresEventLog:
         return self._raw_from_row(row)
 
     def _raw_from_row(self, row) -> RawStoredEventEnvelope:
-        schema_identity = (
-            row["event_schema_version"],
-            row["event_schema_fingerprint"],
-            row["event_domain_contract_fingerprint"],
-        )
-        if any(value is None or not str(value) for value in schema_identity):
-            raise EventSchemaContractMismatch(
-                "stored event row lacks explicit per-event schema identity"
-            )
-        payload_bytes = canonical_json_bytes(row["payload"])
-        values = {
-            "stored_envelope_version": "stored-agent-event:v1",
-            "event_id": str(row["id"]),
-            "runtime_session_id": str(row["session_id"]),
-            "run_id": str(row["run_id"]),
-            "turn_id": str(row["turn_id"]),
-            "reply_id": str(row["reply_id"]),
-            "sequence": int(row["sequence"]),
-            "created_at_utc": canonical_utc_timestamp(row["created_at"].isoformat()),
-            "event_type": str(row["event_type"]),
-            "event_schema_version": str(row["event_schema_version"]),
-            "event_schema_fingerprint": str(row["event_schema_fingerprint"]),
-            "event_domain_contract_fingerprint": str(
-                row["event_domain_contract_fingerprint"]
-            ),
-            "canonical_payload_bytes": payload_bytes,
-            "payload_fingerprint": f"sha256:{sha256(payload_bytes).hexdigest()}",
-        }
-        return RawStoredEventEnvelope(
-            **values,
-            envelope_fingerprint=context_fingerprint(
-                "stored-agent-event-envelope:v1",
-                {
-                    key: value
-                    for key, value in values.items()
-                    if key != "canonical_payload_bytes"
-                },
-            ),
-        )
+        return hydrate_raw_stored_event_envelope_from_row(row)
 
     def _sync_run_projection(self, cursor, stored: AgentEvent) -> None:
         if isinstance(stored, RunStartEvent):

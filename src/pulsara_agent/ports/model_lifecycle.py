@@ -18,7 +18,7 @@ class ModelLifecycleContractError(RuntimeError):
 
 
 class ModelLifecycleTransactionCompanionIdentityFact(FrozenRuntimeStateBase):
-    companion_kind: Literal["durable_derived_model_job"]
+    companion_kind: Literal["durable_derived_model_job", "prompt_queue_steer"]
     phase: Literal["start", "terminal"]
     purpose: ModelCallPurpose
     resolved_model_call_id: str
@@ -96,7 +96,9 @@ class ModelLifecycleRuntimeGateway(Protocol):
     ) -> Any: ...
 
 
-def _validate_identity(model: FrozenRuntimeStateBase, *, field: str, domain: str) -> None:
+def _validate_identity(
+    model: FrozenRuntimeStateBase, *, field: str, domain: str
+) -> None:
     expected = context_fingerprint(
         domain,
         model.model_dump(mode="json", exclude={field}),
@@ -218,7 +220,9 @@ class BackgroundModelCallAdmissionLease(Protocol):
     def identity(self) -> BackgroundModelCallAdmissionLeaseIdentity: ...
 
     @property
-    def state(self) -> Literal[
+    def state(
+        self,
+    ) -> Literal[
         "issued", "in_flight", "consumed", "released", "reconciliation_required"
     ]: ...
 

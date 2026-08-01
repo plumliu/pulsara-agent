@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import time
 from dataclasses import dataclass
 from hashlib import sha256
@@ -130,7 +132,8 @@ class RunFinalOutputMaterializer:
             deadline_monotonic=deadline_monotonic,
         )
         exact_events = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for raw in exact_raw
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for raw in exact_raw
         )
         starts = tuple(
             event for event in exact_events if isinstance(event, RunStartEvent)
@@ -243,7 +246,9 @@ class RunFinalOutputMaterializer:
                 deadline_monotonic=deadline_monotonic,
             )
             for raw in snapshot.events:
-                event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                event = decode_raw_stored_event_envelope(
+                    raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
                 if isinstance(event, ToolResultEndEvent):
                     tool_call_ids.add(event.tool_call_id)
                     continue

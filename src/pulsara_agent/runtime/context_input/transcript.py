@@ -8,6 +8,8 @@ tool-result unit is derived from the owned canonical events in one
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import json
 from dataclasses import dataclass
 from typing import Iterable
@@ -248,7 +250,10 @@ def project_context_transcript(
 
     _validate_snapshot_slice(snapshot=snapshot, event_slice=event_slice)
     decoded = tuple(
-        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        (
+            stored,
+            decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY),
+        )
         for stored in event_slice.events
     )
     decoded_by_sequence = {
@@ -1058,7 +1063,7 @@ def _compaction_summary_message(
             "compacted transcript requires prepared summary artifact text"
         )
     stored = event_slice.event_by_id(window.compaction_terminal_ref.event_id)
-    event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
     prefix = isinstance(event, ContextCompactionCompletedEvent)
     same_run = isinstance(event, ContextWindowCompactionCompletedEvent)
     if not prefix and not same_run:
@@ -1142,7 +1147,7 @@ def _validate_window_compaction_source_document(
     if started_ref is None:
         raise TranscriptNormalizationError("window compaction lacks Started reference")
     stored = event_slice.event_by_id(started_ref.event_id)
-    started = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    started = decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(started, ContextWindowCompactionStartedEvent):
         raise TranscriptNormalizationError("window compaction Started type mismatch")
     plan = started.plan

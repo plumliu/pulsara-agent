@@ -16,11 +16,13 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallStartEvent,
     ProviderInputAppendCommittedEvent,
+    PromptQueueCommittedToProviderInputEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
     TerminalProcessCompletedEvent,
     TerminalProcessMonitorObservationCommittedEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
+    UserSteerCommittedEvent,
 )
 from pulsara_agent.llm.control_contract import (
     build_model_call_control_downstream_contract,
@@ -52,7 +54,10 @@ from pulsara_agent.primitives.run_boundary import (
     RunExecutionActivationFact,
 )
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
-from pulsara_agent.primitives.host_ingress import HostActiveRunMonitorDeliveryFact
+from pulsara_agent.primitives.host_ingress import (
+    ActiveRunPromptSteerCommitGuardFact,
+    HostActiveRunMonitorDeliveryFact,
+)
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.ports.model_lifecycle import (
     ModelLifecycleRuntimeGateway,
@@ -94,9 +99,8 @@ class ModelLifecycleStartCommitBundle:
     )
     provider_input_start_bundle: PreparedProviderInputStartBundlePort | None
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None
-    active_run_monitor_source_event_references: tuple[
-        ContextEventReferenceFact, ...
-    ]
+    active_run_monitor_source_event_references: tuple[ContextEventReferenceFact, ...]
+    active_run_prompt_steer_guard: ActiveRunPromptSteerCommitGuardFact | None
     bundle_fingerprint: str
 
     @property
@@ -144,6 +148,7 @@ def prepare_model_lifecycle_start_bundle(
     active_run_monitor_source_event_references: tuple[
         ContextEventReferenceFact, ...
     ] = (),
+    active_run_prompt_steer_guard: ActiveRunPromptSteerCommitGuardFact | None = None,
 ) -> ModelLifecycleStartCommitBundle:
     """Freeze estimate-only lifecycle facts without starting provider I/O."""
 
@@ -222,6 +227,7 @@ def prepare_model_lifecycle_start_bundle(
         active_run_monitor_source_event_references=(
             active_run_monitor_source_event_references
         ),
+        active_run_prompt_steer_guard=active_run_prompt_steer_guard,
     )
     bundle = ModelLifecycleStartCommitBundle(
         **payload,
@@ -361,10 +367,43 @@ def validate_model_lifecycle_start_bundle(
     base_companions = tuple(
         event for event in companion_events if event.id not in provider_event_id_set
     )
+    steer_guard = bundle.active_run_prompt_steer_guard
+    steer_events = tuple(
+        event
+        for event in base_companions
+        if isinstance(
+            event,
+            (UserSteerCommittedEvent, PromptQueueCommittedToProviderInputEvent),
+        )
+    )
+    lifecycle_base_companions = tuple(
+        event for event in base_companions if event not in steer_events
+    )
+    if (steer_guard is None) != (not steer_events):
+        raise ValueError("active-run prompt steer guard/companion matrix mismatch")
+    if steer_guard is not None:
+        user_steers = tuple(
+            event
+            for event in steer_events
+            if isinstance(event, UserSteerCommittedEvent)
+        )
+        queue_commits = tuple(
+            event
+            for event in steer_events
+            if isinstance(event, PromptQueueCommittedToProviderInputEvent)
+        )
+        if (
+            not main
+            or provider_bundle is None
+            or len(user_steers) != 1
+            or len(queue_commits) != 1
+            or user_steers[0].id != steer_guard.expected_user_steer_event_id
+        ):
+            raise ValueError("active-run prompt steer lifecycle companions drifted")
     if main:
         if (
-            len(base_companions) != 2
-            or not isinstance(base_companions[0], ReplyStartEvent)
+            len(lifecycle_base_companions) != 2
+            or not isinstance(lifecycle_base_companions[0], ReplyStartEvent)
             or len(reservation_events) != 1
         ):
             raise ValueError("main lifecycle requires reply-start plus one reservation")
@@ -376,14 +415,14 @@ def validate_model_lifecycle_start_bundle(
             and event.type.value == "CONTEXT_WINDOW_COMPACTION_STARTED"
         )
         if (
-            len(base_companions) != 2
+            len(lifecycle_base_companions) != 2
             or len(reservation_events) != 1
             or len(started) != 1
         ):
             raise ValueError(
                 "window lifecycle requires reservation plus matching started fact"
             )
-    elif base_companions:
+    elif lifecycle_base_companions:
         raise ValueError("direct lifecycle cannot carry start companions")
     if provider_bundle is not None:
         from pulsara_agent.llm.provider_input_materialization import (
@@ -453,10 +492,9 @@ def validate_model_lifecycle_start_bundle(
             (item.runtime_session_id, item.sequence, item.event_id)
             for item in source_refs
         }
-        if (
-            len(source_refs) != len(delivery.ordered_attachment_fingerprints)
-            or not source_keys.issubset(attachment_keys)
-        ):
+        if len(source_refs) != len(
+            delivery.ordered_attachment_fingerprints
+        ) or not source_keys.issubset(attachment_keys):
             raise ValueError(
                 "active-run monitor delivery/provider observation refs drifted"
             )
@@ -472,12 +510,8 @@ def validate_model_lifecycle_start_bundle(
             != llm_context_fingerprint(context)
         ):
             raise ValueError("governance model lifecycle input attribution drifted")
-    extraction = (
-        call.fact.purpose is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
-    )
-    extraction_attribution = (
-        bundle.compaction_memory_extraction_input_attribution
-    )
+    extraction = call.fact.purpose is ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION
+    extraction_attribution = bundle.compaction_memory_extraction_input_attribution
     if extraction != (extraction_attribution is not None):
         raise ValueError(
             "compaction memory extraction lifecycle attribution matrix mismatch"
@@ -488,16 +522,12 @@ def validate_model_lifecycle_start_bundle(
             or context.model_call_index is not None
             or extraction_attribution.background_budget_reservation.extraction_job_id
             != extraction_attribution.extraction_job_id
-            or extraction_attribution.background_budget_reservation
-            .model_call_reservation_quote.resolved_model_call_id
+            or extraction_attribution.background_budget_reservation.model_call_reservation_quote.resolved_model_call_id
             != call.fact.resolved_model_call_id
-            or extraction_attribution.background_budget_reservation
-            .dispatch_attempt_ordinal
+            or extraction_attribution.background_budget_reservation.dispatch_attempt_ordinal
             != extraction_attribution.dispatch_attempt_ordinal
         ):
-            raise ValueError(
-                "compaction memory extraction lifecycle identity drifted"
-            )
+            raise ValueError("compaction memory extraction lifecycle identity drifted")
     payload = _bundle_payload(
         call_id=bundle.resolved_model_call_id,
         lifecycle_kind=bundle.lifecycle_kind,
@@ -518,6 +548,7 @@ def validate_model_lifecycle_start_bundle(
         active_run_monitor_source_event_references=(
             bundle.active_run_monitor_source_event_references
         ),
+        active_run_prompt_steer_guard=bundle.active_run_prompt_steer_guard,
     )
     expected = context_fingerprint(
         "model-lifecycle-start-bundle:v1",
@@ -541,9 +572,7 @@ def _prepare_model_reservation(
     run_start = runtime_session.long_horizon_state_store.run_start(event_context.run_id)
     if run_start is None:
         return None, "not_rollout_accounted", None
-    binding = runtime_session.resolve_run_rollout_binding(
-        run_id=event_context.run_id
-    )
+    binding = runtime_session.resolve_run_rollout_binding(run_id=event_context.run_id)
     account = binding.account
     state = binding.parent_state
     quote = calculate_model_call_reservation(
@@ -690,9 +719,8 @@ def _bundle_payload(
     ),
     provider_input_start_bundle: PreparedProviderInputStartBundlePort | None,
     active_run_monitor_delivery: HostActiveRunMonitorDeliveryFact | None,
-    active_run_monitor_source_event_references: tuple[
-        ContextEventReferenceFact, ...
-    ],
+    active_run_monitor_source_event_references: tuple[ContextEventReferenceFact, ...],
+    active_run_prompt_steer_guard: ActiveRunPromptSteerCommitGuardFact | None,
 ) -> dict[str, object]:
     return {
         "resolved_model_call_id": call_id,
@@ -716,6 +744,7 @@ def _bundle_payload(
         "active_run_monitor_source_event_references": (
             active_run_monitor_source_event_references
         ),
+        "active_run_prompt_steer_guard": active_run_prompt_steer_guard,
     }
 
 

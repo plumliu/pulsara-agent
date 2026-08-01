@@ -311,8 +311,7 @@ def build_run_timeline(
                 tool_calls[event.tool_call_id] = item
                 items.append(item)
             item.metadata["arguments"] = (
-                str(item.metadata.get("arguments", ""))
-                + event.arguments_json_fragment
+                str(item.metadata.get("arguments", "")) + event.arguments_json_fragment
             )
             _finish(item, event)
             continue

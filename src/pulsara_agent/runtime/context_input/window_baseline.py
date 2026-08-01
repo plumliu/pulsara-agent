@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pydantic import model_validator
 
-from pulsara_agent.primitives._context_base import FrozenContextFact, context_fingerprint
+from pulsara_agent.primitives._context_base import (
+    FrozenContextFact,
+    context_fingerprint,
+)
 from pulsara_agent.primitives.context import (
     TranscriptCompileInput,
     TranscriptMessageFact,
@@ -35,7 +38,9 @@ class WindowCompactionTranscriptBaselineFact(FrozenContextFact):
         if self.baseline_fingerprint != context_fingerprint(
             "window-compaction-transcript-baseline:v1", payload
         ):
-            raise ValueError("window compaction transcript baseline fingerprint mismatch")
+            raise ValueError(
+                "window compaction transcript baseline fingerprint mismatch"
+            )
         message_ids = {item.message_id for item in self.retained_messages}
         if self.current_user_anchor not in message_ids:
             raise ValueError("window baseline lacks current user anchor")
@@ -72,9 +77,7 @@ def build_window_compaction_transcript_baseline(
     )
     pair_ids = {(pair.call_message_id, pair.tool_call_id) for pair in pairs}
     retained_units = tuple(
-        unit
-        for unit in units
-        if (unit.call_message_id, unit.tool_call_id) in pair_ids
+        unit for unit in units if (unit.call_message_id, unit.tool_call_id) in pair_ids
     )
     payload = {
         "schema_version": "window-compaction-transcript-baseline.v1",

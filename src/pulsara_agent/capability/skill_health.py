@@ -92,7 +92,9 @@ class SkillHealthResolver:
                 )
         return tuple(diagnostics)
 
-    def _binary_found(self, binary: str) -> tuple[bool, str, CapabilityDiagnostic | None]:
+    def _binary_found(
+        self, binary: str
+    ) -> tuple[bool, str, CapabilityDiagnostic | None]:
         now = self._monotonic()
         lookup_path = self._lookup_path()
         cache_key = (binary, lookup_path.path, lookup_path.source)
@@ -105,10 +107,14 @@ class SkillHealthResolver:
             else:
                 found = shutil.which(binary, path=lookup_path.path) is not None
         except (OSError, RuntimeError) as exc:
-            return False, lookup_path.source, CapabilityDiagnostic(
-                severity="warning",
-                code="skill_binary_health_check_failed",
-                message=f"Could not check active skill CLI binary on {lookup_path.source}: {binary}: {exc}",
+            return (
+                False,
+                lookup_path.source,
+                CapabilityDiagnostic(
+                    severity="warning",
+                    code="skill_binary_health_check_failed",
+                    message=f"Could not check active skill CLI binary on {lookup_path.source}: {binary}: {exc}",
+                ),
             )
         self._binary_cache[cache_key] = _CachedBinaryHealth(
             expires_at=now + self.ttl_seconds,
@@ -129,7 +135,9 @@ class SkillHealthResolver:
             return SkillBinaryLookupPath(path=None, source="Pulsara process PATH")
 
 
-def _with_skill_path(diagnostic: CapabilityDiagnostic, injection: ActiveSkillInjection) -> CapabilityDiagnostic:
+def _with_skill_path(
+    diagnostic: CapabilityDiagnostic, injection: ActiveSkillInjection
+) -> CapabilityDiagnostic:
     if diagnostic.path is not None:
         return diagnostic
     return CapabilityDiagnostic(

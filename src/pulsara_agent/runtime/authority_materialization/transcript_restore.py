@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from contextlib import nullcontext
 from dataclasses import dataclass
 from time import monotonic
@@ -37,8 +39,8 @@ from pulsara_agent.primitives.authority_materialization import (
     TranscriptDomainSparseReadProofFact,
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
-from pulsara_agent.event_log.protocol import RawTranscriptDomainPrefixFact
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawTranscriptDomainPrefixFact
 from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.runtime.authority_materialization.checkpoint import (
     TRANSCRIPT_CHECKPOINT_BUILD_CONTRACT_FINGERPRINT,
@@ -400,7 +402,7 @@ def _restore_transcript_projection_from_base_locked(
         if len(rows) != 1:
             raise ValueError("manifest transcript checkpoint event is unavailable")
         raw = rows[0]
-        event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if (
             raw.sequence != acceleration.checkpoint_committed_event_sequence
             or not isinstance(event, TranscriptProjectionCheckpointCommittedEvent)
@@ -539,7 +541,7 @@ def _load_frozen_run_seed_carrier(
     if len(rows) != 1:
         raise ValueError("frozen RunStart anchor carrier is unavailable")
     raw = rows[0]
-    event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
     if (
         not isinstance(event, RunStartEvent)
         or raw.sequence != carrier.committed_sequence
@@ -578,8 +580,7 @@ def _validate_frozen_checkpoint_carrier(
         or carrier.committed_sequence > requested_through_sequence
         or frozen_anchor_identity.checkpoint_id != acceleration.checkpoint_id
         or frozen_anchor_identity.checkpoint_committed_event_id != event.id
-        or frozen_anchor_identity.checkpoint_committed_event_sequence
-        != event.sequence
+        or frozen_anchor_identity.checkpoint_committed_event_sequence != event.sequence
         or frozen_anchor_identity.checkpoint_candidate_fingerprint
         != event.checkpoint_candidate_fingerprint
         or frozen_anchor_identity.checkpoint_candidate_ledger_through_sequence
@@ -665,7 +666,8 @@ def _restore_projection_delta(
         deadline_monotonic=deadline_monotonic,
     )
     semantic_events = tuple(
-        raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for raw in delta.semantic_events
+        decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+        for raw in delta.semantic_events
     )
     documents = TranscriptProjectionDocumentRegistry()
     from pulsara_agent.llm.terminal_projection import hydrate_terminal_projection_text
@@ -704,7 +706,7 @@ def _restore_projection_delta(
     by_id = {item.event_id: item for item in start_raw}
     for event_id in start_ids:
         raw = by_id[event_id]
-        event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if not isinstance(event, ModelCallStartEvent):
             raise ValueError("transcript projection Start reference has wrong type")
         starts.append(event)
@@ -855,7 +857,7 @@ def _checkpoint_candidates(
     for raw in rows:
         if raw.sequence > through_sequence:
             raise ValueError("transcript checkpoint lies beyond restore high-water")
-        event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if not isinstance(event, TranscriptProjectionCheckpointCommittedEvent):
             raise ValueError("transcript checkpoint event schema drifted")
         candidate = event.checkpoint
@@ -896,7 +898,7 @@ def _latest_run_start(
     raw = rows[0]
     if raw.sequence > through_sequence:
         raise ValueError("run transcript seed lies beyond restore high-water")
-    event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(event, RunStartEvent):
         raise ValueError("run transcript seed event schema drifted")
     seed = event.run_transcript_seed_semantic

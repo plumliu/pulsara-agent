@@ -112,9 +112,7 @@ def test_d6_dod_evidence_matches_ownership_hard_cut() -> None:
     assert pytest_evidence["post_review_added_nodes"]["failed"] == 0
     assert evidence["static_validation"]["forbidden_d4_observation_count"] == 0
     assert (
-        evidence["static_validation"][
-            "residual_cross_package_scc_observation_count"
-        ]
+        evidence["static_validation"]["residual_cross_package_scc_observation_count"]
         == 0
     )
 
@@ -201,9 +199,9 @@ def test_core_dogfood_suite_is_frozen_and_complete() -> None:
 
 
 def test_core_dogfood_runner_consumes_opaque_run_result() -> None:
-    runner_source = (
-        DEFAULT_SUITE_ROOT.parents[1] / "runner.py"
-    ).read_text(encoding="utf-8")
+    runner_source = (DEFAULT_SUITE_ROOT.parents[1] / "runner.py").read_text(
+        encoding="utf-8"
+    )
     assert "result.state" not in runner_source
     assert "result.run_id" in runner_source
 
@@ -389,9 +387,7 @@ def test_cache_scenario_grader_requires_real_cache_and_balanced_lifecycle() -> N
     assert grade.passed
     assert grade.total_tokens == 300
     assert grade.cached_input_tokens == 80
-    assert all(
-        item.assertion_id != "total_token_budget" for item in grade.assertions
-    )
+    assert all(item.assertion_id != "total_token_budget" for item in grade.assertions)
 
     session_report["model_usage_by_run"] = [
         {**item, "total_tokens": 10_000_000}
@@ -528,9 +524,7 @@ def test_manual_compaction_grader_requires_exact_memory_extraction_chain() -> No
                     "job_id": "job:1",
                     "completed_event_id": "result:1",
                 },
-                "outbox": [
-                    {"producer_event_id": "result:1", "status": "applied"}
-                ],
+                "outbox": [{"producer_event_id": "result:1", "status": "applied"}],
                 "candidates": [{"entry_id": "candidate:1"}],
             }
         ],
@@ -572,9 +566,7 @@ def test_manual_compaction_grader_requires_exact_memory_extraction_chain() -> No
         verifier=verifier,
     )
     assert grade.passed, tuple(
-        (item.assertion_id, item.detail)
-        for item in grade.assertions
-        if not item.passed
+        (item.assertion_id, item.detail) for item in grade.assertions if not item.passed
     )
 
 
@@ -664,9 +656,7 @@ def test_subagent_grader_requires_durable_child_tool_count() -> None:
         verifier=verifier,
     )
     assert grade.passed, tuple(
-        (item.assertion_id, item.detail)
-        for item in grade.assertions
-        if not item.passed
+        (item.assertion_id, item.detail) for item in grade.assertions if not item.passed
     )
 
     session_report["events"][0]["tool_call_count"] = 9

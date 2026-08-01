@@ -127,7 +127,9 @@ def test_admission_registry_has_no_activation_or_execution_handle_attach_api() -
     assert not hasattr(registry, "cancel")
 
 
-def test_recovered_occupancy_installs_before_repair_and_exact_confirms(tmp_path) -> None:
+def test_recovered_occupancy_installs_before_repair_and_exact_confirms(
+    tmp_path,
+) -> None:
     registry = ChildAdmissionSessionRegistry()
     session = in_memory_runtime_session(
         tmp_path,
@@ -167,10 +169,23 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
     class FailingCommitEventLog:
         fail_writes = False
 
-        def extend(self, events, *, expected_last_sequence=None, deadline_monotonic=None):
+        def extend(
+            self, events, *, expected_last_sequence=None, deadline_monotonic=None
+        ):
             if self.fail_writes:
                 raise RuntimeError("synthetic event commit failure")
             return backing.extend(
+                events,
+                expected_last_sequence=expected_last_sequence,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+        def commit_batch(
+            self, events, *, expected_last_sequence=None, deadline_monotonic=None
+        ):
+            if self.fail_writes:
+                raise RuntimeError("synthetic event commit failure")
+            return backing.commit_batch(
                 events,
                 expected_last_sequence=expected_last_sequence,
                 deadline_monotonic=deadline_monotonic,

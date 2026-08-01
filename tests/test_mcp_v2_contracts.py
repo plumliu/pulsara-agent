@@ -376,7 +376,9 @@ def test_form_response_is_sealed_and_not_generically_serializable() -> None:
                 metadata={"nested": {"response": response}},
             )
         )
-    with pytest.raises(TypeError, match="ArtifactStore rejects MCP continuation secret"):
+    with pytest.raises(
+        TypeError, match="ArtifactStore rejects MCP continuation secret"
+    ):
         InMemoryArchiveStore().put_text(
             "artifact:secret",
             "safe body",

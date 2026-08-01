@@ -93,10 +93,15 @@ def hydrate_run_transcript_seed(
     try:
         artifact = RunTranscriptSeedArtifactFact.model_validate_json(payload)
     except ValidationError as exc:
-        raise TranscriptProjectionHydrationError("run seed artifact is invalid") from exc
+        raise TranscriptProjectionHydrationError(
+            "run seed artifact is invalid"
+        ) from exc
     if artifact.seed_semantic != seed_semantic:
         raise TranscriptProjectionHydrationError("run seed artifact semantic mismatch")
-    if artifact.artifact_contract_fingerprint != contracts.run_seed.contract_fingerprint:
+    if (
+        artifact.artifact_contract_fingerprint
+        != contracts.run_seed.contract_fingerprint
+    ):
         raise TranscriptProjectionHydrationError("run seed document contract mismatch")
     root = artifact.root_manifest
     if root.materialization_fingerprint != (
@@ -255,7 +260,9 @@ def _hydrate_node(
     try:
         node = _NODE_ADAPTER.validate_json(payload)
     except ValidationError as exc:
-        raise TranscriptProjectionHydrationError("transcript tree node is invalid") from exc
+        raise TranscriptProjectionHydrationError(
+            "transcript tree node is invalid"
+        ) from exc
 
     if isinstance(node, TranscriptProjectionLeafNodeFact):
         if reference.node_kind != "leaf" or expected_tree_level != 1:
@@ -266,9 +273,13 @@ def _hydrate_node(
         )
     else:
         if reference.node_kind != "internal" or node.tree_level != expected_tree_level:
-            raise TranscriptProjectionHydrationError("transcript internal level mismatch")
+            raise TranscriptProjectionHydrationError(
+                "transcript internal level mismatch"
+            )
         if len(node.child_refs) > contracts.tree.max_internal_fanout:
-            raise TranscriptProjectionHydrationError("transcript tree fanout exceeds contract")
+            raise TranscriptProjectionHydrationError(
+                "transcript tree fanout exceeds contract"
+            )
         nested: list[TranscriptProjectionLeafEntryFact] = []
         for child in node.child_refs:
             nested.extend(
@@ -390,9 +401,13 @@ def _validate_root_contract(
         raise TranscriptProjectionHydrationError("transcript root contract mismatch")
     if isinstance(root, NonEmptyTranscriptProjectionRootManifestFact):
         if root.tree_height > contracts.tree.max_tree_height:
-            raise TranscriptProjectionHydrationError("transcript tree height exceeds contract")
+            raise TranscriptProjectionHydrationError(
+                "transcript tree height exceeds contract"
+            )
         if root.total_entry_count > contracts.tree.maximum_representable_entries:
-            raise TranscriptProjectionHydrationError("transcript tree count exceeds contract")
+            raise TranscriptProjectionHydrationError(
+                "transcript tree count exceeds contract"
+            )
 
 
 def _validate_hydrated_entries(
@@ -401,7 +416,9 @@ def _validate_hydrated_entries(
 ) -> None:
     values = tuple(item.ordinal.value for item in entries)
     if values != tuple(sorted(values)) or len(values) != len(set(values)):
-        raise TranscriptProjectionHydrationError("transcript ordinals are not canonical")
+        raise TranscriptProjectionHydrationError(
+            "transcript ordinals are not canonical"
+        )
     if len(entries) != root.total_entry_count:
         raise TranscriptProjectionHydrationError("transcript root entry count mismatch")
     normalized = context_fingerprint(

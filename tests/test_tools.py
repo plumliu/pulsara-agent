@@ -1677,6 +1677,7 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
         runtime_session,
         recorder=runtime_session.make_thread_recorder(),
     )
+    archive_before_terminal = set(runtime_session.archive.blobs)
 
     result = execute_runtime_tool(
         executor,
@@ -1694,7 +1695,7 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
     assert len(result.output) > 8_000
     assert isinstance(block, ToolResultBlock)
     assert [artifact.artifact_id for artifact in block.artifacts] == [artifact_id]
-    assert set(runtime_session.archive.blobs) - {artifact_id} == {
+    assert set(runtime_session.archive.blobs) - archive_before_terminal == {
         end_event.terminal_projection.projection_reference.document_artifact_id
     }
 

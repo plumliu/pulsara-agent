@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Callable
 
 from pulsara_agent.event.events import RunStartEvent
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     freeze_event_write_candidate,
@@ -159,9 +160,7 @@ def _load_manifest_root(
         transitive_leaf_coverage_fingerprint=(
             root.transitive_leaf_coverage_fingerprint
         ),
-        selection_contract_fingerprint=(
-            root.source_selection_contract_fingerprint
-        ),
+        selection_contract_fingerprint=(root.source_selection_contract_fingerprint),
     )
     attribution = build_frozen_fact(
         CompactionHumanEvidenceManifestAttributionFact,
@@ -176,18 +175,14 @@ def _load_manifest_root(
         domain_completeness_proof_fingerprint=(
             root.domain_completeness_proof_fingerprint
         ),
-        ordered_leaf_attribution_accumulator=(
-            root.ordered_attribution_accumulator
-        ),
+        ordered_leaf_attribution_accumulator=(root.ordered_attribution_accumulator),
         ordered_selection_projection_accumulator=(
             root.ordered_selection_projection_accumulator
         ),
         selection_projection_contract_fingerprint=(
             root.selection_projection_contract_fingerprint
         ),
-        paged_manifest_root_reference=(
-            reference.paged_manifest_root_reference
-        ),
+        paged_manifest_root_reference=(reference.paged_manifest_root_reference),
     )
     if (
         root.runtime_session_id != runtime_session_id
@@ -214,8 +209,7 @@ def _read_manifest_page(
 ) -> CompactionHumanEvidenceManifestPageFact:
     page_reference = root.ordered_page_references[page_index]
     if (
-        page_reference.artifact_kind
-        != "compaction-human-evidence-manifest-page"
+        page_reference.artifact_kind != "compaction-human-evidence-manifest-page"
         or page_reference.artifact_contract_fingerprint
         != MANIFEST_ARTIFACT_CONTRACT_FINGERPRINT
     ):
@@ -235,10 +229,7 @@ def _read_manifest_page(
     )
     expected_attribution = _accumulate(
         "compaction-human-evidence-page-attribution:v1",
-        tuple(
-            item.attribution_fingerprint
-            for item in page.ordered_leaf_attributions
-        ),
+        tuple(item.attribution_fingerprint for item in page.ordered_leaf_attributions),
     )
     expected_projection = _accumulate(
         "compaction-human-evidence-page-selection:v1",
@@ -322,8 +313,7 @@ def _validate_manifest_pages(
         count != root.eligible_leaf_count
         or semantic_accumulator != root.ordered_semantic_accumulator
         or attribution_accumulator != root.ordered_attribution_accumulator
-        or projection_accumulator
-        != root.ordered_selection_projection_accumulator
+        or projection_accumulator != root.ordered_selection_projection_accumulator
         or transitive_coverage != root.transitive_leaf_coverage_fingerprint
         or first_sequence != root.first_source_sequence
         or last_sequence != root.last_source_sequence
@@ -373,7 +363,7 @@ def _build_node(
     )
     source_ref = resolved.stored_reference
     expected_ref = attribution.exact_run_start_event_reference
-    rebound_envelope = RawStoredEventEnvelope.from_stored_event(
+    rebound_envelope = build_raw_stored_event_envelope(
         event=source,
         runtime_session_id=expected_ref.runtime_session_id,
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -382,8 +372,7 @@ def _build_node(
         source.model_copy(update={"sequence": None})
     )
     if (
-        source_ref.stable_identity.runtime_session_id
-        != expected_ref.runtime_session_id
+        source_ref.stable_identity.runtime_session_id != expected_ref.runtime_session_id
         or source_ref.stable_identity.event_id != expected_ref.event_id
         or source_ref.stable_identity.event_type != expected_ref.event_type
         or source_ref.stable_identity.payload_fingerprint

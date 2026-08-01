@@ -204,9 +204,7 @@ def acquire_verified_benchmark_database_lease(
         payload = {
             "database_name": database_name,
             "binding_fingerprint": access_lease.schema_binding.binding_fingerprint,
-            "deep_catalog_fingerprint": (
-                deep.result.observed_deep_catalog_fingerprint
-            ),
+            "deep_catalog_fingerprint": (deep.result.observed_deep_catalog_fingerprint),
             "business_empty": business_empty,
         }
         return VerifiedBenchmarkDatabaseLease(
@@ -247,9 +245,7 @@ def iteration_database_name(
     iteration: int,
 ) -> str:
     digest = sha256(
-        f"{benchmark_run_id}:{case_contract_fingerprint}:{iteration}".encode(
-            "utf-8"
-        )
+        f"{benchmark_run_id}:{case_contract_fingerprint}:{iteration}".encode("utf-8")
     ).hexdigest()[:20]
     prefix = _DATABASE_COMPONENT.sub("_", "pulsara_bench").strip("_")
     return f"{prefix}_{digest}"

@@ -97,12 +97,12 @@ def test_emit_from_thread_does_not_publish_mutable_run_state(tmp_path) -> None:
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             ),
-                    )
+        )
         runtime.emit_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="thread"
             ),
-                    )
+        )
         await asyncio.sleep(0.05)
 
     asyncio.run(run())

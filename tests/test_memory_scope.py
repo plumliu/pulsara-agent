@@ -25,7 +25,9 @@ def test_scope_vocab_accepts_only_user_and_flat_workspace_scopes() -> None:
         assert not is_valid_scope(scope)
 
 
-def test_memory_domain_context_canonicalizes_project_path_and_resolves_hashed_scopes(tmp_path) -> None:
+def test_memory_domain_context_canonicalizes_project_path_and_resolves_hashed_scopes(
+    tmp_path,
+) -> None:
     project_root = tmp_path / "Repo Test"
     equivalent_project_root = project_root / ".." / project_root.name
     expected_project_key = project_root.resolve().as_posix()
@@ -55,6 +57,12 @@ def test_memory_domain_context_rejects_backend_unsafe_ids() -> None:
     with pytest.raises(ValueError):
         MemoryDomainContext(memory_domain_id="u_test", workspace_kind="project")
     with pytest.raises(ValueError):
-        MemoryDomainContext(memory_domain_id="u_test", workspace_kind="project", stable_project_key=" ")
+        MemoryDomainContext(
+            memory_domain_id="u_test", workspace_kind="project", stable_project_key=" "
+        )
     with pytest.raises(ValueError):
-        MemoryDomainContext(memory_domain_id="u_test", workspace_kind="transient", stable_project_key="repo")
+        MemoryDomainContext(
+            memory_domain_id="u_test",
+            workspace_kind="transient",
+            stable_project_key="repo",
+        )

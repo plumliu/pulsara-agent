@@ -756,7 +756,9 @@ class ModelStreamSemanticAttributionFact(BaseModel):
         ):
             raise ValueError("model stream durable/source draft kind mismatch")
         if not is_segment and self.source_span.source_item_count != 1:
-            raise ValueError("model stream singleton must cover exactly one source item")
+            raise ValueError(
+                "model stream singleton must cover exactly one source item"
+            )
         return self
 
 
@@ -788,9 +790,7 @@ class ModelStreamSemanticCommitMeasurementFact(BaseModel):
             raise ValueError("model semantic commit measurement requires charge event")
         expected = sha256_fingerprint(
             "model-stream-semantic-commit-measurement:v1",
-            self.model_dump(
-                mode="json", exclude={"batch_measurement_fingerprint"}
-            ),
+            self.model_dump(mode="json", exclude={"batch_measurement_fingerprint"}),
         )
         if self.batch_measurement_fingerprint != expected:
             raise ValueError("model semantic commit measurement fingerprint mismatch")
@@ -866,7 +866,9 @@ class ModelStreamSettlementMeasurementFact(BaseModel):
         elif self.semantic_commit_batches or (
             self.actual_semantic_commit_batch_count is not None
         ):
-            raise ValueError("unbootstrapped model stream cannot claim physical batches")
+            raise ValueError(
+                "unbootstrapped model stream cannot claim physical batches"
+            )
         expected = sha256_fingerprint(
             "model-stream-settlement-measurement:v1",
             self.model_dump(mode="json", exclude={"measurement_fingerprint"}),
@@ -886,12 +888,8 @@ class ProviderModelStreamErrorCode(StrEnum):
     PROVIDER_TIMEOUT = "provider_timeout"
     CONTENT_FILTERED = "content_filtered"
     TRANSPORT_PROTOCOL_ERROR = "transport_protocol_error"
-    TRANSPORT_SOURCE_ITEM_LIMIT_EXCEEDED = (
-        "transport_source_item_limit_exceeded"
-    )
-    TRANSPORT_SOURCE_PAYLOAD_LIMIT_EXCEEDED = (
-        "transport_source_payload_limit_exceeded"
-    )
+    TRANSPORT_SOURCE_ITEM_LIMIT_EXCEEDED = "transport_source_item_limit_exceeded"
+    TRANSPORT_SOURCE_PAYLOAD_LIMIT_EXCEEDED = "transport_source_payload_limit_exceeded"
     UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
 
 
@@ -920,7 +918,9 @@ class ProviderErrorSanitizationContractFact(BaseModel):
             self.model_dump(mode="json", exclude={"contract_fingerprint"}),
         )
         if self.contract_fingerprint != expected:
-            raise ValueError("provider error sanitization contract fingerprint mismatch")
+            raise ValueError(
+                "provider error sanitization contract fingerprint mismatch"
+            )
         return self
 
 
@@ -981,9 +981,7 @@ class ProviderRetryAttemptSummaryFact(BaseModel):
 class ProviderRetrySummaryFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["provider_retry_summary.v1"] = (
-        "provider_retry_summary.v1"
-    )
+    schema_version: Literal["provider_retry_summary.v1"] = "provider_retry_summary.v1"
     enabled: bool
     final_attempt: int = Field(ge=1, le=32)
     max_attempts: int = Field(ge=1, le=32)

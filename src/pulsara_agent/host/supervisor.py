@@ -74,8 +74,12 @@ class WorkspaceTerminalSupervisor:
     terminal_sessions: TerminalSessionManager = field(init=False)
     created_at: float = field(default_factory=time.monotonic)
     last_active_at: float = field(default_factory=time.monotonic)
-    _state: WorkspaceLifecycleState = field(default=WorkspaceLifecycleState.OPEN, init=False)
-    _leases: dict[str, WorkspaceTerminalLease] = field(default_factory=dict, init=False, repr=False)
+    _state: WorkspaceLifecycleState = field(
+        default=WorkspaceLifecycleState.OPEN, init=False
+    )
+    _leases: dict[str, WorkspaceTerminalLease] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _generation_counter: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -183,7 +187,9 @@ class WorkspaceTerminalSupervisor:
             pending_completion_count=self.terminal_sessions.pending_completion_count(),
             terminal_session_count=self.terminal_sessions.session_count(),
             owner_session_distribution=distribution,
-            processes=tuple(process.to_payload(include_owner=True) for process in processes),
+            processes=tuple(
+                process.to_payload(include_owner=True) for process in processes
+            ),
         )
 
     def summary(self) -> dict[str, object]:

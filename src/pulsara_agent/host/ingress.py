@@ -126,6 +126,7 @@ class HostIngressCoordinator:
         replan_cleanup: Callable[[HostIngressAttemptOwner], Awaitable[None]]
         | None = None,
         reject_if_busy: bool = False,
+        allow_deferred_while_waiting: bool = False,
     ) -> Any:
         loop = asyncio.get_running_loop()
         owner = HostIngressAttemptOwner(
@@ -150,9 +151,13 @@ class HostIngressCoordinator:
             with self._state_lock:
                 if self._lifecycle_state in {"closing", "closed", "latched"}:
                     raise HostIngressClosedError("Host ingress is not accepting work")
-                if self._lifecycle_state == "waiting_user" and (
-                    kind != "resume"
-                    or resume_match_key != self._waiting_resume_match_key
+                waiting_match = (
+                    kind == "resume"
+                    and resume_match_key == self._waiting_resume_match_key
+                )
+                waiting_deferred = allow_deferred_while_waiting and kind == "human"
+                if self._lifecycle_state == "waiting_user" and not (
+                    waiting_match or waiting_deferred
                 ):
                     raise HostIngressWaitingUserError(
                         "Host ingress is waiting for its matching interaction resume"
@@ -370,6 +375,10 @@ class HostIngressCoordinator:
                 self._waiting_resume_match_key = None
                 self._lifecycle_state = "open_idle"
                 self._state_generation += 1
+                if self._queued_count_locked() > 0 and (
+                    self._worker is None or self._worker.done()
+                ):
+                    self._worker = asyncio.create_task(self._run(), name="host-ingress")
             self._condition.notify_all()
 
     def can_borrow_active_run_notifications(self) -> bool:

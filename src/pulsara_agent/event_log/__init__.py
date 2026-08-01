@@ -19,10 +19,7 @@ from pulsara_agent.event_log.protocol import (
     RawEventSelectionBounds,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
-    RawRuntimeProjectionCheckpoint,
-    RawStoredEventEnvelope,
     RawTranscriptDomainDeltaSnapshot,
-    RawTranscriptDomainPrefixFact,
     same_event_payload,
 )
 from pulsara_agent.event_log.serialization import (
@@ -55,10 +52,7 @@ __all__ = [
     "RawEventSelectionBounds",
     "RawReplyEventGroup",
     "RawReplySelectionSnapshot",
-    "RawRuntimeProjectionCheckpoint",
-    "RawStoredEventEnvelope",
     "RawTranscriptDomainDeltaSnapshot",
-    "RawTranscriptDomainPrefixFact",
     "AGENT_EVENT_SCHEMA_VERSION",
     "DEFAULT_EVENT_SCHEMA_REGISTRY",
     "EventSchemaContractMismatch",

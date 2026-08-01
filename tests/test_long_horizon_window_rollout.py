@@ -2509,7 +2509,7 @@ def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
     )
     stored_start = next(
         event
-        for event in dispatch.stored_events
+        for event in dispatch.stored_batch_receipt.owned_stored_events
         if isinstance(event, ModelCallStartEvent)
     )
 
@@ -2646,7 +2646,7 @@ def test_main_model_stream_recovery_closes_reply_envelope() -> None:
     )
     stored_start = next(
         event
-        for event in dispatch.stored_events
+        for event in dispatch.stored_batch_receipt.owned_stored_events
         if isinstance(event, ModelCallStartEvent)
     )
 
@@ -2776,7 +2776,7 @@ def _commit_completed_main_model_call(
     )
     committed_start = next(
         event
-        for event in dispatch.stored_events
+        for event in dispatch.stored_batch_receipt.owned_stored_events
         if isinstance(event, ModelCallStartEvent)
     )
     usage = ModelTokenUsageFact(input_tokens=0, output_tokens=0, total_tokens=0)

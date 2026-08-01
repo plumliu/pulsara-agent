@@ -131,6 +131,7 @@ _POSTGRES_TEST_MODULES = frozenset(
         "test_retrieval_runtime.py",
         "test_schema_migrations.py",
         "test_subagent_postgres_integration.py",
+        "test_terminal_infrastructure_postgres.py",
         "test_working_context.py",
     }
 )
@@ -858,9 +859,7 @@ def run_start_permission_fields(
         host_session_id=f"host:test:{runtime_session_id}",
         conversation_id=f"conversation:test:{runtime_session_id}",
         observed_at_utc=observed_at,
-        ingress_semantic_fingerprint=(
-            ingress_semantic.ingress_semantic_fingerprint
-        ),
+        ingress_semantic_fingerprint=(ingress_semantic.ingress_semantic_fingerprint),
         ordered_item_placements=(placement,),
     )
     host_ingress = build_frozen_fact(
@@ -1163,7 +1162,7 @@ async def emit_test_accepted_model_reply(
         model_call_index=1,
         event_context=event_context,
         runtime_session=runtime_session,
-            )
+    )
 
 
 def test_run_end_event_id(run_id: str) -> str:

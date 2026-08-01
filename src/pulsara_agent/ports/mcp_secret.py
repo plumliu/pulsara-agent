@@ -17,7 +17,10 @@ from typing import Mapping, Sequence
 
 from pydantic import BaseModel
 
-from pulsara_agent.primitives._context_base import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives._context_base import (
+    canonical_json_bytes,
+    context_fingerprint,
+)
 from pulsara_agent.primitives.mcp_continuation import (
     McpContinuationBoundsFact,
     McpFormElicitationRequestFact,
@@ -80,7 +83,9 @@ class McpSecretAccessPurpose(StrEnum):
 class SealedMcpJsonObject(SealedMcpContinuationSecretBase):
     __slots__ = ("_entries",)
 
-    def __init__(self, entries: tuple[tuple[str, object], ...], *, _token: object) -> None:
+    def __init__(
+        self, entries: tuple[tuple[str, object], ...], *, _token: object
+    ) -> None:
         if _token is not _CONSTRUCTION_TOKEN:
             raise TypeError("sealed MCP JSON must be built by its factory")
         object.__setattr__(self, "_entries", entries)
@@ -111,7 +116,9 @@ class McpFormElicitationResponse(SealedMcpContinuationSecretBase):
         object.__setattr__(self, "_action", action)
         object.__setattr__(self, "_content_present", content_present)
         object.__setattr__(self, "_content", content)
-        object.__setattr__(self, "_process_local_response_fingerprint", response_fingerprint)
+        object.__setattr__(
+            self, "_process_local_response_fingerprint", response_fingerprint
+        )
 
     @property
     def request_key(self) -> str:
@@ -137,7 +144,9 @@ class McpUrlElicitationResponse(SealedMcpContinuationSecretBase):
             raise TypeError("sealed MCP response must be built by its factory")
         object.__setattr__(self, "_request_key", request_key)
         object.__setattr__(self, "_action", action)
-        object.__setattr__(self, "_process_local_response_fingerprint", response_fingerprint)
+        object.__setattr__(
+            self, "_process_local_response_fingerprint", response_fingerprint
+        )
 
     @property
     def request_key(self) -> str:
@@ -214,8 +223,14 @@ class _McpRetryablePayloadBase(SealedMcpContinuationSecretBase):
         object.__setattr__(self, "_payload_schema_version", 1)
         object.__setattr__(self, "_payload_kind", payload_kind)
         object.__setattr__(self, "_source_method", source_method)
-        object.__setattr__(self, "_source_method_schema_fingerprint", source_method_schema_fingerprint)
-        object.__setattr__(self, "_process_local_payload_fingerprint", process_local_payload_fingerprint)
+        object.__setattr__(
+            self, "_source_method_schema_fingerprint", source_method_schema_fingerprint
+        )
+        object.__setattr__(
+            self,
+            "_process_local_payload_fingerprint",
+            process_local_payload_fingerprint,
+        )
 
     @property
     def payload_kind(self) -> str:
@@ -362,7 +377,13 @@ class _McpCarrierPlaintextBase(SealedMcpContinuationSecretBase):
 class McpAwaitingInputCarrierPlaintext(_McpCarrierPlaintextBase):
     __slots__ = ("_private_url_requests",)
 
-    def __init__(self, *, private_url_requests: tuple[McpPrivateUrlElicitationPayload, ...], _token: object, **values: object) -> None:
+    def __init__(
+        self,
+        *,
+        private_url_requests: tuple[McpPrivateUrlElicitationPayload, ...],
+        _token: object,
+        **values: object,
+    ) -> None:
         self._install_common(token=_token, **values)
         object.__setattr__(self, "_private_url_requests", private_url_requests)
 
@@ -385,8 +406,12 @@ class McpReplayReadyCarrierPlaintext(_McpCarrierPlaintextBase):
     ) -> None:
         self._install_common(token=_token, **values)
         object.__setattr__(self, "_resolution_event_id", resolution_event_id)
-        object.__setattr__(self, "_current_round_input_responses", current_round_input_responses)
-        object.__setattr__(self, "_response_attribution_fingerprint", response_attribution_fingerprint)
+        object.__setattr__(
+            self, "_current_round_input_responses", current_round_input_responses
+        )
+        object.__setattr__(
+            self, "_response_attribution_fingerprint", response_attribution_fingerprint
+        )
 
 
 McpContinuationCarrierPlaintext = (
@@ -426,7 +451,9 @@ class McpContinuationSecretBorrow:
         if self._purpose not in purposes:
             raise PermissionError("MCP continuation secret borrow purpose mismatch")
 
-    def canonical_plaintext_bytes(self, value: McpContinuationCarrierPlaintext) -> bytes:
+    def canonical_plaintext_bytes(
+        self, value: McpContinuationCarrierPlaintext
+    ) -> bytes:
         self._require(McpSecretAccessPurpose.ENCRYPTION)
         return canonical_json_bytes(_carrier_plaintext_value(value))
 
@@ -470,17 +497,10 @@ class McpContinuationSecretBorrow:
                     raise ValueError("MCP private URL exceeds its byte bound")
         else:
             response_bytes = canonical_json_bytes(
-                _sealed_json_thaw(
-                    value._current_round_input_responses._wire_responses
-                )
+                _sealed_json_thaw(value._current_round_input_responses._wire_responses)
             )
-            if (
-                len(response_bytes)
-                > bounds.maximum_current_round_response_bytes
-            ):
-                raise ValueError(
-                    "MCP current-round responses exceed their byte bound"
-                )
+            if len(response_bytes) > bounds.maximum_current_round_response_bytes:
+                raise ValueError("MCP current-round responses exceed their byte bound")
 
     def decode_plaintext_bytes(
         self,
@@ -522,12 +542,19 @@ class McpContinuationSecretBorrow:
         ):
             raise ValueError("MCP continuation plaintext authority mismatch")
 
-    def form_content(self, value: McpFormElicitationResponse) -> dict[str, object] | None:
-        self._require(McpSecretAccessPurpose.HOST_FORM_SUBMIT, McpSecretAccessPurpose.FRESH_WIRE_BUILD)
+    def form_content(
+        self, value: McpFormElicitationResponse
+    ) -> dict[str, object] | None:
+        self._require(
+            McpSecretAccessPurpose.HOST_FORM_SUBMIT,
+            McpSecretAccessPurpose.FRESH_WIRE_BUILD,
+        )
         return _sealed_json_thaw(value._content) if value._content is not None else None
 
     def exact_private_url(self, value: McpPrivateUrlElicitationPayload) -> str:
-        self._require(McpSecretAccessPurpose.URL_DISPLAY, McpSecretAccessPurpose.URL_LAUNCH)
+        self._require(
+            McpSecretAccessPurpose.URL_DISPLAY, McpSecretAccessPurpose.URL_LAUNCH
+        )
         return value._exact_url
 
 
@@ -593,7 +620,9 @@ class McpSealedElicitationResponseFactory:
             sealed = seal_mcp_json_object(content)
         else:
             if content_present or content is not None:
-                raise ValueError("declined/cancelled MCP form response cannot carry content")
+                raise ValueError(
+                    "declined/cancelled MCP form response cannot carry content"
+                )
             sealed = None
         process_payload = {
             "request_key": request.key,
@@ -607,7 +636,9 @@ class McpSealedElicitationResponseFactory:
             action=action,
             content_present=content_present,
             content=sealed,
-            response_fingerprint=context_fingerprint("mcp-form-response:process-local:v1", process_payload),
+            response_fingerprint=context_fingerprint(
+                "mcp-form-response:process-local:v1", process_payload
+            ),
             _token=_CONSTRUCTION_TOKEN,
         )
 
@@ -634,10 +665,15 @@ class McpSealedElicitationResponseFactory:
         ordered_request_keys: tuple[str, ...],
         responses: Sequence[McpElicitationResponse],
     ) -> McpFrozenRoundInputResponses:
-        if ordered_request_keys != tuple(sorted(set(ordered_request_keys))) or not ordered_request_keys:
+        if (
+            ordered_request_keys != tuple(sorted(set(ordered_request_keys)))
+            or not ordered_request_keys
+        ):
             raise ValueError("MCP response request keys must be ordered and unique")
         response_by_key = {item.request_key: item for item in responses}
-        if set(response_by_key) != set(ordered_request_keys) or len(response_by_key) != len(responses):
+        if set(response_by_key) != set(ordered_request_keys) or len(
+            response_by_key
+        ) != len(responses):
             raise ValueError("MCP response key set must exactly match request set")
         wire: dict[str, object] = {}
         local_fingerprints: list[str] = []
@@ -648,11 +684,14 @@ class McpSealedElicitationResponseFactory:
         canonical = canonical_json_bytes(wire)
         if len(canonical) > self._maximum_current_round_response_bytes:
             raise ValueError("MCP current-round responses exceed their byte bound")
-        keyed_commitment = "hmac-sha256:" + hmac.new(
-            self._commitment_key,
-            b"mcp-current-round-responses:v1\0" + canonical,
-            sha256,
-        ).hexdigest()
+        keyed_commitment = (
+            "hmac-sha256:"
+            + hmac.new(
+                self._commitment_key,
+                b"mcp-current-round-responses:v1\0" + canonical,
+                sha256,
+            ).hexdigest()
+        )
         attribution = context_fingerprint(
             "mcp-response-attribution:v1",
             {
@@ -690,7 +729,10 @@ def seal_mcp_json_object(value: Mapping[str, object]) -> SealedMcpJsonObject:
 
 
 def build_retryable_tool_call_payload(
-    *, tool_name: str, arguments: Mapping[str, object], source_method_schema_fingerprint: str
+    *,
+    tool_name: str,
+    arguments: Mapping[str, object],
+    source_method_schema_fingerprint: str,
 ) -> McpRetryableToolCallPayload:
     sealed = seal_mcp_json_object(arguments)
     payload = {"tool_name": tool_name, "arguments": dict(arguments)}
@@ -698,7 +740,9 @@ def build_retryable_tool_call_payload(
         tool_name=tool_name,
         arguments=sealed,
         source_method_schema_fingerprint=source_method_schema_fingerprint,
-        process_local_payload_fingerprint=context_fingerprint("mcp-tool-call-payload:process-local:v1", payload),
+        process_local_payload_fingerprint=context_fingerprint(
+            "mcp-tool-call-payload:process-local:v1", payload
+        ),
         _token=_CONSTRUCTION_TOKEN,
     )
 
@@ -709,13 +753,18 @@ def build_retryable_resource_read_payload(
     return McpRetryableResourceReadPayload(
         uri=uri,
         source_method_schema_fingerprint=source_method_schema_fingerprint,
-        process_local_payload_fingerprint=context_fingerprint("mcp-resource-read-payload:process-local:v1", {"uri": uri}),
+        process_local_payload_fingerprint=context_fingerprint(
+            "mcp-resource-read-payload:process-local:v1", {"uri": uri}
+        ),
         _token=_CONSTRUCTION_TOKEN,
     )
 
 
 def build_retryable_prompt_get_payload(
-    *, prompt_name: str, arguments: Mapping[str, object] | None, source_method_schema_fingerprint: str
+    *,
+    prompt_name: str,
+    arguments: Mapping[str, object] | None,
+    source_method_schema_fingerprint: str,
 ) -> McpRetryablePromptGetPayload:
     sealed = seal_mcp_json_object(arguments) if arguments is not None else None
     return McpRetryablePromptGetPayload(
@@ -815,10 +864,7 @@ def build_replay_ready_carrier_plaintext(
     operation_expires_at_utc: str,
     expiry_fingerprint: str,
 ) -> McpReplayReadyCarrierPlaintext:
-    if (
-        current_round_input_responses.request_set_fingerprint
-        != request_set_fingerprint
-    ):
+    if current_round_input_responses.request_set_fingerprint != request_set_fingerprint:
         raise ValueError("MCP replay response/request set mismatch")
     return McpReplayReadyCarrierPlaintext(
         _token=_CONSTRUCTION_TOKEN,
@@ -904,18 +950,24 @@ def _retry_payload_value(payload: McpRetryableRequestPayload) -> dict[str, objec
         "source_method": payload._source_method,
         "source_method_schema_fingerprint": payload._source_method_schema_fingerprint,
         "prompt_name": payload._prompt_name,
-        "arguments": _sealed_json_thaw(payload._arguments) if payload._arguments is not None else None,
+        "arguments": _sealed_json_thaw(payload._arguments)
+        if payload._arguments is not None
+        else None,
     }
 
 
-def _carrier_plaintext_value(value: McpContinuationCarrierPlaintext) -> dict[str, object]:
+def _carrier_plaintext_value(
+    value: McpContinuationCarrierPlaintext,
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "carrier_schema_version": value._carrier_schema_version,
         "runtime_session_id": value._runtime_session_id,
         "interaction_id": value._interaction_id,
         "suspension_event_id": value._suspension_event_id,
         "round_ordinal": value._round_ordinal,
-        "retryable_request_payload": _retry_payload_value(value._retryable_request_payload),
+        "retryable_request_payload": _retry_payload_value(
+            value._retryable_request_payload
+        ),
         "request_state": value._request_state,
         "request_set_fingerprint": value._request_set_fingerprint,
         "protocol_semantic_fingerprint": value._protocol_semantic_fingerprint,
@@ -942,7 +994,9 @@ def _carrier_plaintext_value(value: McpContinuationCarrierPlaintext) -> dict[str
             {
                 "carrier_kind": "replay_ready",
                 "resolution_event_id": value._resolution_event_id,
-                "current_round_input_responses": _sealed_json_thaw(value._current_round_input_responses._wire_responses),
+                "current_round_input_responses": _sealed_json_thaw(
+                    value._current_round_input_responses._wire_responses
+                ),
                 "ordered_response_keys": (
                     value._current_round_input_responses._ordered_request_keys
                 ),
@@ -950,8 +1004,7 @@ def _carrier_plaintext_value(value: McpContinuationCarrierPlaintext) -> dict[str
                     value._current_round_input_responses._commitment_key_id
                 ),
                 "keyed_current_round_responses_commitment": (
-                    value._current_round_input_responses
-                    ._keyed_current_round_responses_commitment
+                    value._current_round_input_responses._keyed_current_round_responses_commitment
                 ),
                 "response_attribution_fingerprint": value._response_attribution_fingerprint,
             }
@@ -1014,9 +1067,7 @@ def _decode_carrier_plaintext(value: bytes) -> McpContinuationCarrierPlaintext:
         "round_ordinal": _positive_integer(payload, "round_ordinal"),
         "retryable_request_payload": retry_payload,
         "request_state": request_state,
-        "request_set_fingerprint": _required_string(
-            payload, "request_set_fingerprint"
-        ),
+        "request_set_fingerprint": _required_string(payload, "request_set_fingerprint"),
         "protocol_semantic_fingerprint": _required_string(
             payload, "protocol_semantic_fingerprint"
         ),
@@ -1101,17 +1152,19 @@ def _decode_retry_payload(value: object) -> McpRetryableRequestPayload:
     if not isinstance(value, dict):
         raise ValueError("MCP retry payload must be an object")
     kind = value.get("kind")
-    schema_fingerprint = _required_string(
-        value, "source_method_schema_fingerprint"
-    )
+    schema_fingerprint = _required_string(value, "source_method_schema_fingerprint")
     if kind == "tool_call":
-        if set(value) != {
-            "kind",
-            "source_method",
-            "source_method_schema_fingerprint",
-            "tool_name",
-            "arguments",
-        } or value.get("source_method") != "tools/call":
+        if (
+            set(value)
+            != {
+                "kind",
+                "source_method",
+                "source_method_schema_fingerprint",
+                "tool_name",
+                "arguments",
+            }
+            or value.get("source_method") != "tools/call"
+        ):
             raise ValueError("MCP tool retry payload field set is invalid")
         arguments = value["arguments"]
         if not isinstance(arguments, dict):
@@ -1122,25 +1175,33 @@ def _decode_retry_payload(value: object) -> McpRetryableRequestPayload:
             source_method_schema_fingerprint=schema_fingerprint,
         )
     if kind == "resource_read":
-        if set(value) != {
-            "kind",
-            "source_method",
-            "source_method_schema_fingerprint",
-            "uri",
-        } or value.get("source_method") != "resources/read":
+        if (
+            set(value)
+            != {
+                "kind",
+                "source_method",
+                "source_method_schema_fingerprint",
+                "uri",
+            }
+            or value.get("source_method") != "resources/read"
+        ):
             raise ValueError("MCP resource retry payload field set is invalid")
         return build_retryable_resource_read_payload(
             uri=_required_string(value, "uri"),
             source_method_schema_fingerprint=schema_fingerprint,
         )
     if kind == "prompt_get":
-        if set(value) != {
-            "kind",
-            "source_method",
-            "source_method_schema_fingerprint",
-            "prompt_name",
-            "arguments",
-        } or value.get("source_method") != "prompts/get":
+        if (
+            set(value)
+            != {
+                "kind",
+                "source_method",
+                "source_method_schema_fingerprint",
+                "prompt_name",
+                "arguments",
+            }
+            or value.get("source_method") != "prompts/get"
+        ):
             raise ValueError("MCP prompt retry payload field set is invalid")
         arguments = value["arguments"]
         if arguments is not None and not isinstance(arguments, dict):
@@ -1191,7 +1252,9 @@ def _positive_integer(value: Mapping[str, object], key: str) -> int:
     return item
 
 
-def _validate_form_content(request: McpFormElicitationRequestFact, content: Mapping[str, object]) -> None:
+def _validate_form_content(
+    request: McpFormElicitationRequestFact, content: Mapping[str, object]
+) -> None:
     from jsonschema.validators import validator_for
     from pulsara_agent.primitives._context_base import thaw_json
 
@@ -1200,7 +1263,9 @@ def _validate_form_content(request: McpFormElicitationRequestFact, content: Mapp
     validator_cls.check_schema(schema)
     errors = tuple(validator_cls(schema).iter_errors(dict(content)))
     if errors:
-        raise ValueError(f"MCP elicitation response does not satisfy request schema: {errors[0].message}")
+        raise ValueError(
+            f"MCP elicitation response does not satisfy request schema: {errors[0].message}"
+        )
 
 
 def assert_not_mcp_secret(value: object, *, sink: str) -> None:

@@ -186,9 +186,7 @@ class ContinuationRunAuthorityRevision(FrozenRuntimeStateBase):
             self.execution_surface_identity
         ):
             raise ValueError("continuation execution surface mismatch")
-        _fingerprint(
-            self, "authority_fingerprint", "run-authority:continuation:v1"
-        )
+        _fingerprint(self, "authority_fingerprint", "run-authority:continuation:v1")
         return self
 
 

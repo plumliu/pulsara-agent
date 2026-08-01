@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
@@ -54,7 +56,7 @@ class ExternalExecutionCommitPort:
                     requirement.id,
                 ),
                 owner_id=requirement.id,
-                            )
+            )
             return result
 
         return await self.runtime_session.event_write_service.execute(
@@ -70,13 +72,10 @@ class ExternalExecutionCommitPort:
 
         deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
         requirement = await self._load_requirement(result, deadline_monotonic=deadline)
-        prepared = (
-            await self.runtime_session.tool_terminal_projection_service
-            .prepare_external_result_batch(
-                requirement=requirement,
-                result=result,
-                deadline_monotonic=deadline,
-            )
+        prepared = await self.runtime_session.tool_terminal_projection_service.prepare_external_result_batch(
+            requirement=requirement,
+            result=result,
+            deadline_monotonic=deadline,
         )
         reservation = self.runtime_session.physical_reservation_for_owner(
             operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
@@ -94,7 +93,7 @@ class ExternalExecutionCommitPort:
                 prepared,
                 reservation=reservation,
                 terminal_outcome=terminal_outcome,
-                            )
+            )
 
         return await self.runtime_session.event_write_service.execute(
             commit_settlement,
@@ -137,7 +136,9 @@ class ExternalExecutionCommitPort:
             raise ExternalExecutionCommitContractError(
                 "external requirement event is unavailable"
             )
-        requirement = rows[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        requirement = decode_raw_stored_event_envelope(
+            rows[0], DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(requirement, RequireExternalExecutionEvent):
             raise ExternalExecutionCommitContractError(
                 "external result references the wrong event type"
@@ -171,8 +172,7 @@ class ExternalExecutionCommitPort:
                 or reference.require_event_sequence != requirement.sequence
                 or reference.require_event_payload_fingerprint
                 != frozen_requirement.payload_fingerprint
-                or reference.requirement_fingerprint
-                != expected.requirement_fingerprint
+                or reference.requirement_fingerprint != expected.requirement_fingerprint
             ):
                 raise ExternalExecutionCommitContractError(
                     "external result requirement reference drifted"

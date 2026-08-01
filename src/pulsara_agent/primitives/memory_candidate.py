@@ -28,9 +28,7 @@ class MemoryCandidateSemanticFact(FrozenFactBase):
     schema_version: Literal["memory_candidate_semantic.v2"] = (
         "memory_candidate_semantic.v2"
     )
-    kind: Literal[
-        "Claim", "Preference", "Observation", "ActionBoundary", "Decision"
-    ]
+    kind: Literal["Claim", "Preference", "Observation", "ActionBoundary", "Decision"]
     scope: str = Field(min_length=1)
     normalized_statement: str = Field(min_length=1)
     semantic_fingerprint: str = Field(min_length=1)

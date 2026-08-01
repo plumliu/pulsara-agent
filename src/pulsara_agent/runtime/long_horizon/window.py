@@ -117,7 +117,9 @@ def _open(
             message="A context window ID was reused.",
         )
     expected_generation = len(state.ordered_window_ids) + 1
-    expected_previous = state.ordered_window_ids[-1] if state.ordered_window_ids else None
+    expected_previous = (
+        state.ordered_window_ids[-1] if state.ordered_window_ids else None
+    )
     if (
         window.generation != expected_generation
         or window.previous_window_id != expected_previous
@@ -127,7 +129,10 @@ def _open(
             code="context_window_chain_conflict",
             message="Context window generation or previous identity is inconsistent.",
         )
-    if expected_previous is not None and expected_previous not in state.closed_window_ids:
+    if (
+        expected_previous is not None
+        and expected_previous not in state.closed_window_ids
+    ):
         return _inconsistent(
             state,
             code="context_window_previous_not_closed",

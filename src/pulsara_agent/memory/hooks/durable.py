@@ -9,6 +9,8 @@ by memory governance, not by this producer hook.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass, field
@@ -96,7 +98,9 @@ class DurableMemoryHooks(NoopMemoryHooks):
         # not projected into provider input until it has its own typed authority.
         return None
 
-    async def project(self, view: MemoryHookRunView, *, token_budget: int) -> dict | None:
+    async def project(
+        self, view: MemoryHookRunView, *, token_budget: int
+    ) -> dict | None:
         owner = self._owner(view)
         await self._refresh_working_context_once(view, owner)
         if self.recall is None:
@@ -236,7 +240,9 @@ class DurableMemoryHooks(NoopMemoryHooks):
             return None
         return working_context_projection(summary, token_budget=token_budget)
 
-    def _update_working_context(self, view: MemoryHookRunView) -> WorkingContextSummary | None:
+    def _update_working_context(
+        self, view: MemoryHookRunView
+    ) -> WorkingContextSummary | None:
         return self._update_working_context_for_run(
             runtime_session_id=view.session_id,
             run_id=view.run_id,
@@ -300,7 +306,9 @@ class DurableMemoryHooks(NoopMemoryHooks):
             limit=8,
         )
         for raw in terminal_events:
-            decoded = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decoded = decode_raw_stored_event_envelope(
+                raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             if not isinstance(decoded, RunEndEvent):
                 raise ValueError("RunEnd sparse read decoded another event type")
             if decoded.run_id == current_run_id:

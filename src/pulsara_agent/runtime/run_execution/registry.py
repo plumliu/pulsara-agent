@@ -42,7 +42,7 @@ from pulsara_agent.runtime.run_execution.authority import (
     materialize_run_genesis,
 )
 from pulsara_agent.event import CapabilityExposureResolvedEvent
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.ports.run_authority import AwaitingInitialRevision
 from pulsara_agent.ports.run_authority import InstalledRunAuthorityRevision
 from pulsara_agent.runtime.run_execution.owner import (

@@ -180,12 +180,8 @@ def grade_semantic_assertions(
         if observed_assertions[assertion_id] is not True
     )
     if failed:
-        raise SemanticGradeError(
-            f"{grader_id} failed assertions: {', '.join(failed)}"
-        )
-    unexpected = tuple(
-        sorted(set(observed_assertions) - set(required_assertion_ids))
-    )
+        raise SemanticGradeError(f"{grader_id} failed assertions: {', '.join(failed)}")
+    unexpected = tuple(sorted(set(observed_assertions) - set(required_assertion_ids)))
     if unexpected:
         raise SemanticGradeError(
             f"{grader_id} reported undeclared assertions: {', '.join(unexpected)}"

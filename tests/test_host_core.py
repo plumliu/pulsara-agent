@@ -49,6 +49,8 @@ from pulsara_agent.event import (
     PlanModeExitedEvent,
     PlanQuestionAnsweredEvent,
     PlanQuestionAskedEvent,
+    PromptQueueCommittedToProviderInputEvent,
+    ProviderInputAppendCommittedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RequireUserConfirmEvent,
@@ -65,6 +67,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
+    UserSteerCommittedEvent,
 )
 from pulsara_agent.host import (
     HostCore,
@@ -88,6 +91,10 @@ from tests.support import (
 from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.runtime.terminal_application.prompt_queue import (
+    PromptQueueSubmitRequest,
+)
+from pulsara_agent.primitives.prompt_queue import ConfirmedArtifactQueueContentFact
 from pulsara_agent.message import (
     ToolCallBlock,
     ToolCallState,
@@ -497,6 +504,242 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
     assert "first user" in _context_text(transport.contexts[1])
     assert "sentinel-one" in _context_text(transport.contexts[1])
     assert FAILURE_NOTE_TEXT not in _context_text(transport.contexts[1])
+
+
+def test_queued_follow_up_atomically_commits_run_start_and_queue_disposition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        await session.run_turn("first user")
+        runtime = session.wiring.runtime_wiring.runtime_session
+        source = tuple(runtime.event_log.iter())[-1]
+        item = await runtime.prompt_queue_mutation_service.submit(
+            PromptQueueSubmitRequest(
+                command_id="command:queued-follow-up",
+                client_instance_id="client:test",
+                client_submission_id="submission:queued-follow-up",
+                text="second user from queue",
+                requested_delivery_mode="follow_up",
+                event_context=EventContext(
+                    run_id=source.run_id,
+                    turn_id=source.turn_id,
+                    reply_id=source.reply_id,
+                ),
+            )
+        )
+        result = await session.run_queued_follow_up(item.queue_item_id)
+        projected = runtime.prompt_queue_projection_store.item(item.queue_item_id)
+        events = tuple(runtime.event_log.iter())
+        await core.shutdown()
+        return result, projected, events
+
+    result, projected, events = asyncio.run(run())
+
+    assert result.status == "finished"
+    assert projected is not None
+    assert projected.delivery_state == "committed_to_new_run"
+    assert projected.reservation is None
+    assert "second user from queue" in _context_text(transport.contexts[1])
+    commit_event = next(
+        event for event in events if str(event.type) == "PROMPT_QUEUE_COMMITTED_TO_RUN"
+    )
+    run_start = next(
+        event
+        for event in events
+        if isinstance(event, RunStartEvent)
+        and event.id == commit_event.committed_run_start_event_identity.event_id
+    )
+    assert commit_event.run_id == run_start.run_id
+    assert commit_event.sequence > run_start.sequence
+    assert not any(
+        isinstance(event, RunEndEvent)
+        and event.run_id == run_start.run_id
+        and run_start.sequence < event.sequence < commit_event.sequence
+        for event in events
+    )
+
+
+def test_large_prompt_queue_content_consumes_and_releases_artifact_hold(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([{"text": "seed"}]))
+    large_text = "large-paste:" + "x" * (20 * 1024)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        await session.run_turn("seed user")
+        runtime = session.wiring.runtime_wiring.runtime_session
+        source = tuple(runtime.event_log.iter())[-1]
+        item = await runtime.prompt_queue_mutation_service.submit(
+            PromptQueueSubmitRequest(
+                command_id="command:large-paste",
+                client_instance_id="client:test",
+                client_submission_id="submission:large-paste",
+                text=large_text,
+                requested_delivery_mode="follow_up",
+                event_context=EventContext(
+                    run_id=source.run_id,
+                    turn_id=source.turn_id,
+                    reply_id=source.reply_id,
+                ),
+            )
+        )
+        content = item.prepared_content
+        assert isinstance(content, ConfirmedArtifactQueueContentFact)
+        archive = runtime.archive
+        hold_payload = archive.prompt_queue_artifact_holds[content.preparation_id]
+        assert hold_payload["state"] == "CONSUMED"
+        assert (
+            runtime.runtime_session_id,
+            item.queue_item_id,
+        ) in archive.prompt_queue_content_references
+        assert (
+            await runtime.prompt_queue_mutation_service.materialize_content_text(
+                item.queue_item_id
+            )
+            == large_text
+        )
+
+        cancelled = await runtime.prompt_queue_mutation_service.cancel(
+            queue_item_id=item.queue_item_id,
+            command_id="command:large-paste-cancel",
+            event_context=runtime.prompt_queue_mutation_service.source_event_context(
+                item.queue_item_id
+            ),
+        )
+        retired = await runtime.prompt_queue_mutation_service.retire_content(
+            queue_item_id=item.queue_item_id,
+            command_id="command:large-paste-retire",
+            event_context=runtime.prompt_queue_mutation_service.source_event_context(
+                item.queue_item_id
+            ),
+            reason="cancelled",
+        )
+        assert cancelled.delivery_state == "cancelled"
+        assert retired.content_retention_state == "retired"
+        assert archive.prompt_queue_artifact_holds[content.preparation_id]["state"] == (
+            "RELEASED"
+        )
+        assert (
+            runtime.runtime_session_id,
+            item.queue_item_id,
+        ) not in archive.prompt_queue_content_references
+        assert runtime.prompt_queue_projection_store.snapshot().items[-1] == retired
+        await core.shutdown()
+
+    asyncio.run(run())
+
+
+def test_active_run_auto_prompt_is_atomically_steered_into_next_model_input(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session_holder: dict[str, object] = {}
+    submit_tasks: list[asyncio.Task] = []
+
+    def submit_during_first_model_call(index: int, _context: LLMContext) -> None:
+        if index != 1:
+            return
+        session = session_holder["session"]
+        runtime = session.wiring.runtime_wiring.runtime_session  # type: ignore[attr-defined]
+        source = tuple(runtime.event_log.iter())[-1]
+        submit_tasks.append(
+            asyncio.create_task(
+                runtime.prompt_queue_mutation_service.submit(
+                    PromptQueueSubmitRequest(
+                        command_id="command:auto-steer",
+                        client_instance_id="client:test",
+                        client_submission_id="submission:auto-steer",
+                        text="Please include the active-run steer.",
+                        requested_delivery_mode="auto",
+                        event_context=EventContext(
+                            run_id=source.run_id,
+                            turn_id=source.turn_id,
+                            reply_id=source.reply_id,
+                        ),
+                    )
+                )
+            )
+        )
+
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:steer-boundary",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "printf STEER_BOUNDARY", "yield_time_ms": 1000}
+                        ),
+                    }
+                ]
+            },
+            {"text": "steer accepted"},
+        ],
+        delay=0.1,
+        on_context_captured=submit_during_first_model_call,
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=_trusted_terminal_policy(),
+        )
+        session_holder["session"] = session
+        result = await session.run_turn("start and then accept a steer")
+        await asyncio.gather(*submit_tasks)
+        events = tuple(session.replay_events())
+        await core.shutdown()
+        return result, events
+
+    result, events = asyncio.run(run())
+
+    assert result.final_text == "steer accepted"
+    assert len(transport.contexts) == 2
+    assert "Please include the active-run steer." in _context_text(
+        transport.contexts[1]
+    )
+
+    model_start = next(
+        event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.active_run_prompt_steer_guard is not None
+    )
+    append = next(
+        event
+        for event in events
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+        and event.resolved_model_call_id
+        == model_start.resolved_call.resolved_model_call_id
+    )
+    steer = next(
+        event for event in events if isinstance(event, UserSteerCommittedEvent)
+    )
+    queue_commit = next(
+        event
+        for event in events
+        if isinstance(event, PromptQueueCommittedToProviderInputEvent)
+    )
+    assert steer.provider_input_append_event_identity.event_id == append.id
+    assert queue_commit.provider_input_append_event_identity.event_id == append.id
+    assert queue_commit.user_steer_event_identity.event_id == steer.id
+    assert model_start.active_run_prompt_steer_guard is not None
+    assert (
+        model_start.active_run_prompt_steer_guard.queue_item_id == steer.queue_item_id
+    )
+    assert (
+        append.sequence < steer.sequence < queue_commit.sequence < model_start.sequence
+    )
 
 
 def test_host_session_refreezes_run_seed_after_confirmed_source_stale(
@@ -2201,10 +2444,11 @@ def test_host_terminal_monitor_uses_pre_model_safe_point_without_new_run(
         await session.run_turn("continue working while the monitor is active")
         events = session.replay_events()
         contexts = tuple(transport.contexts)
+        operational = session.wiring.runtime_wiring.runtime_session.ui_operational_activity_store.snapshot()
         await core.close_session(session.host_session_id)
-        return events, contexts
+        return events, contexts, operational
 
-    events, contexts = asyncio.run(run())
+    events, contexts, operational = asyncio.run(run())
     run_starts = tuple(event for event in events if isinstance(event, RunStartEvent))
     observations = tuple(
         event
@@ -2248,6 +2492,15 @@ def test_host_terminal_monitor_uses_pre_model_safe_point_without_new_run(
     )
     assert len(contexts) == 5
     assert _terminal_monitor_notification_payloads(contexts[-1])
+    terminal_activities = tuple(
+        item
+        for item in operational.ordered_activity_cells
+        if item.activity_kind == "terminal_process_activity"
+    )
+    assert len(terminal_activities) == 1
+    assert terminal_activities[0].owner_id == (
+        progress_observations[0].observation.monitor_id
+    )
 
 
 def _bind_two_monitor_process_ids(*, index: int, transport, session) -> None:
@@ -4666,7 +4919,7 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
         await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
-        session.close()
+        await session.aclose()
         assert session.get_pending_approval() is None
         assert session.suspended_run_id is None
         with pytest.raises(RuntimeError, match="closed"):

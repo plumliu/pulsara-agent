@@ -181,11 +181,10 @@ class CompactionMemoryExtractionEvidenceGate(FrozenContract):
 
     @model_validator(mode="after")
     def _ordered_statuses(self) -> "CompactionMemoryExtractionEvidenceGate":
-        if (
-            self.allowed_terminal_statuses
-            != tuple(sorted(self.allowed_terminal_statuses))
-            or len(self.allowed_terminal_statuses)
-            != len(set(self.allowed_terminal_statuses))
+        if self.allowed_terminal_statuses != tuple(
+            sorted(self.allowed_terminal_statuses)
+        ) or len(self.allowed_terminal_statuses) != len(
+            set(self.allowed_terminal_statuses)
         ):
             raise ValueError("compaction terminal statuses must be sorted and unique")
         return self

@@ -67,12 +67,11 @@ def test_open_items_receive_append_ordinals_only_when_they_close() -> None:
     )
     recovered.apply(ended)
     completed = recovered.take_completed_items()
-    assert tuple(
-        item["absolute_item_ordinal"] for item in completed
-    ) == (0, 1)
-    assert tuple(
-        item["timeline_item"]["kind"] for item in completed
-    ) == ("reply", "assistant_text")
+    assert tuple(item["absolute_item_ordinal"] for item in completed) == (0, 1)
+    assert tuple(item["timeline_item"]["kind"] for item in completed) == (
+        "reply",
+        "assistant_text",
+    )
 
 
 def test_completed_item_semantics_do_not_depend_on_fold_page_boundaries() -> None:

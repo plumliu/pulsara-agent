@@ -105,10 +105,12 @@ def profile_filtered_capability_runtime(
     allowed_descriptor_ids = frozenset(
         getattr(profile, "allowed_descriptor_ids", ()) or ()
     )
-    allowed_skill_names = frozenset(
-        getattr(profile, "allowed_skill_names", ()) or ()
-    )
-    if not allowed_tool_names and not allowed_descriptor_ids and not allowed_skill_names:
+    allowed_skill_names = frozenset(getattr(profile, "allowed_skill_names", ()) or ())
+    if (
+        not allowed_tool_names
+        and not allowed_descriptor_ids
+        and not allowed_skill_names
+    ):
         return CapabilityRuntime(providers=())
 
     filtered: list[Any] = []

@@ -219,9 +219,7 @@ class ModelTerminalProjectionReducer:
         self._runtime_session_id = runtime_session_id
         self._start = start_event
         self._contracts = contracts
-        self._domain_fingerprint = (
-            model_stream_semantic_domain_contract_fingerprint
-        )
+        self._domain_fingerprint = model_stream_semantic_domain_contract_fingerprint
         self._semantic_count = 0
         self._source_accumulator = context_fingerprint(
             "model-stream-sanitized-source:v2", "empty"
@@ -230,9 +228,7 @@ class ModelTerminalProjectionReducer:
         self._durable_event_accumulator = context_fingerprint(
             "model-terminal-durable-event-accumulator:v1", "empty"
         )
-        self._segment_policy_contract_fingerprint = (
-            segment_policy_contract_fingerprint
-        )
+        self._segment_policy_contract_fingerprint = segment_policy_contract_fingerprint
         self._semantic_event_identities: list[StableEventIdentityFact] = []
         self._adapter_source_item_count = 0
         self._adapter_source_payload_bytes = 0
@@ -262,8 +258,7 @@ class ModelTerminalProjectionReducer:
                 attribution.resolved_model_call_id
                 != self._start.resolved_call.resolved_model_call_id
                 or attribution.model_call_start_event_id != self._start.id
-                or attribution.durable_semantic_event_index
-                != self._durable_event_count
+                or attribution.durable_semantic_event_index != self._durable_event_count
             ):
                 raise ValueError("model projection semantic cursor drifted")
             span = attribution.source_span
@@ -300,11 +295,11 @@ class ModelTerminalProjectionReducer:
             self._adapter_source_item_count += span.adapter_source_item_count
             self._adapter_source_payload_bytes += span.adapter_source_payload_bytes
             self._synthetic_source_item_count += span.synthetic_source_item_count
-            self._synthetic_source_payload_bytes += (
-                span.synthetic_source_payload_bytes
-            )
+            self._synthetic_source_payload_bytes += span.synthetic_source_payload_bytes
             candidate_bytes = len(
-                canonical_event_payload_bytes(event.model_copy(update={"sequence": None}))
+                canonical_event_payload_bytes(
+                    event.model_copy(update={"sequence": None})
+                )
             )
             if attribution.segment_seal_reason is None:
                 self._singleton_event_count += 1
@@ -352,9 +347,7 @@ class ModelTerminalProjectionReducer:
         source = build_frozen_fact(
             ModelCallSemanticSourceFact,
             schema_version="model_call_semantic_source.v3",
-            resolved_model_call_id=(
-                self._start.resolved_call.resolved_model_call_id
-            ),
+            resolved_model_call_id=(self._start.resolved_call.resolved_model_call_id),
             model_call_start_event_identity=stable_event_identity(
                 self._start,
                 runtime_session_id=self._runtime_session_id,
@@ -454,9 +447,7 @@ class ModelTerminalProjectionReducer:
         semantic_commit_measurements: tuple[
             ModelStreamSemanticCommitMeasurementFact, ...
         ],
-        physical_accounting_mode: Literal[
-            "accounted", "unbootstrapped_test"
-        ],
+        physical_accounting_mode: Literal["accounted", "unbootstrapped_test"],
     ) -> ModelStreamSettlementMeasurementFact:
         if physical_accounting_mode == "accounted":
             measured = tuple(
@@ -514,7 +505,9 @@ class ModelTerminalProjectionReducer:
 
     def _apply_one(self, event: AgentEvent) -> None:
         if isinstance(event, TextBlockStartEvent):
-            self._start_block("text", event.block_id, source_start_sequence=event.sequence)
+            self._start_block(
+                "text", event.block_id, source_start_sequence=event.sequence
+            )
         elif isinstance(event, TextBlockSegmentEvent):
             self._append_block("text", event.block_id, event.text)
         elif isinstance(event, TextBlockEndEvent):
@@ -632,7 +625,8 @@ class ModelTerminalProjectionReducer:
             if kind == "provider_error":
                 error = value["error"]
                 diagnostics = tuple(
-                    item.diagnostic_fingerprint for item in error.diagnostics  # type: ignore[attr-defined]
+                    item.diagnostic_fingerprint
+                    for item in error.diagnostics  # type: ignore[attr-defined]
                 )
                 semantic = build_frozen_fact(
                     ModelProviderErrorSemanticFact,
@@ -800,25 +794,19 @@ def build_model_stream_semantic_commit_measurement(
         for event in committed_semantic_events
     )
     charged = charge_event.charge
-    if (
-        charged.owner_kind.value != "model_call"
-        or tuple(
-            sorted(
-                charged.charged_business_event_identities,
-                key=lambda item: (item.runtime_session_id, item.event_id),
-            )
+    if charged.owner_kind.value != "model_call" or tuple(
+        sorted(
+            charged.charged_business_event_identities,
+            key=lambda item: (item.runtime_session_id, item.event_id),
         )
-        != tuple(
-            sorted(
-                semantic_identities,
-                key=lambda item: (item.runtime_session_id, item.event_id),
-            )
+    ) != tuple(
+        sorted(
+            semantic_identities,
+            key=lambda item: (item.runtime_session_id, item.event_id),
         )
     ):
         raise ValueError("model semantic commit/physical charge join mismatch")
-    semantic_candidate_payload_bytes = (
-        charged.business_candidate_charge_payload_bytes
-    )
+    semantic_candidate_payload_bytes = charged.business_candidate_charge_payload_bytes
     payload = {
         "commit_batch_index": commit_batch_index,
         "semantic_event_identities": semantic_identities,
@@ -905,9 +893,7 @@ def bind_model_terminal_projection_to_session(
 ) -> PreparedModelTerminalProjection:
     """Bind same-batch identity to the session's exact metadata overlay."""
 
-    committed_event = runtime_session.prepare_event_for_write(
-        prepared.committed_event
-    )
+    committed_event = runtime_session.prepare_event_for_write(prepared.committed_event)
     end_reference = build_frozen_fact(
         ModelCallTerminalProjectionEndReferenceFact,
         schema_version="model_call_terminal_projection_end_ref.v2",
@@ -937,20 +923,22 @@ async def persist_model_terminal_projection(
     reference = prepared.projection_reference
     operation = await runtime_session.context_input_io_service.start_owned(
         operation_name="model-terminal-projection-write",
-        operation=lambda: runtime_session.archive.put_text_if_absent_or_confirm_identical(
-            reference.document_artifact_id,
-            prepared.canonical_document_bytes.decode("utf-8"),
-            session_id=runtime_session.runtime_session_id,
-            run_id=run_id,
-            media_type=TERMINAL_PROJECTION_MEDIA_TYPE,
-            semantic_metadata={
-                "projection_kind": "model_call",
-                "document_fact_fingerprint": reference.document_fact_fingerprint,
-                "document_contract_fingerprint": (
-                    reference.document_contract_fingerprint
-                ),
-            },
-            deadline_monotonic=deadline,
+        operation=lambda: (
+            runtime_session.archive.put_text_if_absent_or_confirm_identical(
+                reference.document_artifact_id,
+                prepared.canonical_document_bytes.decode("utf-8"),
+                session_id=runtime_session.runtime_session_id,
+                run_id=run_id,
+                media_type=TERMINAL_PROJECTION_MEDIA_TYPE,
+                semantic_metadata={
+                    "projection_kind": "model_call",
+                    "document_fact_fingerprint": reference.document_fact_fingerprint,
+                    "document_contract_fingerprint": (
+                        reference.document_contract_fingerprint
+                    ),
+                },
+                deadline_monotonic=deadline,
+            )
         ),
         deadline_monotonic=deadline,
     )
@@ -1121,9 +1109,7 @@ def build_terminal_inline_content(
         canonical_content_sha256=f"sha256:{sha256(encoded).hexdigest()}",
         utf8_bytes=len(encoded),
         media_type=media_type,
-        content_canonicalization_contract_fingerprint=(
-            contract.contract_fingerprint
-        ),
+        content_canonicalization_contract_fingerprint=(contract.contract_fingerprint),
     )
     return build_frozen_fact(
         TerminalInlineContentFact,

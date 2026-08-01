@@ -71,7 +71,9 @@ class RecallResult:
 
 
 class MemoryRecallService(Protocol):
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult: ...
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult: ...
 
 
 @dataclass(slots=True)
@@ -88,7 +90,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
     graph_candidates: GraphCandidateService | None = None
     _cooldown_until: float = field(default=0.0, init=False, repr=False)
 
-    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+    async def recall(
+        self, query: RecallQuery, *, graph_id: str | None = None
+    ) -> RecallResult:
         if self._cooldown_until > time.monotonic():
             result = RecallResult(
                 status=RecallStatus.UNAVAILABLE,
@@ -104,7 +108,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
             return result
         started = time.perf_counter()
         try:
-            result, candidate_ids = await asyncio.to_thread(self._recall_sync, query, graph_id)
+            result, candidate_ids = await asyncio.to_thread(
+                self._recall_sync, query, graph_id
+            )
         except Exception as exc:
             self._cooldown_until = time.monotonic() + self.unavailable_cooldown_seconds
             result = RecallResult(
@@ -128,18 +134,26 @@ class LexicalMemoryRecallService(MemoryRecallService):
         )
         return result
 
-    def _recall_sync(self, query: RecallQuery, graph_id: str | None) -> tuple[RecallResult, tuple[str, ...]]:
+    def _recall_sync(
+        self, query: RecallQuery, graph_id: str | None
+    ) -> tuple[RecallResult, tuple[str, ...]]:
         terms = _query_terms(query.text)
         if not terms:
-            return RecallResult(status=RecallStatus.EMPTY, guidance=_empty_guidance()), ()
+            return RecallResult(
+                status=RecallStatus.EMPTY, guidance=_empty_guidance()
+            ), ()
 
         scopes = query.scopes or None
         types = query.types or None
         warnings: list[str] = []
         metadata: dict[str, Any] = {
-            "graph_max_hops": query.max_hops if query.trigger is RecallTrigger.EXPLICIT_SEARCH else 0,
+            "graph_max_hops": query.max_hops
+            if query.trigger is RecallTrigger.EXPLICIT_SEARCH
+            else 0,
         }
-        suppressed_ids = self._recent_suppressed_ids(query, graph_id=graph_id, warnings=warnings)
+        suppressed_ids = self._recent_suppressed_ids(
+            query, graph_id=graph_id, warnings=warnings
+        )
         lexical = self.memory_query.lexical_candidates(
             terms=terms,
             scopes=scopes,
@@ -173,14 +187,20 @@ class LexicalMemoryRecallService(MemoryRecallService):
                     graph_id=graph_id,
                     suppressed_ids=suppressed_ids,
                 )
-                graph_rows = list(graph_outcome.batch.channel_rows()[0][1]) if graph_outcome.batch.candidates else []
+                graph_rows = (
+                    list(graph_outcome.batch.channel_rows()[0][1])
+                    if graph_outcome.batch.candidates
+                    else []
+                )
                 graph_paths = graph_outcome.paths_by_id
                 warnings.extend(graph_outcome.batch.warnings)
                 metadata.update(graph_outcome.batch.metadata)
             except Exception as exc:
                 warnings.append(f"graph_expand_degraded:{type(exc).__name__}: {exc}")
                 metadata["graph_query"] = "degraded"
-        channels = (*direct_channels, ("graph", graph_rows)) if graph_rows else direct_channels
+        channels = (
+            (*direct_channels, ("graph", graph_rows)) if graph_rows else direct_channels
+        )
         ranked_ids, why_by_id = _rrf_ranked_ids(channels=channels, k=self.rrf_k)
         candidate_ids = tuple(ranked_ids)
         if not ranked_ids:
@@ -191,7 +211,10 @@ class LexicalMemoryRecallService(MemoryRecallService):
                 metadata=metadata,
             ), candidate_ids
 
-        views = {view.id: view for view in self.memory_query.fetch_nodes(ranked_ids, graph_id=graph_id)}
+        views = {
+            view.id: view
+            for view in self.memory_query.fetch_nodes(ranked_ids, graph_id=graph_id)
+        }
         items: list[RecallItem] = []
         filtered_ids: list[str] = []
         candidate_limit = max(query.limit * 4, query.limit)
@@ -217,7 +240,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
                     why=tuple(why_by_id.get(memory_id, ())),
                     deep_recall=f"memory_get {view.id}",
                     direct_match=memory_id in direct_ranked_ids,
-                    hop_count=0 if memory_id in direct_ranked_ids else _minimum_hops(graph_paths.get(memory_id, ())),
+                    hop_count=0
+                    if memory_id in direct_ranked_ids
+                    else _minimum_hops(graph_paths.get(memory_id, ())),
                     paths=graph_paths.get(memory_id, ()),
                 )
             )
@@ -237,7 +262,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
             passes_filter=self._passes_canonical_filter,
             query=query,
         )
-        items = _mark_visible_conflicts(items, views, {item.memory_id for item in items})
+        items = _mark_visible_conflicts(
+            items, views, {item.memory_id for item in items}
+        )
 
         if not items:
             return RecallResult(
@@ -255,11 +282,16 @@ class LexicalMemoryRecallService(MemoryRecallService):
             metadata=metadata,
         ), candidate_ids
 
-    def _passes_canonical_filter(self, view: CanonicalNodeView, query: RecallQuery) -> bool:
+    def _passes_canonical_filter(
+        self, view: CanonicalNodeView, query: RecallQuery
+    ) -> bool:
         if view.status is memory.NodeStatus.REJECTED:
             return False
         if view.status is not memory.NodeStatus.ACTIVE:
-            if not (query.trigger is RecallTrigger.EXPLICIT_SEARCH and self.allow_needs_review):
+            if not (
+                query.trigger is RecallTrigger.EXPLICIT_SEARCH
+                and self.allow_needs_review
+            ):
                 return False
         if query.scopes and view.scope not in query.scopes:
             return False
@@ -290,7 +322,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
                 )
             )
         except Exception as exc:
-            warnings.append(f"recall_suppression_unavailable:{type(exc).__name__}: {exc}")
+            warnings.append(
+                f"recall_suppression_unavailable:{type(exc).__name__}: {exc}"
+            )
             return set()
 
     def _record_trace(
@@ -302,7 +336,11 @@ class LexicalMemoryRecallService(MemoryRecallService):
         candidate_ids: Sequence[str],
         latency_ms: int,
     ) -> None:
-        if not query.trace or self.trace_store is None or not _has_trace_coordinates(query):
+        if (
+            not query.trace
+            or self.trace_store is None
+            or not _has_trace_coordinates(query)
+        ):
             return
         try:
             self.trace_store.record(
@@ -427,7 +465,10 @@ def _expand_contradiction_companions(
     surfaced = {item.memory_id for item in items}
     wanted: dict[str, list[str]] = {}
     # Collect contradiction partners from each surfaced item's view edges.
-    views = {view.id: view for view in memory_query.fetch_nodes(list(surfaced), graph_id=graph_id)}
+    views = {
+        view.id: view
+        for view in memory_query.fetch_nodes(list(surfaced), graph_id=graph_id)
+    }
     for item in items:
         view = views.get(item.memory_id)
         if view is None:
@@ -477,7 +518,11 @@ def _mark_visible_conflicts(
         if view is None:
             marked.append(item)
             continue
-        conflicts = tuple(memory_id for memory_id in _contradiction_ids(view) if memory_id in visible_ids)
+        conflicts = tuple(
+            memory_id
+            for memory_id in _contradiction_ids(view)
+            if memory_id in visible_ids
+        )
         if not conflicts:
             marked.append(item)
             continue

@@ -1,4 +1,3 @@
-
 import asyncio
 from threading import Event, Timer
 from time import monotonic
@@ -232,8 +231,7 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
 
     assert isinstance(wiring, AgentRuntimeWiring)
     assert (
-        wiring.runtime_wiring.runtime_session
-        is wiring.runtime_wiring.runtime_session
+        wiring.runtime_wiring.runtime_session is wiring.runtime_wiring.runtime_session
     )
     assert (
         wiring.runtime_wiring.runtime_session.runtime_session_id == runtime_session_id

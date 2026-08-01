@@ -94,11 +94,14 @@ def resolve_extraction_input_budget(
     safety_margin_tokens: int = 256,
     maximum_physical_input_utf8_bytes: int = 512 * 1024,
 ) -> ExtractionInputBudgetOutcome:
-    if min(
-        static_prompt_tokens,
-        carrier_and_framing_reserve_tokens,
-        safety_margin_tokens,
-    ) < 0:
+    if (
+        min(
+            static_prompt_tokens,
+            carrier_and_framing_reserve_tokens,
+            safety_margin_tokens,
+        )
+        < 0
+    ):
         raise ValueError("extraction input budget components must be non-negative")
     output_reserve = target.context_budget.effective_output_tokens
     usable = max(
@@ -152,13 +155,30 @@ def reserve_background_budget(
     failure_kind: str | None = None
     if account.account_status == "reconciliation_required":
         failure_kind = "account_reconciliation_required"
-    elif account.dispatched_call_count + 1 > policy.maximum_dispatched_calls_per_session:
+    elif (
+        account.dispatched_call_count + 1 > policy.maximum_dispatched_calls_per_session
+    ):
         failure_kind = "call_cap_exhausted"
-    elif account.settled_charged_input_tokens + account.open_reserved_input_tokens + quote.physical_input_token_upper_bound > policy.maximum_physical_input_tokens_per_session:
+    elif (
+        account.settled_charged_input_tokens
+        + account.open_reserved_input_tokens
+        + quote.physical_input_token_upper_bound
+        > policy.maximum_physical_input_tokens_per_session
+    ):
         failure_kind = "input_token_cap_exhausted"
-    elif account.settled_charged_output_tokens + account.open_reserved_output_tokens + quote.output_token_upper_bound > policy.maximum_output_tokens_per_session:
+    elif (
+        account.settled_charged_output_tokens
+        + account.open_reserved_output_tokens
+        + quote.output_token_upper_bound
+        > policy.maximum_output_tokens_per_session
+    ):
         failure_kind = "output_token_cap_exhausted"
-    elif account.settled_charged_milliunits + account.open_reserved_milliunits + quote.reserved_milliunits > policy.maximum_milliunits_per_session:
+    elif (
+        account.settled_charged_milliunits
+        + account.open_reserved_milliunits
+        + quote.reserved_milliunits
+        > policy.maximum_milliunits_per_session
+    ):
         failure_kind = "milliunit_cap_exhausted"
     if failure_kind is not None:
         failure = build_frozen_fact(
@@ -170,7 +190,9 @@ def reserve_background_budget(
                 quote.quote_fact_fingerprint or quote.quote_semantic_fingerprint
             ),
         )
-        return BackgroundBudgetReserveOutcome(account=account, reservation=None, failure=failure)
+        return BackgroundBudgetReserveOutcome(
+            account=account, reservation=None, failure=failure
+        )
 
     reservation = build_frozen_fact(
         BackgroundDerivedWorkBudgetReservationFact,
@@ -193,15 +215,20 @@ def reserve_background_budget(
         dispatched_call_count=account.dispatched_call_count + 1,
         settled_call_count=account.settled_call_count,
         open_reservation_count=account.open_reservation_count + 1,
-        open_reserved_input_tokens=account.open_reserved_input_tokens + quote.physical_input_token_upper_bound,
-        open_reserved_output_tokens=account.open_reserved_output_tokens + quote.output_token_upper_bound,
-        open_reserved_milliunits=account.open_reserved_milliunits + quote.reserved_milliunits,
+        open_reserved_input_tokens=account.open_reserved_input_tokens
+        + quote.physical_input_token_upper_bound,
+        open_reserved_output_tokens=account.open_reserved_output_tokens
+        + quote.output_token_upper_bound,
+        open_reserved_milliunits=account.open_reserved_milliunits
+        + quote.reserved_milliunits,
         settled_charged_input_tokens=account.settled_charged_input_tokens,
         settled_charged_output_tokens=account.settled_charged_output_tokens,
         settled_charged_milliunits=account.settled_charged_milliunits,
     )
     validate_background_budget_account(account=updated, policy=policy)
-    return BackgroundBudgetReserveOutcome(account=updated, reservation=reservation, failure=None)
+    return BackgroundBudgetReserveOutcome(
+        account=updated, reservation=reservation, failure=None
+    )
 
 
 def settle_background_budget(
@@ -223,8 +250,7 @@ def settle_background_budget(
         raise ValueError("background budget settlement authority mismatch")
     if (
         account.open_reservation_count < 1
-        or account.open_reserved_input_tokens
-        < quote.physical_input_token_upper_bound
+        or account.open_reserved_input_tokens < quote.physical_input_token_upper_bound
         or account.open_reserved_output_tokens < quote.output_token_upper_bound
         or account.open_reserved_milliunits < quote.reserved_milliunits
     ):
@@ -322,8 +348,7 @@ def settle_background_budget(
         settled_call_count=account.settled_call_count + 1,
         open_reservation_count=account.open_reservation_count - 1,
         open_reserved_input_tokens=(
-            account.open_reserved_input_tokens
-            - quote.physical_input_token_upper_bound
+            account.open_reserved_input_tokens - quote.physical_input_token_upper_bound
         ),
         open_reserved_output_tokens=(
             account.open_reserved_output_tokens - quote.output_token_upper_bound

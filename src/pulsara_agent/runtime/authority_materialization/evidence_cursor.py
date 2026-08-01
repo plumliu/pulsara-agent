@@ -11,10 +11,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from pulsara_agent.event_log.protocol import (
+from pulsara_agent.primitives.stored_event import (
     RawStoredEventEnvelope,
-    RawTranscriptDomainDeltaSnapshot,
     RawTranscriptDomainPrefixFact,
+)
+
+from pulsara_agent.event_log.protocol import (
+    RawTranscriptDomainDeltaSnapshot,
 )
 from pulsara_agent.primitives import context_fingerprint
 from pulsara_agent.primitives.authority_materialization import (
@@ -250,14 +253,21 @@ class PersistentTranscriptSemanticEnvelopeVector:
         if not envelopes:
             return self
         chunks = _build_chunks(envelopes, max_payload_bytes=max_payload_bytes)
-        if self.last_sequence is not None and chunks[0].first_sequence <= self.last_sequence:
+        if (
+            self.last_sequence is not None
+            and chunks[0].first_sequence <= self.last_sequence
+        ):
             raise ValueError("cursor envelope append is not strictly ordered")
         next_chunks = (*self.chunks, *chunks)
         event_count = self.event_count + len(envelopes)
         payload_bytes = self.canonical_payload_bytes + sum(
             len(item.canonical_payload_bytes) for item in envelopes
         )
-        first = self.first_sequence if self.first_sequence is not None else envelopes[0].sequence
+        first = (
+            self.first_sequence
+            if self.first_sequence is not None
+            else envelopes[0].sequence
+        )
         last = envelopes[-1].sequence
         return PersistentTranscriptSemanticEnvelopeVector(
             chunks=next_chunks,
@@ -309,9 +319,7 @@ class VerifiedTranscriptProjectionDocumentView:
     view_fingerprint: str
 
     def __post_init__(self) -> None:
-        expected = tuple(
-            item.reference.reference_fingerprint for item in self.entries
-        )
+        expected = tuple(item.reference.reference_fingerprint for item in self.entries)
         if self.reference_fingerprints != expected:
             raise ValueError("terminal projection frozen-view index drifted")
         if expected != tuple(sorted(expected)) or len(expected) != len(set(expected)):
@@ -327,8 +335,7 @@ class VerifiedTranscriptProjectionDocumentView:
         )
         if (
             index < len(self.reference_fingerprints)
-            and self.reference_fingerprints[index]
-            == reference.reference_fingerprint
+            and self.reference_fingerprints[index] == reference.reference_fingerprint
         ):
             entry = self.entries[index]
             if entry.reference != reference:
@@ -351,9 +358,7 @@ class TranscriptProjectionMaterializationMismatchCode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class TranscriptProjectionMaterializationEquivalenceContract:
-    contract_id: Literal[
-        "pulsara.transcript-projection-materialization-equivalence"
-    ]
+    contract_id: Literal["pulsara.transcript-projection-materialization-equivalence"]
     contract_version: Literal["1"]
     inline_message_contract_fingerprint: str
     message_artifact_contract_fingerprint: str
@@ -375,10 +380,13 @@ class TranscriptProjectionMaterializationEquivalenceResult:
     def __post_init__(self) -> None:
         if self.equivalent != (self.mismatch_code is None):
             raise ValueError("materialization equivalence result is inconsistent")
-        if min(
-            self.compared_stable_entry_count,
-            self.compared_terminal_document_count,
-        ) < 0:
+        if (
+            min(
+                self.compared_stable_entry_count,
+                self.compared_terminal_document_count,
+            )
+            < 0
+        ):
             raise ValueError("materialization equivalence counts cannot be negative")
         if self.equivalent and (
             self.left_normalized_transcript_fingerprint
@@ -494,10 +502,7 @@ class TranscriptProjectionMaterializationEquivalenceBinding:
                     right_entry.projection_reference
                 )
                 compared_documents += 1
-                if (
-                    left_document.semantic_identity
-                    != right_document.semantic_identity
-                ):
+                if left_document.semantic_identity != right_document.semantic_identity:
                     return result(
                         TranscriptProjectionMaterializationMismatchCode.TERMINAL_DOCUMENT,
                         compared_entries=index,
@@ -896,9 +901,7 @@ def build_materialization_equivalence_contract(
     terminal_document_contract_fingerprint: str,
 ) -> TranscriptProjectionMaterializationEquivalenceContract:
     values = {
-        "contract_id": (
-            "pulsara.transcript-projection-materialization-equivalence"
-        ),
+        "contract_id": ("pulsara.transcript-projection-materialization-equivalence"),
         "contract_version": "1",
         "inline_message_contract_fingerprint": context_fingerprint(
             "inline-normalized-message-content-schema:v3",
@@ -1129,7 +1132,9 @@ def _build_chunks(
     for envelope in envelopes:
         size = len(envelope.canonical_payload_bytes)
         if size > max_payload_bytes:
-            raise ValueError("single transcript semantic envelope exceeds physical bound")
+            raise ValueError(
+                "single transcript semantic envelope exceeds physical bound"
+            )
         if previous_sequence is not None and envelope.sequence <= previous_sequence:
             raise ValueError("transcript semantic envelopes are not strictly ordered")
         if current and (
@@ -1156,9 +1161,7 @@ def _chunk(
         "last_sequence": envelopes[-1].sequence,
         "event_count": len(envelopes),
         "canonical_payload_bytes": payload_bytes,
-        "envelope_fingerprints": tuple(
-            item.envelope_fingerprint for item in envelopes
-        ),
+        "envelope_fingerprints": tuple(item.envelope_fingerprint for item in envelopes),
     }
     return VerifiedTranscriptSemanticEnvelopeChunk(
         first_sequence=envelopes[0].sequence,
@@ -1180,7 +1183,10 @@ def _deep_validate_vector(
         expected = _chunk(chunk.envelopes)
         if expected != chunk:
             raise ValueError("cursor semantic envelope chunk drifted")
-        if rebuilt.last_sequence is not None and chunk.first_sequence <= rebuilt.last_sequence:
+        if (
+            rebuilt.last_sequence is not None
+            and chunk.first_sequence <= rebuilt.last_sequence
+        ):
             raise ValueError("cursor semantic envelope chunks overlap")
         event_count = rebuilt.event_count + chunk.event_count
         payload_bytes = rebuilt.canonical_payload_bytes + chunk.canonical_payload_bytes
@@ -1208,7 +1214,10 @@ def _deep_validate_vector(
 
 
 def _validate_base_identity(identity: TranscriptProjectionCursorBaseIdentity) -> None:
-    if identity.anchor_available_from_sequence != identity.anchor_carrier.committed_sequence:
+    if (
+        identity.anchor_available_from_sequence
+        != identity.anchor_carrier.committed_sequence
+    ):
         raise ValueError("cursor anchor availability drifted")
     payload = {
         item: (
@@ -1251,7 +1260,9 @@ def _cursor_fingerprint(cursor: VerifiedTranscriptProjectionCursorSnapshot) -> s
             "delta_before_prefix_fingerprint": raw_prefix_fingerprint(
                 cursor.delta_before
             ),
-            "delta_after_prefix_fingerprint": raw_prefix_fingerprint(cursor.delta_after),
+            "delta_after_prefix_fingerprint": raw_prefix_fingerprint(
+                cursor.delta_after
+            ),
             "semantic_envelope_vector_fingerprint": (
                 cursor.semantic_envelopes.vector_fingerprint
             ),
@@ -1342,10 +1353,8 @@ def _validate_incremental_candidate(
         live.ledger_through_sequence != new_delta.after.through_sequence
         or live.ledger_continuity_accumulator
         != new_delta.after.ledger_continuity_accumulator
-        or live.transcript_semantic_event_count
-        != new_delta.after.semantic_event_count
-        or live.transcript_semantic_accumulator
-        != new_delta.after.semantic_accumulator
+        or live.transcript_semantic_event_count != new_delta.after.semantic_event_count
+        or live.transcript_semantic_accumulator != new_delta.after.semantic_accumulator
         or live.stable_semantic_state.state_semantic_fingerprint
         != candidate.semantic_source.resulting_state_fingerprint
         or candidate.semantic_source.semantic_source_event_count
@@ -1383,9 +1392,7 @@ def _domain_prefix(
     }
     return TranscriptDomainPrefixFact(
         **payload,
-        prefix_fingerprint=context_fingerprint(
-            "transcript-domain-prefix:v1", payload
-        ),
+        prefix_fingerprint=context_fingerprint("transcript-domain-prefix:v1", payload),
     )
 
 

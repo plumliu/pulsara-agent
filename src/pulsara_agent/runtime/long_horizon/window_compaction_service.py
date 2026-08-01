@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 import hashlib
 import time
@@ -851,7 +853,7 @@ class ContextWindowCompactionService:
         try:
             return await self.runtime_session.write_events(
                 candidates,
-                            )
+            )
         except EventPublicationAfterCommitError as exc:
             return exc.result
         except BaseException as original:
@@ -930,7 +932,9 @@ async def _validate_source_refs(
             "window compaction source is not the current ledger high-water"
         )
     by_id = {
-        event.event_id: event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event.event_id: decode_raw_stored_event_envelope(
+            event, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         for event in snapshot.events
     }
     for entry in source.entries:

@@ -64,6 +64,7 @@ from pulsara_agent.event import (
     TranscriptProjectionCheckpointIntentEvent,
 )
 from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.ports.stored_event import StoredEventBatchCommitReceipt
 from pulsara_agent.runtime.authority_materialization.account import (
     LedgerMaterializationCoordinator,
     build_account_state,
@@ -106,7 +107,7 @@ class InstalledTranscriptCheckpoint:
     reservation_event: PhysicalOperationReservationCreatedEvent
     barrier: CheckpointDispatchBarrierFact
     barrier_event: CheckpointDispatchBarrierInstalledEvent
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
     @property
@@ -160,7 +161,7 @@ class CommittedTranscriptCheckpoint:
     generation_event: LedgerMaterializationGenerationAdvancedEvent | None
     settlement_event: PhysicalOperationReservationSettledEvent
     barrier_release_event: CheckpointDispatchBarrierReleasedEvent
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -177,7 +178,7 @@ class TerminatedTranscriptCheckpoint:
     terminal_event: CheckpointNonSuccessTerminalEvent
     settlement_event: PhysicalOperationReservationSettledEvent
     barrier_release_event: CheckpointDispatchBarrierReleasedEvent
-    stored_events: tuple[AgentEvent, ...]
+    stored_batch_receipt: StoredEventBatchCommitReceipt
     resulting_account_state: LedgerMaterializationAccountStateFact
 
 
@@ -654,17 +655,23 @@ def install_checkpoint_barrier(
     return InstalledTranscriptCheckpoint(
         prepared=prepared,
         intent_event=_canonical_stored_event(
-            stored, intent, TranscriptProjectionCheckpointIntentEvent
+            stored.owned_stored_events,
+            intent,
+            TranscriptProjectionCheckpointIntentEvent,
         ),
         reservation=reservation,
         reservation_event=_canonical_stored_event(
-            stored, reservation_event, PhysicalOperationReservationCreatedEvent
+            stored.owned_stored_events,
+            reservation_event,
+            PhysicalOperationReservationCreatedEvent,
         ),
         barrier=barrier,
         barrier_event=_canonical_stored_event(
-            stored, barrier_event, CheckpointDispatchBarrierInstalledEvent
+            stored.owned_stored_events,
+            barrier_event,
+            CheckpointDispatchBarrierInstalledEvent,
         ),
-        stored_events=stored,
+        stored_batch_receipt=stored,
         resulting_account_state=resulting,
     )
 
@@ -1003,14 +1010,18 @@ def commit_checkpoint_success(
     return CommittedTranscriptCheckpoint(
         installed=installed,
         committed_event=_canonical_stored_event(
-            stored, committed_event, TranscriptProjectionCheckpointCommittedEvent
+            stored.owned_stored_events,
+            committed_event,
+            TranscriptProjectionCheckpointCommittedEvent,
         ),
         horizon_event=_canonical_stored_event(
-            stored, horizon_event, LedgerMaterializationConsumerHorizonAdvancedEvent
+            stored.owned_stored_events,
+            horizon_event,
+            LedgerMaterializationConsumerHorizonAdvancedEvent,
         ),
         generation_event=(
             _canonical_stored_event(
-                stored,
+                stored.owned_stored_events,
                 generation_event,
                 LedgerMaterializationGenerationAdvancedEvent,
             )
@@ -1018,12 +1029,16 @@ def commit_checkpoint_success(
             else None
         ),
         settlement_event=_canonical_stored_event(
-            stored, settlement_event, PhysicalOperationReservationSettledEvent
+            stored.owned_stored_events,
+            settlement_event,
+            PhysicalOperationReservationSettledEvent,
         ),
         barrier_release_event=_canonical_stored_event(
-            stored, release_event, CheckpointDispatchBarrierReleasedEvent
+            stored.owned_stored_events,
+            release_event,
+            CheckpointDispatchBarrierReleasedEvent,
         ),
-        stored_events=stored,
+        stored_batch_receipt=stored,
         resulting_account_state=resulting,
     )
 
@@ -1388,15 +1403,19 @@ def _commit_checkpoint_non_success(
     return TerminatedTranscriptCheckpoint(
         installed=installed,
         terminal_event=_canonical_stored_event(
-            stored, terminal_event, type(terminal_event)
+            stored.owned_stored_events, terminal_event, type(terminal_event)
         ),
         settlement_event=_canonical_stored_event(
-            stored, settlement_event, PhysicalOperationReservationSettledEvent
+            stored.owned_stored_events,
+            settlement_event,
+            PhysicalOperationReservationSettledEvent,
         ),
         barrier_release_event=_canonical_stored_event(
-            stored, release_event, CheckpointDispatchBarrierReleasedEvent
+            stored.owned_stored_events,
+            release_event,
+            CheckpointDispatchBarrierReleasedEvent,
         ),
-        stored_events=stored,
+        stored_batch_receipt=stored,
         resulting_account_state=resulting,
     )
 

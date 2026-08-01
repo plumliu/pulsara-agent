@@ -7,6 +7,8 @@ from ``sources.input`` and remain storage/network free.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Mapping
@@ -583,8 +585,7 @@ def _context_source_dispositions(
             )
         )
     if not any(
-        item.source_id is ContextSourceId.MEMORY_PROJECTION
-        for item in dispositions
+        item.source_id is ContextSourceId.MEMORY_PROJECTION for item in dispositions
     ):
         latest_failure = next(
             (
@@ -592,7 +593,9 @@ def _context_source_dispositions(
                 for stored in reversed(event_slice.events)
                 if stored.event_type == EventType.PROJECTION_FAILED
                 and isinstance(
-                    stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                    decode_raw_stored_event_envelope(
+                        stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    ),
                     ProjectionFailedEvent,
                 )
             ),
@@ -667,7 +670,9 @@ def _append_capability_inputs(
             content = _inline_content("")
         else:
             if projection_ref is None:
-                raise ValueError("capability projection artifact lacks source reference")
+                raise ValueError(
+                    "capability projection artifact lacks source reference"
+                )
             artifact = _require_artifact(artifact_metadata, artifact_id)
             content = _artifact_content(artifact)
         ordered = tuple(
@@ -749,7 +754,7 @@ def _append_memory_projection_input(
     if len(projection.source_event_refs) != 1:
         raise ValueError("memory projection requires one terminal event")
     stored = event_slice.event_by_id(projection.source_event_refs[0].event_id)
-    event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(event, ProjectionReadyEvent):
         raise ValueError("memory projection source is not ProjectionReadyEvent")
     if event.projection_kind != "memory":
@@ -911,9 +916,7 @@ def _append_plan_inputs(
             registry=registry,
             input_type=PlanSourceInput,
             source_id=ContextSourceId.PLAN_GUIDANCE,
-            source_instance_id=(
-                f"plan:guidance:{plan_snapshot.workflow_id}:active"
-            ),
+            source_instance_id=(f"plan:guidance:{plan_snapshot.workflow_id}:active"),
             candidate_key="active-plan-guidance",
             payload=guidance_payload,
             revision=_event_revision(
@@ -941,7 +944,11 @@ def _append_plan_inputs(
         for stored in event_slice.events
         if stored.event_type == EventType.PLAN_EXIT_RESOLVED
         if isinstance(
-            (event := stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                event := decode_raw_stored_event_envelope(
+                    stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             PlanExitResolvedEvent,
         )
         and event.decision == "revise"
@@ -1008,7 +1015,7 @@ def _latest_plan_terminal(
             EventType.PLAN_MODE_EXITED,
         }:
             continue
-        event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if isinstance(event, PlanModeEnteredEvent):
             active_entry = stored
         elif isinstance(event, PlanModeExitedEvent):
@@ -1036,7 +1043,7 @@ def _append_subagent_inputs(
     for stored in (*event_slice.events, *external_authority_events.values()):
         if stored.event_type != EventType.SUBAGENT_RUN_COMPLETED:
             continue
-        event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if isinstance(event, SubagentRunCompletedEvent) and event.result_id in selected:
             matches.append((stored, event))
     matches.sort(

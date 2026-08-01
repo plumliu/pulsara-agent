@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import time
 from dataclasses import dataclass
 
@@ -107,15 +109,12 @@ class ModelCallControlDispositionRecoveryService:
                         downstream=downstream,
                     )
                     if not any(
-                        item.resolved_model_call_id
-                        == result.resolved_model_call_id
+                        item.resolved_model_call_id == result.resolved_model_call_id
                         for item in recovered
                     ):
                         recovered.append(
                             RecoveredModelCallControlDisposition(
-                                resolved_model_call_id=(
-                                    result.resolved_model_call_id
-                                ),
+                                resolved_model_call_id=(result.resolved_model_call_id),
                                 disposition_event_id=winner.id,
                                 disposition=winner.disposition,
                                 source="existing_winner",
@@ -138,9 +137,7 @@ class ModelCallControlDispositionRecoveryService:
                         reply_id=start.reply_id,
                     ),
                     activation=_activation(start),
-                    disposition=(
-                        ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY
-                    ),
+                    disposition=(ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY),
                     termination_intent=None,
                     recovery_reason_code=(
                         "process_restarted_before_control_resolution"
@@ -224,12 +221,10 @@ class ModelCallControlDispositionRecoveryService:
             deadline_monotonic=deadline_monotonic,
         )
         events = tuple(
-            envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw.events
         )
-        if tuple(event.sequence for event in events) != tuple(
-            range(1, high_water + 1)
-        ):
+        if tuple(event.sequence for event in events) != tuple(range(1, high_water + 1)):
             raise ModelCallControlRecoveryStructuralError(
                 "model control recovery requires one contiguous ledger prefix"
             )
@@ -250,9 +245,7 @@ def _completed_main_starts(
         if isinstance(event, ModelCallStartEvent)
         and event.recovery_plan.lifecycle_kind == "main_assistant_reply"
     )
-    identities = tuple(
-        event.resolved_call.resolved_model_call_id for event in starts
-    )
+    identities = tuple(event.resolved_call.resolved_model_call_id for event in starts)
     if len(identities) != len(set(identities)):
         raise ModelCallControlRecoveryStructuralError(
             "model control recovery found duplicate Start identity"

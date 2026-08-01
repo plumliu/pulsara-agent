@@ -89,7 +89,9 @@ class JiebaSearchTokenizer:
         self._min_token_length = min_token_length
         self._lowercase = lowercase
         self._stopwords = (
-            _DEFAULT_STOPWORDS | extra_stopwords if extra_stopwords else _DEFAULT_STOPWORDS
+            _DEFAULT_STOPWORDS | extra_stopwords
+            if extra_stopwords
+            else _DEFAULT_STOPWORDS
         )
 
     def tokenize(self, text: str) -> list[str]:

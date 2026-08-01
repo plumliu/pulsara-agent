@@ -136,7 +136,9 @@ class McpInstallationReferenceFact(McpFact):
             raise ValueError("MCP installation config_epoch must be non-negative")
         server_pairs = self.server_snapshot_semantic_fingerprints
         if server_pairs != tuple(sorted(set(server_pairs))):
-            raise ValueError("MCP server semantic fingerprints must be sorted and unique")
+            raise ValueError(
+                "MCP server semantic fingerprints must be sorted and unique"
+            )
         binding_keys = [
             (item.server_id, item.slot_id, item.snapshot_id, item.discovery_generation)
             for item in self.binding_identities
@@ -299,7 +301,9 @@ class McpServerSnapshotFact(McpFact):
         if self.status != "ready" and (
             self.tools or self.resources or self.resource_templates or self.prompts
         ):
-            raise ValueError("non-ready MCP snapshots cannot expose discovered collections")
+            raise ValueError(
+                "non-ready MCP snapshots cannot expose discovered collections"
+            )
         discovered_items = (
             *self.tools,
             *self.resources,
@@ -309,13 +313,18 @@ class McpServerSnapshotFact(McpFact):
         if any(item.server_id != self.server_id for item in discovered_items):
             raise ValueError("MCP snapshot fact discovered item server_id mismatch")
         if self.status not in {"starting", "closing"}:
-            if self.timing.completed_at_utc is None or self.timing.total_duration_seconds is None:
+            if (
+                self.timing.completed_at_utc is None
+                or self.timing.total_duration_seconds is None
+            ):
                 raise ValueError("terminal MCP snapshot requires completed timing")
         if self.status == "ready" and (
             self.timing.connect_ended_at_utc is None
             or self.timing.discovery_ended_at_utc is None
         ):
-            raise ValueError("ready MCP snapshot requires completed connect/discovery timing")
+            raise ValueError(
+                "ready MCP snapshot requires completed connect/discovery timing"
+            )
         return self
 
 
@@ -409,8 +418,12 @@ class McpInstalledServerSnapshotFact(McpFact):
             self.protocol_behavior_era,
             self.negotiation_wire_receipt_fingerprint,
         )
-        if self.status == "ready" and any(value is None for value in protocol_authority):
-            raise ValueError("ready MCP installed snapshot requires exact protocol authority")
+        if self.status == "ready" and any(
+            value is None for value in protocol_authority
+        ):
+            raise ValueError(
+                "ready MCP installed snapshot requires exact protocol authority"
+            )
         if self.status != "ready" and 0 < sum(
             value is not None for value in protocol_authority
         ) < len(protocol_authority):
@@ -419,7 +432,9 @@ class McpInstalledServerSnapshotFact(McpFact):
             self.lifecycle_timing.completed_at_utc is None
             or self.lifecycle_timing.total_duration_seconds is None
         ):
-            raise ValueError("terminal MCP installed snapshot requires completed timing")
+            raise ValueError(
+                "terminal MCP installed snapshot requires completed timing"
+            )
         if self.status == "ready" and (
             self.lifecycle_timing.connect_ended_at_utc is None
             or self.lifecycle_timing.discovery_ended_at_utc is None

@@ -111,7 +111,9 @@ class CompactionCommitPendingAfterCancellation(asyncio.CancelledError):
 
     def __init__(self, pending: PendingCompactionEventCommit) -> None:
         self.pending = pending
-        super().__init__("compaction commit remains in flight after caller cancellation")
+        super().__init__(
+            "compaction commit remains in flight after caller cancellation"
+        )
 
 
 class CompactionBatchCommitCancelledAfterCommit(asyncio.CancelledError):
@@ -300,7 +302,7 @@ class RuntimeSessionCompactionEventCommitPort:
                 return await self.runtime_session.write_event_with_deadline(
                     event,
                     deadline_monotonic=deadline_monotonic,
-                                        publication_terminal_maintenance_lease=(
+                    publication_terminal_maintenance_lease=(
                         publication_terminal_maintenance_lease
                     ),
                 )
@@ -336,7 +338,7 @@ class RuntimeSessionCompactionEventCommitPort:
                 return await self.runtime_session.write_events_with_deadline(
                     events,
                     deadline_monotonic=deadline_monotonic,
-                                        publication_terminal_maintenance_lease=(
+                    publication_terminal_maintenance_lease=(
                         publication_terminal_maintenance_lease
                     ),
                 )

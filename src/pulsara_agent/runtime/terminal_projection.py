@@ -222,12 +222,12 @@ class ToolResultEndCandidate:
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
-    mcp_input_required_terminal_source: (
-        McpInputRequiredTerminalSourceFact | None
-    ) = None
+    mcp_input_required_terminal_source: McpInputRequiredTerminalSourceFact | None = None
 
     def __post_init__(self) -> None:
-        if not all((self.id, self.run_id, self.turn_id, self.reply_id, self.tool_call_id)):
+        if not all(
+            (self.id, self.run_id, self.turn_id, self.reply_id, self.tool_call_id)
+        ):
             raise ValueError("tool terminal candidate identity cannot be empty")
         if self.observation_timing.tool_call_id not in (None, self.tool_call_id):
             raise ValueError("tool terminal candidate timing identity mismatch")
@@ -326,7 +326,9 @@ class ExternalExecutionResultCandidate:
         if not all((self.id, self.run_id, self.turn_id, self.reply_id)):
             raise ValueError("external result candidate identity cannot be empty")
         if not ids or len(ids) != len(set(ids)):
-            raise ValueError("external result candidate call IDs must be non-empty and unique")
+            raise ValueError(
+                "external result candidate call IDs must be non-empty and unique"
+            )
 
     def bind_projections(
         self,
@@ -456,9 +458,7 @@ class ToolTerminalProjectionService:
             )
             output.append(projection.committed_event)
             end_references.append(projection.end_reference)
-        output.append(
-            result.bind_projections(tuple(end_references))
-        )
+        output.append(result.bind_projections(tuple(end_references)))
         return tuple(output)
 
     def validate_tool_document(
@@ -483,7 +483,9 @@ class ToolTerminalProjectionService:
                 if source is not None:
                     raise ValueError("tool terminal validation found duplicate Start")
                 source = _PendingToolResultSource(event, ())
-            elif isinstance(event, (ToolResultTextDeltaEvent, ToolResultDataDeltaEvent)):
+            elif isinstance(
+                event, (ToolResultTextDeltaEvent, ToolResultDataDeltaEvent)
+            ):
                 if source is None:
                     raise ValueError("tool terminal validation delta lacks Start")
                 source = _PendingToolResultSource(
@@ -1105,20 +1107,22 @@ class ToolTerminalProjectionService:
         reference = projection.projection_reference
         confirmation = await self._runtime_session.context_input_io_service.execute(
             operation_name="tool-terminal-projection-document-write",
-            operation=lambda: self._runtime_session.archive.put_text_if_absent_or_confirm_identical(
-                reference.document_artifact_id,
-                projection.canonical_document_bytes.decode("utf-8"),
-                session_id=self._runtime_session.runtime_session_id,
-                run_id=run_id,
-                media_type=TERMINAL_PROJECTION_MEDIA_TYPE,
-                semantic_metadata={
-                    "projection_kind": "tool_result",
-                    "document_fact_fingerprint": reference.document_fact_fingerprint,
-                    "document_contract_fingerprint": (
-                        reference.document_contract_fingerprint
-                    ),
-                },
-                deadline_monotonic=deadline_monotonic,
+            operation=lambda: (
+                self._runtime_session.archive.put_text_if_absent_or_confirm_identical(
+                    reference.document_artifact_id,
+                    projection.canonical_document_bytes.decode("utf-8"),
+                    session_id=self._runtime_session.runtime_session_id,
+                    run_id=run_id,
+                    media_type=TERMINAL_PROJECTION_MEDIA_TYPE,
+                    semantic_metadata={
+                        "projection_kind": "tool_result",
+                        "document_fact_fingerprint": reference.document_fact_fingerprint,
+                        "document_contract_fingerprint": (
+                            reference.document_contract_fingerprint
+                        ),
+                    },
+                    deadline_monotonic=deadline_monotonic,
+                )
             ),
             deadline_monotonic=deadline_monotonic,
         )

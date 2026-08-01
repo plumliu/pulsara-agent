@@ -270,9 +270,7 @@ def test_durable_hook_lazily_refreshes_after_timeline_projection_arrives(
     observed: list[tuple[str, str]] = []
 
     def summarize(**kwargs):
-        observed.append(
-            (kwargs["runtime_session_id"], kwargs["run_id"])
-        )
+        observed.append((kwargs["runtime_session_id"], kwargs["run_id"]))
         return RunTimelineSummary(
             runtime_session_id=kwargs["runtime_session_id"],
             run_id=kwargs["run_id"],
@@ -355,7 +353,6 @@ def _ctx() -> EventContext:
     return EventContext(
         run_id=f"run:test:{uuid4().hex}", turn_id="turn:test", reply_id="reply:test"
     )
-
 
 
 def _delete_working_context(dsn: str, memory_domain_id: str) -> None:

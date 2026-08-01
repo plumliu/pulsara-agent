@@ -198,7 +198,7 @@ def test_registry_validates_resources_and_prefix_recurrence() -> None:
     POSTGRES_MIGRATION_REGISTRY.verify_resources()
     assert tuple(
         definition.version for definition in POSTGRES_MIGRATION_REGISTRY.definitions
-    ) == tuple(range(11))
+    ) == tuple(range(12))
     assert (
         POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         == POSTGRES_MIGRATION_REGISTRY.definitions[-1].registry_prefix_fingerprint
@@ -290,16 +290,27 @@ def test_historical_migration_identity_has_append_only_golden_vectors() -> None:
         61,
         65,
         66,
+        71,
     )
-    latest = POSTGRES_MIGRATION_REGISTRY.definition(10)
+    version_10 = POSTGRES_MIGRATION_REGISTRY.definition(10)
     assert (
         POSTGRES_SCHEMA_MANIFESTS[10].manifest_fingerprint,
-        latest.migration_contract_fingerprint,
-        latest.registry_prefix_fingerprint,
+        version_10.migration_contract_fingerprint,
+        version_10.registry_prefix_fingerprint,
     ) == (
         "sha256:692b47b1874261d4f3e31c51cc6cbd3224f0857efee6763ba0d4004095deb311",
         "sha256:c5b9e95cea297f687ac4367dc00dee060b2708852649b5f2fbf5bbe619f7fd88",
         "sha256:fd01134786d9e1ef3e672d4c016f397c4b7185bb243d2db2678407eb1e788be5",
+    )
+    latest = POSTGRES_MIGRATION_REGISTRY.definition(11)
+    assert (
+        POSTGRES_SCHEMA_MANIFESTS[11].manifest_fingerprint,
+        latest.migration_contract_fingerprint,
+        latest.registry_prefix_fingerprint,
+    ) == (
+        "sha256:22fe5e1ffd770526eb0b5d95e0173acbdccad5acf40af08725e010ae9cfe9af8",
+        "sha256:936270cbfe0e2789f1b1cf95634a882a458cfb70e2aea2c842e3d86ba1336783",
+        "sha256:bea04ae7601edc0a046c002dd191d6225f105675f6d45fd3ad12a2126a19dd0d",
     )
     assert all(
         identity.object_name != "memory_governance_decisions"
@@ -345,7 +356,7 @@ def test_fresh_database_migrates_to_latest_and_second_run_is_noop() -> None:
             preparation_port=preparation_port,
         )
         assert final.status == "migrated"
-        assert final.migration_head_version == 10
+        assert final.migration_head_version == 11
         assert final.registry_prefix_fingerprint == (
             POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         )
@@ -381,8 +392,8 @@ def test_final_binary_advances_historical_v4_database_through_all_dpj_gates() ->
             preparation_port=preparation_port,
         )
         assert final.status == "migrated"
-        assert final.applied_versions == (8, 9, 10)
-        assert final.migration_head_version == 10
+        assert final.applied_versions == (8, 9, 10, 11)
+        assert final.migration_head_version == 11
         assert final.registry_prefix_fingerprint == (
             POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
         )
@@ -538,7 +549,7 @@ def test_migration_commit_confirmation_has_distinct_full_none_and_conflict() -> 
         )
         outcome, connection = runner._confirm_migration_commit(  # noqa: SLF001
             runtime_identity=identity,
-            definition=POSTGRES_MIGRATION_REGISTRY.definition(10),
+            definition=POSTGRES_MIGRATION_REGISTRY.definition(11),
             deadline_monotonic=monotonic() + 30.0,
         )
         assert outcome is PostgresCommitConfirmation.FULL
@@ -629,7 +640,7 @@ def test_runtime_role_can_read_ledger_but_cannot_create_schema_objects(
         autocommit=True,
     ) as connection:
         rows = read_migration_ledger(connection)
-        assert rows is not None and rows[-1].version == 10
+        assert rows is not None and rows[-1].version == 11
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute(
                 f"CREATE TABLE public.forbidden_{uuid4().hex} (id integer)"

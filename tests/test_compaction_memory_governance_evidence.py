@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from hashlib import sha256
 from time import monotonic
 
@@ -61,7 +63,10 @@ from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
-from pulsara_agent.primitives._context_base import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives._context_base import (
+    canonical_json_bytes,
+    context_fingerprint,
+)
 from pulsara_agent.primitives.compaction import (
     CompactionMemoryExtractionModelInputAttributionFact,
     CompactionPostCompletionExtensionLinkFact,
@@ -98,6 +103,7 @@ from tests.support.model_call import (
     test_resolved_call_fact,
 )
 from tests.support.memory_uow import fake_memory_uow_factory, postgres_memory_uow
+from tests.support.event_write import restore_transcript_projection_fixture
 from tests.support.postgres import verified_postgres_provider
 from tests.test_compaction_memory_extraction_evidence import _select, _world
 
@@ -107,7 +113,7 @@ def _stored_reference(world, event_id: str) -> GovernanceStoredEventReferenceFac
         (event_id,), deadline_monotonic=monotonic() + 10.0
     )
     assert len(raw) == 1
-    event = raw[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(raw[0], DEFAULT_EVENT_SCHEMA_REGISTRY)
     return build_frozen_fact(
         GovernanceStoredEventReferenceFact,
         schema_version="governance_stored_event_reference.v1",
@@ -424,7 +430,7 @@ def test_compaction_governance_rebinds_complete_sanitized_human_message(
         runtime_session_id=world.runtime_session_id,
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    reducer.apply_committed(tuple(world.log.iter()))
+    restore_transcript_projection_fixture(event_log=world.log, reducer=reducer)
     evidence_builder = GovernanceSourceEvidenceBuilder(
         runtime_session_id=world.runtime_session_id,
         event_log=world.log,
@@ -437,9 +443,7 @@ def test_compaction_governance_rebinds_complete_sanitized_human_message(
         authority=authority,
     )
 
-    assert (
-        preparation.result.status is GovernanceEvidenceBuildStatus.FULL
-    ), (
+    assert preparation.result.status is GovernanceEvidenceBuildStatus.FULL, (
         preparation.result.stable_reason_code,
         preparation.rejection.stable_reason_code
         if preparation.rejection is not None
@@ -458,9 +462,9 @@ def test_compaction_governance_rebinds_complete_sanitized_human_message(
     assert tuple(item.field_code for item in prompt.ordered_evidence_texts) == (
         "canonical_sanitized_user_message",
     )
-    quote_attribution = (
-        preparation.candidate_snapshot.source_evidence_attribution.quoted_evidence_attributions[0]
-    )
+    quote_attribution = preparation.candidate_snapshot.source_evidence_attribution.quoted_evidence_attributions[
+        0
+    ]
     assert quote_attribution.start_char is None
     assert quote_attribution.end_char is None
 

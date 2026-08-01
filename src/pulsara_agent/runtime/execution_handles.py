@@ -91,6 +91,7 @@ class CapabilityExecutionBorrowTracker:
     def release_activation(self) -> None:
         self._change("active_activation_borrows", -1)
 
+
 @dataclass(frozen=True, slots=True)
 class CapabilityExecutionBorrowAuthority:
     handle_id: str

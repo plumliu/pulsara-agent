@@ -194,9 +194,7 @@ def _validate_owner_batch(
     )
 
     if owner_kind == "compaction_started_publication_failed_bundle":
-        if len(events) != 1 or not isinstance(
-            events[0], ContextCompactionFailedEvent
-        ):
+        if len(events) != 1 or not isinstance(events[0], ContextCompactionFailedEvent):
             raise ValueError(
                 "started-publication maintenance requires one compaction Failed"
             )
@@ -234,9 +232,7 @@ def _validate_owner_batch(
         event for event in events if isinstance(event, ContextWindowClosedEvent)
     )
     account_closes = tuple(
-        event
-        for event in events
-        if isinstance(event, RolloutBudgetAccountClosedEvent)
+        event for event in events if isinstance(event, RolloutBudgetAccountClosedEvent)
     )
     if len(run_ends) != 1 or len(window_closes) != 1 or len(account_closes) != 1:
         raise ValueError(
@@ -326,10 +322,13 @@ def validate_publication_latched_run_termination_authority(
         terminal: ToolResultEndEvent,
         identity: object,
     ) -> None:
-        if stable_event_identity(
-            terminal,
-            runtime_session_id=runtime_session_id,
-        ) != identity:
+        if (
+            stable_event_identity(
+                terminal,
+                runtime_session_id=runtime_session_id,
+            )
+            != identity
+        ):
             raise ValueError("MCP publication terminal identity is not exact")
 
     def validate_terminal_source(terminal: ToolResultEndEvent) -> None:
@@ -355,9 +354,7 @@ def validate_publication_latched_run_termination_authority(
 
     sources: list[AgentEvent] = []
     for reference in termination.source_event_references:
-        sources.append(
-            require_exact_reference(reference, expected_type=AgentEvent)
-        )
+        sources.append(require_exact_reference(reference, expected_type=AgentEvent))
 
     reason = termination.reason
     if reason == "mandatory_runtime_audit_publication_unavailable":
@@ -371,7 +368,9 @@ def validate_publication_latched_run_termination_authority(
         return
     if reason == "compaction_publication_unavailable":
         starts = tuple(
-            event for event in sources if isinstance(event, ContextCompactionStartedEvent)
+            event
+            for event in sources
+            if isinstance(event, ContextCompactionStartedEvent)
         )
         terminals = tuple(
             event
@@ -415,7 +414,9 @@ def validate_publication_latched_run_termination_authority(
     for terminal in terminals:
         validate_terminal_source(terminal)
     resume_failures = tuple(
-        event for event in sources if isinstance(event, McpInputRequiredResumeFailedEvent)
+        event
+        for event in sources
+        if isinstance(event, McpInputRequiredResumeFailedEvent)
     )
     for failure in resume_failures:
         require_exact_reference(
@@ -565,7 +566,9 @@ class PublicationTerminalMaintenanceCoordinator:
             transaction_companion=transaction_companion,
         )
         if not ids or len(ids) != len(set(ids)):
-            raise ValueError("terminal-maintenance batch IDs must be non-empty and unique")
+            raise ValueError(
+                "terminal-maintenance batch IDs must be non-empty and unique"
+            )
         identity = PublicationTerminalMaintenanceLeaseIdentity(
             lease_id=f"publication_maintenance:{uuid4().hex}",
             runtime_session_id=self._runtime_session_id,
@@ -627,7 +630,9 @@ class PublicationTerminalMaintenanceCoordinator:
         """Validate one exact issued batch without advancing lease ownership."""
 
         if not isinstance(handle, PublicationTerminalMaintenanceLease):
-            raise PermissionError("terminal maintenance requires an opaque lease handle")
+            raise PermissionError(
+                "terminal maintenance requires an opaque lease handle"
+            )
         identity = handle.identity
         record = self._records.get(identity.lease_id)
         if (
@@ -640,8 +645,7 @@ class PublicationTerminalMaintenanceCoordinator:
             raise PermissionError("publication terminal-maintenance lease is stale")
         if (
             identity.runtime_session_id != self._runtime_session_id
-            or identity.publication_latch_generation
-            != publication_latch_generation
+            or identity.publication_latch_generation != publication_latch_generation
             or deadline_monotonic > identity.terminal_deadline_monotonic
         ):
             raise PermissionError("publication terminal-maintenance authority drifted")

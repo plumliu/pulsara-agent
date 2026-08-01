@@ -36,6 +36,7 @@ from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
     TranscriptProjectionStateStore,
 )
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.support.event_write import restore_transcript_projection_fixture
 from tests.support.model_call import test_resolved_target_fact
 
 
@@ -111,7 +112,7 @@ def _authority(text: str):
         reply_id="reply:manifest-owner",
     )
     log = InMemoryEventLog(runtime_session_id=runtime_session_id)
-    committed = log.extend(
+    log.commit_batch(
         (
             RunStartEvent(
                 **context.event_fields(),
@@ -131,8 +132,13 @@ def _authority(text: str):
         runtime_session_id=runtime_session_id,
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    reducer.apply_committed(tuple(committed))
-    return runtime_session_id, context, log, reducer.capture_governance_authority_snapshot()
+    restore_transcript_projection_fixture(event_log=log, reducer=reducer)
+    return (
+        runtime_session_id,
+        context,
+        log,
+        reducer.capture_governance_authority_snapshot(),
+    )
 
 
 def test_manifest_abandon_retires_only_after_physical_exit() -> None:
@@ -170,9 +176,7 @@ def test_manifest_abandon_retires_only_after_physical_exit() -> None:
 
         handle = intent.private_handle
         consumed = handle.manifest_operation.consume_full_or_abandon()
-        assert isinstance(
-            consumed, CompactionHumanEvidenceManifestConsumedAbandoned
-        )
+        assert isinstance(consumed, CompactionHumanEvidenceManifestConsumedAbandoned)
         handle.abandon_before_write(reason="call_a_completed")
         assert extension.pending_physical_operation_count == 1
         assert handle.identity.handle_id in extension._handles
@@ -213,9 +217,9 @@ def test_driver_registry_is_generation_aware_and_borrow_fails_closed() -> None:
     driver = _FakeDriver(session_id, 1, "sha256:binding:1")
     registration = registry.register(driver)
 
-    assert registry.available_runtime_session_ids(
-        now_monotonic=monotonic()
-    ) == (session_id,)
+    assert registry.available_runtime_session_ids(now_monotonic=monotonic()) == (
+        session_id,
+    )
     borrow = registry.borrow(session_id)
     assert borrow is not None and borrow.driver is driver
     assert registry.active_borrow_count(session_id) == 1
@@ -281,9 +285,7 @@ def test_input_artifact_uses_attempt_deadline_and_retains_physical_owner() -> No
 
 def test_provider_failure_rejects_conflicting_retry_transition() -> None:
     async def run() -> None:
-        repository = _DeferralRepository(
-            DurableProjectionCommitConfirmation.CONFLICT
-        )
+        repository = _DeferralRepository(DurableProjectionCommitConfirmation.CONFLICT)
         driver = CompactionMemoryExtractionSessionDriver(
             runtime_session=_RuntimeSessionStub("runtime:retry-conflict"),
             llm_runtime=None,
@@ -301,7 +303,9 @@ def test_provider_failure_rejects_conflicting_retry_transition() -> None:
             delivery_policy=default_compaction_memory_delivery_policy()
         )
 
-        with pytest.raises(RuntimeError, match="provider retry transition was conflict"):
+        with pytest.raises(
+            RuntimeError, match="provider retry transition was conflict"
+        ):
             await driver._defer_failed_model_attempt(
                 lease,
                 dispatch_attempt_ordinal=1,

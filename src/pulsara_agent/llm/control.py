@@ -8,6 +8,8 @@ AgentRuntime segment.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass, replace
 from threading import RLock
@@ -253,12 +255,12 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
             try:
                 return self._runtime_session.commit_reduce_events_from_thread(
                     (candidate,),
-                                    )
+                )
             except BaseException as original:
                 try:
                     return self._runtime_session.confirm_and_reduce_event_batch(
                         (candidate,),
-                                            )
+                    )
                 except BaseException as confirmation_error:
                     if isinstance(confirmation_error, EventCommitError):
                         raise original
@@ -344,7 +346,7 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
         try:
             status = self._runtime_session.publish_committed_through_from_thread(
                 through_sequence=folded.disposition_sequence,
-                            )
+            )
         except BaseException:
             status = "unavailable"
         return ModelCallControlDispositionPublicationResult(
@@ -412,7 +414,10 @@ class RunModelCallControlOwner:
         event_context: EventContext,
         runtime_session: Any,
     ) -> ModelCallControlResolutionResult:
-        if result.control_disposition is not ModelCallResultControlDisposition.SUCCESS_ELIGIBLE:
+        if (
+            result.control_disposition
+            is not ModelCallResultControlDisposition.SUCCESS_ELIGIBLE
+        ):
             raise ModelCallControlResolutionError(
                 "only a success-eligible model result has a live disposition"
             )
@@ -440,7 +445,7 @@ class RunModelCallControlOwner:
             deadline_monotonic=attribution_deadline,
         )
         attribution_events = tuple(
-            item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for item in raw_attribution
         )
         starts = tuple(
@@ -490,9 +495,8 @@ class RunModelCallControlOwner:
                     metadata=runtime_session.default_event_metadata,
                 )
                 self._pending_candidates[result.resolved_model_call_id] = candidate
-            candidate = (
-                runtime_session.model_call_control_disposition_owner
-                .get_or_register_candidate(candidate)
+            candidate = runtime_session.model_call_control_disposition_owner.get_or_register_candidate(
+                candidate
             )
 
             commit_deadline = monotonic() + 30.0

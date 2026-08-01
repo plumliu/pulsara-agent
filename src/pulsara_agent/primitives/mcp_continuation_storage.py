@@ -63,10 +63,14 @@ class McpContinuationCarrierControlFact(FrozenStorageFactBase):
 
     @model_validator(mode="after")
     def _initial_revision(self) -> "McpContinuationCarrierControlFact":
-        if self.carrier_state in {
-            McpContinuationCarrierState.AWAITING_CLIENT_INPUT,
-            McpContinuationCarrierState.REPLAY_READY,
-        } and self.control_revision < 1:
+        if (
+            self.carrier_state
+            in {
+                McpContinuationCarrierState.AWAITING_CLIENT_INPUT,
+                McpContinuationCarrierState.REPLAY_READY,
+            }
+            and self.control_revision < 1
+        ):
             raise ValueError("MCP continuation control starts at revision one")
         return self
 

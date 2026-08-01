@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 import hashlib
 import json
@@ -174,6 +176,7 @@ from pulsara_agent.ports.host_ingress import (
     HostIngressAdmissionStale,
     build_active_run_monitor_delivery,
 )
+from pulsara_agent.runtime.provider_input.causal import append_same_batch_user_steer
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
     _final_text,
@@ -855,9 +858,7 @@ class AgentRuntime:
             raise TypeError("run draft requires a frozen execution surface")
         run_identity = replace(
             self._run_identity,
-            mcp_installation_id=(
-                frozen_surface.identity.mcp_installation_id
-            ),
+            mcp_installation_id=(frozen_surface.identity.mcp_installation_id),
         )
         return await prepare_agent_run_draft(
             state,
@@ -1654,7 +1655,7 @@ class AgentRuntime:
             max_payload_bytes=2 * 1024 * 1024,
         )
         child_events = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for raw in child_snapshot.events
         )
         terminals = tuple(
@@ -2959,6 +2960,12 @@ class AgentRuntime:
                     next_model_call_index=model_call_index,
                 )
             )
+            active_run_prompt_steer_lease = (
+                await self._run_model.borrow_active_run_prompt_steer_safe_point(
+                    run_id=state.run_id,
+                    next_model_call_index=model_call_index,
+                )
+            )
             memory_prompt = getattr(
                 self.memory_hooks, "memory_context_prompt", lambda: None
             )()
@@ -3430,6 +3437,43 @@ class AgentRuntime:
                             final_compiled_context,
                             active_run_monitor_attachments=(
                                 active_run_monitor_lease.attachments
+                            ),
+                        )
+                    if active_run_prompt_steer_lease is not None:
+                        ordered_projection = final_compiled_context.prepared_ordered_transcript_projection
+                        if ordered_projection is None:
+                            raise RuntimeError(
+                                "active-run prompt steer lacks ordered transcript projection"
+                            )
+                        final_compiled_context = replace(
+                            final_compiled_context,
+                            prepared_ordered_transcript_projection=(
+                                append_same_batch_user_steer(
+                                    prepared=ordered_projection,
+                                    runtime_session_id=(
+                                        self._run_identity.runtime_session_id
+                                    ),
+                                    context_id=context_id,
+                                    queue_item_id=(
+                                        active_run_prompt_steer_lease.queue_item_id
+                                    ),
+                                    reservation_fingerprint=(
+                                        active_run_prompt_steer_lease.reservation_fingerprint
+                                    ),
+                                    expected_user_steer_event_id=(
+                                        active_run_prompt_steer_lease.expected_user_steer_event_id
+                                    ),
+                                    message_id=(
+                                        active_run_prompt_steer_lease.message_id
+                                    ),
+                                    text=active_run_prompt_steer_lease.text,
+                                    content_semantic_fingerprint=(
+                                        active_run_prompt_steer_lease.content_semantic_fingerprint
+                                    ),
+                                    policy=(
+                                        final_compiled_context.provider_causal_physical_policy
+                                    ),
+                                )
                             ),
                         )
                     if (
@@ -3926,6 +3970,10 @@ class AgentRuntime:
                     self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
                     )
+                if active_run_prompt_steer_lease is not None:
+                    self._run_model.release_active_run_prompt_steer_safe_point(
+                        active_run_prompt_steer_lease
+                    )
                 if provider_input_start_bundle is not None:
                     await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                         provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
@@ -3953,6 +4001,10 @@ class AgentRuntime:
                 if active_run_monitor_lease is not None:
                     self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
+                    )
+                if active_run_prompt_steer_lease is not None:
+                    self._run_model.release_active_run_prompt_steer_safe_point(
+                        active_run_prompt_steer_lease
                     )
                 await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
@@ -4126,6 +4178,19 @@ class AgentRuntime:
                     if active_run_monitor_lease is not None
                     else ()
                 )
+                active_run_prompt_steer_guard = None
+                active_run_prompt_steer_extra_candidates = ()
+                active_run_prompt_steer_transaction_companion = None
+                if active_run_prompt_steer_lease is not None:
+                    (
+                        active_run_prompt_steer_guard,
+                        active_run_prompt_steer_extra_candidates,
+                        prompt_steer_queue_companion,
+                    ) = self._run_model.prepare_active_run_prompt_steer_start(
+                        lease=active_run_prompt_steer_lease,
+                        provider_input_start_bundle=provider_input_start_bundle,
+                        event_context=self._event_context(state),
+                    )
                 start_bundle = self._run_model.prepare_lifecycle_start_bundle(
                     call=resolved_call,
                     context=context,
@@ -4137,13 +4202,33 @@ class AgentRuntime:
                     active_run_monitor_source_event_references=(
                         active_run_monitor_source_references
                     ),
+                    active_run_prompt_steer_guard=(active_run_prompt_steer_guard),
+                    extra_companion_candidates=(
+                        active_run_prompt_steer_extra_candidates
+                    ),
                 )
+                if active_run_prompt_steer_lease is not None:
+                    active_run_prompt_steer_transaction_companion = (
+                        self._run_model.build_prompt_steer_start_transaction_companion(
+                            queue_companion=prompt_steer_queue_companion,
+                            resolved_model_call_id=(
+                                resolved_call.fact.resolved_model_call_id
+                            ),
+                            model_call_start_event_id=(
+                                start_bundle.recovery_plan.model_call_start_event_id
+                            ),
+                        )
+                    )
                 model_stream_handle = self.llm_runtime.start_stream(
                     call=resolved_call,
                     context=context,
                     event_context=self._event_context(state),
                     start_bundle=start_bundle,
-                    commit_port=self._run_model.event_commit_port(),
+                    commit_port=self._run_model.event_commit_port(
+                        start_transaction_companion=(
+                            active_run_prompt_steer_transaction_companion
+                        )
+                    ),
                     execution_registry=(
                         self._run_model.model_stream_execution_registry
                     ),
@@ -4304,6 +4389,10 @@ class AgentRuntime:
                     self._run_model.release_active_run_monitor_safe_point(
                         active_run_monitor_lease
                     )
+                if active_run_prompt_steer_lease is not None:
+                    self._run_model.release_active_run_prompt_steer_safe_point(
+                        active_run_prompt_steer_lease
+                    )
                 await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
                     provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
                     reason=(
@@ -4410,6 +4499,11 @@ class AgentRuntime:
                 break
             if state.status is not LoopStatus.RUNNING:
                 break
+            # The complete ToolResult batch is now durable and all post-tool
+            # hooks have accepted it.  Pending calls represent only in-flight
+            # or suspended work; clear them before exposing the one legal
+            # active-run steer safe point for the follow-up model step.
+            state.pending_tool_calls = []
             async for event in self._continue_after_tool_before_followup(state):
                 yield event
 
@@ -4541,6 +4635,7 @@ class AgentRuntime:
             async for event in self._finalize_run(state):
                 yield event
             return
+        state.pending_tool_calls = []
         async for event in self._continue_after_tool_before_followup(state):
             yield event
         exposure = self._require_capability_exposure(state)
@@ -4871,17 +4966,15 @@ class AgentRuntime:
                             ),
                         )
                         try:
-                            dispatch_result = (
-                                await commit_port.commit_mcp_continuation_dispatch_reservation(
-                                    dispatch_candidate=dispatch_event,
-                                    commit_guard=guard,
-                                    transaction_companion=(
-                                        prepared_dispatch.transaction_companion
-                                    ),
-                                    deadline_monotonic=(
-                                        deadline_budget.ordinary_deadline_monotonic
-                                    ),
-                                )
+                            dispatch_result = await commit_port.commit_mcp_continuation_dispatch_reservation(
+                                dispatch_candidate=dispatch_event,
+                                commit_guard=guard,
+                                transaction_companion=(
+                                    prepared_dispatch.transaction_companion
+                                ),
+                                deadline_monotonic=(
+                                    deadline_budget.ordinary_deadline_monotonic
+                                ),
                             )
                         except BaseException as dispatch_error:
                             dispatch_outcome = self._run_ledger.resolved_write_outcome(
@@ -5502,7 +5595,7 @@ class AgentRuntime:
                 max_payload_bytes=16 * 1_024 * 1_024,
             )
             decoded = tuple(
-                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for item in snapshot.events
             )
             ends = tuple(
@@ -6604,7 +6697,9 @@ class AgentRuntime:
                 )
             )
             state.pending_interaction_source_event_candidate = (
-                freeze_event_write_candidate(event.model_copy(update={"sequence": None}))
+                freeze_event_write_candidate(
+                    event.model_copy(update={"sequence": None})
+                )
             )
             yield event
             return
@@ -9110,7 +9205,7 @@ def _active_projection_rewrite_refs(
     for frozen in prepared_context_input.authority_slice.events:
         if frozen.event_type != EventType.CONTEXT_PROJECTION_REWRITE_PAGE:
             continue
-        event = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if not isinstance(event, ContextProjectionRewritePageEvent):
             raise RuntimeError("projection rewrite event decoder mismatch")
         if (

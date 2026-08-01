@@ -15,10 +15,16 @@ class MemoryGovernanceCoordinator:
     debounce_seconds: float = 0.25
     session_min_interval_seconds: float = 5.0
     on_commit: Callable[[], None] | None = None
-    _pending: dict[str, MemoryGovernanceEngine] = field(default_factory=dict, init=False, repr=False)
+    _pending: dict[str, MemoryGovernanceEngine] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _last_run: dict[str, float] = field(default_factory=dict, init=False, repr=False)
-    _retry_attempts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _next_retry_at: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _retry_attempts: dict[str, int] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _next_retry_at: dict[str, float] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -50,13 +56,17 @@ class MemoryGovernanceCoordinator:
                 if retry_at is not None and now < retry_at:
                     self._pending[session_id] = engine
                     delay = retry_at - now
-                    deferred_delay = delay if deferred_delay is None else min(deferred_delay, delay)
+                    deferred_delay = (
+                        delay if deferred_delay is None else min(deferred_delay, delay)
+                    )
                     continue
                 elapsed = now - self._last_run.get(session_id, 0.0)
                 if retry_at is None and elapsed < self.session_min_interval_seconds:
                     self._pending[session_id] = engine
                     delay = self.session_min_interval_seconds - elapsed
-                    deferred_delay = delay if deferred_delay is None else min(deferred_delay, delay)
+                    deferred_delay = (
+                        delay if deferred_delay is None else min(deferred_delay, delay)
+                    )
                     continue
                 try:
                     result = await engine.run_pending(trigger_reason="turn_safe_point")
@@ -88,7 +98,9 @@ class MemoryGovernanceCoordinator:
             if self._pending:
                 if deferred_delay:
                     try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=deferred_delay)
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=deferred_delay
+                        )
                     except TimeoutError:
                         pass
                 self._wake.set()

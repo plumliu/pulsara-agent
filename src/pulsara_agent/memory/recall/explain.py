@@ -128,12 +128,22 @@ def validate_explanation(
         f"field:{view.id}:memory_type",
         *(f"signal:{signal}" for signal in signals),
     }
-    allowed.update(_edge_id(source_id, predicate, view.id) for predicate, source_id in view.incoming)
-    allowed.update(_edge_id(view.id, predicate, target_id) for predicate, target_id in view.outgoing)
+    allowed.update(
+        _edge_id(source_id, predicate, view.id)
+        for predicate, source_id in view.incoming
+    )
+    allowed.update(
+        _edge_id(view.id, predicate, target_id)
+        for predicate, target_id in view.outgoing
+    )
     for claim in explanation.claims:
-        missing = [grounding for grounding in claim.grounded_on if grounding not in allowed]
+        missing = [
+            grounding for grounding in claim.grounded_on if grounding not in allowed
+        ]
         if missing:
-            raise ValueError(f"ungrounded explanation claim for {explanation.memory_id}: {missing}")
+            raise ValueError(
+                f"ungrounded explanation claim for {explanation.memory_id}: {missing}"
+            )
 
 
 def explanation_to_payload(explanation: Explanation) -> dict:

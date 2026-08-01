@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass
 from time import monotonic
@@ -25,7 +27,11 @@ from pulsara_agent.runtime.compaction.service import (
     ContextCompactionService,
 )
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.state import RunActivationWorkingState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.state import (
+    RunActivationWorkingState,
+    LoopStatus,
+    LoopTransition,
+)
 from pulsara_agent.runtime.transcript import rebuild_prior_messages_before_sequence
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.runtime_event_vocabulary import (
@@ -46,9 +52,7 @@ class MidTurnCompactionResult:
     rewritten_messages: tuple[Msg, ...] | None = None
     skipped_reason: str | None = None
     publication_failure: ContextCompactionAttemptResult | None = None
-    mandatory_audit_deadline_budget: (
-        RuntimeEventOperationDeadlineBudget | None
-    ) = None
+    mandatory_audit_deadline_budget: RuntimeEventOperationDeadlineBudget | None = None
     mandatory_audit_publication_failed: bool = False
 
 
@@ -100,12 +104,14 @@ class RuntimeContextCompactor:
             else None
         )
         if current_run_start is None or current_run_start.sequence is None:
-            diagnostic, deadline_budget, publication_failed = (
-                await self._emit_skip_diagnostic(
-                    state,
-                    reason="current_run_start_missing",
-                    current_run_start=None,
-                )
+            (
+                diagnostic,
+                deadline_budget,
+                publication_failed,
+            ) = await self._emit_skip_diagnostic(
+                state,
+                reason="current_run_start_missing",
+                current_run_start=None,
             )
             return MidTurnCompactionResult(
                 compacted=False,
@@ -125,7 +131,8 @@ class RuntimeContextCompactor:
             deadline_monotonic=asyncio.get_running_loop().time() + 10.0,
         )
         boundary_events = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for raw in boundary_rows
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for raw in boundary_rows
         )
         latest_boundary = latest_completed_boundary(
             boundary_events,
@@ -136,12 +143,14 @@ class RuntimeContextCompactor:
             latest_boundary is not None
             and max_compactable_sequence <= latest_boundary.keep_after_sequence
         ):
-            diagnostic, deadline_budget, publication_failed = (
-                await self._emit_skip_diagnostic(
-                    state,
-                    reason="no_compactable_prefix_before_current_run",
-                    current_run_start=current_run_start,
-                )
+            (
+                diagnostic,
+                deadline_budget,
+                publication_failed,
+            ) = await self._emit_skip_diagnostic(
+                state,
+                reason="no_compactable_prefix_before_current_run",
+                current_run_start=current_run_start,
             )
             return MidTurnCompactionResult(
                 compacted=False,
@@ -153,12 +162,14 @@ class RuntimeContextCompactor:
 
         tail = _current_run_tail_from_state(state)
         if not tail:
-            diagnostic, deadline_budget, publication_failed = (
-                await self._emit_skip_diagnostic(
-                    state,
-                    reason="current_run_tail_missing",
-                    current_run_start=current_run_start,
-                )
+            (
+                diagnostic,
+                deadline_budget,
+                publication_failed,
+            ) = await self._emit_skip_diagnostic(
+                state,
+                reason="current_run_tail_missing",
+                current_run_start=current_run_start,
             )
             return MidTurnCompactionResult(
                 compacted=False,
@@ -169,12 +180,14 @@ class RuntimeContextCompactor:
             )
 
         if not protected_model_visible_messages_after:
-            diagnostic, deadline_budget, publication_failed = (
-                await self._emit_skip_diagnostic(
-                    state,
-                    reason="current_run_rendered_tail_missing",
-                    current_run_start=current_run_start,
-                )
+            (
+                diagnostic,
+                deadline_budget,
+                publication_failed,
+            ) = await self._emit_skip_diagnostic(
+                state,
+                reason="current_run_rendered_tail_missing",
+                current_run_start=current_run_start,
             )
             return MidTurnCompactionResult(
                 compacted=False,
@@ -328,6 +341,7 @@ class RuntimeContextCompactor:
             deadline_budget,
             receipt.publication_summary not in {"completed", "enqueued"},
         )
+
 
 def _current_run_tail_from_state(state: RunActivationWorkingState) -> list[Msg]:
     tail: list[Msg] = []

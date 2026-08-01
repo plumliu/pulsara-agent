@@ -62,6 +62,23 @@ from pulsara_agent.runtime.run_execution.prepared import PreparedRunActivationOw
 
 
 @dataclass(frozen=True, slots=True)
+class QueuedPromptRunDelivery:
+    queue_item_id: str
+    reservation_fingerprint: str
+    reservation_generation: int
+    content_semantic_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.queue_item_id
+            or not self.reservation_fingerprint.startswith("sha256:")
+            or self.reservation_generation < 1
+            or not self.content_semantic_fingerprint.startswith("sha256:")
+        ):
+            raise ValueError("queued prompt run delivery identity is malformed")
+
+
+@dataclass(frozen=True, slots=True)
 class NewRunBoundaryInput:
     identity: HostRunBoundaryIdentityFact
     user_input: str
@@ -69,6 +86,7 @@ class NewRunBoundaryInput:
     host_session_id: str
     conversation_id: str
     ingress_owner: Any
+    queued_prompt_delivery: QueuedPromptRunDelivery | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +114,7 @@ def derive_continuation_basis(
         source_basis_id=original_fact.basis_id,
         source_basis_fingerprint=original_fact.basis_fingerprint,
         owner=continuation_owner,
-        workspace_identity_fingerprint=(
-            original_fact.workspace_identity_fingerprint
-        ),
+        workspace_identity_fingerprint=(original_fact.workspace_identity_fingerprint),
         memory_domain_id=original_fact.memory_domain_id,
         permission_snapshot_id=original_fact.permission_snapshot_id,
         plan_active=original_fact.plan_active,
@@ -141,6 +157,7 @@ class PreparedNewRunBoundary:
     pending_mcp_audits: tuple[AgentEvent, ...]
     long_horizon: PreparedLongHorizonRunFacts
     diagnostics: tuple[HostRunBoundaryDiagnostic, ...]
+    queued_prompt_delivery: QueuedPromptRunDelivery | None = None
 
 
 @dataclass(frozen=True, slots=True)

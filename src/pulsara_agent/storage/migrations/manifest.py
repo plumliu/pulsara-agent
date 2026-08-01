@@ -86,8 +86,14 @@ _COMPACTION_MEMORY_EXTRACTION_RELATIONS = (
     "compaction_memory_extraction_result_candidates",
 )
 
-_MCP_CONTINUATION_RELATIONS = (
-    "mcp_continuation_secret_carriers",
+_MCP_CONTINUATION_RELATIONS = ("mcp_continuation_secret_carriers",)
+
+_TERMINAL_PRESENTATION_QUEUE_RELATIONS = (
+    "prompt_queue_accounts",
+    "prompt_queue_artifact_preparation_holds",
+    "prompt_queue_content_references",
+    "prompt_queue_items",
+    "terminal_command_receipts",
 )
 
 _RELATIONS_INTRODUCED_BY_VERSION = (
@@ -102,6 +108,7 @@ _RELATIONS_INTRODUCED_BY_VERSION = (
     (),
     _COMPACTION_MEMORY_EXTRACTION_RELATIONS,
     _MCP_CONTINUATION_RELATIONS,
+    _TERMINAL_PRESENTATION_QUEUE_RELATIONS,
 )
 _ALL_RELATIONS = tuple(
     name
@@ -206,6 +213,19 @@ _V10_RUNTIME_RELATION_PRIVILEGES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_V11_RUNTIME_RELATION_PRIVILEGES: dict[str, tuple[str, ...]] = {
+    "prompt_queue_accounts": ("SELECT", "INSERT", "UPDATE"),
+    "prompt_queue_artifact_preparation_holds": (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+    ),
+    "prompt_queue_content_references": ("SELECT", "INSERT", "DELETE"),
+    "prompt_queue_items": ("SELECT", "INSERT", "UPDATE"),
+    "terminal_command_receipts": ("SELECT", "INSERT", "UPDATE"),
+}
+
 _V5_FUNCTION_ARGUMENT_TYPES: dict[str, tuple[str, ...]] = {
     "pulsara_jsonb_text_array": ("pg_catalog.jsonb",),
     "pulsara_runtime_write_lock_key": ("pg_catalog.text", "pg_catalog.jsonb"),
@@ -252,7 +272,7 @@ _V5_RUNTIME_EXECUTABLE_FUNCTIONS = {
 
 
 def _manifest_payload(through_version: int) -> dict[str, object]:
-    if through_version < 0 or through_version > 10:
+    if through_version < 0 or through_version > 11:
         raise ValueError("unsupported manifest version")
     relations: list[dict[str, object]] = [
         _relation(
@@ -314,6 +334,16 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
                 runtime_privileges=_V10_RUNTIME_RELATION_PRIVILEGES[name],
             )
             for name in _MCP_CONTINUATION_RELATIONS
+        )
+    if through_version >= 11:
+        relations.extend(
+            _relation(
+                name,
+                writable=True,
+                through_version=through_version,
+                runtime_privileges=_V11_RUNTIME_RELATION_PRIVILEGES[name],
+            )
+            for name in _TERMINAL_PRESENTATION_QUEUE_RELATIONS
         )
     extensions: tuple[dict[str, object], ...] = ()
     if through_version >= 1:
@@ -412,7 +442,7 @@ def build_postgres_schema_manifest(
 
 
 POSTGRES_SCHEMA_MANIFESTS = tuple(
-    build_postgres_schema_manifest(version) for version in range(11)
+    build_postgres_schema_manifest(version) for version in range(12)
 )
 POSTGRES_LATEST_SCHEMA_MANIFEST = POSTGRES_SCHEMA_MANIFESTS[-1]
 PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)

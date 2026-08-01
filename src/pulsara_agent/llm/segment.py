@@ -267,10 +267,7 @@ class ModelStreamSegmentAccumulator:
         prospective_candidate_bytes = self._prospective_candidate_bytes(
             envelope, content
         )
-        if (
-            prospective_candidate_bytes
-            > self._policy.max_canonical_event_bytes
-        ):
+        if prospective_candidate_bytes > self._policy.max_canonical_event_bytes:
             if self._open.source_item_count:
                 prepared.append(
                     self._seal(
@@ -282,7 +279,9 @@ class ModelStreamSegmentAccumulator:
                     envelope, content
                 )
             if prospective_candidate_bytes > self._policy.max_canonical_event_bytes:
-                raise AssertionError("standalone segment sizing changed after validation")
+                raise AssertionError(
+                    "standalone segment sizing changed after validation"
+                )
 
         self._append_open(envelope, content)
         self._adopt_source_envelope(envelope)
@@ -291,13 +290,8 @@ class ModelStreamSegmentAccumulator:
             prepared.append(
                 self._seal(ModelStreamSegmentSealReason.HARD_CONTENT_BYTE_LIMIT)
             )
-        elif (
-            self._open.source_item_count
-            >= self._policy.max_segment_source_items
-        ):
-            prepared.append(
-                self._seal(ModelStreamSegmentSealReason.SOURCE_ITEM_LIMIT)
-            )
+        elif self._open.source_item_count >= self._policy.max_segment_source_items:
+            prepared.append(self._seal(ModelStreamSegmentSealReason.SOURCE_ITEM_LIMIT))
         return tuple(prepared)
 
     def _require_next_envelope(
@@ -367,10 +361,7 @@ class ModelStreamSegmentAccumulator:
             > self._policy.string_target_utf8_bytes
         ):
             return ModelStreamSegmentSealReason.SOFT_STRING_BYTE_TARGET
-        if (
-            self._open.codepoints + len(content)
-            > self._policy.text_target_codepoints
-        ):
+        if self._open.codepoints + len(content) > self._policy.text_target_codepoints:
             return ModelStreamSegmentSealReason.SOFT_TEXT_TOKEN_TARGET
         return None
 
@@ -448,9 +439,7 @@ class ModelStreamSegmentAccumulator:
         )
         # Use the longest legal reason for a conservative exact candidate size.
         reason = max(ModelStreamSegmentSealReason, key=lambda item: len(item.value))
-        content_utf8_bytes = active.content_utf8_bytes + len(
-            content.encode("utf-8")
-        )
+        content_utf8_bytes = active.content_utf8_bytes + len(content.encode("utf-8"))
         content_codepoints = active.codepoints + len(content)
         sizing_event = self._construct_segment_event(
             open_segment=active,
@@ -560,9 +549,7 @@ class ModelStreamSegmentAccumulator:
             "text": ModelStreamDurableSemanticKind.TEXT_BLOCK_SEGMENT,
             "thinking": ModelStreamDurableSemanticKind.THINKING_BLOCK_SEGMENT,
             "data": ModelStreamDurableSemanticKind.DATA_BLOCK_SEGMENT,
-            "tool_call": (
-                ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT
-            ),
+            "tool_call": (ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT),
         }
         durable_kind = kind_by_segment[open_segment.segment_kind]
         attribution = self._build_attribution(
@@ -784,9 +771,7 @@ class ModelStreamSegmentAccumulator:
             "durable_kind": durable_kind,
             "source_span": source_span,
             "segment_seal_reason": reason,
-            "segment_policy_contract_fingerprint": (
-                self._policy.contract_fingerprint
-            ),
+            "segment_policy_contract_fingerprint": (self._policy.contract_fingerprint),
         }
         provisional = ModelStreamSemanticAttributionFact.model_construct(
             **payload, attribution_fingerprint="pending"

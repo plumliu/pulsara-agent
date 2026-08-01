@@ -226,7 +226,9 @@ class LocalSkillProvider:
     ) -> tuple[LocalSkillManifest | None, tuple[CapabilityDiagnostic, ...]]:
         diagnostics: list[CapabilityDiagnostic] = []
         try:
-            content, too_large = _read_bounded_utf8(path, max_bytes=self.max_skill_file_bytes)
+            content, too_large = _read_bounded_utf8(
+                path, max_bytes=self.max_skill_file_bytes
+            )
         except UnicodeDecodeError:
             return None, (
                 CapabilityDiagnostic(
@@ -377,7 +379,9 @@ class LocalSkillProvider:
                 network_required=network_required,
                 auth_required=cast(SkillAuthRequired, auth_required),
                 cli_usage_kind=cast(SkillCliUsageKind, cli_usage_kind),
-                disable_model_invocation=_bool_field(raw_fields, "disable_model_invocation", default=False),
+                disable_model_invocation=_bool_field(
+                    raw_fields, "disable_model_invocation", default=False
+                ),
                 user_invocable=_bool_field(raw_fields, "user_invocable", default=True),
                 body_too_large=too_large,
             ),
@@ -437,7 +441,9 @@ def _extract_frontmatter(content: str) -> tuple[str, bool]:
     return "", False
 
 
-def _parse_frontmatter(frontmatter: str, *, path: Path) -> tuple[dict[str, Any], tuple[CapabilityDiagnostic, ...]]:
+def _parse_frontmatter(
+    frontmatter: str, *, path: Path
+) -> tuple[dict[str, Any], tuple[CapabilityDiagnostic, ...]]:
     try:
         parsed = yaml.safe_load(frontmatter) if frontmatter.strip() else {}
     except yaml.YAMLError as exc:
@@ -463,7 +469,9 @@ def _parse_frontmatter(frontmatter: str, *, path: Path) -> tuple[dict[str, Any],
     return {str(key): value for key, value in parsed.items()}, ()
 
 
-def _frontmatter_key_diagnostics(fields: dict[str, Any], *, path: Path) -> tuple[CapabilityDiagnostic, ...]:
+def _frontmatter_key_diagnostics(
+    fields: dict[str, Any], *, path: Path
+) -> tuple[CapabilityDiagnostic, ...]:
     diagnostics: list[CapabilityDiagnostic] = []
     for key in sorted(fields):
         if key in _IGNORED_SCOPE_FRONTMATTER:

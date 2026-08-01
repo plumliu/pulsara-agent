@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from time import monotonic
 from typing import cast
@@ -10,11 +12,12 @@ from pulsara_agent.event import (
     ContextCompactionMemoryExtractionRequestedEvent,
     ToolResultEndEvent,
 )
-from pulsara_agent.event_log.protocol import (
-    EventLog,
+from pulsara_agent.primitives.stored_event import (
     RawStoredEventEnvelope,
     RawTranscriptDomainPrefixFact,
 )
+
+from pulsara_agent.event_log.protocol import EventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.projection_jobs.contracts import (
     DurableProjectionJobCandidateFact,
@@ -164,7 +167,9 @@ def build_job_candidate(
         not in matching[0].accepted_event_schema_fingerprints
     ):
         raise ValueError("projection trigger event schema is unsupported")
-    event = stored.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(
+        stored.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     tool_call_id = event.tool_call_id if isinstance(event, ToolResultEndEvent) else None
     source_event_id = (
         event.id

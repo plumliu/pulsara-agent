@@ -20,12 +20,40 @@ DIRECT_EVENT_LOG_MUTATION_ALLOWLIST = {
         "RuntimeSession",
         "_commit_reduce_enqueue",
         "self.event_log",
-        "extend",
+        "commit_batch",
     ),
     (
         "runtime/session.py",
         "RuntimeSession",
         "_persist_runtime_projection_checkpoint",
+        "self.event_log",
+        "write_runtime_projection_checkpoint",
+    ),
+    (
+        "runtime/terminal_application/prompt_queue_checkpoint.py",
+        "PromptQueueCheckpointService",
+        "initialize",
+        "self.runtime_session.event_log",
+        "write_runtime_projection_checkpoint",
+    ),
+    (
+        "runtime/terminal_application/prompt_queue_checkpoint.py",
+        "PromptQueueCheckpointService",
+        "_checkpoint_once",
+        "self.runtime_session.event_log",
+        "write_runtime_projection_checkpoint",
+    ),
+    (
+        "runtime/terminal_presentation/history_checkpoint.py",
+        "PresentationHistoryProjectionCheckpointOwner",
+        "ensure_genesis",
+        "self.event_log",
+        "write_runtime_projection_checkpoint",
+    ),
+    (
+        "runtime/terminal_presentation/history_checkpoint.py",
+        "PresentationHistoryProjectionCheckpointOwner",
+        "commit_prepared_attempt",
         "self.event_log",
         "write_runtime_projection_checkpoint",
     ),
@@ -81,9 +109,7 @@ DIRECT_EVENT_LOG_MAINTENANCE_INVENTORY = Counter(
 
 def test_production_event_log_mutation_inventory_is_exact() -> None:
     observations = scan_production_event_log_mutations(PACKAGE_ROOT)
-    escapes = tuple(
-        item for item in observations if item.syntax_kind != "direct_call"
-    )
+    escapes = tuple(item for item in observations if item.syntax_kind != "direct_call")
     assert escapes == ()
 
     event_rows = {
@@ -139,7 +165,9 @@ def mutate(event_log):
     assert all(item.receiver == "event_log" for item in observations)
 
 
-def test_event_log_mutation_guard_detects_nested_aliases_but_skips_nested_scopes() -> None:
+def test_event_log_mutation_guard_detects_nested_aliases_but_skips_nested_scopes() -> (
+    None
+):
     observations = scan_source_event_log_mutations(
         """
 def mutate(event_log, enabled):

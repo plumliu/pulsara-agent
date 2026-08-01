@@ -139,7 +139,9 @@ class ContextWindowProjectionReducer:
     ) -> None:
         first = pages[0]
         if len(pages) != first.page_count:
-            raise ContextProjectionReducerError("projection rewrite page count mismatch")
+            raise ContextProjectionReducerError(
+                "projection rewrite page count mismatch"
+            )
         shared = (
             first.run_id,
             first.window_id,
@@ -205,10 +207,7 @@ class ContextWindowProjectionReducer:
                 raise ContextProjectionReducerError(
                     "projection rewrite from-representation mismatch"
                 )
-            if (
-                entry.to_projection.tool_result_sequence
-                > first.source_through_sequence
-            ):
+            if entry.to_projection.tool_result_sequence > first.source_through_sequence:
                 raise ContextProjectionReducerError(
                     "projection rewrite includes a result beyond its source high-water"
                 )

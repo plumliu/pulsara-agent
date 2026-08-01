@@ -16,9 +16,7 @@ class LLMTransportBindingUntrusted(RuntimeError):
 class LLMTransportRegistry:
     production_mode: bool = False
     _transports: dict[str, LLMTransport] = field(default_factory=dict)
-    _untrusted_bindings: dict[str, tuple[str, str, str]] = field(
-        default_factory=dict
-    )
+    _untrusted_bindings: dict[str, tuple[str, str, str]] = field(default_factory=dict)
 
     def register(self, transport: object) -> None:
         if not isinstance(transport, SanitizingLLMTransport):

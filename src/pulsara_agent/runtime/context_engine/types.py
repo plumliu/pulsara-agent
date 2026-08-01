@@ -249,9 +249,7 @@ class CompiledContext:
     prepared_ordered_transcript_projection: (
         PreparedOrderedProviderTranscriptProjection | None
     )
-    provider_causal_physical_policy: (
-        ResolvedProviderInputCausalAndPhysicalPolicyFact
-    )
+    provider_causal_physical_policy: ResolvedProviderInputCausalAndPhysicalPolicyFact
     model_visible_named_fact_semantic_selection: (
         ModelVisibleNamedFactSemanticSelectionFact
     )

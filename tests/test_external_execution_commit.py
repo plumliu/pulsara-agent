@@ -34,7 +34,9 @@ from tests.support.model_call import test_resolved_target_fact
 from tests.support.runtime_session import in_memory_runtime_session
 
 
-def test_external_requirement_retains_physical_owner_until_exact_result(tmp_path) -> None:
+def test_external_requirement_retains_physical_owner_until_exact_result(
+    tmp_path,
+) -> None:
     runtime_session_id = "runtime:test"
     context = EventContext(
         run_id="run:external-commit",
@@ -73,7 +75,9 @@ def test_external_requirement_retains_physical_owner_until_exact_result(tmp_path
             owner_id=requirement.id,
         )
         assert reservation is not None
-        assert runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 1
+        assert (
+            runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 1
+        )
 
         submission = freeze_external_tool_result_submission(
             result_block=ToolResultBlock(
@@ -88,9 +92,7 @@ def test_external_requirement_retains_physical_owner_until_exact_result(tmp_path
                 tool_name="external_lookup",
                 tool_origin="custom",
             ),
-            selected_variant_code=(
-                ToolResultRenderVariantCode.EXTERNAL_GENERIC_RESULT
-            ),
+            selected_variant_code=(ToolResultRenderVariantCode.EXTERNAL_GENERIC_RESULT),
             domain_result=None,
             terminal_payload_timing=None,
         )
@@ -121,20 +123,28 @@ def test_external_requirement_retains_physical_owner_until_exact_result(tmp_path
         stored_result = runtime.event_log.get_by_id(result.id)
         assert isinstance(stored_result, ExternalExecutionResultEvent)
         assert len(stored_result.terminal_projections) == 1
-        projection_reference = (
-            stored_result.terminal_projections[0].projection_reference
-        )
+        projection_reference = stored_result.terminal_projections[
+            0
+        ].projection_reference
         assert projection_reference.semantic_join.tool_call_id == (
             "call:external-commit"
         )
-        assert runtime.transcript_projection_document_registry.resolve(
-            projection_reference
-        ).semantic_identity.execution_semantics == ingress.execution_semantics
-        assert runtime.physical_reservation_for_owner(
-            operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
-            owner_id=requirement.id,
-        ) is None
-        assert runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 0
+        assert (
+            runtime.transcript_projection_document_registry.resolve(
+                projection_reference
+            ).semantic_identity.execution_semantics
+            == ingress.execution_semantics
+        )
+        assert (
+            runtime.physical_reservation_for_owner(
+                operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
+                owner_id=requirement.id,
+            )
+            is None
+        )
+        assert (
+            runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 0
+        )
 
     try:
         asyncio.run(scenario())
@@ -188,11 +198,16 @@ def test_external_requirement_precommit_failure_releases_all_owners(
         with pytest.raises(Exception, match="not committed"):
             await ExternalExecutionCommitPort(runtime).commit_requirement(requirement)
         assert runtime.event_log.get_by_id(requirement.id) is None
-        assert runtime.physical_reservation_for_owner(
-            operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
-            owner_id=requirement.id,
-        ) is None
-        assert runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 0
+        assert (
+            runtime.physical_reservation_for_owner(
+                operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
+                owner_id=requirement.id,
+            )
+            is None
+        )
+        assert (
+            runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 0
+        )
 
     try:
         asyncio.run(scenario())
@@ -249,8 +264,12 @@ def test_external_requirement_commit_then_raise_confirms_one_owner(
         )
         await ExternalExecutionCommitPort(runtime).commit_requirement(requirement)
         assert calls == 1
-        assert sum(event.id == requirement.id for event in runtime.event_log.iter()) == 1
-        assert runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 1
+        assert (
+            sum(event.id == requirement.id for event in runtime.event_log.iter()) == 1
+        )
+        assert (
+            runtime.checkpoint_dispatch_barrier_coordinator.active_producer_count == 1
+        )
 
         monkeypatch.setattr(
             InMemoryEventLog,
@@ -412,9 +431,7 @@ def test_external_result_reference_mismatch_preserves_reservation(tmp_path) -> N
                 tool_name="external_lookup",
                 tool_origin="custom",
             ),
-            selected_variant_code=(
-                ToolResultRenderVariantCode.EXTERNAL_GENERIC_RESULT
-            ),
+            selected_variant_code=(ToolResultRenderVariantCode.EXTERNAL_GENERIC_RESULT),
             domain_result=None,
             terminal_payload_timing=None,
         )
@@ -436,10 +453,13 @@ def test_external_result_reference_mismatch_preserves_reservation(tmp_path) -> N
             match="reference drifted",
         ):
             await port.commit_result(result)
-        assert runtime.physical_reservation_for_owner(
-            operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
-            owner_id=requirement.id,
-        ) is not None
+        assert (
+            runtime.physical_reservation_for_owner(
+                operation_kind=PhysicalOperationKind.EXTERNAL_EXECUTION,
+                owner_id=requirement.id,
+            )
+            is not None
+        )
         valid_ingress = ExternalToolResultIngressBuilder(
             build_default_tool_result_semantics_registry()
         ).bind_submission(

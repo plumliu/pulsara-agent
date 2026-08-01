@@ -344,9 +344,7 @@ def resolve_model_call(
         else ModelContextMode.DIRECT
     )
     fact = ResolvedModelCallFact(
-        resolved_model_call_id=(
-            resolved_model_call_id or f"model_call:{uuid4().hex}"
-        ),
+        resolved_model_call_id=(resolved_model_call_id or f"model_call:{uuid4().hex}"),
         purpose=purpose,
         context_mode=mode,
         target=target.fact,

@@ -50,16 +50,22 @@ class LocalSkillCapabilityProvider:
         )
         skills_by_name = {skill.name: skill for skill in discovery.skills}
         catalog_entries = tuple(
-            _catalog_entry(skill) for skill in discovery.skills if not skill.disable_model_invocation
+            _catalog_entry(skill)
+            for skill in discovery.skills
+            if not skill.disable_model_invocation
         )
         active_injections, active_diagnostics = _active_injections(
             skills_by_name,
             user_input=context.user_input,
             active_skill_names=context.active_skill_names,
         )
-        catalog = render_catalog_prompt(catalog_entries, budget_chars=self.catalog_budget_chars)
+        catalog = render_catalog_prompt(
+            catalog_entries, budget_chars=self.catalog_budget_chars
+        )
         active = render_active_skill_prompt(active_injections)
-        health_diagnostics = self.skill_health_resolver.diagnostics_for_active_skills(active_injections)
+        health_diagnostics = self.skill_health_resolver.diagnostics_for_active_skills(
+            active_injections
+        )
         diagnostics = (
             *discovery.diagnostics,
             *active_diagnostics,
@@ -140,7 +146,9 @@ def _active_injections(
                 base_dir=skill.base_dir,
                 location=skill.location,
                 content=skill.content,
-                reason="host_command" if name in active_skill_names else "explicit_user_mention",
+                reason="host_command"
+                if name in active_skill_names
+                else "explicit_user_mention",
                 suggested_tools=skill.suggested_tools,
                 required_binaries=skill.required_binaries,
                 optional_binaries=skill.optional_binaries,
@@ -160,5 +168,9 @@ def _explicitly_mentions_skill(user_input: str, skill_name: str) -> bool:
     prefix_boundary = r"(?<![A-Za-z0-9_-])"
     return bool(
         re.search(prefix_boundary + r"\$" + escaped + token_boundary, user_input)
-        or re.search(prefix_boundary + r"skill:" + escaped + token_boundary, user_input, flags=re.IGNORECASE)
+        or re.search(
+            prefix_boundary + r"skill:" + escaped + token_boundary,
+            user_input,
+            flags=re.IGNORECASE,
+        )
     )

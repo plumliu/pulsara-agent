@@ -68,7 +68,8 @@ from pulsara_agent.runtime.terminal.notification import (
     TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
     TerminalNotificationAccountCoordinator,
 )
-from pulsara_agent.event_log import InMemoryEventLog, RawRuntimeProjectionCheckpoint
+from pulsara_agent.event_log import InMemoryEventLog
+from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
 from pulsara_agent.runtime.event_write_service import PendingRuntimeEventWriteError
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal

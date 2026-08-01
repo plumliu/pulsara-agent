@@ -503,6 +503,18 @@ def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(
         assert graph.edges[0].edge_kind == "spawn"
         assert graph.edges[0].payload_artifact_id == task_artifact_id
 
+        operational = parent.ui_operational_activity_store.snapshot()
+        subagent_activity = tuple(
+            item
+            for item in operational.ordered_activity_cells
+            if item.activity_kind == "subagent_activity"
+        )
+        assert len(subagent_activity) == 1
+        assert subagent_activity[0].owner_id == subagent.subagent_run_id
+        assert subagent_activity[0].bounded_public_text == (
+            "Subagent worker-a is running…"
+        )
+
     asyncio.run(run())
 
 
@@ -713,6 +725,12 @@ def test_wait_result_records_consumption_edge_without_delivered_event(tmp_path) 
 
         graph = runtime.graph()
         assert graph.nodes[0].status == "completed"
+        assert not tuple(
+            item
+            for item in parent.ui_operational_activity_store.snapshot().ordered_activity_cells
+            if item.activity_kind == "subagent_activity"
+            and item.owner_id == subagent.subagent_run_id
+        )
         assert graph.nodes[0].consumed_by_wait is True
         assert graph.nodes[0].delivered is False
 
@@ -1503,12 +1521,12 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_create_agent_tasks_materializes_batch_with_event_log_extend(
+def test_create_agent_tasks_materializes_batch_with_event_log_commit_batch(
     tmp_path, monkeypatch
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(_control_port(runtime))
-    extend_calls = 0
+    commit_batch_calls = 0
     original_event_log = parent.event_log
 
     class BatchOnlyEventLog:
@@ -1534,9 +1552,21 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(
             expected_last_sequence=None,
             deadline_monotonic=None,
         ):
-            nonlocal extend_calls
-            extend_calls += 1
-            return original_event_log.extend(
+            del events, expected_last_sequence, deadline_monotonic
+            raise AssertionError(
+                "create_agent_tasks must use the physical batch receipt boundary"
+            )
+
+        def commit_batch(
+            self,
+            events,
+            *,
+            expected_last_sequence=None,
+            deadline_monotonic=None,
+        ):
+            nonlocal commit_batch_calls
+            commit_batch_calls += 1
+            return original_event_log.commit_batch(
                 events,
                 expected_last_sequence=expected_last_sequence,
                 deadline_monotonic=deadline_monotonic,
@@ -1576,7 +1606,7 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(
         )
 
         assert result.status is ToolResultState.SUCCESS
-        assert extend_calls == 1
+        assert commit_batch_calls == 1
         payload = json.loads(result.output)
         assert payload["status"] == "accepted"
         assert payload["started_count"] == 2

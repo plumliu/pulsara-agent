@@ -24,6 +24,7 @@ from pulsara_agent.primitives.provider_input import (
     DerivedToolResultMessageSourceAttributionFact,
     DirectStableMessageSemanticSourceFact,
     DirectStableMessageSourceAttributionFact,
+    SameBatchUserSteerAttributionFact,
     LifecycleNoteSemanticSourceFact,
     LifecycleNoteSourceAttributionFact,
     ProviderCausalPlacementSemanticFact,
@@ -48,6 +49,9 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptProjectionLeafEntryReferenceFact,
     TranscriptToolPairLeafEntryFact,
     TranscriptToolResultLeafEntryFact,
+)
+from pulsara_agent.primitives.transcript_message_semantics import (
+    build_inline_text_message_semantics,
 )
 from pulsara_agent.llm.provider_input_materialization import (
     freeze_provider_message_fragment,
@@ -121,8 +125,189 @@ class PreparedOrderedProviderTranscriptProjection:
     source_event_refs_by_message: tuple[tuple[ContextEventReferenceFact, ...], ...]
 
 
-def build_default_provider_transcript_source_selection_contract(
-) -> ProviderTranscriptSourceSelectionContractFact:
+def append_same_batch_user_steer(
+    *,
+    prepared: PreparedOrderedProviderTranscriptProjection,
+    runtime_session_id: str,
+    context_id: str,
+    queue_item_id: str,
+    reservation_fingerprint: str,
+    expected_user_steer_event_id: str,
+    message_id: str,
+    text: str,
+    content_semantic_fingerprint: str,
+    policy: ResolvedProviderInputCausalAndPhysicalPolicyFact,
+) -> PreparedOrderedProviderTranscriptProjection:
+    """Append a user steer that will become durable in the same ModelStart batch.
+
+    The unit uses the exact semantic constructors consumed by the committed
+    transcript reducer.  Its physical attribution names the pending same-batch
+    event without pretending that an EventLog sequence already exists.
+    """
+
+    base = prepared.projection
+    if len(base.ordered_units) >= policy.max_projection_units_per_manifest:
+        raise ProviderInputPhysicalPolicyError(
+            ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_UNIT_BOUND_EXCEEDED,
+            "same-batch user steer exceeds provider transcript unit bound",
+        )
+    _block, _provider, leaf = build_inline_text_message_semantics(
+        text=text,
+        role="user",
+        name="user",
+        segment="current_run_tail",
+    )
+    message = LLMMessage.user(
+        text,
+        causal_occurrence_semantic_fingerprint=context_fingerprint(
+            "canonical-human-message-occurrence:v1", message_id
+        ),
+    )
+    fragment = freeze_provider_message_fragment(message)
+    source = build_frozen_fact(
+        DirectStableMessageSemanticSourceFact,
+        schema_version="direct_stable_message_semantic_source.v1",
+        canonical_message_id=message_id,
+        stable_entry_semantic_fingerprint=leaf.semantic_fingerprint,
+    )
+    same_batch = build_frozen_fact(
+        SameBatchUserSteerAttributionFact,
+        schema_version="same_batch_user_steer_attribution.v1",
+        runtime_session_id=runtime_session_id,
+        queue_item_id=queue_item_id,
+        reservation_fingerprint=reservation_fingerprint,
+        expected_user_steer_event_id=expected_user_steer_event_id,
+        canonical_message_id=message_id,
+        content_semantic_fingerprint=content_semantic_fingerprint,
+    )
+    source_attribution = build_frozen_fact(
+        DirectStableMessageSourceAttributionFact,
+        schema_version="direct_stable_message_source_attribution.v1",
+        same_batch_user_steer=same_batch,
+        source_semantic_fingerprint=source.source_semantic_fingerprint,
+    )
+    wire = build_frozen_fact(
+        ProviderWireMessageSemanticFact,
+        schema_version="provider_wire_message_semantic.v1",
+        provider_message=fragment,
+        wire_framing_contract_fingerprint=WIRE_FRAMING_CONTRACT_FINGERPRINT,
+    )
+    node = build_frozen_fact(
+        ProviderTranscriptNodeIdentityFact,
+        schema_version="provider_transcript_node_identity.v1",
+        source_identity_fingerprint=source.source_semantic_fingerprint,
+        wire_semantic_fingerprint=wire.wire_semantic_fingerprint,
+    )
+    predecessor = (
+        base.ordered_units[-1].causal_placement.node_identity.node_identity_fingerprint
+        if base.ordered_units
+        else None
+    )
+    position = build_frozen_fact(
+        ProviderProjectionPositionFact,
+        schema_version="provider_projection_position.v1",
+        projection_index=len(base.ordered_units),
+        predecessor_node_identity_fingerprint=predecessor,
+        position_contract_fingerprint=POSITION_CONTRACT_FINGERPRINT,
+    )
+    causal = build_frozen_fact(
+        ProviderCausalPlacementSemanticFact,
+        schema_version="provider_causal_placement_semantic.v1",
+        source=source,
+        node_identity=node,
+        position=position,
+        visible_causal_predecessor_node_identity_fingerprints=(),
+    )
+    invocation = build_frozen_fact(
+        ProviderInvocationClassificationAttributionFact,
+        schema_version="provider_invocation_classification_attribution.v1",
+        invocation_classification="current_run_tail",
+        compile_context_id=context_id,
+        section_id="transcript:current_run_tail",
+    )
+    unit = build_frozen_fact(
+        ProviderOrderedTranscriptUnitFact,
+        schema_version="provider_ordered_transcript_unit.v2",
+        wire_semantic=wire,
+        causal_placement=causal,
+        source_attribution=source_attribution,
+        invocation_attribution=invocation,
+        unit_causal_semantic_fingerprint=context_fingerprint(
+            "provider-ordered-transcript-unit-causal-semantic:v2",
+            (wire.wire_semantic_fingerprint, causal.causal_semantic_fingerprint),
+        ),
+    )
+    units = (*base.ordered_units, unit)
+    wire_accumulator = _ordered_accumulator(
+        "provider-ordered-transcript-wire:v2",
+        tuple(item.wire_semantic.wire_semantic_fingerprint for item in units),
+    )
+    causal_accumulator = _ordered_accumulator(
+        "provider-ordered-transcript-causal:v2",
+        tuple(item.unit_causal_semantic_fingerprint for item in units),
+    )
+    causal_proof = context_fingerprint(
+        "provider-ordered-transcript-causal-order-proof:v2",
+        tuple(
+            (
+                item.causal_placement.node_identity.node_identity_fingerprint,
+                item.causal_placement.position.position_fingerprint,
+                item.causal_placement.visible_causal_predecessor_node_identity_fingerprints,
+            )
+            for item in units
+        ),
+    )
+    # The canonical transcript authority was frozen before this same-batch
+    # event exists.  Keep that exact authority identity here; the appended
+    # unit carries the pending steer semantic and attribution independently.
+    # Recomputing a future TranscriptCompileInput fingerprint would require a
+    # physical EventLog sequence that is assigned only at commit time and
+    # would therefore either guess or make the candidate self-referential.
+    stable_transcript = base.stable_transcript_semantic_fingerprint
+    semantic = context_fingerprint(
+        "provider-ordered-transcript-projection-semantic:v2",
+        {
+            "rendering_contract_fingerprint": base.rendering_contract_fingerprint,
+            "source_selection_contract_fingerprint": base.source_selection_contract_fingerprint,
+            "resolved_causal_physical_policy_fingerprint": base.resolved_causal_physical_policy_fingerprint,
+            "stable_transcript_semantic_fingerprint": stable_transcript,
+            "unit_count": len(units),
+            "ordered_wire_semantic_accumulator": wire_accumulator,
+            "ordered_causal_semantic_accumulator": causal_accumulator,
+            "causal_order_proof_fingerprint": causal_proof,
+        },
+    )
+    projection = build_frozen_fact(
+        ProviderOrderedTranscriptProjectionFact,
+        schema_version="provider_ordered_transcript_projection.v2",
+        rendering_contract_fingerprint=base.rendering_contract_fingerprint,
+        source_selection_contract_fingerprint=base.source_selection_contract_fingerprint,
+        resolved_causal_physical_policy_fingerprint=base.resolved_causal_physical_policy_fingerprint,
+        stable_transcript_semantic_fingerprint=stable_transcript,
+        ordered_units=units,
+        ordered_wire_semantic_accumulator=wire_accumulator,
+        ordered_causal_semantic_accumulator=causal_accumulator,
+        causal_order_proof_fingerprint=causal_proof,
+        projection_semantic_fingerprint=semantic,
+    )
+    if len(canonical_json_bytes(projection.model_dump(mode="json"))) > (
+        policy.max_projection_canonical_bytes_per_manifest
+    ):
+        raise ProviderInputPhysicalPolicyError(
+            ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_BYTE_BOUND_EXCEEDED,
+            "same-batch user steer exceeds provider transcript byte bound",
+        )
+    return PreparedOrderedProviderTranscriptProjection(
+        projection=projection,
+        identity=projection_identity(projection),
+        lowered_messages=(*prepared.lowered_messages, message),
+        source_event_refs_by_message=(*prepared.source_event_refs_by_message, ()),
+    )
+
+
+def build_default_provider_transcript_source_selection_contract() -> (
+    ProviderTranscriptSourceSelectionContractFact
+):
     rules = (
         build_frozen_fact(
             ProviderTranscriptSourceSelectionRuleFact,
@@ -198,9 +383,7 @@ def build_default_resolved_causal_physical_policy(
         max_non_tool_transcript_units_per_operation=256,
         max_visible_causal_predecessors_per_unit=130,
         max_projection_units_per_manifest=16_384,
-        max_projection_canonical_bytes_per_manifest=(
-            max_projection_canonical_bytes
-        ),
+        max_projection_canonical_bytes_per_manifest=(max_projection_canonical_bytes),
         max_generation_root_units=128,
         max_initial_generation_units=16_640,
         max_transcript_delta_units_per_append=384,
@@ -390,9 +573,7 @@ def build_ordered_provider_transcript_projection(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_TOOL_CALL_FAN_IN_EXCEEDED,
             "provider causal edge fan-in exceeds resolved policy",
         )
-    wire_values = tuple(
-        item.wire_semantic.wire_semantic_fingerprint for item in units
-    )
+    wire_values = tuple(item.wire_semantic.wire_semantic_fingerprint for item in units)
     causal_values = tuple(item.unit_causal_semantic_fingerprint for item in units)
     wire_accumulator = _ordered_accumulator(
         "provider-ordered-transcript-wire:v2", wire_values
@@ -539,7 +720,9 @@ def _stable_entry_indexes(stable_entries):
             key = entry.ordinal.value
             target = results
         if key in target:
-            raise ProviderOrderedProjectionError("stable transcript entry identity repeats")
+            raise ProviderOrderedProjectionError(
+                "stable transcript entry identity repeats"
+            )
         target[key] = entry
     return messages, pairs, results
 
@@ -560,7 +743,9 @@ def _source_identity(
 ):
     if lowered_source_kind == "rollup_observation":
         if not source_event_refs:
-            raise ProviderOrderedProjectionError("rollup observation lacks source events")
+            raise ProviderOrderedProjectionError(
+                "rollup observation lacks source events"
+            )
         note_semantic = context_fingerprint(
             "provider-rollup-observation-semantic:v1",
             freeze_provider_message_fragment(provider_message).semantic_fingerprint,

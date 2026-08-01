@@ -78,10 +78,15 @@ def load_config(path: Path = _DEFAULT_CONFIG_PATH) -> EvalConfig:
     raw_gates = payload.get("gates") or {}
     gates = EvalGates(
         overall_recall_at_k_min=float(
-            raw_gates.get("overall_recall_at_k_min", DEFAULT_GATES.overall_recall_at_k_min)
+            raw_gates.get(
+                "overall_recall_at_k_min", DEFAULT_GATES.overall_recall_at_k_min
+            )
         ),
         positive_slice_recall_at_k_min=float(
-            raw_gates.get("positive_slice_recall_at_k_min", DEFAULT_GATES.positive_slice_recall_at_k_min)
+            raw_gates.get(
+                "positive_slice_recall_at_k_min",
+                DEFAULT_GATES.positive_slice_recall_at_k_min,
+            )
         ),
         overall_miss_rate_max=float(
             raw_gates.get("overall_miss_rate_max", DEFAULT_GATES.overall_miss_rate_max)
@@ -178,7 +183,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     prediction_payload = json.loads(args.predictions.read_text(encoding="utf-8"))
     if "candidate_predictions" in prediction_payload:
         candidate_predictions = prediction_payload["candidate_predictions"]
-        destructive_predictions = prediction_payload.get("destructive_action_predictions")
+        destructive_predictions = prediction_payload.get(
+            "destructive_action_predictions"
+        )
     else:
         # Backward-compatible report mode. A legacy candidate-only payload can
         # still be inspected, but --gate fails closed because planner-action

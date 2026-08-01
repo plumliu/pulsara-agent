@@ -180,7 +180,9 @@ class MemoryLifecycle:
             },
         )
 
-    def apply_mutation(self, mutation: "LifecycleMutation", *, graph_id: str | None = None) -> None:
+    def apply_mutation(
+        self, mutation: "LifecycleMutation", *, graph_id: str | None = None
+    ) -> None:
         for node_id, document in mutation.final_documents.items():
             self.graph.put_jsonld(document, graph_id=graph_id)
 
@@ -189,6 +191,7 @@ class MemoryLifecycle:
 class LifecycleMutation:
     final_documents: dict[str, dict[str, Any]]
     event_documents: dict[str, dict[str, Any]]
+
 
 def _memory_event_fields(document: dict[str, Any]) -> dict[str, str]:
     return {
@@ -210,7 +213,9 @@ def _document_memory_type(document: dict[str, Any]) -> str:
             memory.OBSERVATION.name,
         }:
             return str(value)
-    raise ValueError(f"document is not a canonical memory node: {document.get('@id')!r}")
+    raise ValueError(
+        f"document is not a canonical memory node: {document.get('@id')!r}"
+    )
 
 
 def _append_node_ref(document: dict[str, Any], predicate: str, target_id: str) -> None:
@@ -237,7 +242,9 @@ def _clone_doc(document: dict[str, Any]) -> dict[str, Any]:
     cloned: dict[str, Any] = {}
     for key, value in document.items():
         if isinstance(value, list):
-            cloned[key] = [item.copy() if isinstance(item, dict) else item for item in value]
+            cloned[key] = [
+                item.copy() if isinstance(item, dict) else item for item in value
+            ]
         elif isinstance(value, dict):
             cloned[key] = value.copy()
         else:

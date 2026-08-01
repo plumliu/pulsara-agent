@@ -91,6 +91,8 @@ _OUTPUT_DOCUMENT_SCHEMA_FINGERPRINT = context_fingerprint(
     "compaction-memory-extraction-output-document-schema:v1",
     "compaction_memory_extraction_output.v1",
 )
+
+
 def build_compaction_memory_extraction_contract() -> (
     CompactionMemoryExtractionContractFact
 ):

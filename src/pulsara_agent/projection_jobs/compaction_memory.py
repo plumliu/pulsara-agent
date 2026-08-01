@@ -69,7 +69,9 @@ class CompactionMemoryNoEligibleEvidenceResultSemanticFact(FrozenFactBase):
     result_semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
-    def _canonical_empty(self) -> "CompactionMemoryNoEligibleEvidenceResultSemanticFact":
+    def _canonical_empty(
+        self,
+    ) -> "CompactionMemoryNoEligibleEvidenceResultSemanticFact":
         if (
             self.evidence_set_semantic_fingerprint
             != CANONICAL_EMPTY_COMPACTION_MEMORY_EVIDENCE_SET_FINGERPRINT
@@ -443,9 +445,7 @@ def result_candidate_installation_guard(
 ) -> ResultCandidateInstallationGuard:
     payload = {
         "result_candidate_id": result_candidate.result_candidate_id,
-        "result_candidate_fingerprint": (
-            result_candidate.result_candidate_fingerprint
-        ),
+        "result_candidate_fingerprint": (result_candidate.result_candidate_fingerprint),
         "job_id": result_candidate.job_id,
         "source_job_state_revision": source_job_state_revision,
         "source_job_lease_generation": source_job_lease_generation,

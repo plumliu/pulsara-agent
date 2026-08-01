@@ -98,9 +98,7 @@ def test_mixed_elicitation_requires_exact_full_round_and_explicit_url_consent(
             opened_urls.append(url)
             return True
 
-        monkeypatch.setattr(
-            "pulsara_agent.runtime.mcp.browser.webbrowser.open", _open
-        )
+        monkeypatch.setattr("pulsara_agent.runtime.mcp.browser.webbrowser.open", _open)
         leg, private_urls = _mixed_input_leg()
         browser = SystemMcpExternalBrowserPort()
         owner = build_mcp_elicitation_batch_owner(
@@ -140,9 +138,7 @@ def test_mixed_elicitation_requires_exact_full_round_and_explicit_url_consent(
             consent_receipt_fingerprint="consent" * 8,
         )
         assert outcome.disposition is McpUrlLaunchDisposition.LAUNCHED
-        assert opened_urls == [
-            "https://example.com/authorize?state=private-canary"
-        ]
+        assert opened_urls == ["https://example.com/authorize?state=private-canary"]
         assert owner.frozen_resolution is None
 
         owner.confirm_url_retry(request_key="login")
@@ -153,16 +149,16 @@ def test_mixed_elicitation_requires_exact_full_round_and_explicit_url_consent(
         assert owner.begin_commit() is frozen
         owner.confirm_commit("full")
         assert owner.state is McpElicitationBatchState.FULL
-        await owner.drain(
-            deadline_monotonic=asyncio.get_running_loop().time() + 1.0
-        )
+        await owner.drain(deadline_monotonic=asyncio.get_running_loop().time() + 1.0)
         owner.retire()
         assert owner.state is McpElicitationBatchState.RETIRED
 
     asyncio.run(run())
 
 
-def test_input_required_state_only_schedule_and_unadvertised_method_are_closed() -> None:
+def test_input_required_state_only_schedule_and_unadvertised_method_are_closed() -> (
+    None
+):
     assert tuple(state_only_retry_delay(index) for index in range(1, 7)) == (
         0.05,
         0.1,
@@ -251,9 +247,7 @@ def test_url_launch_caller_cancellation_detaches_from_physical_owner() -> None:
         with pytest.raises(asyncio.CancelledError):
             await waiter
         browser.release.set()
-        await owner.drain(
-            deadline_monotonic=asyncio.get_running_loop().time() + 1.0
-        )
+        await owner.drain(deadline_monotonic=asyncio.get_running_loop().time() + 1.0)
         login_slot = next(
             slot for slot in owner.item_slots if slot.request.key == "login"
         )
@@ -276,9 +270,7 @@ def test_continuation_bounds_are_enforced_at_lowering_and_round_freeze() -> None
         "retryable_payload": retryable,
         "operation_deadline_monotonic": 10_000.0,
         "commitment_key_id": "test-key",
-        "keyed_commitment": (
-            lambda _domain, _payload: "hmac-sha256:" + "a" * 64
-        ),
+        "keyed_commitment": (lambda _domain, _payload: "hmac-sha256:" + "a" * 64),
         "elicitation_advertised": True,
     }
     form_request = {
@@ -354,9 +346,7 @@ def test_continuation_bounds_are_enforced_at_lowering_and_round_freeze() -> None
             content_present=True,
             content={"email": "x" * 1024},
         )
-    email_slot = next(
-        slot for slot in owner.item_slots if slot.request.key == "email"
-    )
+    email_slot = next(slot for slot in owner.item_slots if slot.request.key == "email")
     assert email_slot.response is None
     assert owner.frozen_resolution is None
     owner.retire()

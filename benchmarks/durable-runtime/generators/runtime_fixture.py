@@ -216,9 +216,7 @@ async def bootstrap_benchmark_root_run(
     ingress_semantic = build_frozen_fact(
         HostRunIngressSemanticFact,
         schema_version="host_run_ingress_semantic.v1",
-        ordered_current_input_semantic_fingerprints=(
-            human_input.semantic_fingerprint,
-        ),
+        ordered_current_input_semantic_fingerprints=(human_input.semantic_fingerprint,),
     )
     ingress_attribution = build_frozen_fact(
         HostRunIngressAttributionFact,
@@ -227,9 +225,7 @@ async def bootstrap_benchmark_root_run(
         host_session_id=f"host:benchmark:{runtime_session.runtime_session_id}",
         conversation_id=None,
         observed_at_utc=BENCHMARK_OBSERVED_AT_UTC,
-        ingress_semantic_fingerprint=(
-            ingress_semantic.ingress_semantic_fingerprint
-        ),
+        ingress_semantic_fingerprint=(ingress_semantic.ingress_semantic_fingerprint),
         ordered_item_placements=(ingress_placement,),
     )
     host_run_ingress = build_frozen_fact(
@@ -273,9 +269,7 @@ async def bootstrap_benchmark_root_run(
         long_horizon=prepared_long_horizon.contract,
         child_rollout_subaccount=None,
         mcp_installation_id=mcp_installation_id,
-        mcp_installation_owner_runtime_session_id=(
-            runtime_session.runtime_session_id
-        ),
+        mcp_installation_owner_runtime_session_id=(runtime_session.runtime_session_id),
         run_entry_kind="host",
         current_user_message=current_user,
         host_run_ingress=host_run_ingress,

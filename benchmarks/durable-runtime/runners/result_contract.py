@@ -84,12 +84,7 @@ class BenchmarkMetricAggregateFact(FrozenResultFact):
 
     @model_validator(mode="after")
     def _ordered_statistics(self) -> "BenchmarkMetricAggregateFact":
-        if not (
-            self.minimum
-            <= self.median
-            <= self.p95_nearest_rank
-            <= self.maximum
-        ):
+        if not (self.minimum <= self.median <= self.p95_nearest_rank <= self.maximum):
             raise ValueError("aggregate metric statistics are not ordered")
         return self
 
@@ -289,9 +284,7 @@ class ContextBenchmarkSampleResultFact(FrozenResultFact):
         point_ids = tuple(item.point_id for item in self.compile_points)
         if len(point_ids) != len(set(point_ids)):
             raise ValueError("context compile point IDs must be unique")
-        sequences = tuple(
-            item.source_through_sequence for item in self.compile_points
-        )
+        sequences = tuple(item.source_through_sequence for item in self.compile_points)
         if sequences != tuple(sorted(sequences)):
             raise ValueError("context compile point high-water must be monotonic")
         return self
@@ -335,9 +328,7 @@ def capture_benchmark_environment(
         "postgres_pool_max_connections": pool.max_connections,
         "postgres_critical_write_reserve": pool.critical_write_reserve,
         "postgres_bounded_read_capacity": pool.bounded_read_capacity,
-        "postgres_default_lease_timeout_seconds": (
-            pool.default_lease_timeout_seconds
-        ),
+        "postgres_default_lease_timeout_seconds": (pool.default_lease_timeout_seconds),
     }
     postgres = (
         None
@@ -432,12 +423,8 @@ def _capture_postgres_identity(
     return PostgresRuntimeIdentityFact(
         server_version=str(version_row["server_version"]),
         configuration_fingerprint=_fingerprint(settings),
-        connection_pool_fingerprint=(
-            database_lease.connection_pool_policy_fingerprint
-        ),
-        migration_head_version=(
-            database_lease.schema_binding.migration_head_version
-        ),
+        connection_pool_fingerprint=(database_lease.connection_pool_policy_fingerprint),
+        migration_head_version=(database_lease.schema_binding.migration_head_version),
         durable_registry_prefix_fingerprint=(
             database_lease.schema_binding.durable_registry_prefix_fingerprint
         ),

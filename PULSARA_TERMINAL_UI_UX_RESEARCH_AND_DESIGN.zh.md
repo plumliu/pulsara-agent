@@ -2,6 +2,8 @@
 
 > 文档性质：竞品代码真值调研 + Pulsara Terminal 产品设计基线 + 规范索引
 > 状态：ACTIVE PRODUCT BASELINE；Bubble Tea v2为长期一等Terminal客户端的provisional selection，须先通过S0 feasibility gate
+>
+> 当前实施边界（2026-08-01）：renderer-neutral Python infrastructure hard cut独立推进；S0 feasibility、全部`TUI-BT-*`、Go packaging与默认TTY activation均为`DEFERRED`，不计入本轮完成口径。
 > 规范口径：本文拥有`TUI-UX-*`产品行为与跨规格总边界；其中保留的DTO、算法和伪代码用于解释设计来源，不再充当唯一implementation authority
 > 调研对象：
 >

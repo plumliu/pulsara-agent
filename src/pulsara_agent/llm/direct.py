@@ -64,8 +64,7 @@ async def collect_direct_model_call_handle(
         event
         for event in completion.committed_events
         if isinstance(event, ModelCallEndEvent)
-        and event.resolved_model_call_id
-        == expected_call.fact.resolved_model_call_id
+        and event.resolved_model_call_id == expected_call.fact.resolved_model_call_id
     )
     if len(model_ends) != 1:
         raise DirectModelCallCollectionError(

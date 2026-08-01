@@ -59,9 +59,7 @@ class CompactionHumanEvidenceManifestPreparationIdentity(FrozenRuntimeStateBase)
         return self
 
 
-class CompactionHumanEvidenceManifestPreparationFailureSnapshot(
-    FrozenRuntimeStateBase
-):
+class CompactionHumanEvidenceManifestPreparationFailureSnapshot(FrozenRuntimeStateBase):
     failure_stage: Literal[
         "page_content_write",
         "page_write",
@@ -180,14 +178,10 @@ class CompactionMemoryExtractionOutputFact(FrozenRuntimeStateBase):
     schema_version: Literal["compaction_memory_extraction_output.v1"] = (
         "compaction_memory_extraction_output.v1"
     )
-    candidates: tuple[CompactionMemoryPreferenceProposalFact, ...] = Field(
-        max_length=3
-    )
+    candidates: tuple[CompactionMemoryPreferenceProposalFact, ...] = Field(max_length=3)
 
 
-class CompactionMemoryExtractionSettlementWriteAttemptIdentity(
-    FrozenRuntimeStateBase
-):
+class CompactionMemoryExtractionSettlementWriteAttemptIdentity(FrozenRuntimeStateBase):
     result_candidate_id: str
     result_candidate_fingerprint: str
     settlement_generation: int
@@ -346,4 +340,8 @@ def build_settlement_write_attempt(
     )
 
 
-__all__ = [name for name in globals() if name.startswith(("Background", "Compaction", "Driver"))]
+__all__ = [
+    name
+    for name in globals()
+    if name.startswith(("Background", "Compaction", "Driver"))
+]

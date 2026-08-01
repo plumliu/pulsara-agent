@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from time import monotonic
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, cast
 from uuid import uuid4
 
 from pulsara_agent.event import (
@@ -28,6 +31,7 @@ from pulsara_agent.event import (
     ContextWindowCompactionFailedEvent,
     ContextWindowCompactionStartedEvent,
     ContextWindowOpenedEvent,
+    DataBlockSegmentEvent,
     EventContext,
     ExternalExecutionResultEvent,
     McpContinuationDispatchReservedEvent,
@@ -48,6 +52,12 @@ from pulsara_agent.event import (
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
     RequireExternalExecutionEvent,
+    SubagentPhaseReportedEvent,
+    SubagentRunCancelledEvent,
+    SubagentRunCompletedEvent,
+    SubagentRunFailedEvent,
+    SubagentRunStartedEvent,
+    SubagentRunSuspendedEvent,
     TerminalNotificationReservationCreatedEvent,
     TerminalNotificationReservationReleasedEvent,
     TerminalProcessCompletedEvent,
@@ -57,6 +67,9 @@ from pulsara_agent.event import (
     TerminalProcessMonitorTerminatedEvent,
     TerminalProcessObservationDeliveryDeferredEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
+    TextBlockSegmentEvent,
+    ThinkingBlockSegmentEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolResultEndEvent,
     ToolResultDataDeltaEvent,
     ToolResultStartEvent,
@@ -72,8 +85,6 @@ from pulsara_agent.event_log import (
     EventLog,
     EventLogWriteConflict,
     InMemoryEventLog,
-    RawRuntimeProjectionCheckpoint,
-    RawTranscriptDomainPrefixFact,
     DEFAULT_EVENT_SCHEMA_REGISTRY,
 )
 from pulsara_agent.event_log.protocol import EventLogTransactionCompanion
@@ -84,6 +95,10 @@ from pulsara_agent.primitives.context import (
     ContextStaticInstructionFact,
     canonical_json_bytes,
     context_fingerprint,
+)
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationConsumerKind,
@@ -120,6 +135,11 @@ from pulsara_agent.runtime.terminal import (
     TerminalRuntimeBinding,
     TerminalSessionManager,
 )
+from pulsara_agent.runtime.terminal_presentation import (
+    UiCommittedEventTap,
+    UiOperationalActivityStore,
+)
+from pulsara_agent.primitives.terminal_presentation import LiveCommittedFoldResult
 
 
 from pulsara_agent.runtime.tool_artifacts import (
@@ -147,9 +167,16 @@ from pulsara_agent.ports.event_write import (
     EventReconciliationRequired,
     EventWriteCancelled,
     EventWriteResult,
+    business_accounting_partition_fingerprint,
     event_batch_commit_outcome_from_error as _base_event_batch_commit_outcome,
 )
 from pulsara_agent.ports.mcp import McpContinuationTransactionAuthority
+from pulsara_agent.ports.stored_event import (
+    CommittedReducerIngressPort,
+    CommittedReducerRebuildPort,
+    GroupingIndependentOwnedEventReducerAdapter,
+    StoredEventBatchCommitReceipt,
+)
 
 
 RuntimeTransactionCompanion = (
@@ -220,8 +247,8 @@ class PublisherSequenceGapError(RuntimeError):
 class _CommittedReducerRegistration:
     reducer_id: str
     through_sequence: int
-    apply_committed: Callable[[tuple[AgentEvent, ...]], None]
-    rebuild_committed: Callable[[tuple[AgentEvent, ...]], None] | None = None
+    ingress: CommittedReducerIngressPort
+    rebuild_owner: CommittedReducerRebuildPort | None = None
     reconciliation_required: bool = False
     last_error: str | None = None
 
@@ -355,6 +382,23 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    ui_committed_event_tap: UiCommittedEventTap = field(init=False, repr=False)
+    ui_operational_activity_store: UiOperationalActivityStore = field(
+        init=False, repr=False
+    )
+    presentation_history_materialization_policy: Any = field(init=False, repr=False)
+    presentation_purpose_policy_registry: Any = field(init=False, repr=False)
+    presentation_audit_extractor_binding: Any = field(init=False, repr=False)
+    presentation_history_checkpoint_owner: Any = field(init=False, repr=False)
+    terminal_presentation_foundation_service: Any = field(init=False, repr=False)
+    prompt_queue_projection_store: Any = field(init=False, repr=False)
+    prompt_queue_artifact_storage: Any = field(init=False, repr=False)
+    terminal_command_receipt_storage: Any = field(init=False, repr=False)
+    prompt_queue_mutation_service: Any = field(init=False, repr=False)
+    prompt_queue_checkpoint_service: Any = field(init=False, repr=False)
+    _presentation_restore_range: Any = field(init=False, repr=False, default=None)
+    _presentation_restore_fold: Any = field(init=False, repr=False, default=None)
+    _transcript_reducer_id: str = field(init=False, repr=False)
     provider_input_generation_store: Any = field(
         init=False,
         repr=False,
@@ -485,6 +529,18 @@ class RuntimeSession:
         default=None, init=False, repr=False
     )
     _active_run_monitor_safe_point_commit_guard_factory: (
+        Callable[..., AbstractContextManager[None]] | None
+    ) = field(default=None, init=False, repr=False)
+    _active_run_prompt_steer_safe_point_provider: (
+        Callable[[Any, int], Awaitable[Any]] | None
+    ) = field(default=None, init=False, repr=False)
+    _active_run_prompt_steer_safe_point_validator: Callable[..., None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_run_prompt_steer_safe_point_releaser: Callable[[Any], None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_run_prompt_steer_commit_guard_factory: (
         Callable[..., AbstractContextManager[None]] | None
     ) = field(default=None, init=False, repr=False)
 
@@ -638,16 +694,109 @@ class RuntimeSession:
                 and isinstance(self.event_log, InMemoryEventLog)
             ),
         )
+        from pulsara_agent.primitives.presentation_history import (
+            build_default_history_materialization_policy,
+        )
+        from pulsara_agent.runtime.terminal_presentation.history_checkpoint import (
+            PresentationHistoryProjectionCheckpointOwner,
+        )
+        from pulsara_agent.runtime.terminal_presentation.policy import (
+            PresentationPurposePolicyRegistry,
+            build_default_audit_extractor_binding,
+            build_default_presentation_purpose_policy_registry,
+        )
+        from pulsara_agent.runtime.terminal_presentation.restore import (
+            restore_transcript_with_presentation_spine,
+        )
+
+        self.presentation_history_materialization_policy = (
+            build_default_history_materialization_policy()
+        )
+        self.presentation_purpose_policy_registry = PresentationPurposePolicyRegistry(
+            build_default_presentation_purpose_policy_registry(
+                transcript_domains=self.authority_materialization_contracts.event_domain
+            )
+        )
+        self.presentation_audit_extractor_binding = (
+            build_default_audit_extractor_binding()
+        )
+        self.presentation_history_checkpoint_owner = (
+            PresentationHistoryProjectionCheckpointOwner(
+                runtime_session_id=self.runtime_session_id,
+                event_log=self.event_log,
+                archive=self.archive,
+                materialization_policy=(
+                    self.presentation_history_materialization_policy
+                ),
+                purpose_policy=self.presentation_purpose_policy_registry,
+                audit_extractor=self.presentation_audit_extractor_binding,
+            )
+        )
+        presentation_genesis = (
+            self.presentation_history_checkpoint_owner.ensure_genesis(
+                deadline_monotonic=self._runtime_open_deadline_monotonic
+            )
+        )
+        if presentation_genesis.disposition != "full":
+            raise ValueError(
+                "presentation history genesis could not be durably confirmed"
+            )
+        presentation_spine = (
+            self.presentation_history_checkpoint_owner.read_spine_acceleration(
+                deadline_monotonic=self._runtime_open_deadline_monotonic
+            )
+        )
+        presentation_restore = restore_transcript_with_presentation_spine(
+            current_restore=transcript_restore,
+            acceleration=presentation_spine,
+            event_log=self.event_log,
+            archive=self.archive,
+            runtime_session_id=self.runtime_session_id,
+            requested_through_sequence=ledger_usage.through_sequence,
+            authority_contracts=self.authority_materialization_contracts,
+            materialization_contracts=(
+                self.transcript_projection_materialization_contracts
+            ),
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+            allow_seedless_test_bootstrap=(
+                self.allow_unbootstrapped_test_events
+                and isinstance(self.event_log, InMemoryEventLog)
+            ),
+        )
+        transcript_restore = presentation_restore.transcript_restore
+        self._presentation_restore_range = (
+            presentation_restore.presentation_catch_up_range
+        )
+        self._presentation_restore_fold = (
+            presentation_restore.presentation_catch_up_fold
+        )
         self.transcript_projection_restore = transcript_restore
         self.transcript_projection_document_registry = (
             transcript_restore.document_registry
         )
         self.transcript_projection_state_store = transcript_restore.state_store
+        self.ui_committed_event_tap = UiCommittedEventTap(
+            runtime_session_id=self.runtime_session_id
+        )
+        self.ui_operational_activity_store = UiOperationalActivityStore(
+            runtime_session_id=self.runtime_session_id
+        )
+        self._transcript_reducer_id = f"transcript_projection:{self.runtime_session_id}"
         self.register_committed_reducer(
-            reducer_id=f"transcript_projection:{self.runtime_session_id}",
+            reducer_id=self._transcript_reducer_id,
             through_sequence=self.transcript_projection_state_store.through_sequence,
-            apply_committed=self.transcript_projection_state_store.apply_committed,
-            rebuild_committed=self.transcript_projection_state_store.rebuild,
+            ingress=self.transcript_projection_state_store,
+            rebuild_owner=self.transcript_projection_state_store,
+        )
+        from pulsara_agent.runtime.terminal_presentation.service import (
+            TerminalPresentationFoundationService,
+        )
+
+        self.terminal_presentation_foundation_service = (
+            TerminalPresentationFoundationService(runtime_session=self)
+        )
+        self.terminal_presentation_foundation_service.initialize(
+            deadline_monotonic=self._runtime_open_deadline_monotonic
         )
         from pulsara_agent.runtime.provider_input import (
             ProviderInputGenerationCoordinator,
@@ -679,7 +828,9 @@ class RuntimeSession:
         self.provider_input_generation_store = (
             ProviderInputGenerationStore.from_sparse_bootstrap(
                 tuple(
-                    event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(
+                        event, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
                     for event in provider_input_bootstrap.events
                 ),
                 runtime_session_id=self.runtime_session_id,
@@ -699,9 +850,65 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"provider_input_generation:{self.runtime_session_id}",
             through_sequence=self.provider_input_generation_store.through_sequence,
-            apply_committed=self.provider_input_generation_store.apply_committed,
-            rebuild_committed=self.provider_input_generation_store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self.provider_input_generation_store.apply_committed,
+                reset_owned_events=lambda: self.provider_input_generation_store.rebuild(
+                    ()
+                ),
+            ),
         )
+        from pulsara_agent.runtime.terminal_application.prompt_queue import (
+            PromptQueueProjectionStore,
+            TerminalPromptQueueMutationService,
+        )
+        from pulsara_agent.runtime.terminal_application.artifact_hold import (
+            build_prompt_queue_artifact_storage,
+        )
+        from pulsara_agent.runtime.terminal_application.command_receipt import (
+            build_terminal_command_receipt_storage,
+        )
+        from pulsara_agent.runtime.terminal_application.prompt_queue_checkpoint import (
+            PromptQueueCheckpointService,
+        )
+
+        self.prompt_queue_projection_store = PromptQueueProjectionStore(
+            runtime_session_id=self.runtime_session_id
+        )
+        self.prompt_queue_artifact_storage = build_prompt_queue_artifact_storage(
+            self.archive
+        )
+        self.terminal_command_receipt_storage = build_terminal_command_receipt_storage(
+            self.event_log
+        )
+        self.prompt_queue_checkpoint_service = PromptQueueCheckpointService(
+            runtime_session=self,
+            store=self.prompt_queue_projection_store,
+        )
+        self.prompt_queue_checkpoint_service.initialize(
+            deadline_monotonic=self._runtime_open_deadline_monotonic
+        )
+        self.prompt_queue_artifact_storage.release_expired_prepared(
+            runtime_session_id=self.runtime_session_id,
+            expired_before_utc=datetime.now(UTC).isoformat(),
+            maximum_holds=256,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.prompt_queue_mutation_service = TerminalPromptQueueMutationService(
+            runtime_session=self,
+            store=self.prompt_queue_projection_store,
+            artifact_storage=self.prompt_queue_artifact_storage,
+        )
+        self.register_committed_reducer(
+            reducer_id=f"prompt_queue:{self.runtime_session_id}",
+            through_sequence=self.prompt_queue_projection_store.through_sequence,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self.prompt_queue_checkpoint_service.apply_committed,
+                reset_owned_events=lambda: self.prompt_queue_projection_store.rebuild(
+                    ()
+                ),
+            ),
+        )
+        self.prompt_queue_checkpoint_service.start_background_if_possible()
         # Startup recovery may commit a stable checkpoint terminal batch. The
         # publisher must own that newly committed suffix before recovery runs.
         self.publisher = RuntimeEventPublisher(
@@ -733,7 +940,7 @@ class RuntimeSession:
         )
         self.tool_terminal_projection_state_store = ToolTerminalProjectionStateStore(
             tuple(
-                event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for event in tool_projection_bootstrap.events
             ),
             through_sequence=tool_projection_bootstrap.through_sequence,
@@ -746,8 +953,14 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"tool_terminal_projection:{self.runtime_session_id}",
             through_sequence=self.tool_terminal_projection_state_store.through_sequence,
-            apply_committed=self.tool_terminal_projection_state_store.apply_committed,
-            rebuild_committed=self.tool_terminal_projection_state_store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=(
+                    self.tool_terminal_projection_state_store.apply_committed
+                ),
+                reset_owned_events=lambda: (
+                    self.tool_terminal_projection_state_store.rebuild(())
+                ),
+            ),
         )
         from pulsara_agent.runtime.mcp.lifecycle import (
             McpInputRequiredLifecycleStore,
@@ -772,7 +985,9 @@ class RuntimeSession:
         self.mcp_input_required_lifecycle_store = (
             McpInputRequiredLifecycleStore.from_sparse_bootstrap(
                 tuple(
-                    event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(
+                        event, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
                     for event in mcp_lifecycle_bootstrap.events
                 ),
                 runtime_session_id=self.runtime_session_id,
@@ -782,8 +997,14 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"mcp_input_required_lifecycle:{self.runtime_session_id}",
             through_sequence=self.mcp_input_required_lifecycle_store.through_sequence,
-            apply_committed=(self.mcp_input_required_lifecycle_store.apply_committed),
-            rebuild_committed=self.mcp_input_required_lifecycle_store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=(
+                    self.mcp_input_required_lifecycle_store.apply_committed
+                ),
+                reset_owned_events=lambda: (
+                    self.mcp_input_required_lifecycle_store.rebuild(())
+                ),
+            ),
         )
         from pulsara_agent.primitives.long_horizon import (
             default_subagent_graph_checkpoint_policy,
@@ -842,7 +1063,7 @@ class RuntimeSession:
         )
         self.long_horizon_state_store = LongHorizonStateStore.from_sparse_bootstrap(
             tuple(
-                event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for event in long_horizon_bootstrap.events
             ),
             through_sequence=long_horizon_bootstrap.through_sequence,
@@ -850,8 +1071,10 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=(f"long_horizon:{self.runtime_session_id}"),
             through_sequence=self.long_horizon_state_store.through_sequence,
-            apply_committed=self.long_horizon_state_store.apply_committed,
-            rebuild_committed=self.long_horizon_state_store.rebuild,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self.long_horizon_state_store.apply_committed,
+                reset_owned_events=lambda: self.long_horizon_state_store.rebuild(()),
+            ),
         )
         from pulsara_agent.runtime.authority_materialization import (
             AuthorityMaterializationShadowAccount,
@@ -892,7 +1115,9 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=(f"authority_materialization_shadow:{self.runtime_session_id}"),
             through_sequence=self.authority_materialization_shadow.through_sequence,
-            apply_committed=self.authority_materialization_shadow.apply_committed,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self.authority_materialization_shadow.apply_committed,
+            ),
         )
         self._bind_terminal(self.terminal_binding)
         from pulsara_agent.runtime.terminal.notification import (
@@ -927,8 +1152,12 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"terminal_notification:{self.runtime_session_id}",
             through_sequence=self.terminal_notification_store.through_sequence,
-            apply_committed=self._apply_terminal_notification_committed,
-            rebuild_committed=self._rebuild_terminal_notification_committed,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self._apply_terminal_notification_committed,
+                reset_owned_events=lambda: (
+                    self._rebuild_terminal_notification_committed(())
+                ),
+            ),
         )
 
         self.terminal_monitor_store = self._restore_terminal_monitor_projection(
@@ -945,8 +1174,10 @@ class RuntimeSession:
         self.register_committed_reducer(
             reducer_id=f"terminal_monitor:{self.runtime_session_id}",
             through_sequence=self.terminal_monitor_store.through_sequence,
-            apply_committed=self._apply_terminal_monitor_committed,
-            rebuild_committed=self._rebuild_terminal_monitor_committed,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=self._apply_terminal_monitor_committed,
+                reset_owned_events=lambda: self._rebuild_terminal_monitor_committed(()),
+            ),
         )
         self.terminal_monitor_coordinator.on_committed(
             tuple(
@@ -1259,7 +1490,8 @@ class RuntimeSession:
             deadline_monotonic=deadline_monotonic,
         )
         selected = [
-            item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in snapshot.events
+            decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for item in snapshot.events
         ]
         tool_result_ids = {
             event.tool_result_end_event_identity.event_id
@@ -1282,7 +1514,8 @@ class RuntimeSession:
                     "terminal projection delta lacks exact ToolResult authority"
                 )
             selected.extend(
-                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in exact
+                decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for item in exact
             )
         by_id = {event.id: event for event in selected}
         ordered = tuple(
@@ -1370,7 +1603,9 @@ class RuntimeSession:
                 "active physical reservation is missing its durable creation fact"
             )
         by_id = {
-            raw.event_id: raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            raw.event_id: decode_raw_stored_event_envelope(
+                raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             for raw in raw_events
         }
         for active in durable_account.active_reservations:
@@ -1963,6 +2198,73 @@ class RuntimeSession:
             run_id=start_event.run_id,
         )
 
+    def bind_active_run_prompt_steer_safe_point(
+        self,
+        *,
+        provider: Callable[[Any, int], Awaitable[Any]] | None,
+        validator: Callable[..., None] | None,
+        releaser: Callable[[Any], None] | None,
+        commit_guard_factory: Callable[..., AbstractContextManager[None]] | None,
+    ) -> None:
+        with self.write_coordinator.lock:
+            self._active_run_prompt_steer_safe_point_provider = provider
+            self._active_run_prompt_steer_safe_point_validator = validator
+            self._active_run_prompt_steer_safe_point_releaser = releaser
+            self._active_run_prompt_steer_commit_guard_factory = commit_guard_factory
+
+    async def borrow_active_run_prompt_steer_safe_point(
+        self,
+        *,
+        run_id: str,
+        next_model_call_index: int,
+    ) -> Any:
+        provider = self._active_run_prompt_steer_safe_point_provider
+        if provider is None:
+            return None
+        return await provider(run_id, next_model_call_index)
+
+    def release_active_run_prompt_steer_safe_point(self, lease: Any) -> None:
+        releaser = self._active_run_prompt_steer_safe_point_releaser
+        if releaser is not None:
+            releaser(lease)
+
+    @contextmanager
+    def active_run_prompt_steer_commit_guard(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard: Any,
+    ):
+        factory = self._active_run_prompt_steer_commit_guard_factory
+        if guard is None or factory is None:
+            yield
+            return
+        with factory(
+            start_event=start_event,
+            candidate_events=candidate_events,
+            guard=guard,
+            run_id=start_event.run_id,
+        ):
+            yield
+
+    def validate_active_run_prompt_steer_safe_point(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard: Any,
+    ) -> None:
+        validator = self._active_run_prompt_steer_safe_point_validator
+        if validator is None:
+            raise ValueError("active-run prompt steer owner is unavailable")
+        validator(
+            start_event=start_event,
+            candidate_events=candidate_events,
+            guard=guard,
+            run_id=start_event.run_id,
+        )
+
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
         if event.sequence is not None:
             raise ValueError(
@@ -2432,8 +2734,8 @@ class RuntimeSession:
         *,
         reducer_id: str,
         through_sequence: int,
-        apply_committed: Callable[[tuple[AgentEvent, ...]], None],
-        rebuild_committed: Callable[[tuple[AgentEvent, ...]], None] | None = None,
+        ingress: CommittedReducerIngressPort,
+        rebuild_owner: CommittedReducerRebuildPort | None = None,
     ) -> None:
         with self.write_coordinator.lock:
             if reducer_id in self._committed_reducers:
@@ -2441,8 +2743,14 @@ class RuntimeSession:
             registration = _CommittedReducerRegistration(
                 reducer_id=reducer_id,
                 through_sequence=through_sequence,
-                apply_committed=apply_committed,
-                rebuild_committed=rebuild_committed,
+                ingress=ingress,
+                rebuild_owner=(
+                    rebuild_owner
+                    if rebuild_owner is not None
+                    else cast(CommittedReducerRebuildPort, ingress)
+                    if callable(getattr(ingress, "reset_for_rebuild", None))
+                    else None
+                ),
             )
             # Registration is durable process state even when initial catch-up
             # fails. Keeping the failed registration is what makes an explicit
@@ -2450,14 +2758,12 @@ class RuntimeSession:
             self._committed_reducers[reducer_id] = registration
             try:
                 current_last = self.event_log.next_sequence() - 1
-                missing = _contiguous_interval(
-                    self.event_log.iter(after_sequence=through_sequence),
-                    start=through_sequence + 1,
-                    end=current_last,
+                self._fold_committed_reducer_range(
+                    registration,
+                    through_sequence=current_last,
+                    source_kind="runtime_catch_up",
+                    deadline_monotonic=self._runtime_open_deadline_monotonic,
                 )
-                if missing:
-                    apply_committed(missing)
-                registration.through_sequence = current_last
             except Exception:
                 registration.reconciliation_required = True
                 registration.last_error = "initial committed reducer catch-up failed"
@@ -2468,19 +2774,18 @@ class RuntimeSession:
         with self.write_coordinator.lock:
             registration = self._committed_reducers[reducer_id]
             try:
-                events = tuple(self.event_log.iter())
-                if registration.rebuild_committed is not None:
-                    registration.rebuild_committed(events)
-                else:
-                    missing = tuple(
-                        event
-                        for event in events
-                        if event.sequence is not None
-                        and event.sequence > registration.through_sequence
+                if registration.rebuild_owner is None:
+                    raise RuntimeError(
+                        "committed reducer has no explicit bounded rebuild owner"
                     )
-                    if missing:
-                        registration.apply_committed(missing)
-                registration.through_sequence = events[-1].sequence if events else 0  # type: ignore[assignment]
+                registration.rebuild_owner.reset_for_rebuild()
+                registration.through_sequence = 0
+                self._fold_committed_reducer_range(
+                    registration,
+                    through_sequence=self.event_log.next_sequence() - 1,
+                    source_kind="repair",
+                    deadline_monotonic=monotonic() + 30.0,
+                )
             except Exception:
                 registration.reconciliation_required = True
                 registration.last_error = "committed reducer rebuild failed"
@@ -2492,6 +2797,67 @@ class RuntimeSession:
                 item.reconciliation_required
                 for item in self._committed_reducers.values()
             )
+
+    def _fold_committed_reducer_range(
+        self,
+        registration: _CommittedReducerRegistration,
+        *,
+        through_sequence: int,
+        source_kind: Literal["runtime_catch_up", "repair"],
+        deadline_monotonic: float | None,
+    ) -> None:
+        """Advance one reducer through bounded historical raw-range proofs."""
+
+        while registration.through_sequence < through_sequence:
+            page_end = min(registration.through_sequence + 256, through_sequence)
+            proof = self.event_log.read_joined_raw_range(
+                source_kind=source_kind,
+                from_sequence_exclusive=registration.through_sequence,
+                through_sequence=page_end,
+                max_events=256,
+                max_payload_bytes=16 * 1024 * 1024,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if proof is None or proof.through_sequence != page_end:
+                raise EventReconciliationRequired(
+                    "committed reducer historical range is unavailable"
+                )
+            registration.ingress.fold_restored_range(proof)
+            registration.through_sequence = page_end
+
+    def _apply_live_receipt_to_reducer(
+        self,
+        registration: _CommittedReducerRegistration,
+        receipt: StoredEventBatchCommitReceipt,
+        *,
+        catch_up_through_sequence: int,
+        deadline_monotonic: float | None,
+    ) -> object | None:
+        first = receipt.raw_stored_envelopes[0].sequence
+        last = receipt.raw_stored_envelopes[-1].sequence
+        if registration.through_sequence < first - 1:
+            self._fold_committed_reducer_range(
+                registration,
+                through_sequence=first - 1,
+                source_kind="runtime_catch_up",
+                deadline_monotonic=deadline_monotonic,
+            )
+        live_result: object | None = None
+        if registration.through_sequence == first - 1:
+            live_result = registration.ingress.apply_live_committed(receipt)
+            registration.through_sequence = last
+        elif registration.through_sequence < last:
+            raise EventReconciliationRequired(
+                "committed reducer partially overlaps a physical batch"
+            )
+        if registration.through_sequence < catch_up_through_sequence:
+            self._fold_committed_reducer_range(
+                registration,
+                through_sequence=catch_up_through_sequence,
+                source_kind="runtime_catch_up",
+                deadline_monotonic=deadline_monotonic,
+            )
+        return live_result
 
     def unregister_committed_reducer(self, reducer_id: str) -> None:
         """Detach one process-local reducer without changing durable truth."""
@@ -2860,7 +3226,10 @@ class RuntimeSession:
                 physical = dispatches[0].dispatch_reservation.physical_operation_id
                 matches = tuple(
                     reservation
-                    for (kind, _), reservation in self._physical_reservation_facts.items()
+                    for (
+                        kind,
+                        _,
+                    ), reservation in self._physical_reservation_facts.items()
                     if kind is PhysicalOperationKind.TOOL_CALL
                     and reservation.reservation_id == physical
                 )
@@ -3029,7 +3398,7 @@ class RuntimeSession:
                 )
             self._physical_operation_admission_tokens[key] = promoted[0]
             result = self._handoff_accounted_business_batch(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=prepared,
                 deadline_monotonic=deadline,
             )
@@ -3085,7 +3454,7 @@ class RuntimeSession:
                 )
                 raise AssertionError("unreachable materialization exception mapping")
             return self._handoff_accounted_business_batch(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=(checkpoint_event,),
                 deadline_monotonic=deadline,
             )
@@ -3156,9 +3525,7 @@ class RuntimeSession:
                         else None
                     ),
                     retained_terminal_tail_events=retained_tail_events,
-                    retained_terminal_tail_payload_bytes=(
-                        retained_tail_payload_bytes
-                    ),
+                    retained_terminal_tail_payload_bytes=(retained_tail_payload_bytes),
                     deadline_monotonic=deadline,
                     transaction_companion=transaction_companion,
                 )
@@ -3169,7 +3536,7 @@ class RuntimeSession:
                 )
                 raise AssertionError("unreachable materialization exception mapping")
             attempt = self._handoff_accounted_business_batch_attempt(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=prepared,
                 deadline_monotonic=deadline,
                 await_delivery=await_delivery,
@@ -3246,7 +3613,7 @@ class RuntimeSession:
                 zip(operation_keys, promoted, strict=True)
             )
             result = self._handoff_accounted_business_batch(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=prepared,
                 deadline_monotonic=deadline,
             )
@@ -3314,7 +3681,7 @@ class RuntimeSession:
                 operation_token
             )
             result = self._handoff_accounted_business_batch(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=prepared,
                 deadline_monotonic=deadline,
             )
@@ -3384,7 +3751,7 @@ class RuntimeSession:
                 )
                 raise AssertionError("unreachable materialization exception mapping")
             result = self._handoff_accounted_business_batch(
-                stored_events=committed.stored_events,
+                stored_batch_receipt=committed.stored_batch_receipt,
                 business_events=prepared,
                 deadline_monotonic=deadline,
             )
@@ -3399,12 +3766,12 @@ class RuntimeSession:
     def _handoff_accounted_business_batch(
         self,
         *,
-        stored_events: tuple[AgentEvent, ...],
+        stored_batch_receipt: StoredEventBatchCommitReceipt,
         business_events: tuple[AgentEvent, ...],
         deadline_monotonic: float,
     ) -> EventWriteResult:
         return self._handoff_accounted_business_batch_attempt(
-            stored_events=stored_events,
+            stored_batch_receipt=stored_batch_receipt,
             business_events=business_events,
             deadline_monotonic=deadline_monotonic,
         ).result
@@ -3412,19 +3779,14 @@ class RuntimeSession:
     def _handoff_accounted_business_batch_attempt(
         self,
         *,
-        stored_events: tuple[AgentEvent, ...],
+        stored_batch_receipt: StoredEventBatchCommitReceipt,
         business_events: tuple[AgentEvent, ...],
         deadline_monotonic: float,
         await_delivery: bool = False,
     ) -> _WriteAttempt:
-        if not stored_events:
-            raise EventCommitError(
-                "materialization commit returned an empty batch",
-                commit_outcome="unknown",
-                deadline_monotonic=deadline_monotonic,
-            )
+        stored_events = stored_batch_receipt.owned_stored_events
         full_attempt = self._reconcile_confirmed_attempt(
-            stored_events,
+            stored_batch_receipt,
             catch_up_through_sequence=_event_sequence(stored_events[-1]),
             await_delivery=await_delivery,
         )
@@ -3437,9 +3799,8 @@ class RuntimeSession:
                 "materialization batch lost one of its business facts"
             ) from exc
         attempt = _WriteAttempt(
-            result=replace(
-                full_attempt.result,
-                committed_events=committed_business,
+            result=full_attempt.result.with_partition(
+                business_events=committed_business,
                 accounting_events=tuple(
                     event
                     for event in stored_events
@@ -3793,7 +4154,9 @@ class RuntimeSession:
                     deadline_monotonic=monotonic() + 5.0,
                 )
                 decoded = tuple(
-                    item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(
+                        item, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
                     for item in lifecycle.events
                 )
                 starts = tuple(
@@ -4047,7 +4410,9 @@ class RuntimeSession:
                     deadline_monotonic=monotonic() + 5.0,
                 )
                 decoded = tuple(
-                    item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    decode_raw_stored_event_envelope(
+                        item, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
                     for item in snapshot.events
                 )
                 matching = tuple(
@@ -4111,7 +4476,9 @@ class RuntimeSession:
                     decoded
                     for item in source_snapshot.events
                     if isinstance(
-                        decoded := item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                        decoded := decode_raw_stored_event_envelope(
+                            item, DEFAULT_EVENT_SCHEMA_REGISTRY
+                        ),
                         CapabilityExposureResolvedEvent,
                     )
                     and decoded.exposure.exposure_id == boundary.source_exposure_id
@@ -4195,9 +4562,7 @@ class RuntimeSession:
                 requested = tuple(
                     item
                     for item in event.post_completion_extension_dispositions
-                    if isinstance(
-                        item, CompactionPostCompletionExtensionRequestedFact
-                    )
+                    if isinstance(item, CompactionPostCompletionExtensionRequestedFact)
                 )
                 if not requested:
                     continue
@@ -4245,10 +4610,7 @@ class RuntimeSession:
                         request.id,
                     ),
                 )
-                if (
-                    request.business_occurrence_fingerprint
-                    != expected_occurrence
-                ):
+                if request.business_occurrence_fingerprint != expected_occurrence:
                     raise ValueError(
                         "compaction extraction request occurrence fingerprint drifted"
                     )
@@ -4256,8 +4618,7 @@ class RuntimeSession:
                     "context-compaction-memory-extraction-request-semantic:v1",
                     {
                         "manifest_semantic": (
-                            request.human_evidence_manifest_reference
-                            .manifest_semantic_fingerprint
+                            request.human_evidence_manifest_reference.manifest_semantic_fingerprint
                         ),
                         "memory_domain_id": request.memory_domain_id,
                         "resolved_scope": request.resolved_scope,
@@ -4548,6 +4909,15 @@ class RuntimeSession:
         if not events:
             result = EventWriteResult(
                 committed_events=(),
+                accounting_events=(),
+                stored_batch_receipt=None,
+                business_accounting_partition_fingerprint=(
+                    business_accounting_partition_fingerprint(
+                        receipt=None,
+                        business_events=(),
+                        accounting_events=(),
+                    )
+                ),
                 commit_status="committed",
                 reducer_high_waters={
                     key: reducer.through_sequence
@@ -4618,13 +4988,12 @@ class RuntimeSession:
                 )
             commit_deadline = _commit_phase_deadline(deadline_monotonic)
             try:
-                committed = tuple(
-                    self.event_log.extend(
-                        events,
-                        expected_last_sequence=expected_last_sequence,
-                        deadline_monotonic=commit_deadline,
-                    )
+                stored_batch_receipt = self.event_log.commit_batch(
+                    events,
+                    expected_last_sequence=expected_last_sequence,
+                    deadline_monotonic=commit_deadline,
                 )
+                committed = stored_batch_receipt.owned_stored_events
             except EventLogWriteConflict as exc:
                 confirmed, confirmed_high_water = self._confirm_committed_batch(
                     events,
@@ -4682,20 +5051,21 @@ class RuntimeSession:
             first_sequence = _event_sequence(committed[0])
             last_sequence = _event_sequence(committed[-1])
             reducer_errors: list[CommittedReducerError] = []
+            presentation_fold: LiveCommittedFoldResult | None = None
             for registration in self._committed_reducers.values():
                 try:
-                    if registration.through_sequence < first_sequence - 1:
-                        missing = _contiguous_interval(
-                            self.event_log.iter(
-                                after_sequence=registration.through_sequence
-                            ),
-                            start=registration.through_sequence + 1,
-                            end=first_sequence - 1,
-                        )
-                        registration.apply_committed(missing)
-                        registration.through_sequence = first_sequence - 1
-                    registration.apply_committed(committed)
-                    registration.through_sequence = last_sequence
+                    fold_result = self._apply_live_receipt_to_reducer(
+                        registration,
+                        stored_batch_receipt,
+                        catch_up_through_sequence=last_sequence,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    if registration.reducer_id == self._transcript_reducer_id:
+                        if not isinstance(fold_result, LiveCommittedFoldResult):
+                            raise TypeError(
+                                "canonical transcript live ingress returned wrong carrier"
+                            )
+                        presentation_fold = fold_result
                 except Exception as exc:
                     registration.reconciliation_required = True
                     registration.last_error = (
@@ -4709,6 +5079,12 @@ class RuntimeSession:
                             message=_bounded_error(exc),
                         )
                     )
+
+            if presentation_fold is not None:
+                self._offer_presentation_tap_noexcept(
+                    stored_batch_receipt,
+                    presentation_fold,
+                )
 
             publication_errors: tuple[EventPublicationError, ...] = ()
             publisher_events: tuple[AgentEvent, ...] = ()
@@ -4757,6 +5133,15 @@ class RuntimeSession:
                     )
             result = EventWriteResult(
                 committed_events=committed,
+                accounting_events=(),
+                stored_batch_receipt=stored_batch_receipt,
+                business_accounting_partition_fingerprint=(
+                    business_accounting_partition_fingerprint(
+                        receipt=stored_batch_receipt,
+                        business_events=committed,
+                        accounting_events=(),
+                    )
+                ),
                 commit_status="committed",
                 reducer_high_waters={
                     key: registration.through_sequence
@@ -4851,6 +5236,7 @@ class RuntimeSession:
                         owner_id=f"one_shot:{identity}",
                         burst_contract=burst_contract,
                         deadline_monotonic=deadline_monotonic,
+                        transaction_companion=transaction_companion,
                     )
                 )
             else:
@@ -4888,15 +5274,28 @@ class RuntimeSession:
                 ) from exc
             raise
         full_attempt = self._reconcile_confirmed_attempt(
-            committed.stored_events,
-            catch_up_through_sequence=_event_sequence(committed.stored_events[-1]),
+            committed.stored_batch_receipt,
+            catch_up_through_sequence=_event_sequence(
+                committed.stored_batch_receipt.owned_stored_events[-1]
+            ),
             await_delivery=await_delivery,
             enqueue_publication=enqueue_publication,
         )
-        by_id = {event.id: event for event in committed.stored_events}
+        by_id = {
+            event.id: event
+            for event in committed.stored_batch_receipt.owned_stored_events
+        }
         business = tuple(by_id[event.id] for event in events)
+        accounting = tuple(
+            event
+            for event in committed.stored_batch_receipt.owned_stored_events
+            if event.id not in {item.id for item in business}
+        )
         return _WriteAttempt(
-            result=replace(full_attempt.result, committed_events=business),
+            result=full_attempt.result.with_partition(
+                business_events=business,
+                accounting_events=accounting,
+            ),
             delivery_futures=full_attempt.delivery_futures,
             published_events=full_attempt.published_events,
         )
@@ -4962,18 +5361,23 @@ class RuntimeSession:
                     commit_outcome="none",
                     deadline_monotonic=deadline_monotonic,
                 ) from exc
-            stored = committed.stored_events
+            stored = committed.stored_batch_receipt.owned_stored_events
             full_attempt = self._reconcile_confirmed_attempt(
-                stored,
+                committed.stored_batch_receipt,
                 catch_up_through_sequence=_event_sequence(stored[-1]),
                 await_delivery=await_delivery,
             )
             by_id = {event.id: event for event in stored}
             business = tuple(by_id[event.id] for event in events)
+            accounting = tuple(
+                event
+                for event in stored
+                if event.id not in {item.id for item in business}
+            )
             return _WriteAttempt(
-                result=replace(
-                    full_attempt.result,
-                    committed_events=business,
+                result=full_attempt.result.with_partition(
+                    business_events=business,
+                    accounting_events=accounting,
                 ),
                 delivery_futures=full_attempt.delivery_futures,
                 published_events=full_attempt.published_events,
@@ -4984,42 +5388,43 @@ class RuntimeSession:
         candidates: tuple[AgentEvent, ...],
         *,
         deadline_monotonic: float,
-    ) -> tuple[tuple[AgentEvent, ...] | None, int]:
-        confirmation = self.event_log.confirm_batch(
+    ) -> tuple[StoredEventBatchCommitReceipt | None, int]:
+        confirmation = self.event_log.confirm_stored_batch(
             candidates,
             deadline_monotonic=deadline_monotonic,
         )
-        stored = confirmation.committed_events
-        if confirmation.missing_event_ids:
-            if stored:
-                self._latch_ledger_reconciliation_required()
-                raise EventReconciliationRequired(
-                    "Only part of an atomic event batch can be confirmed by id"
-                )
-            return None, confirmation.actual_last_sequence
-        sequences = [_event_sequence(event) for event in stored]
-        if sequences != list(range(sequences[0], sequences[-1] + 1)):
+        if confirmation.evidence is None:
             self._latch_ledger_reconciliation_required()
             raise EventReconciliationRequired(
-                f"Confirmed event batch is not contiguous: {sequences}"
+                "Stored event candidate confirmation is unavailable"
             )
-        return stored, confirmation.actual_last_sequence
+        high_water = confirmation.evidence.actual_last_sequence
+        if confirmation.disposition == "none":
+            return None, high_water
+        if (
+            confirmation.disposition != "full"
+            or confirmation.confirmed_full_batch is None
+        ):
+            self._latch_ledger_reconciliation_required()
+            raise EventReconciliationRequired(
+                "Stored event candidate confirmation is partial or conflicting"
+            )
+        return confirmation.confirmed_full_batch.receipt, high_water
 
     def _latch_ledger_reconciliation_required(self) -> None:
         self._ledger_reconciliation_required = True
 
     def accept_authority_materialization_transition(
         self,
-        committed: tuple[AgentEvent, ...],
+        committed: StoredEventBatchCommitReceipt,
     ) -> None:
         """Fold and enqueue a coordinator-owned batch after its durable FULL commit."""
 
-        if not committed:
-            raise ValueError("authority transition cannot be empty")
-        self._sync_physical_reservation_facts(committed)
+        events = committed.owned_stored_events
+        self._sync_physical_reservation_facts(events)
         self._reconcile_confirmed_attempt(
             committed,
-            catch_up_through_sequence=_event_sequence(committed[-1]),
+            catch_up_through_sequence=_event_sequence(events[-1]),
             await_delivery=False,
         )
 
@@ -5061,17 +5466,21 @@ class RuntimeSession:
 
     def _reconcile_confirmed_attempt(
         self,
-        committed: tuple[AgentEvent, ...],
+        stored_batch_receipt: StoredEventBatchCommitReceipt,
         *,
         catch_up_through_sequence: int,
         await_delivery: bool,
         enqueue_publication: bool = True,
     ) -> _WriteAttempt:
+        committed = stored_batch_receipt.owned_stored_events
         target_sequence = max(
             _event_sequence(committed[-1]),
             catch_up_through_sequence,
         )
-        self._catch_up_reducers(target_sequence)
+        self._catch_up_reducers(
+            target_sequence,
+            live_receipt=stored_batch_receipt,
+        )
         reducer_errors = tuple(
             CommittedReducerError(
                 reducer_id=registration.reducer_id,
@@ -5134,6 +5543,15 @@ class RuntimeSession:
                 )
         result = EventWriteResult(
             committed_events=committed,
+            accounting_events=(),
+            stored_batch_receipt=stored_batch_receipt,
+            business_accounting_partition_fingerprint=(
+                business_accounting_partition_fingerprint(
+                    receipt=stored_batch_receipt,
+                    business_events=committed,
+                    accounting_events=(),
+                )
+            ),
             commit_status="committed",
             reducer_high_waters={
                 key: registration.through_sequence
@@ -5151,22 +5569,247 @@ class RuntimeSession:
             published_events=publisher_events,
         )
 
-    def _catch_up_reducers(self, through_sequence: int) -> None:
+    def _catch_up_reducers(
+        self,
+        through_sequence: int,
+        *,
+        live_receipt: StoredEventBatchCommitReceipt | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        presentation_fold: LiveCommittedFoldResult | None = None
         for registration in self._committed_reducers.values():
             if registration.through_sequence >= through_sequence:
                 continue
-            missing = _contiguous_interval(
-                self.event_log.iter(after_sequence=registration.through_sequence),
-                start=registration.through_sequence + 1,
-                end=through_sequence,
-            )
             try:
-                registration.apply_committed(missing)
-                registration.through_sequence = through_sequence
+                if live_receipt is not None:
+                    fold_result = self._apply_live_receipt_to_reducer(
+                        registration,
+                        live_receipt,
+                        catch_up_through_sequence=through_sequence,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    if registration.reducer_id == self._transcript_reducer_id:
+                        if fold_result is not None and not isinstance(
+                            fold_result, LiveCommittedFoldResult
+                        ):
+                            raise TypeError(
+                                "canonical transcript live ingress returned wrong carrier"
+                            )
+                        presentation_fold = fold_result
+                else:
+                    self._fold_committed_reducer_range(
+                        registration,
+                        through_sequence=through_sequence,
+                        source_kind="runtime_catch_up",
+                        deadline_monotonic=deadline_monotonic,
+                    )
             except Exception as exc:
                 registration.reconciliation_required = True
                 registration.last_error = f"{type(exc).__name__}: {_bounded_error(exc)}"
                 self._reconciliation_required = True
+        if live_receipt is not None and presentation_fold is not None:
+            self._offer_presentation_tap_noexcept(
+                live_receipt,
+                presentation_fold,
+            )
+
+    def _offer_presentation_tap_noexcept(
+        self,
+        receipt: StoredEventBatchCommitReceipt,
+        fold_result: LiveCommittedFoldResult,
+    ) -> None:
+        """Keep the observational tap outside the durable writer failure surface."""
+
+        try:
+            self.ui_committed_event_tap.offer_committed_nowait(receipt, fold_result)
+            self._offer_operational_activities_noexcept(receipt)
+        except BaseException:
+            # The concrete tap already contains its own validation/diagnostics
+            # boundary.  This second boundary protects durable commits from a
+            # replaced or future tap implementation that violates that contract.
+            return
+
+    def _offer_operational_activities_noexcept(
+        self, receipt: StoredEventBatchCommitReceipt
+    ) -> None:
+        """Project bounded in-flight hints without entering durable semantics."""
+
+        store = self.ui_operational_activity_store
+        for event in receipt.owned_stored_events:
+            if isinstance(event, ModelCallStartEvent):
+                call_id = event.resolved_call.resolved_model_call_id
+                store.offer_nowait(
+                    activity_kind="model_activity",
+                    owner_kind="model_call",
+                    owner_id=call_id,
+                    owner_generation=1,
+                    coalesce_key=f"model:{call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text="Model response in progress…",
+                )
+            elif isinstance(event, TextBlockSegmentEvent):
+                call_id = event.model_stream_attribution.resolved_model_call_id
+                store.offer_nowait(
+                    activity_kind="model_activity",
+                    owner_kind="model_call",
+                    owner_id=call_id,
+                    owner_generation=1,
+                    coalesce_key=f"model:{call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=event.text,
+                )
+            elif isinstance(event, ThinkingBlockSegmentEvent):
+                call_id = event.model_stream_attribution.resolved_model_call_id
+                store.offer_nowait(
+                    activity_kind="model_activity",
+                    owner_kind="model_call",
+                    owner_id=call_id,
+                    owner_generation=1,
+                    coalesce_key=f"model:{call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text="Model reasoning in progress…",
+                )
+            elif isinstance(event, DataBlockSegmentEvent):
+                call_id = event.model_stream_attribution.resolved_model_call_id
+                store.offer_nowait(
+                    activity_kind="model_activity",
+                    owner_kind="model_call",
+                    owner_id=call_id,
+                    owner_generation=1,
+                    coalesce_key=f"model:{call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=f"Model data stream in progress ({event.media_type}).",
+                )
+            elif isinstance(event, ToolCallArgumentsSegmentEvent):
+                call_id = event.model_stream_attribution.resolved_model_call_id
+                store.offer_nowait(
+                    activity_kind="model_activity",
+                    owner_kind="model_call",
+                    owner_id=call_id,
+                    owner_generation=1,
+                    coalesce_key=f"model:{call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text="Model is preparing a tool call…",
+                )
+            elif isinstance(event, ModelCallEndEvent):
+                store.retire_nowait(
+                    coalesce_key=f"model:{event.resolved_model_call_id}",
+                    owner_kind="model_call",
+                    owner_id=event.resolved_model_call_id,
+                    owner_generation=1,
+                    reason="durable_terminal",
+                )
+            elif isinstance(event, ToolResultStartEvent):
+                store.offer_nowait(
+                    activity_kind="tool_activity",
+                    owner_kind="tool_call",
+                    owner_id=event.tool_call_id,
+                    owner_generation=1,
+                    coalesce_key=f"tool:{event.tool_call_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=f"Running {event.tool_call_name}…",
+                )
+            elif isinstance(event, ToolResultEndEvent):
+                store.retire_nowait(
+                    coalesce_key=f"tool:{event.tool_call_id}",
+                    owner_kind="tool_call",
+                    owner_id=event.tool_call_id,
+                    owner_generation=1,
+                    reason="durable_terminal",
+                )
+            elif isinstance(event, TerminalProcessMonitorRegisteredEvent):
+                monitor_id = event.registration_semantic.monitor_id
+                process_id = event.registration_semantic.initial_baseline_cursor.stream_identity.process_id
+                store.offer_nowait(
+                    activity_kind="terminal_process_activity",
+                    owner_kind="terminal_monitor",
+                    owner_id=monitor_id,
+                    owner_generation=1,
+                    coalesce_key=f"terminal-monitor:{monitor_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=f"Monitoring terminal process {process_id}…",
+                )
+            elif isinstance(event, TerminalProcessMonitorObservationCommittedEvent):
+                observation = event.observation
+                monitor_id = observation.monitor_id
+                if observation.observation_kind in {
+                    "process_completed",
+                    "monitor_expired",
+                }:
+                    store.retire_nowait(
+                        coalesce_key=f"terminal-monitor:{monitor_id}",
+                        owner_kind="terminal_monitor",
+                        owner_id=monitor_id,
+                        owner_generation=1,
+                        reason="durable_terminal",
+                    )
+                else:
+                    preview = observation.output_authority.output_preview
+                    store.offer_nowait(
+                        activity_kind="terminal_process_activity",
+                        owner_kind="terminal_monitor",
+                        owner_id=monitor_id,
+                        owner_generation=1,
+                        coalesce_key=f"terminal-monitor:{monitor_id}",
+                        replacement_semantics="expire_at_terminal",
+                        public_text=(
+                            preview if preview else "Terminal process is still running…"
+                        ),
+                    )
+            elif isinstance(event, TerminalProcessMonitorTerminatedEvent):
+                monitor_id = event.termination_semantic.monitor_id
+                store.retire_nowait(
+                    coalesce_key=f"terminal-monitor:{monitor_id}",
+                    owner_kind="terminal_monitor",
+                    owner_id=monitor_id,
+                    owner_generation=1,
+                    reason="durable_terminal",
+                )
+            elif isinstance(event, SubagentRunStartedEvent):
+                store.offer_nowait(
+                    activity_kind="subagent_activity",
+                    owner_kind="subagent_run",
+                    owner_id=event.subagent_run_id,
+                    owner_generation=1,
+                    coalesce_key=f"subagent:{event.subagent_run_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=(f"Subagent {event.label or event.role} is running…"),
+                )
+            elif isinstance(event, SubagentPhaseReportedEvent):
+                store.offer_nowait(
+                    activity_kind="subagent_activity",
+                    owner_kind="subagent_run",
+                    owner_id=event.subagent_run_id,
+                    owner_generation=1,
+                    coalesce_key=f"subagent:{event.subagent_run_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=f"Subagent phase: {event.phase}.",
+                )
+            elif isinstance(event, SubagentRunSuspendedEvent):
+                store.offer_nowait(
+                    activity_kind="subagent_activity",
+                    owner_kind="subagent_run",
+                    owner_id=event.subagent_run_id,
+                    owner_generation=1,
+                    coalesce_key=f"subagent:{event.subagent_run_id}",
+                    replacement_semantics="expire_at_terminal",
+                    public_text=f"Subagent is suspended ({event.reason_code}).",
+                )
+            elif isinstance(
+                event,
+                (
+                    SubagentRunCompletedEvent,
+                    SubagentRunFailedEvent,
+                    SubagentRunCancelledEvent,
+                ),
+            ):
+                store.retire_nowait(
+                    coalesce_key=f"subagent:{event.subagent_run_id}",
+                    owner_kind="subagent_run",
+                    owner_id=event.subagent_run_id,
+                    owner_generation=1,
+                    reason="durable_terminal",
+                )
 
     def _catch_up_publisher(
         self,
@@ -5314,6 +5957,7 @@ class RuntimeSession:
             raise RuntimeError(
                 "cannot close RuntimeSession with active physical operation admissions"
             )
+        self.terminal_presentation_foundation_service.close()
         self.terminal_monitor_coordinator.close()
         self._terminal_notification_listener = None
         self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
@@ -5324,6 +5968,7 @@ class RuntimeSession:
         self.event_write_service.close_if_idle()
         self.subagent_graph_checkpoint_service.close_if_idle()
         self.transcript_projection_checkpoint_service.close_if_idle()
+        self.prompt_queue_checkpoint_service.close_if_idle()
         if self.window_compaction_service is not None:
             self.window_compaction_service.close_if_idle()
         self.context_static_instruction_cache.clear()
@@ -5432,6 +6077,7 @@ _HOST_BOUNDARY_FIXED_EVENT_TYPES = frozenset(
         EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED,
         EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION,
         EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED,
+        EventType.PROMPT_QUEUE_COMMITTED_TO_RUN,
     }
 )
 _EXTERNAL_EXECUTION_FIXED_EVENT_TYPES = frozenset(

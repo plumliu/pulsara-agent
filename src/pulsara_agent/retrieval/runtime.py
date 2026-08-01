@@ -34,9 +34,13 @@ class RetrievalRuntimeResources:
     embedding: EmbeddingProvider | None = None
     rerank: RerankProvider | None = None
     close_timeout_seconds: float = 5.0
-    _workers: list[RetrievalWorker] = field(default_factory=list, init=False, repr=False)
+    _workers: list[RetrievalWorker] = field(
+        default_factory=list, init=False, repr=False
+    )
     _tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
-    _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _close_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
     _closed: bool = field(default=False, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
 
@@ -50,7 +54,9 @@ class RetrievalRuntimeResources:
 
     def attach_worker(self, worker: RetrievalWorker) -> None:
         if self._started:
-            raise RuntimeError("Retrieval workers must be attached before resources start")
+            raise RuntimeError(
+                "Retrieval workers must be attached before resources start"
+            )
         if self._closed:
             raise RuntimeError("Retrieval resources are closed")
         self._workers.append(worker)
@@ -108,13 +114,19 @@ class RetrievalRuntimeResources:
             # Providers close only after borrowers/workers have drained.
             for provider in (self.rerank, self.embedding):
                 if provider is not None:
-                    await _bounded_call(provider.aclose, timeout=self.close_timeout_seconds)
+                    await _bounded_call(
+                        provider.aclose, timeout=self.close_timeout_seconds
+                    )
 
 
-def build_retrieval_runtime_resources(config: RetrievalConfig) -> RetrievalRuntimeResources:
+def build_retrieval_runtime_resources(
+    config: RetrievalConfig,
+) -> RetrievalRuntimeResources:
     """Build configured providers without making missing secrets break non-retrieval tests."""
 
-    embedding = build_embedding_provider(config.embedding) if config.embedding.api_key else None
+    embedding = (
+        build_embedding_provider(config.embedding) if config.embedding.api_key else None
+    )
     rerank = build_rerank_provider(config.rerank) if config.rerank.api_key else None
     return RetrievalRuntimeResources(embedding=embedding, rerank=rerank)
 

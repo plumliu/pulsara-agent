@@ -36,7 +36,9 @@ class PublisherEnqueueResult:
 
 
 class RuntimeEventPublisher:
-    def __init__(self, *, runtime_session_id: str, next_sequence_to_publish: int = 1) -> None:
+    def __init__(
+        self, *, runtime_session_id: str, next_sequence_to_publish: int = 1
+    ) -> None:
         if next_sequence_to_publish < 1:
             raise ValueError("next_sequence_to_publish must be >= 1")
         self.runtime_session_id = runtime_session_id
@@ -137,7 +139,11 @@ class RuntimeEventPublisher:
         sequence = published.event.sequence
         if sequence is None:
             raise ValueError("Discarded events must have a canonical sequence")
-        if self._loop is not None and not self._loop.is_closed() and self._loop_thread_id != threading.get_ident():
+        if (
+            self._loop is not None
+            and not self._loop.is_closed()
+            and self._loop_thread_id != threading.get_ident()
+        ):
             self._loop.call_soon_threadsafe(self._discard_unpublished_in_loop, sequence)
             return
         self._discard_unpublished_in_loop(sequence)
@@ -149,7 +155,9 @@ class RuntimeEventPublisher:
             self._mailbox = asyncio.Queue()
             return
         if self._loop is not loop:
-            raise RuntimeError("RuntimeEventPublisher is already bound to a different event loop")
+            raise RuntimeError(
+                "RuntimeEventPublisher is already bound to a different event loop"
+            )
 
     def _enqueue(self, item: _PublishItem) -> None:
         assert self._mailbox is not None
@@ -214,7 +222,11 @@ class RuntimeEventPublisher:
                     self.errors.append(exc)
                     if item.error is None:
                         item.error = exc
-            if item.delivered is not None and item.error is not None and not item.delivered.done():
+            if (
+                item.delivered is not None
+                and item.error is not None
+                and not item.delivered.done()
+            ):
                 item.delivered.set_exception(item.error)
             if item.delivered is not None and not item.delivered.done():
                 item.delivered.set_result(None)

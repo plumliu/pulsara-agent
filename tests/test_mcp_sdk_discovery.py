@@ -405,8 +405,7 @@ def test_discovery_failure_cancels_and_drains_sibling_requests() -> None:
         with pytest.raises(ExceptionGroup) as caught:
             await _discover(connection)
         assert any(
-            "tools discovery failed" in str(error)
-            for error in caught.value.exceptions
+            "tools discovery failed" in str(error) for error in caught.value.exceptions
         )
         assert {"resources", "templates", "prompts"}.issubset(session.cancelled)
 

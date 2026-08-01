@@ -109,9 +109,7 @@ class ModelStreamDurableBatchAccumulator:
     def oldest_unconfirmed_at_monotonic_ns(self) -> int | None:
         if not self._events:
             return None
-        return min(
-            item.oldest_accepted_at_monotonic_ns for item in self._events
-        )
+        return min(item.oldest_accepted_at_monotonic_ns for item in self._events)
 
     def add(self, item: PreparedModelStreamSemanticEvent) -> bool:
         if item.canonical_candidate_bytes > MODEL_STREAM_COMMIT_MAX_CANDIDATE_BYTES:

@@ -366,9 +366,7 @@ _KIND_PAYLOAD_SCHEMA = {
 @lru_cache(maxsize=1)
 def default_runtime_observation_protocol() -> RuntimeObservationProtocolContractFact:
     lifecycle = default_context_source_lifecycle_registry()
-    source_kind_producers: dict[
-        str, list[ContextSourceObservationProducerFact]
-    ] = {}
+    source_kind_producers: dict[str, list[ContextSourceObservationProducerFact]] = {}
     for source_id, spec in _SOURCE_LIFECYCLES.items():
         if not spec["bindings"]:
             continue
@@ -538,7 +536,8 @@ def default_runtime_request_protocol() -> RuntimeRequestProtocolContractFact:
             allowed_owner_kinds=values[2],
             payload_schema_version=(
                 "runtime_task_request_payload.v1"
-                if kind in {
+                if kind
+                in {
                     "subagent_task",
                     "current_run_task",
                     "terminal_process_observation",
@@ -650,7 +649,9 @@ def context_source_lifecycle_entry(
         if item.source_id is source_id
     )
     if len(matches) != 1:
-        raise ValueError(f"ContextSource lifecycle is not registered: {source_id.value}")
+        raise ValueError(
+            f"ContextSource lifecycle is not registered: {source_id.value}"
+        )
     return matches[0]
 
 
@@ -711,7 +712,10 @@ def context_source_transition_kind(source_id: ContextSourceId, payload) -> str:
         transition = (
             "terminal"
             if payload.ordered_entries
-            and all(item.status in {"failed", "disabled"} for item in payload.ordered_entries)
+            and all(
+                item.status in {"failed", "disabled"}
+                for item in payload.ordered_entries
+            )
             else "diagnostic_update"
         )
     else:

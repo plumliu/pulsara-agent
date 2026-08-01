@@ -91,7 +91,9 @@ class FixtureMemoryQuery:
         self.views = {_view_from_fixture(row): row for row in rows}
         self.by_id = {view.id: view for view in self.views}
 
-    def fetch_nodes(self, ids, *, graph_id: str | None = None) -> list[CanonicalNodeView]:
+    def fetch_nodes(
+        self, ids, *, graph_id: str | None = None
+    ) -> list[CanonicalNodeView]:
         return [self.by_id[node_id] for node_id in ids if node_id in self.by_id]
 
     def lexical_candidates(
@@ -144,7 +146,9 @@ class FixtureMemoryQuery:
         return scored[:limit]
 
 
-def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None) -> RecallEvalReport:
+def run_eval(
+    cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
+) -> RecallEvalReport:
     included_hits = 0
     included_total = 0
     excluded_leaks = 0
@@ -194,12 +198,22 @@ def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
         latencies.append(latency_ms)
         included_ids = {item.memory_id for item in result.items}
         included_total += len(case.expected_included)
-        included_hits += sum(1 for memory_id in case.expected_included if memory_id in included_ids)
-        leaked = sorted(memory_id for memory_id in case.expected_excluded if memory_id in included_ids)
+        included_hits += sum(
+            1 for memory_id in case.expected_included if memory_id in included_ids
+        )
+        leaked = sorted(
+            memory_id
+            for memory_id in case.expected_excluded
+            if memory_id in included_ids
+        )
         excluded_leaks += len(leaked)
         if leaked:
             failures.append(f"{case.case_id}: expected excluded ids leaked: {leaked}")
-        missing = sorted(memory_id for memory_id in case.expected_included if memory_id not in included_ids)
+        missing = sorted(
+            memory_id
+            for memory_id in case.expected_included
+            if memory_id not in included_ids
+        )
         if missing:
             failures.append(f"{case.case_id}: expected included ids missing: {missing}")
         rejected = [
@@ -218,13 +232,20 @@ def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
         superseded_leaks += len(superseded)
         if superseded:
             failures.append(f"{case.case_id}: superseded ids leaked: {superseded}")
-        views = {view.id: view for view in service.memory_query.fetch_nodes([item.memory_id for item in result.items])}
+        views = {
+            view.id: view
+            for view in service.memory_query.fetch_nodes(
+                [item.memory_id for item in result.items]
+            )
+        }
         for item in result.items:
             try:
                 explain_memory(views[item.memory_id], signals=item.why)
             except Exception as exc:
                 confabulations += 1
-                failures.append(f"{case.case_id}: ungrounded explanation for {item.memory_id}: {exc}")
+                failures.append(
+                    f"{case.case_id}: ungrounded explanation for {item.memory_id}: {exc}"
+                )
         if latency_ms > case.latency_budget_ms:
             failures.append(
                 f"{case.case_id}: latency {latency_ms:.2f}ms exceeded budget {case.latency_budget_ms}ms"
@@ -238,7 +259,9 @@ def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
 
     included_hit_rate = (included_hits / included_total) if included_total else 1.0
     if floor is None:
-        informational.append("v1_floor.json not loaded; quality floor check is informational.")
+        informational.append(
+            "v1_floor.json not loaded; quality floor check is informational."
+        )
     else:
         floor_metrics = floor.get("metrics", {})
         floor_hit_rate = float(floor_metrics.get("included_hit_rate", 0.0))
@@ -263,7 +286,9 @@ def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
 
 def load_cases(path: Path) -> list[RecallEvalCase]:
     cases: list[RecallEvalCase] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -277,13 +302,19 @@ def load_cases(path: Path) -> list[RecallEvalCase]:
                     expected_included=tuple(payload.get("expected_included", ())),
                     expected_excluded=tuple(payload.get("expected_excluded", ())),
                     latency_budget_ms=int(payload.get("latency_budget_ms", 500)),
-                    projection_char_budget=int(payload.get("projection_char_budget", 1200)),
+                    projection_char_budget=int(
+                        payload.get("projection_char_budget", 1200)
+                    ),
                     must_have_warning=bool(payload.get("must_have_warning", False)),
-                    semantic_candidate_ids=tuple(payload.get("semantic_candidate_ids", ())),
+                    semantic_candidate_ids=tuple(
+                        payload.get("semantic_candidate_ids", ())
+                    ),
                 )
             )
         except KeyError as exc:
-            raise ValueError(f"{path}:{line_number}: missing required field {exc}") from exc
+            raise ValueError(
+                f"{path}:{line_number}: missing required field {exc}"
+            ) from exc
     return cases
 
 
@@ -291,8 +322,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run memory recall golden-set evals.")
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--floor", type=Path, default=DEFAULT_FLOOR)
-    parser.add_argument("--gate", action="store_true", help="Exit non-zero when blocking gates fail.")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    parser.add_argument(
+        "--gate", action="store_true", help="Exit non-zero when blocking gates fail."
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Print machine-readable JSON."
+    )
     args = parser.parse_args(argv)
 
     report = run_eval(load_cases(args.fixture), floor=_load_floor(args.floor))
@@ -334,9 +369,15 @@ def _view_from_fixture(row: dict[str, Any]) -> CanonicalNodeView:
         status=status,
         statement=str(row["statement"]),
         summary=_optional_str(row.get("summary")),
-        source_authority=_optional_enum(memory.SourceAuthority, row.get("source_authority")),
-        verification_status=_optional_enum(memory.VerificationStatus, row.get("verification_status")),
-        confidence_level=_optional_enum(memory.ConfidenceLevel, row.get("confidence_level")),
+        source_authority=_optional_enum(
+            memory.SourceAuthority, row.get("source_authority")
+        ),
+        verification_status=_optional_enum(
+            memory.VerificationStatus, row.get("verification_status")
+        ),
+        confidence_level=_optional_enum(
+            memory.ConfidenceLevel, row.get("confidence_level")
+        ),
         applies_when=_optional_str(row.get("applies_when")),
         do_not_apply_when=_optional_str(row.get("do_not_apply_when")),
         created_at=_parse_datetime(row.get("created_at")) or now,

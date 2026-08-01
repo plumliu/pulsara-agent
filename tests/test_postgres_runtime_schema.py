@@ -13,10 +13,7 @@ def _relation(name: str) -> dict[str, object]:
 
 
 def _constraint_definitions(name: str) -> set[str]:
-    return {
-        str(item["definition"])
-        for item in _relation(name)["constraints"]
-    }
+    return {str(item["definition"]) for item in _relation(name)["constraints"]}
 
 
 def test_runtime_truth_is_owned_by_cumulative_manifest() -> None:

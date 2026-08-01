@@ -55,8 +55,7 @@ class MemoryHookRunView(FrozenRuntimeStateBase):
     @property
     def messages(self) -> tuple[Msg, ...]:
         return tuple(
-            Msg.model_validate(thaw_json(message))
-            for message in self.frozen_messages
+            Msg.model_validate(thaw_json(message)) for message in self.frozen_messages
         )
 
     @property
@@ -95,7 +94,9 @@ def build_memory_hook_run_view(
         if not isinstance(frozen, FrozenJsonObjectFact):
             raise TypeError("message projection must be an object")
         frozen_messages.append(frozen)
-    frozen_projection = freeze_json(current_projection) if current_projection is not None else None
+    frozen_projection = (
+        freeze_json(current_projection) if current_projection is not None else None
+    )
     if frozen_projection is not None and not isinstance(
         frozen_projection, FrozenJsonObjectFact
     ):
@@ -121,9 +122,7 @@ class MemoryHooks(Protocol):
     @property
     def memory_proposal_sink(self) -> object | None: ...
 
-    async def on_turn_start(
-        self, view: MemoryHookRunView, user_input: str
-    ) -> None: ...
+    async def on_turn_start(self, view: MemoryHookRunView, user_input: str) -> None: ...
 
     async def on_session_start(
         self, view: MemoryHookRunView, user_input: str
@@ -163,14 +162,10 @@ class NoopMemoryHooks:
     def memory_proposal_sink(self) -> object | None:
         return None
 
-    async def on_session_start(
-        self, view: MemoryHookRunView, user_input: str
-    ) -> None:
+    async def on_session_start(self, view: MemoryHookRunView, user_input: str) -> None:
         return None
 
-    async def on_turn_start(
-        self, view: MemoryHookRunView, user_input: str
-    ) -> None:
+    async def on_turn_start(self, view: MemoryHookRunView, user_input: str) -> None:
         return await self.on_session_start(view, user_input)
 
     def baseline_projection(

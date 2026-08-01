@@ -73,7 +73,9 @@ def test_tool_terminal_projection_is_atomic_and_independently_hydratable(
         for event in committed
         if isinstance(event, ToolResultTerminalProjectionCommittedEvent)
     )
-    terminal = next(event for event in committed if isinstance(event, ToolResultEndEvent))
+    terminal = next(
+        event for event in committed if isinstance(event, ToolResultEndEvent)
+    )
     assert [event.type for event in committed][-2:] == [
         EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED,
         EventType.TOOL_RESULT_END,

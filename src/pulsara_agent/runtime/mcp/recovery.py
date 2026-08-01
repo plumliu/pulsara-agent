@@ -210,9 +210,7 @@ async def terminalize_reopened_mcp_input_required(
         )
         from pulsara_agent.event import McpInputRequiredResolutionSubmittedEvent
 
-        if not isinstance(
-            resolution_event, McpInputRequiredResolutionSubmittedEvent
-        ):
+        if not isinstance(resolution_event, McpInputRequiredResolutionSubmittedEvent):
             raise RuntimeError("MCP recovery lost its replay carrier source")
         carrier_id = resolution_event.continuation.replay_continuation_carrier_id
     stored_carrier = continuation_repository.read(

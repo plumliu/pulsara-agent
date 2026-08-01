@@ -125,9 +125,7 @@ class RuntimeEventWriteService:
             if current is not None:
                 current.uncancel()
             try:
-                result = await asyncio.shield(
-                    asyncio.wrap_future(owned.completion)
-                )
+                result = await asyncio.shield(asyncio.wrap_future(owned.completion))
             except BaseException as error:
                 raise RuntimeEventWriteCancelled(
                     operation_result=None,
@@ -287,8 +285,8 @@ class RuntimeEventWriteService:
             self._start_next_locked()
             return
         physical.add_done_callback(
-            lambda completed, operation_id=owned.operation_id: (
-                self._operation_done(operation_id, completed)
+            lambda completed, operation_id=owned.operation_id: self._operation_done(
+                operation_id, completed
             )
         )
 
@@ -318,7 +316,9 @@ class RuntimeEventWriteService:
             raise RuntimeError("runtime event writer has no admission coordinator")
         owned = getattr(self._worker_local, "owned_operation", None)
         if not isinstance(owned, _OwnedRuntimeEventWrite):
-            raise RuntimeError("operation admission promotion requires writer ownership")
+            raise RuntimeError(
+                "operation admission promotion requires writer ownership"
+            )
         token = owned.producer_admission
         if token is None:
             raise RuntimeError("current writer admission was already transferred")

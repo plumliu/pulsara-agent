@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -17,14 +21,16 @@ from pulsara_agent.event import (
     ProviderInputGenerationClosedEvent,
     ProviderInputGenerationRolloverResolvedEvent,
     ProviderInputGenerationStartedEvent,
+    PromptQueueCommittedToProviderInputEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     TerminalNotificationReservationReleasedEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
+    UserSteerCommittedEvent,
 )
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     FrozenEventWriteCandidate,
@@ -37,10 +43,13 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.primitives.terminal_projection import ModelCallSemanticSourceFact
 from pulsara_agent.primitives.provider_input import (
+    ExistingAppendCommitGuardFact,
     ProviderInputGenerationCommitGuardFact,
+    RolloverGenerationCommitGuardFact,
 )
 from pulsara_agent.primitives.host_ingress import (
     ActiveRunMonitorSafePointCommitGuardFact,
+    ActiveRunPromptSteerCommitGuardFact,
 )
 from pulsara_agent.llm.terminal_projection import (
     MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
@@ -85,7 +94,7 @@ class ConfirmedCommittedBatch:
 
     def decode_owned(self) -> tuple[AgentEvent, ...]:
         return tuple(
-            event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(event, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for event in self.committed_events
         )
 
@@ -103,9 +112,8 @@ class ModelStreamStartCommitGuard:
     provider_input_generation_guard: ProviderInputGenerationCommitGuardFact | None
     prepared_provider_input_candidate_fingerprint: str | None
     committed_provider_input_reference_fingerprint: str | None
-    active_run_monitor_safe_point_guard: (
-        ActiveRunMonitorSafePointCommitGuardFact | None
-    )
+    active_run_monitor_safe_point_guard: ActiveRunMonitorSafePointCommitGuardFact | None
+    active_run_prompt_steer_guard: ActiveRunPromptSteerCommitGuardFact | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +191,7 @@ def build_model_stream_start_commit_guard(
             if bundle.active_run_monitor_delivery is None
             else bundle.active_run_monitor_delivery.commit_guard
         ),
+        active_run_prompt_steer_guard=bundle.active_run_prompt_steer_guard,
     )
 
 
@@ -288,6 +297,8 @@ class RuntimeSessionModelStreamEventCommitPort:
             ProviderInputGenerationRolloverResolvedEvent,
             TerminalProcessObservationDeliveryDispositionEvent,
             TerminalNotificationReservationReleasedEvent,
+            UserSteerCommittedEvent,
+            PromptQueueCommittedToProviderInputEvent,
         )
         if any(not isinstance(event, allowed) for event in events):
             raise ModelStreamCommitContractError(
@@ -314,9 +325,8 @@ class RuntimeSessionModelStreamEventCommitPort:
         )
         self._model_call_purpose = start.resolved_call.purpose
         safe_point_guard = guard.active_run_monitor_safe_point_guard
-        if (safe_point_guard is None) != (
-            start.active_run_monitor_delivery is None
-        ):
+        steer_guard = guard.active_run_prompt_steer_guard
+        if (safe_point_guard is None) != (start.active_run_monitor_delivery is None):
             raise ModelStreamCommitContractError(
                 "model start active-run monitor guard matrix mismatch"
             )
@@ -327,6 +337,10 @@ class RuntimeSessionModelStreamEventCommitPort:
         ):
             raise ModelStreamCommitContractError(
                 "model start active-run monitor guard drifted"
+            )
+        if steer_guard != start.active_run_prompt_steer_guard:
+            raise ModelStreamCommitContractError(
+                "model start active-run prompt steer guard drifted"
             )
         provider_guard = guard.provider_input_generation_guard
         if (provider_guard is None) != (start.provider_input_reference is None):
@@ -352,6 +366,40 @@ class RuntimeSessionModelStreamEventCommitPort:
                 raise ModelStreamCommitContractError(
                     "model start provider append/reference join failed"
                 )
+            host_guards = tuple(
+                item for item in (safe_point_guard, steer_guard) if item is not None
+            )
+            if host_guards:
+                if isinstance(provider_guard, ExistingAppendCommitGuardFact):
+                    provider_generation_id = provider_guard.generation_id
+                    provider_revision = provider_guard.expected_revision
+                    provider_core_fingerprint = (
+                        provider_guard.expected_committed_core_state_fingerprint
+                    )
+                elif isinstance(provider_guard, RolloverGenerationCommitGuardFact):
+                    provider_generation_id = provider_guard.old_generation_id
+                    provider_revision = provider_guard.expected_old_revision
+                    provider_core_fingerprint = (
+                        provider_guard.expected_old_core_state_fingerprint
+                    )
+                else:
+                    raise ModelStreamCommitContractError(
+                        "Host safe-point delivery cannot target initial generation"
+                    )
+            for host_guard in host_guards:
+                if (
+                    host_guard.expected_provider_input_generation_id
+                    != provider_generation_id
+                    or host_guard.expected_provider_input_generation_revision
+                    != provider_revision
+                    or host_guard.expected_provider_input_committed_state_fingerprint
+                    != provider_core_fingerprint
+                    or host_guard.prepared_provider_input_append_fingerprint
+                    != guard.prepared_provider_input_candidate_fingerprint
+                ):
+                    raise ModelStreamCommitContractError(
+                        "model start Host safe-point/provider guard join failed"
+                    )
         elif any(
             value is not None
             for value in (
@@ -409,6 +457,11 @@ class RuntimeSessionModelStreamEventCommitPort:
                     candidate_events=events,
                     guard=safe_point_guard,
                 ),
+                self._runtime_session.active_run_prompt_steer_commit_guard(
+                    start_event=start,
+                    candidate_events=events,
+                    guard=steer_guard,
+                ),
                 self._runtime_session.write_coordinator.lock,
             ):
                 if provider_guard is not None:
@@ -420,6 +473,12 @@ class RuntimeSessionModelStreamEventCommitPort:
                         start_event=start,
                         candidate_events=events,
                         guard=safe_point_guard,
+                    )
+                if steer_guard is not None:
+                    self._runtime_session.validate_active_run_prompt_steer_safe_point(
+                        start_event=start,
+                        candidate_events=events,
+                        guard=steer_guard,
                     )
                 if reservation is not None:
                     self._require_expected_rollout_state(
@@ -816,6 +875,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             LedgerWriteAdmissionClass,
             PhysicalOperationKind,
         )
+
         admission_kwargs = {}
         if self._physical_reservation is not None:
             admission_kwargs = {
@@ -962,7 +1022,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 "model stream commit confirmation is missing a candidate"
             )
         raw = tuple(
-            RawStoredEventEnvelope.from_stored_event(
+            build_raw_stored_event_envelope(
                 event=event,
                 runtime_session_id=self._runtime_session.runtime_session_id,
                 schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -1117,9 +1177,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 )
             active = matching_states[0].active_reservations
         elif guard.rollout_accounting_mode == "child_subaccount":
-            binding = self._runtime_session.resolve_run_rollout_binding(
-                run_id=run_id
-            )
+            binding = self._runtime_session.resolve_run_rollout_binding(run_id=run_id)
             if binding.child_state is None:
                 raise ModelStreamCommitContractError(
                     "child model terminal lacks its local rollout ledger"

@@ -91,9 +91,7 @@ class InMemoryCheckpointMaintenanceAuthority:
         if not runtime_session_id:
             raise ValueError("checkpoint maintenance runtime session is required")
         with self._catalog_lock:
-            return self._locks.setdefault(
-                runtime_session_id, _InMemoryReadWriteLock()
-            )
+            return self._locks.setdefault(runtime_session_id, _InMemoryReadWriteLock())
 
     @contextmanager
     def acquire_shared(
@@ -177,14 +175,10 @@ class PostgresCheckpointMaintenanceAuthority:
         lock_key = f"pulsara:checkpoint-maintenance:{runtime_session_id}"
         acquired = False
         lock_function = (
-            "pg_try_advisory_lock"
-            if exclusive
-            else "pg_try_advisory_lock_shared"
+            "pg_try_advisory_lock" if exclusive else "pg_try_advisory_lock_shared"
         )
         unlock_function = (
-            "pg_advisory_unlock"
-            if exclusive
-            else "pg_advisory_unlock_shared"
+            "pg_advisory_unlock" if exclusive else "pg_advisory_unlock_shared"
         )
         with self.connection_provider.connection(
             lane=PostgresConnectionLane.CHECKPOINT_MAINTENANCE,
@@ -251,7 +245,5 @@ def checkpoint_maintenance_authority_for_event_log(
     from pulsara_agent.event_log.postgres import PostgresEventLog
 
     if isinstance(event_log, PostgresEventLog):
-        return PostgresCheckpointMaintenanceAuthority(
-            event_log.connection_provider
-        )
+        return PostgresCheckpointMaintenanceAuthority(event_log.connection_provider)
     return None

@@ -46,12 +46,15 @@ class MandatoryRuntimeAuditReceipt(FrozenRuntimeStateBase):
     attempt_generation: int
     status: Literal["full", "reconciliation_required"]
     committed_event_reference: ContextEventReferenceFact | None
-    publication_summary: Literal[
-        "completed",
-        "enqueued",
-        "unavailable",
-        "failed_after_commit",
-    ] | None
+    publication_summary: (
+        Literal[
+            "completed",
+            "enqueued",
+            "unavailable",
+            "failed_after_commit",
+        ]
+        | None
+    )
     publication_errors: tuple[object, ...]
 
 
@@ -168,9 +171,7 @@ class RuntimeSessionMandatoryAuditOwner:
             try:
                 result = await self._runtime_session.write_event_with_deadline(
                     candidate,
-                    deadline_monotonic=(
-                        deadline_budget.ordinary_deadline_monotonic
-                    ),
+                    deadline_monotonic=(deadline_budget.ordinary_deadline_monotonic),
                     # type: ignore[arg-type]
                 )
             except asyncio.CancelledError:
@@ -201,9 +202,7 @@ class RuntimeSessionMandatoryAuditOwner:
                     publication_errors=(),
                 )
             stored = next(
-                event
-                for event in result.committed_events
-                if event.id == candidate.id
+                event for event in result.committed_events if event.id == candidate.id
             )
             summary: Literal[
                 "completed",

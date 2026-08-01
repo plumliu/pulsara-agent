@@ -24,9 +24,7 @@ def test_named_graph_supports_put_get_and_delete() -> None:
     except KeyError:
         pass
     else:
-        raise AssertionError(
-            "Default graph lookup should not search named graphs"
-        )
+        raise AssertionError("Default graph lookup should not search named graphs")
     graph.delete_graph("graph:test")
 
     try:
@@ -70,19 +68,14 @@ def test_empty_graph_id_is_rejected() -> None:
 
 def test_default_graph_lookup_does_not_return_named_graph_duplicate() -> None:
     graph = InMemoryGraphStore()
-    graph.put_jsonld(
-        {"@id": "claim:1", "@type": ["Claim"], "statement": "default"}
-    )
+    graph.put_jsonld({"@id": "claim:1", "@type": ["Claim"], "statement": "default"})
     graph.put_jsonld(
         {"@id": "claim:1", "@type": ["Claim"], "statement": "named"},
         graph_id="graph:named",
     )
 
     assert graph.get_jsonld("claim:1")["statement"] == "default"
-    assert (
-        graph.get_jsonld("claim:1", graph_id="graph:named")["statement"]
-        == "named"
-    )
+    assert graph.get_jsonld("claim:1", graph_id="graph:named")["statement"] == "named"
     assert graph.has_jsonld("claim:1")
     assert graph.has_jsonld("claim:1", graph_id="graph:named")
 
@@ -105,9 +98,7 @@ def test_default_find_by_type_does_not_scan_named_graphs() -> None:
         graph_id="graph:named",
     )
 
-    assert [doc["@id"] for doc in graph.find_by_type(memory.CLAIM)] == [
-        "claim:default"
-    ]
+    assert [doc["@id"] for doc in graph.find_by_type(memory.CLAIM)] == ["claim:default"]
     assert [
         doc["@id"]
         for doc in graph.find_by_type(

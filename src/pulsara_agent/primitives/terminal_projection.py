@@ -228,7 +228,9 @@ class ModelProviderErrorSemanticFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _bounded_diagnostics(self) -> "ModelProviderErrorSemanticFact":
-        if any(len(item.encode("utf-8")) > 1_024 for item in self.sanitized_diagnostics):
+        if any(
+            len(item.encode("utf-8")) > 1_024 for item in self.sanitized_diagnostics
+        ):
             raise ValueError("provider diagnostic exceeds UTF-8 byte bound")
         return self
 
@@ -324,8 +326,7 @@ class ModelCallSemanticSourceFact(FrozenFactBase):
             first != 0
             or last != self.source_semantic_item_count - 1
             or self.durable_semantic_event_count == 0
-            or self.durable_semantic_event_count
-            > self.source_semantic_item_count
+            or self.durable_semantic_event_count > self.source_semantic_item_count
         ):
             raise ValueError("model source transport/durable range mismatch")
         measurement = self.stream_settlement_measurement
@@ -373,8 +374,7 @@ class CanonicalToolResultDataBlockSemanticFact(FrozenFactBase):
 
 
 CanonicalToolResultContentBlockSemanticFact: TypeAlias = Annotated[
-    CanonicalToolResultTextBlockSemanticFact
-    | CanonicalToolResultDataBlockSemanticFact,
+    CanonicalToolResultTextBlockSemanticFact | CanonicalToolResultDataBlockSemanticFact,
     Field(discriminator="content_kind"),
 ]
 
@@ -396,7 +396,9 @@ class CanonicalToolResultContentBlockFact(FrozenFactBase):
         else:
             if self.content is None:
                 if semantic.content_semantic_identity is not None:
-                    raise ValueError("artifact-only tool data cannot carry inline identity")
+                    raise ValueError(
+                        "artifact-only tool data cannot carry inline identity"
+                    )
                 if not semantic.artifact_content_fingerprints:
                     raise ValueError("tool data requires content or artifact identity")
             elif self.content.semantic_identity != semantic.content_semantic_identity:
@@ -428,8 +430,13 @@ class CanonicalToolResultBlockFact(FrozenFactBase):
         )
         if self.semantic_identity.ordered_content_semantic_fingerprints != expected:
             raise ValueError("tool result ordered content fingerprint mismatch")
-        artifact_fingerprints = tuple(item.ref_fingerprint for item in self.artifact_refs)
-        if self.semantic_identity.artifact_content_fingerprints != artifact_fingerprints:
+        artifact_fingerprints = tuple(
+            item.ref_fingerprint for item in self.artifact_refs
+        )
+        if (
+            self.semantic_identity.artifact_content_fingerprints
+            != artifact_fingerprints
+        ):
             raise ValueError("tool result artifact fingerprint mismatch")
         return self
 
@@ -450,9 +457,7 @@ class ToolTerminalProjectionSemanticFact(FrozenFactBase):
     terminal_process_monitor_cancellation: (
         TerminalProcessMonitorCancellationSemanticFact | None
     ) = None
-    mcp_input_required_terminal_source: (
-        McpInputRequiredTerminalSourceFact | None
-    ) = None
+    mcp_input_required_terminal_source: McpInputRequiredTerminalSourceFact | None = None
     semantic_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -507,8 +512,7 @@ class ToolTerminalProjectionSemanticJoinFact(FrozenFactBase):
     @model_validator(mode="after")
     def _monitor_action(self) -> "ToolTerminalProjectionSemanticJoinFact":
         if (
-            self.terminal_process_monitor_registration_semantic_fingerprint
-            is not None
+            self.terminal_process_monitor_registration_semantic_fingerprint is not None
             and self.terminal_process_monitor_cancellation_semantic_fingerprint
             is not None
         ):
@@ -519,8 +523,7 @@ class ToolTerminalProjectionSemanticJoinFact(FrozenFactBase):
 
 
 TerminalProjectionSemanticJoinFact: TypeAlias = Annotated[
-    ModelTerminalProjectionSemanticJoinFact
-    | ToolTerminalProjectionSemanticJoinFact,
+    ModelTerminalProjectionSemanticJoinFact | ToolTerminalProjectionSemanticJoinFact,
     Field(discriminator="projection_kind"),
 ]
 
@@ -578,7 +581,9 @@ class ToolResultSemanticSourceFact(FrozenFactBase):
         if self.source_delta_count == 0:
             if first is not None or last is not None:
                 raise ValueError("empty tool source cannot carry delta range")
-        elif first is None or last is None or last - first + 1 != self.source_delta_count:
+        elif (
+            first is None or last is None or last - first + 1 != self.source_delta_count
+        ):
             raise ValueError("tool result delta range mismatch")
         return self
 
@@ -626,7 +631,9 @@ class TerminalProjectionDocumentFact(FrozenFactBase):
                 raise ValueError("model document requires usage status")
             if self.tool_result_artifact_refs:
                 raise ValueError("model document cannot carry tool artifacts")
-            assert isinstance(self.semantic_identity, ModelTerminalProjectionSemanticFact)
+            assert isinstance(
+                self.semantic_identity, ModelTerminalProjectionSemanticFact
+            )
             assert isinstance(self.payload, ModelTerminalProjectionPayloadFact)
             expected = tuple(
                 item.semantic_identity.semantic_fingerprint
@@ -650,7 +657,9 @@ class TerminalProjectionDocumentFact(FrozenFactBase):
                 if len(errors) != 1 or errors[-1] != self.payload.items[-1]:
                     raise ValueError("provider error must be the final projection item")
             elif errors:
-                raise ValueError("non-provider-error outcome cannot carry provider error")
+                raise ValueError(
+                    "non-provider-error outcome cannot carry provider error"
+                )
         else:
             if not isinstance(self.source_fact, ToolResultSemanticSourceFact):
                 raise ValueError("tool document requires tool source")
@@ -722,37 +731,157 @@ class ToolResultTerminalProjectionEndReferenceFact(FrozenFactBase):
 
 
 _OWN: tuple[tuple[str, str | None, str], ...] = (
-    ("data_media_type_normalization_rule.v1", "rule_fingerprint", "data-media-type-normalization-rule:v1"),
-    ("data_media_type_normalization_contract.v1", "contract_fingerprint", "data-media-type-normalization-contract:v1"),
-    ("terminal_content_canonicalization_contract.v2", "contract_fingerprint", "terminal-content-canonicalization-contract:v2"),
-    ("terminal_content_artifact_codec_contract.v1", "contract_fingerprint", "terminal-content-artifact-codec-contract:v1"),
-    ("terminal_content_semantic.v2", "semantic_fingerprint", "terminal-content-semantic:v2"),
-    ("terminal_inline_content.v2", "reference_fingerprint", "terminal-inline-content:v2"),
-    ("terminal_artifact_content_ref.v2", "reference_fingerprint", "terminal-artifact-content-ref:v2"),
-    ("model_text_block_semantic.v1", "semantic_fingerprint", "model-text-block-semantic:v1"),
-    ("model_thinking_block_semantic.v1", "semantic_fingerprint", "model-thinking-block-semantic:v1"),
-    ("model_data_block_semantic.v1", "semantic_fingerprint", "model-data-block-semantic:v1"),
-    ("model_tool_call_block_semantic.v1", "semantic_fingerprint", "model-tool-call-block-semantic:v1"),
-    ("model_provider_error_semantic.v1", "semantic_fingerprint", "model-provider-error-semantic:v1"),
+    (
+        "data_media_type_normalization_rule.v1",
+        "rule_fingerprint",
+        "data-media-type-normalization-rule:v1",
+    ),
+    (
+        "data_media_type_normalization_contract.v1",
+        "contract_fingerprint",
+        "data-media-type-normalization-contract:v1",
+    ),
+    (
+        "terminal_content_canonicalization_contract.v2",
+        "contract_fingerprint",
+        "terminal-content-canonicalization-contract:v2",
+    ),
+    (
+        "terminal_content_artifact_codec_contract.v1",
+        "contract_fingerprint",
+        "terminal-content-artifact-codec-contract:v1",
+    ),
+    (
+        "terminal_content_semantic.v2",
+        "semantic_fingerprint",
+        "terminal-content-semantic:v2",
+    ),
+    (
+        "terminal_inline_content.v2",
+        "reference_fingerprint",
+        "terminal-inline-content:v2",
+    ),
+    (
+        "terminal_artifact_content_ref.v2",
+        "reference_fingerprint",
+        "terminal-artifact-content-ref:v2",
+    ),
+    (
+        "model_text_block_semantic.v1",
+        "semantic_fingerprint",
+        "model-text-block-semantic:v1",
+    ),
+    (
+        "model_thinking_block_semantic.v1",
+        "semantic_fingerprint",
+        "model-thinking-block-semantic:v1",
+    ),
+    (
+        "model_data_block_semantic.v1",
+        "semantic_fingerprint",
+        "model-data-block-semantic:v1",
+    ),
+    (
+        "model_tool_call_block_semantic.v1",
+        "semantic_fingerprint",
+        "model-tool-call-block-semantic:v1",
+    ),
+    (
+        "model_provider_error_semantic.v1",
+        "semantic_fingerprint",
+        "model-provider-error-semantic:v1",
+    ),
     ("model_projection_item.v2", "fact_fingerprint", "model-projection-item:v2"),
-    ("model_call_semantic_source.v3", "source_fingerprint", "model-call-semantic-source:v3"),
-    ("model_terminal_projection_semantic.v1", "semantic_fingerprint", "model-terminal-projection-semantic:v1"),
-    ("canonical_tool_result_text_block_semantic.v1", "semantic_fingerprint", "canonical-tool-result-text-block-semantic:v1"),
-    ("canonical_tool_result_data_block_semantic.v2", "semantic_fingerprint", "canonical-tool-result-data-block-semantic:v2"),
-    ("canonical_tool_result_content_block.v1", "fact_fingerprint", "canonical-tool-result-content-block:v1"),
-    ("canonical_tool_result_block_semantic.v1", "semantic_fingerprint", "canonical-tool-result-block-semantic:v1"),
-    ("canonical_tool_result_block.v1", "fact_fingerprint", "canonical-tool-result-block:v1"),
-    ("tool_terminal_projection_semantic.v1", "semantic_fingerprint", "tool-terminal-projection-semantic:v1"),
-    ("model_terminal_projection_semantic_join.v1", None, "model-terminal-projection-semantic-join:v1"),
-    ("tool_terminal_projection_semantic_join.v1", None, "tool-terminal-projection-semantic-join:v1"),
-    ("model_terminal_projection_payload.v2", None, "model-terminal-projection-payload:v2"),
-    ("tool_terminal_projection_payload.v2", None, "tool-terminal-projection-payload:v2"),
-    ("tool_result_semantic_source.v1", "source_fingerprint", "tool-result-semantic-source:v1"),
-    ("terminal_projection_document_contract.v2", "contract_fingerprint", "terminal-projection-document-contract:v2"),
-    ("terminal_projection_document.v2", "fact_fingerprint", "terminal-projection-document:v2"),
-    ("terminal_projection_reference.v2", "reference_fingerprint", "terminal-projection-reference:v2"),
-    ("model_call_terminal_projection_end_ref.v2", "end_reference_fingerprint", "model-call-terminal-projection-end-ref:v2"),
-    ("tool_result_terminal_projection_end_ref.v2", "end_reference_fingerprint", "tool-result-terminal-projection-end-ref:v2"),
+    (
+        "model_call_semantic_source.v3",
+        "source_fingerprint",
+        "model-call-semantic-source:v3",
+    ),
+    (
+        "model_terminal_projection_semantic.v1",
+        "semantic_fingerprint",
+        "model-terminal-projection-semantic:v1",
+    ),
+    (
+        "canonical_tool_result_text_block_semantic.v1",
+        "semantic_fingerprint",
+        "canonical-tool-result-text-block-semantic:v1",
+    ),
+    (
+        "canonical_tool_result_data_block_semantic.v2",
+        "semantic_fingerprint",
+        "canonical-tool-result-data-block-semantic:v2",
+    ),
+    (
+        "canonical_tool_result_content_block.v1",
+        "fact_fingerprint",
+        "canonical-tool-result-content-block:v1",
+    ),
+    (
+        "canonical_tool_result_block_semantic.v1",
+        "semantic_fingerprint",
+        "canonical-tool-result-block-semantic:v1",
+    ),
+    (
+        "canonical_tool_result_block.v1",
+        "fact_fingerprint",
+        "canonical-tool-result-block:v1",
+    ),
+    (
+        "tool_terminal_projection_semantic.v1",
+        "semantic_fingerprint",
+        "tool-terminal-projection-semantic:v1",
+    ),
+    (
+        "model_terminal_projection_semantic_join.v1",
+        None,
+        "model-terminal-projection-semantic-join:v1",
+    ),
+    (
+        "tool_terminal_projection_semantic_join.v1",
+        None,
+        "tool-terminal-projection-semantic-join:v1",
+    ),
+    (
+        "model_terminal_projection_payload.v2",
+        None,
+        "model-terminal-projection-payload:v2",
+    ),
+    (
+        "tool_terminal_projection_payload.v2",
+        None,
+        "tool-terminal-projection-payload:v2",
+    ),
+    (
+        "tool_result_semantic_source.v1",
+        "source_fingerprint",
+        "tool-result-semantic-source:v1",
+    ),
+    (
+        "terminal_projection_document_contract.v2",
+        "contract_fingerprint",
+        "terminal-projection-document-contract:v2",
+    ),
+    (
+        "terminal_projection_document.v2",
+        "fact_fingerprint",
+        "terminal-projection-document:v2",
+    ),
+    (
+        "terminal_projection_reference.v2",
+        "reference_fingerprint",
+        "terminal-projection-reference:v2",
+    ),
+    (
+        "model_call_terminal_projection_end_ref.v2",
+        "end_reference_fingerprint",
+        "model-call-terminal-projection-end-ref:v2",
+    ),
+    (
+        "tool_result_terminal_projection_end_ref.v2",
+        "end_reference_fingerprint",
+        "tool-result-terminal-projection-end-ref:v2",
+    ),
 )
 
 for _schema, _field, _domain in _OWN:

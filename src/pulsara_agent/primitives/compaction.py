@@ -133,7 +133,8 @@ class CompactionHumanEvidenceSelectionWindowAttributionFact(FrozenFactBase):
     @model_validator(mode="after")
     def _window(self) -> "CompactionHumanEvidenceSelectionWindowAttributionFact":
         if not (
-            self.previous_keep_after_sequence < self.current_keep_after_sequence
+            self.previous_keep_after_sequence
+            < self.current_keep_after_sequence
             <= self.current_through_sequence
         ):
             raise ValueError("compaction human evidence window is invalid")
@@ -233,7 +234,9 @@ class CompactionHumanEvidenceArtifactSelectionProjectionFact(FrozenFactBase):
     selection_projection_fingerprint: Fingerprint
 
     @model_validator(mode="after")
-    def _artifact_join(self) -> "CompactionHumanEvidenceArtifactSelectionProjectionFact":
+    def _artifact_join(
+        self,
+    ) -> "CompactionHumanEvidenceArtifactSelectionProjectionFact":
         ref = self.sanitized_full_text_reference
         if (
             ref.content_sha256 != self.sanitized_full_text_sha256
@@ -260,8 +263,8 @@ class CompactionHumanEvidenceManifestPageFact(FrozenFactBase):
         "compaction_human_evidence_manifest_page.v1"
     )
     page_index: int = Field(ge=0)
-    ordered_leaf_semantics: tuple[CompactionHumanEvidenceLeafSemanticFact, ...] = (
-        Field(max_length=256)
+    ordered_leaf_semantics: tuple[CompactionHumanEvidenceLeafSemanticFact, ...] = Field(
+        max_length=256
     )
     ordered_leaf_attributions: tuple[
         CompactionHumanEvidenceLeafAttributionFact, ...
@@ -279,15 +282,20 @@ class CompactionHumanEvidenceManifestPageFact(FrozenFactBase):
     @model_validator(mode="after")
     def _page(self) -> "CompactionHumanEvidenceManifestPageFact":
         count = len(self.ordered_leaf_semantics)
-        if count == 0 or count != len(self.ordered_leaf_attributions) or count != len(
-            self.ordered_selection_projections
+        if (
+            count == 0
+            or count != len(self.ordered_leaf_attributions)
+            or count != len(self.ordered_selection_projections)
         ):
             raise ValueError("manifest page columns must be non-empty and aligned")
-        sequences = tuple(item.source_sequence for item in self.ordered_leaf_attributions)
+        sequences = tuple(
+            item.source_sequence for item in self.ordered_leaf_attributions
+        )
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("manifest page source sequences must be ordered/unique")
         if (self.first_source_sequence, self.last_source_sequence) != (
-            sequences[0], sequences[-1]
+            sequences[0],
+            sequences[-1],
         ):
             raise ValueError("manifest page source bounds mismatch")
         for semantic, attribution, projection in zip(
@@ -305,7 +313,9 @@ class CompactionHumanEvidenceManifestPageFact(FrozenFactBase):
         expected_accumulators = (
             _ordered_accumulator(
                 "compaction-human-evidence-page-semantic:v1",
-                tuple(item.semantic_fingerprint for item in self.ordered_leaf_semantics),
+                tuple(
+                    item.semantic_fingerprint for item in self.ordered_leaf_semantics
+                ),
             ),
             _ordered_accumulator(
                 "compaction-human-evidence-page-attribution:v1",
@@ -403,9 +413,9 @@ class CompactionHumanEvidenceManifestSemanticFact(FrozenFactBase):
     "compaction-human-evidence-manifest-attribution:v1",
 )
 class CompactionHumanEvidenceManifestAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["compaction_human_evidence_manifest_attribution.v1"] = (
         "compaction_human_evidence_manifest_attribution.v1"
-    ] = "compaction_human_evidence_manifest_attribution.v1"
+    )
     manifest_semantic_fingerprint: Fingerprint
     runtime_session_id: str = Field(min_length=1)
     selection_window_attribution: CompactionHumanEvidenceSelectionWindowAttributionFact
@@ -422,7 +432,10 @@ class CompactionHumanEvidenceManifestAttributionFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _horizon(self) -> "CompactionHumanEvidenceManifestAttributionFact":
-        if self.verified_through_sequence < self.selection_window_attribution.current_keep_after_sequence:
+        if (
+            self.verified_through_sequence
+            < self.selection_window_attribution.current_keep_after_sequence
+        ):
             raise ValueError("manifest verification horizon is behind selection window")
         return self
 
@@ -536,9 +549,7 @@ class CompactionMemoryExtractionContractFact(FrozenFactBase):
         "pulsara.compaction-memory-extraction"
     )
     extractor_version: Literal["1"] = "1"
-    accepted_source_kind: Literal["direct_human_input_only"] = (
-        "direct_human_input_only"
-    )
+    accepted_source_kind: Literal["direct_human_input_only"] = "direct_human_input_only"
     output_candidate_kinds: tuple[Literal["Preference"], ...]
     input_document_schema_fingerprint: Fingerprint
     output_document_schema_fingerprint: Fingerprint
@@ -634,7 +645,10 @@ class BackgroundDerivedWorkBudgetAccountFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _recurrence(self) -> "BackgroundDerivedWorkBudgetAccountFact":
-        if self.dispatched_call_count != self.settled_call_count + self.open_reservation_count:
+        if (
+            self.dispatched_call_count
+            != self.settled_call_count + self.open_reservation_count
+        ):
             raise ValueError("background budget account count recurrence mismatch")
         return self
 
@@ -688,7 +702,11 @@ class BackgroundDerivedWorkBudgetSettlementFact(FrozenFactBase):
         if self.resulting_account_revision != self.source_account_revision + 1:
             raise ValueError("background budget settlement revision mismatch")
         if self.accounting_basis == "not_started_zero" and any(
-            (self.charged_input_tokens, self.charged_output_tokens, self.charged_milliunits)
+            (
+                self.charged_input_tokens,
+                self.charged_output_tokens,
+                self.charged_milliunits,
+            )
         ):
             raise ValueError("not-started settlement must charge zero")
         return self
@@ -715,9 +733,9 @@ class BackgroundDerivedWorkBudgetAccountReferenceFact(FrozenFactBase):
     "background-derived-work-budget-admission-failure:v1",
 )
 class BackgroundDerivedWorkBudgetAdmissionFailureFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["background_derived_work_budget_admission_failure.v1"] = (
         "background_derived_work_budget_admission_failure.v1"
-    ] = "background_derived_work_budget_admission_failure.v1"
+    )
     failure_kind: Literal[
         "call_cap_exhausted",
         "input_token_cap_exhausted",
@@ -897,7 +915,8 @@ class CompactionMemoryEvidenceNodeFact(FrozenFactBase):
         ):
             raise ValueError("evidence node semantic join mismatch")
         if (
-            self.input_projection.projected_text != self.semantic.sanitized_full_message_text
+            self.input_projection.projected_text
+            != self.semantic.sanitized_full_message_text
             or self.input_projection.projected_text_sha256
             != self.semantic.sanitized_full_message_sha256
             or self.input_projection.projected_text_utf8_bytes
@@ -991,12 +1010,16 @@ class ResolvedExtractionInputBudgetAttributionFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _budget(self) -> "ResolvedExtractionInputBudgetAttributionFact":
-        expected = max(0, self.target_input_limit_tokens - (
-            self.static_prompt_tokens
-            + self.carrier_and_framing_reserve_tokens
-            + self.output_reserve_tokens
-            + self.safety_margin_tokens
-        ))
+        expected = max(
+            0,
+            self.target_input_limit_tokens
+            - (
+                self.static_prompt_tokens
+                + self.carrier_and_framing_reserve_tokens
+                + self.output_reserve_tokens
+                + self.safety_margin_tokens
+            ),
+        )
         if self.usable_evidence_tokens != expected:
             raise ValueError("resolved extraction input budget recurrence mismatch")
         return self
@@ -1156,9 +1179,9 @@ class CompactionMemoryPreferenceCandidatePayloadFact(FrozenFactBase):
     "compaction-memory-extraction-candidate-attribution:v1",
 )
 class CompactionMemoryExtractionCandidateAttributionFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["compaction_memory_extraction_candidate_attribution.v1"] = (
         "compaction_memory_extraction_candidate_attribution.v1"
-    ] = "compaction_memory_extraction_candidate_attribution.v1"
+    )
     candidate_entry_id: str = Field(min_length=1)
     candidate_ordinal: int = Field(ge=0, le=2)
     candidate_payload: CompactionMemoryPreferenceCandidatePayloadFact
@@ -1184,8 +1207,7 @@ class CompactionMemoryExtractionCandidateAttributionFact(FrozenFactBase):
         if (
             self.candidate_payload.candidate_id
             != f"candidate:compaction-memory:{occurrence_suffix}"
-            or self.candidate_entry_id
-            != f"pool:compaction-memory:{occurrence_suffix}"
+            or self.candidate_entry_id != f"pool:compaction-memory:{occurrence_suffix}"
         ):
             raise ValueError("candidate occurrence identity drifted")
         return self

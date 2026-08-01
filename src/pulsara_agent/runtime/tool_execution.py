@@ -809,7 +809,7 @@ class ToolExecutionTerminalRegistry:
             self._runtime_session,
             lambda: self._runtime_session.confirm_and_handoff_event_batch_from_thread(
                 candidates,
-                            ),
+            ),
             deadline_monotonic=deadline_monotonic,
         )
 
@@ -1739,12 +1739,12 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     return self.runtime_session.write_events_from_thread(
                         events,
                         expected_last_sequence=expected_sequence,
-                                            )
+                    )
                 except BaseException as original:
                     try:
                         return self.runtime_session.confirm_and_handoff_event_batch(
                             events,
-                                                    )
+                        )
                     except Exception as confirmation_error:
                         from pulsara_agent.runtime.session import EventCommitError
 

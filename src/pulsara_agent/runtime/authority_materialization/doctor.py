@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import (
+    build_joined_raw_stored_event_range_proof,
+    decode_raw_stored_event_envelope,
+)
+
 from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic
@@ -209,9 +214,7 @@ def _verify_full_source(
     max_payload_bytes: int,
     deadline_monotonic: float,
 ) -> _FullSourceVerification:
-    usage = event_log.read_ledger_usage_snapshot(
-        deadline_monotonic=deadline_monotonic
-    )
+    usage = event_log.read_ledger_usage_snapshot(deadline_monotonic=deadline_monotonic)
     if usage.through_sequence < 1:
         raise ValueError("transcript projection doctor requires a non-empty ledger")
     account = event_log.read_materialization_account_state(
@@ -240,7 +243,7 @@ def _verify_full_source(
     if len(raw.events) != usage.through_sequence:
         raise ValueError("full-source ledger range is incomplete")
     decoded = tuple(
-        envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
         for envelope in raw.events
     )
     _verify_materialization_account_chain(
@@ -264,8 +267,7 @@ def _verify_full_source(
     expected_semantic_envelopes = tuple(
         envelope
         for envelope in raw.events
-        if classify_transcript_event_type(envelope.event_type)
-        == "transcript_semantic"
+        if classify_transcript_event_type(envelope.event_type) == "transcript_semantic"
     )
     if tuple(
         item.envelope_fingerprint for item in semantic_delta.semantic_events
@@ -302,7 +304,7 @@ def _verify_full_source(
     run_starts: list[RunStartEvent] = []
     verified_checkpoint_ids: list[str] = []
     reachable_by_checkpoint_id: dict[str, frozenset[str]] = {}
-    for event in decoded:
+    for event, raw_envelope in zip(decoded, raw.events, strict=True):
         if isinstance(event, RunStartEvent):
             _verify_run_seed(
                 runtime_session_id=runtime_session_id,
@@ -313,7 +315,16 @@ def _verify_full_source(
                 deadline_monotonic=deadline_monotonic,
             )
             run_starts.append(event)
-        store.apply_committed((event,))
+        proof = build_joined_raw_stored_event_range_proof(
+            runtime_session_id=runtime_session_id,
+            source_kind="doctor",
+            from_sequence_exclusive=(event.sequence or 1) - 1,
+            raw_stored_envelopes=(raw_envelope,),
+            registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+        )
+        if proof is None:
+            raise ValueError("doctor failed to build non-empty raw range proof")
+        store.fold_restored_range(proof)
         for checkpoint in checkpoints_by_source.get(event.sequence or -1, ()):
             reachable_by_checkpoint_id[checkpoint.checkpoint_id] = (
                 _verify_checkpoint_against_store(
@@ -341,13 +352,10 @@ def _verify_full_source(
         or after.ledger_payload_bytes != scanned_payload_bytes
         or after.semantic_event_count != live.transcript_semantic_event_count
         or after.semantic_accumulator != live.transcript_semantic_accumulator
-        or after.ledger_continuity_accumulator
-        != live.ledger_continuity_accumulator
+        or after.ledger_continuity_accumulator != live.ledger_continuity_accumulator
     ):
         raise ValueError("transcript prefix projection drifted from full source")
-    if set(verified_checkpoint_ids) != {
-        item.checkpoint_id for item in checkpoints
-    }:
+    if set(verified_checkpoint_ids) != {item.checkpoint_id for item in checkpoints}:
         raise ValueError("checkpoint source lies outside the full-source ledger")
     return _FullSourceVerification(
         account=account,
@@ -470,9 +478,14 @@ def _verify_materialization_account_chain(
         if transition.before_account_state_fingerprint == current_fingerprint:
             current_fingerprint = transition.after_account_state_fingerprint
         elif transition.after_account_state_fingerprint != current_fingerprint:
-            raise ValueError("materialization account transition chain is discontinuous")
+            raise ValueError(
+                "materialization account transition chain is discontinuous"
+            )
         resulting = getattr(event, "resulting_account_state_fingerprint", None)
-        if resulting is not None and resulting != transition.after_account_state_fingerprint:
+        if (
+            resulting is not None
+            and resulting != transition.after_account_state_fingerprint
+        ):
             raise ValueError("account transition event reports another resulting state")
         if isinstance(event, LedgerMaterializationAccountGenesisEvent):
             genesis_count += 1

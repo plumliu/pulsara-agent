@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal, TypeAlias
@@ -10,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pulsara_agent.event import SubagentGraphCheckpointCommittedEvent
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.long_horizon import (
     SubagentGraphAccelerationFact,
@@ -242,9 +244,7 @@ def prepare_subagent_graph_checkpoint_from_restore(
         state=state,
         graph_event_count=semantic_source.graph_event_count,
         graph_semantic_accumulator=semantic_source.graph_semantic_accumulator,
-        ledger_continuity_accumulator=(
-            acceleration.ledger_continuity_accumulator
-        ),
+        ledger_continuity_accumulator=(acceleration.ledger_continuity_accumulator),
         through_event=through_event,
         reducer_binding=reducer_binding,
     )
@@ -304,9 +304,7 @@ def _prepare_checkpoint_from_materialized_state(
     )
     artifact_payload = reducer_binding.export_canonical_state(state)
     content_hash = f"sha256:{sha256(artifact_payload).hexdigest()}"
-    artifact_id = _stable_id(
-        "subagent_graph_checkpoint_artifact:v1", checkpoint_id
-    )
+    artifact_id = _stable_id("subagent_graph_checkpoint_artifact:v1", checkpoint_id)
     metadata_payload = {
         "artifact_id": artifact_id,
         "media_type": CHECKPOINT_MEDIA_TYPE,
@@ -375,7 +373,9 @@ def restore_subagent_graph_from_checkpoint(
     SubagentGraphSemanticSourceFact,
     SubagentGraphAccelerationFact,
 ]:
-    event = snapshot.checkpoint_event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(
+        snapshot.checkpoint_event, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(event, SubagentGraphCheckpointCommittedEvent):
         raise SubagentGraphCheckpointContractMismatch(
             "checkpoint catalog row is not a checkpoint event"

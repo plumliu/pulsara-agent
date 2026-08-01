@@ -48,7 +48,9 @@ def is_valid_scope(scope: str) -> bool:
     return False
 
 
-def parse_scope(scope: str) -> tuple[Literal["user"], str | None] | tuple[Literal["workspace"], str]:
+def parse_scope(
+    scope: str,
+) -> tuple[Literal["user"], str | None] | tuple[Literal["workspace"], str]:
     if scope == CTX_USER:
         return ("user", None)
     if scope.startswith(WORKSPACE_SCOPE_PREFIX):
@@ -67,13 +69,21 @@ class MemoryDomainContext:
 
     def __post_init__(self) -> None:
         if not is_valid_flat_id(self.memory_domain_id):
-            raise ValueError(f"memory_domain_id must be a flat id: {self.memory_domain_id!r}")
+            raise ValueError(
+                f"memory_domain_id must be a flat id: {self.memory_domain_id!r}"
+            )
         if self.workspace_kind not in {"project", "transient"}:
-            raise ValueError(f"workspace_kind must be 'project' or 'transient': {self.workspace_kind!r}")
+            raise ValueError(
+                f"workspace_kind must be 'project' or 'transient': {self.workspace_kind!r}"
+            )
         if self.workspace_kind == "project":
             if self.stable_project_key is None:
                 raise ValueError("project memory domain requires stable_project_key")
-            object.__setattr__(self, "stable_project_key", canonical_project_key(self.stable_project_key))
+            object.__setattr__(
+                self,
+                "stable_project_key",
+                canonical_project_key(self.stable_project_key),
+            )
         elif self.stable_project_key is not None:
             raise ValueError("transient memory domain must not set stable_project_key")
 

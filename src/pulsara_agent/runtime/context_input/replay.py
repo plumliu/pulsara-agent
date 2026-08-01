@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -725,7 +727,7 @@ def _read_replay_compaction_terminal(*, event_log: EventLog, terminal_ref):
             "context_compaction_terminal_identity_mismatch",
             "context compaction terminal event identity differs from the manifest",
         )
-    event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(
         event,
         ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent,
@@ -761,7 +763,7 @@ def _validate_replayed_long_horizon_facts(
         return
     try:
         decoded = tuple(
-            frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for frozen in event_slice.events
         )
         store = LongHorizonStateStore(
@@ -864,7 +866,11 @@ def _validate_replayed_long_horizon_facts(
         frozen.to_reference(event_slice.runtime_session_id)
         for frozen in event_slice.events
         if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).window_id
+        and (
+            event := decode_raw_stored_event_envelope(
+                frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
+        ).window_id
         == window.window_id
         and event.to_projection_generation <= projection.projection_generation
     )
@@ -887,7 +893,7 @@ def _validate_compacted_window_replay(
     authority: ContextEventAuthorityView,
 ) -> None:
     decoded = tuple(
-        frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
         for frozen in authority.events
     )
     active_window = manifest.active_window
@@ -947,7 +953,11 @@ def _validate_compacted_window_replay(
         frozen.to_reference(authority.runtime_session_id)
         for frozen in authority.events
         if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).window_id
+        and (
+            event := decode_raw_stored_event_envelope(
+                frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
+        ).window_id
         == active_window.window_id
         and event.to_projection_generation
         <= manifest.projection_state.projection_generation
@@ -1005,7 +1015,9 @@ def _restore_replay_subagent_graph(
             "historical context RunStart is unavailable",
         )
     run_start_raw = run_start_rows[0]
-    run_start = run_start_raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    run_start = decode_raw_stored_event_envelope(
+        run_start_raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if (
         not isinstance(run_start, RunStartEvent)
         or run_start_raw.sequence != run_start_ref.sequence
@@ -1106,7 +1118,7 @@ def _restore_replay_subagent_graph(
         FrozenStoredEvent.from_raw_envelope(raw) for raw in raw_events
     )
     for result, frozen in zip(results, frozen_events, strict=True):
-        event = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if (
             not isinstance(event, SubagentRunCompletedEvent)
             or event.result_id != result.result_id
@@ -1136,7 +1148,11 @@ def _validate_replayed_candidates(
         (frozen, event)
         for frozen in event_slice.events
         if isinstance(
-            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                event := decode_raw_stored_event_envelope(
+                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             CapabilityExposureResolvedEvent,
         )
         and event.run_id == snapshot.identity.run_id
@@ -1174,7 +1190,11 @@ def _validate_replayed_candidates(
             for frozen in event_slice.events
             if frozen.run_id == snapshot.identity.run_id
             if isinstance(
-                (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+                (
+                    event := decode_raw_stored_event_envelope(
+                        frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
+                ),
                 RunStartEvent,
             )
         )
@@ -1218,7 +1238,11 @@ def _validate_replayed_candidates(
             event.account
             for frozen in rollout_event_slice.events
             if isinstance(
-                (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+                (
+                    event := decode_raw_stored_event_envelope(
+                        frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
+                ),
                 RolloutBudgetAccountOpenedEvent,
             )
             and event.account.account_id
@@ -1466,8 +1490,7 @@ def replay_compiled_context(
         if prepared_provider_input is None or manifest_reference is None:
             raise ValueError("compiled context lacks provider manifest carrier")
         if (
-            prepared_provider_input.manifest_projection_reference
-            != manifest_reference
+            prepared_provider_input.manifest_projection_reference != manifest_reference
             or manifest_reference.input_manifest_artifact_id
             != event.input_audit.input_manifest_artifact_id
             or manifest_reference.input_manifest_fact_fingerprint

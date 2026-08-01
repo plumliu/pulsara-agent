@@ -25,11 +25,15 @@ class DenseCandidateService:
     _cache: OrderedDict[tuple[str, str, str], tuple[float, ...]] = field(
         default_factory=OrderedDict, init=False, repr=False
     )
-    _cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _cache_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
 
     @property
     def embedding_fingerprint(self) -> str:
-        return f"{self.provider_name}:{self.provider.model_id}:{self.provider.dimensions}"
+        return (
+            f"{self.provider_name}:{self.provider.model_id}:{self.provider.dimensions}"
+        )
 
     async def collect(
         self,
@@ -38,7 +42,11 @@ class DenseCandidateService:
         graph_id: str | None = None,
     ) -> CandidateBatch:
         vector, cache_state = await self._query_embedding(query)
-        limit = self.auto_limit if query.trigger is RecallTrigger.CHEAP_AUTO else self.explicit_limit
+        limit = (
+            self.auto_limit
+            if query.trigger is RecallTrigger.CHEAP_AUTO
+            else self.explicit_limit
+        )
         rows = await asyncio.to_thread(
             self.vector_query.candidates,
             query_vector=vector,
@@ -54,7 +62,9 @@ class DenseCandidateService:
             else self.explicit_min_score
         )
         dropped_ids = [memory_id for memory_id, score in rows if score < minimum_score]
-        rows = [(memory_id, score) for memory_id, score in rows if score >= minimum_score]
+        rows = [
+            (memory_id, score) for memory_id, score in rows if score >= minimum_score
+        ]
         return CandidateBatch(
             candidates=tuple(
                 ChannelCandidate(

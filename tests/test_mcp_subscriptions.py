@@ -113,9 +113,7 @@ def test_supervisor_ignores_dirty_signal_from_retired_generation(monkeypatch) ->
             snapshot_id=snapshot.snapshot_id,
             config_epoch=snapshot.config_epoch,
             discovery_generation=snapshot.discovery_generation,
-            transport_generation=(
-                authority.discovery_attribution.transport_generation
-            ),
+            transport_generation=(authority.discovery_attribution.transport_generation),
             signal_generation=1,
             dirty_reasons=(McpSnapshotDirtyReason.LIST_CHANGED,),
             dirty_kinds=("tools",),

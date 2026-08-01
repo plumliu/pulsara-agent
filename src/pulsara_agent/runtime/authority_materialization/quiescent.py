@@ -50,9 +50,7 @@ def commit_quiescent_accounted_batch(
         limits=contracts.limits,
     )
     digest = sha256(
-        "\x1f".join(f"{event.id}\x1e{event.type}" for event in events).encode(
-            "utf-8"
-        )
+        "\x1f".join(f"{event.id}\x1e{event.type}" for event in events).encode("utf-8")
     ).hexdigest()
     first = events[0]
     committed = coordinator.commit_one_shot_operation(
@@ -71,7 +69,7 @@ def commit_quiescent_accounted_batch(
         ),
         deadline_monotonic=deadline_monotonic,
     )
-    return committed.stored_events
+    return committed.stored_batch_receipt.owned_stored_events
 
 
 __all__ = ["commit_quiescent_accounted_batch"]

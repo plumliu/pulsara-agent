@@ -49,9 +49,7 @@ class McpInputRequiredLifecycleRecord:
     status: McpInputRequiredLifecycleStatus
     source_suspension_event_reference: ContextEventReferenceFact
     source_suspension_fact_fingerprint: str
-    latest_resolution_submitted_event_reference: (
-        ContextEventReferenceFact | None
-    ) = None
+    latest_resolution_submitted_event_reference: ContextEventReferenceFact | None = None
     latest_dispatch_reserved_event_reference: ContextEventReferenceFact | None = None
     latest_resume_failed_event_reference: ContextEventReferenceFact | None = None
     terminal_tool_result_event_reference: ContextEventReferenceFact | None = None
@@ -150,7 +148,9 @@ class McpInputRequiredLifecycleStore:
         for event in events:
             if event.sequence is None:
                 candidate_sequence += 1
-                sequenced.append(event.model_copy(update={"sequence": candidate_sequence}))
+                sequenced.append(
+                    event.model_copy(update={"sequence": candidate_sequence})
+                )
             else:
                 candidate_sequence = max(candidate_sequence, event.sequence)
                 sequenced.append(event)
@@ -238,10 +238,7 @@ class McpInputRequiredLifecycleStore:
                 self._retire_interaction(retire_interaction_id)
         self.through_sequence = max(
             self.through_sequence,
-            max(
-                event.sequence or 0
-                for event in events
-            ),
+            max(event.sequence or 0 for event in events),
         )
 
     def _relevant_events(
@@ -310,9 +307,7 @@ class McpInputRequiredLifecycleStore:
         elif isinstance(event, ToolResultEndEvent):
             source = event.mcp_input_required_terminal_source
             reference = (
-                source.source_suspension_event_reference
-                if source is not None
-                else None
+                source.source_suspension_event_reference if source is not None else None
             )
         elif isinstance(event, McpInputRequiredInteractionClosedEvent):
             reference = event.source_suspension_event_reference
@@ -381,10 +376,7 @@ class McpInputRequiredLifecycleStore:
         assert isinstance(suspension, ToolExecutionSuspendedEvent)
         interaction_id = suspension.suspension.interaction.interaction_id
         record = self._records.get(interaction_id)
-        if (
-            record is None
-            or record.source_suspension_event_reference != reference
-        ):
+        if record is None or record.source_suspension_event_reference != reference:
             raise ValueError("MCP lifecycle suspension owner is not active")
         return record
 
@@ -414,22 +406,18 @@ class McpInputRequiredLifecycleStore:
                 expected_type=McpInputRequiredResolutionSubmittedEvent,
                 known=known,
             )
-        self._records[interaction.interaction_id] = (
-            McpInputRequiredLifecycleRecord(
-                interaction_id=interaction.interaction_id,
-                runtime_session_id=self.runtime_session_id,
-                run_id=event.run_id,
-                turn_id=event.turn_id,
-                reply_id=event.reply_id,
-                tool_call_id=event.tool_call_id,
-                tool_name=event.tool_name,
-                round_count=interaction.round_count,
-                status="suspended",
-                source_suspension_event_reference=reference,
-                source_suspension_fact_fingerprint=(
-                    suspension.suspension_fact_fingerprint
-                ),
-            )
+        self._records[interaction.interaction_id] = McpInputRequiredLifecycleRecord(
+            interaction_id=interaction.interaction_id,
+            runtime_session_id=self.runtime_session_id,
+            run_id=event.run_id,
+            turn_id=event.turn_id,
+            reply_id=event.reply_id,
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            round_count=interaction.round_count,
+            status="suspended",
+            source_suspension_event_reference=reference,
+            source_suspension_fact_fingerprint=(suspension.suspension_fact_fingerprint),
         )
 
     def _apply_resolution(
@@ -489,8 +477,7 @@ class McpInputRequiredLifecycleStore:
         if record.status == "suspended":
             if (
                 attempt.attempt_ordinal != 1
-                or attempt.predecessor_resolution_submitted_event_reference
-                is not None
+                or attempt.predecessor_resolution_submitted_event_reference is not None
                 or attempt.predecessor_resume_failed_event_reference is not None
             ):
                 raise ValueError("first MCP resolution attempt is not canonical")
@@ -632,10 +619,14 @@ class McpInputRequiredLifecycleStore:
             known=known,
         )
         terminal = known.get(event.terminal_tool_result_event_identity.event_id)
-        if not isinstance(terminal, ToolResultEndEvent) or stable_event_identity(
-            terminal,
-            runtime_session_id=self.runtime_session_id,
-        ) != event.terminal_tool_result_event_identity:
+        if (
+            not isinstance(terminal, ToolResultEndEvent)
+            or stable_event_identity(
+                terminal,
+                runtime_session_id=self.runtime_session_id,
+            )
+            != event.terminal_tool_result_event_identity
+        ):
             raise ValueError("MCP terminal disposition ToolResult identity drifted")
         if (
             record.latest_resolution_submitted_event_reference
@@ -669,10 +660,13 @@ class McpInputRequiredLifecycleStore:
         terminal = known.get(event.terminal_tool_result_event_identity.event_id)
         if not isinstance(terminal, ToolResultEndEvent):
             raise ValueError("MCP closure lacks its terminal ToolResult")
-        if stable_event_identity(
-            terminal,
-            runtime_session_id=self.runtime_session_id,
-        ) != event.terminal_tool_result_event_identity:
+        if (
+            stable_event_identity(
+                terminal,
+                runtime_session_id=self.runtime_session_id,
+            )
+            != event.terminal_tool_result_event_identity
+        ):
             raise ValueError("MCP closure terminal ToolResult identity drifted")
         if record.terminal_tool_result_event_reference != self._reference(terminal):
             raise ValueError("MCP closure terminal ToolResult was not adopted")

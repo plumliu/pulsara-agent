@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from pulsara_agent.runtime.terminal.models import TerminalRequest
-from pulsara_agent.runtime.terminal.policy import ExecPolicyDecisionKind, TerminalExecPolicy
+from pulsara_agent.runtime.terminal.policy import (
+    ExecPolicyDecisionKind,
+    TerminalExecPolicy,
+)
 
 
 @dataclass(frozen=True, slots=True)

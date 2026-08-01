@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import json
 from dataclasses import asdict, dataclass
 from hashlib import sha256
@@ -1151,17 +1153,15 @@ def _compaction_memory_extraction_durable_status(
         str(row["job_id"]): row for row in result_candidate_rows
     }
     budget_account = store.background_derived_work_budget_account(runtime_session_id)
-    budget_reservations = (
-        store.background_derived_work_budget_reservations_for_session(
-            runtime_session_id,
-            limit=256,
-        )
+    budget_reservations = store.background_derived_work_budget_reservations_for_session(
+        runtime_session_id,
+        limit=256,
     )
     budget_reservations_by_job: dict[str, list[dict[str, Any]]] = {}
     for row in budget_reservations:
-        budget_reservations_by_job.setdefault(
-            str(row["extraction_job_id"]), []
-        ).append(row)
+        budget_reservations_by_job.setdefault(str(row["extraction_job_id"]), []).append(
+            row
+        )
     governance_claims = store.governance_claims_for_session(
         runtime_session_id,
         limit=512,
@@ -1360,8 +1360,7 @@ def _compaction_memory_extraction_durable_status(
                 ),
                 "outbox": [_json_safe(row) for row in rows],
                 "candidates": [
-                    _memory_candidate_projection(row, store)
-                    for row in candidate_rows
+                    _memory_candidate_projection(row, store) for row in candidate_rows
                 ],
             }
         )
@@ -1422,7 +1421,9 @@ def _compaction_memory_input_artifact_projection(
         document.attribution.ordered_evidence_attributions,
         strict=True,
     ):
-        source_event = events_by_id.get(source.source_event_reference.stable_identity.event_id)
+        source_event = events_by_id.get(
+            source.source_event_reference.stable_identity.event_id
+        )
         ingress_kind = (
             source_event.host_run_ingress.ingress_kind
             if isinstance(source_event, RunStartEvent)
@@ -1448,8 +1449,7 @@ def _compaction_memory_input_artifact_projection(
                 ),
                 "source_ingress_kind": ingress_kind,
                 "is_direct_human": (
-                    isinstance(source_event, RunStartEvent)
-                    and ingress_kind == "human"
+                    isinstance(source_event, RunStartEvent) and ingress_kind == "human"
                 ),
             }
         )
@@ -4096,7 +4096,11 @@ def _replayed_rollout_status_hint(
         for frozen in primary.events
         if frozen.run_id == snapshot.identity.run_id
         if isinstance(
-            (decoded := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                decoded := decode_raw_stored_event_envelope(
+                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             RunStartEvent,
         )
     )

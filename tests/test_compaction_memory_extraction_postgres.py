@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
@@ -356,7 +358,9 @@ def _governance_event_reference(
         GovernanceStoredEventReferenceFact,
         schema_version="governance_stored_event_reference.v1",
         stable_identity=stable_event_identity(
-            source.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+            decode_raw_stored_event_envelope(
+                source.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+            ),
             runtime_session_id=runtime_session_id,
         ),
         sequence=source.envelope.sequence,
@@ -428,7 +432,9 @@ def _prepare_no_call_settlement_fixture(
         GovernanceStoredEventReferenceFact,
         schema_version="governance_stored_event_reference.v1",
         stable_identity=stable_event_identity(
-            request_source.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+            decode_raw_stored_event_envelope(
+                request_source.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+            ),
             runtime_session_id=runtime_session_id,
         ),
         sequence=request_source.envelope.sequence,
@@ -494,8 +500,7 @@ def _prepare_no_call_settlement_fixture(
             == lease.expected_state_revision
         )
         assert (
-            installation_guard.source_job_lease_fingerprint
-            == lease.lease_fingerprint
+            installation_guard.source_job_lease_fingerprint == lease.lease_fingerprint
         )
         assert installation_guard.target_lease_fingerprint
         assert (
@@ -1058,7 +1063,9 @@ def test_model_start_and_end_atomically_reserve_and_settle_background_budget(
         GovernanceStoredEventReferenceFact,
         schema_version="governance_stored_event_reference.v1",
         stable_identity=stable_event_identity(
-            request_source.envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+            decode_raw_stored_event_envelope(
+                request_source.envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+            ),
             runtime_session_id=runtime_session_id,
         ),
         sequence=request_source.envelope.sequence,
@@ -1382,10 +1389,7 @@ def test_model_start_and_end_atomically_reserve_and_settle_background_budget(
         ),
         deadline_monotonic=monotonic() + 20.0,
     )
-    assert (
-        bootstrap_outcome.confirmation
-        is DurableProjectionCommitConfirmation.FULL
-    )
+    assert bootstrap_outcome.confirmation is DurableProjectionCommitConfirmation.FULL
     assert bootstrap_outcome.resulting_state is not None
     assert (
         bootstrap_outcome.resulting_state.background_budget_account_fingerprint

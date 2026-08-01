@@ -103,7 +103,9 @@ def build_conformed_tool_schema(
         annotations=_freeze_object(annotations or {}),
         icons=tuple(_freeze_object(item) for item in icons),
         execution=_freeze_object(execution) if execution is not None else None,
-        protocol_meta=_freeze_object(protocol_meta) if protocol_meta is not None else None,
+        protocol_meta=_freeze_object(protocol_meta)
+        if protocol_meta is not None
+        else None,
     )
     projection = build_mcp_protocol_fact(
         McpProviderSchemaProjectionFact,

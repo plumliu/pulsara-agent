@@ -169,11 +169,14 @@ def test_checkpoint_diagnostic_sanitizer_does_not_fail_on_second_change() -> Non
     contract = _sanitization_contract()
     sanitizer = _StepSanitizer(("pass-1", "pass-2", "pass-2"))
 
-    assert sanitize_checkpoint_diagnostic_detail(
-        "raw",
-        contract=contract,
-        registry=_registry(contract, sanitizer),
-    ) == "pass-2"
+    assert (
+        sanitize_checkpoint_diagnostic_detail(
+            "raw",
+            contract=contract,
+            registry=_registry(contract, sanitizer),
+        )
+        == "pass-2"
+    )
     assert sanitizer.calls == 3
 
 
@@ -295,7 +298,9 @@ def test_empty_run_seed_is_content_addressed_and_has_no_fake_tree_node() -> None
         prepared.seed_semantic.seed_semantic_fingerprint
     )
     assert prepared.seed_artifact.root_manifest == prepared.root_manifest
-    assert prepared.artifacts[-1].artifact_id == prepared.seed_reference.seed_artifact_id
+    assert (
+        prepared.artifacts[-1].artifact_id == prepared.seed_reference.seed_artifact_id
+    )
 
 
 def test_empty_run_seed_round_trips_through_strict_hydrator() -> None:
@@ -399,7 +404,9 @@ def test_identical_seed_semantics_use_session_scoped_artifact_placement() -> Non
     )
 
     assert parent.seed_semantic == child.seed_semantic
-    assert parent.seed_reference.seed_artifact_id != child.seed_reference.seed_artifact_id
+    assert (
+        parent.seed_reference.seed_artifact_id != child.seed_reference.seed_artifact_id
+    )
 
 
 def test_run_seed_closes_source_stable_state_and_transcript_identity() -> None:

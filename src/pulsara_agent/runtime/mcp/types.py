@@ -265,10 +265,15 @@ class McpDiscoveredTool:
                 freeze_mcp_json_value(dict(self.output_schema)),
             )
         if self.semantic is not None:
-            if self.semantic.server_id != self.server_id or self.semantic.name != self.name:
+            if (
+                self.semantic.server_id != self.server_id
+                or self.semantic.name != self.name
+            ):
                 raise ValueError("MCP tool semantic identity mismatch")
             if self.discovery_attribution is None or self.provider_projection is None:
-                raise ValueError("MCP tool semantic requires attribution and projection")
+                raise ValueError(
+                    "MCP tool semantic requires attribution and projection"
+                )
             semantic_fingerprint = self.semantic.tool_semantic_fingerprint
             if (
                 self.discovery_attribution.tool_semantic_fingerprint
@@ -299,8 +304,7 @@ class McpDiscoveredResource:
         object.__setattr__(self, "name", self.name.strip() or self.uri.strip())
         object.__setattr__(self, "description", self.description.strip())
         if self.semantic is not None and (
-            self.semantic.server_id != self.server_id
-            or self.semantic.uri != self.uri
+            self.semantic.server_id != self.server_id or self.semantic.uri != self.uri
         ):
             raise ValueError("MCP resource semantic identity mismatch")
 
@@ -352,8 +356,7 @@ class McpDiscoveredPrompt:
             tuple(freeze_mcp_json_value(argument) for argument in self.arguments),
         )
         if self.semantic is not None and (
-            self.semantic.server_id != self.server_id
-            or self.semantic.name != self.name
+            self.semantic.server_id != self.server_id or self.semantic.name != self.name
         ):
             raise ValueError("MCP prompt semantic identity mismatch")
 
@@ -1007,7 +1010,7 @@ def _runtime_config_payload(config: McpServerConfig) -> dict[str, object]:
                 "mcp-http-bearer:v1",
                 os.getenv(transport.bearer_token_env_var)
                 if transport.bearer_token_env_var
-                else None
+                else None,
             ),
             "header_keys": sorted(transport.headers),
             "header_value_commitments": {
@@ -1093,11 +1096,14 @@ def runtime_mcp_secret_commitment(domain: str, value: str | None) -> str | None:
         return None
     configured = os.getenv("PULSARA_MCP_COMMITMENT_KEY")
     key = configured.encode("utf-8") if configured else _PROCESS_RUNTIME_COMMITMENT_KEY
-    return "hmac-sha256:" + hmac.new(
-        key,
-        domain.encode("utf-8") + b"\0" + value.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+    return (
+        "hmac-sha256:"
+        + hmac.new(
+            key,
+            domain.encode("utf-8") + b"\0" + value.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
 
 def _validate_static_http_header(header: str, *, value: str | None) -> None:
@@ -1105,7 +1111,9 @@ def _validate_static_http_header(header: str, *, value: str | None) -> None:
     if not normalized or any(char in header for char in "\r\n"):
         raise ValueError("MCP HTTP header name is invalid")
     if normalized in _MCP_MANAGED_HTTP_HEADERS or normalized.startswith("mcp-"):
-        raise ValueError(f"MCP protocol-managed HTTP header is not configurable: {header}")
+        raise ValueError(
+            f"MCP protocol-managed HTTP header is not configurable: {header}"
+        )
     if value is not None and any(char in value for char in "\r\n"):
         raise ValueError("MCP HTTP header value is invalid")
 

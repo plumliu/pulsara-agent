@@ -120,9 +120,9 @@ class CheckpointFailureReasonStageRuleFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _canonical_rules(self) -> "CheckpointFailureReasonStageRuleFact":
-        if not self.allowed_failure_stages or tuple(self.allowed_failure_stages) != tuple(
-            sorted(set(self.allowed_failure_stages))
-        ):
+        if not self.allowed_failure_stages or tuple(
+            self.allowed_failure_stages
+        ) != tuple(sorted(set(self.allowed_failure_stages))):
             raise ValueError("checkpoint failure stages must be sorted and unique")
         diagnostic_values = tuple(item.value for item in self.allowed_diagnostic_codes)
         if not diagnostic_values or diagnostic_values != tuple(
@@ -185,7 +185,10 @@ class CheckpointDiagnosticSanitizationContractFact(FrozenFactBase):
             tokens = getattr(self, name)
             if tokens != tuple(sorted(set(tokens))):
                 raise ValueError(f"{name} must be sorted and unique")
-            if any(len(token.encode("utf-8")) > self.max_token_utf8_bytes for token in tokens):
+            if any(
+                len(token.encode("utf-8")) > self.max_token_utf8_bytes
+                for token in tokens
+            ):
                 raise ValueError(f"{name} token exceeds UTF-8 byte bound")
             limit = (
                 self.max_secret_key_tokens_total_utf8_bytes
@@ -219,9 +222,7 @@ class CheckpointDiagnosticSanitizerBinding:
 class CheckpointDiagnosticSanitizerRegistry:
     def __init__(self) -> None:
         self._lock = RLock()
-        self._bindings: dict[
-            tuple[str, str], CheckpointDiagnosticSanitizerBinding
-        ] = {}
+        self._bindings: dict[tuple[str, str], CheckpointDiagnosticSanitizerBinding] = {}
 
     def register(self, binding: CheckpointDiagnosticSanitizerBinding) -> None:
         key = (binding.contract_id, binding.contract_version)
@@ -304,7 +305,12 @@ class CheckpointTerminalContractFact(FrozenFactBase):
         )
         if cancellation_sources != tuple(sorted(set(cancellation_sources))):
             raise ValueError("checkpoint cancellation rules must be sorted and unique")
-        expected_sources = {"user_stop", "host_close", "session_shutdown", "operation_deadline"}
+        expected_sources = {
+            "user_stop",
+            "host_close",
+            "session_shutdown",
+            "operation_deadline",
+        }
         if set(cancellation_sources) != expected_sources:
             raise ValueError("checkpoint cancellation rule matrix is incomplete")
         expected_pairs = {
@@ -313,7 +319,10 @@ class CheckpointTerminalContractFact(FrozenFactBase):
             "session_shutdown": CheckpointCancellationReasonCode.SESSION_SHUTDOWN,
             "operation_deadline": CheckpointCancellationReasonCode.OPERATION_DEADLINE,
         }
-        if any(expected_pairs[item.cancellation_source] is not item.reason_code for item in self.cancellation_rules):
+        if any(
+            expected_pairs[item.cancellation_source] is not item.reason_code
+            for item in self.cancellation_rules
+        ):
             raise ValueError("checkpoint cancellation reason matrix mismatch")
         return self
 
@@ -327,9 +336,10 @@ class CheckpointTerminalDiagnosticFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _detail_bytes(self) -> "CheckpointTerminalDiagnosticFact":
-        if self.sanitized_detail is not None and len(
-            self.sanitized_detail.encode("utf-8")
-        ) > 1_024:
+        if (
+            self.sanitized_detail is not None
+            and len(self.sanitized_detail.encode("utf-8")) > 1_024
+        ):
             raise ValueError("checkpoint diagnostic exceeds UTF-8 byte bound")
         return self
 
@@ -384,17 +394,61 @@ class CheckpointDispatchBarrierReleaseFact(FrozenFactBase):
 
 
 _OWN: tuple[tuple[str, str | None, str], ...] = (
-    ("transcript_projection_checkpoint_candidate.v1", "candidate_fingerprint", "transcript-projection-checkpoint-candidate:v1"),
-    ("checkpoint_failure_reason_stage_rule.v1", "rule_fingerprint", "checkpoint-failure-reason-stage-rule:v1"),
-    ("checkpoint_cancellation_reason_rule.v1", "rule_fingerprint", "checkpoint-cancellation-reason-rule:v1"),
-    ("checkpoint_diagnostic_sanitization_contract.v2", "contract_fingerprint", "checkpoint-diagnostic-sanitization-contract:v2"),
-    ("checkpoint_terminal_contract.v1", "contract_fingerprint", "checkpoint-terminal-contract:v1"),
-    ("checkpoint_terminal_diagnostic.v2", "diagnostic_fingerprint", "checkpoint-terminal-diagnostic:v2"),
-    ("checkpoint_committed_terminal_ref.v1", "terminal_reference_fingerprint", "checkpoint-committed-terminal-ref:v1"),
-    ("checkpoint_failed_terminal_ref.v1", "terminal_reference_fingerprint", "checkpoint-failed-terminal-ref:v1"),
-    ("checkpoint_cancelled_terminal_ref.v1", "terminal_reference_fingerprint", "checkpoint-cancelled-terminal-ref:v1"),
-    ("checkpoint_recovered_interrupted_terminal_ref.v1", "terminal_reference_fingerprint", "checkpoint-recovered-interrupted-terminal-ref:v1"),
-    ("checkpoint_dispatch_barrier_release.v1", "release_fingerprint", "checkpoint-dispatch-barrier-release:v1"),
+    (
+        "transcript_projection_checkpoint_candidate.v1",
+        "candidate_fingerprint",
+        "transcript-projection-checkpoint-candidate:v1",
+    ),
+    (
+        "checkpoint_failure_reason_stage_rule.v1",
+        "rule_fingerprint",
+        "checkpoint-failure-reason-stage-rule:v1",
+    ),
+    (
+        "checkpoint_cancellation_reason_rule.v1",
+        "rule_fingerprint",
+        "checkpoint-cancellation-reason-rule:v1",
+    ),
+    (
+        "checkpoint_diagnostic_sanitization_contract.v2",
+        "contract_fingerprint",
+        "checkpoint-diagnostic-sanitization-contract:v2",
+    ),
+    (
+        "checkpoint_terminal_contract.v1",
+        "contract_fingerprint",
+        "checkpoint-terminal-contract:v1",
+    ),
+    (
+        "checkpoint_terminal_diagnostic.v2",
+        "diagnostic_fingerprint",
+        "checkpoint-terminal-diagnostic:v2",
+    ),
+    (
+        "checkpoint_committed_terminal_ref.v1",
+        "terminal_reference_fingerprint",
+        "checkpoint-committed-terminal-ref:v1",
+    ),
+    (
+        "checkpoint_failed_terminal_ref.v1",
+        "terminal_reference_fingerprint",
+        "checkpoint-failed-terminal-ref:v1",
+    ),
+    (
+        "checkpoint_cancelled_terminal_ref.v1",
+        "terminal_reference_fingerprint",
+        "checkpoint-cancelled-terminal-ref:v1",
+    ),
+    (
+        "checkpoint_recovered_interrupted_terminal_ref.v1",
+        "terminal_reference_fingerprint",
+        "checkpoint-recovered-interrupted-terminal-ref:v1",
+    ),
+    (
+        "checkpoint_dispatch_barrier_release.v1",
+        "release_fingerprint",
+        "checkpoint-dispatch-barrier-release:v1",
+    ),
 )
 
 for _schema, _field, _domain in _OWN:

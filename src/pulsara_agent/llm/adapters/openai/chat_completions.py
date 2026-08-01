@@ -266,8 +266,7 @@ def build_chat_completions_payload(
     provider_profile = model.provider_profile
     runtime_observation_role: str | None = None
     if any(
-        message.role
-        in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
+        message.role in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
         for message in context.messages
     ):
         carrier = call.target.fact.runtime_observation_carrier
@@ -275,7 +274,9 @@ def build_chat_completions_payload(
             raise ValueError("resolved target does not support runtime observations")
         binding = resolve_runtime_observation_binding(carrier)
         if binding.wire_role != "user":
-            raise ValueError("resolved runtime observation carrier is not chat-compatible")
+            raise ValueError(
+                "resolved runtime observation carrier is not chat-compatible"
+            )
         runtime_observation_role = binding.wire_role
     messages: list[dict[str, Any]] = []
     if context.system_prompt:
@@ -434,11 +435,7 @@ class ChatToolCallAccumulator:
                 arguments_delta = arguments
 
         events: list[RawProviderStreamItem] = []
-        if (
-            not state.started
-            and state.tool_call_id
-            and state.name
-        ):
+        if not state.started and state.tool_call_id and state.name:
             events.extend(
                 self.builder.tool_call_start(
                     tool_call_id=state.tool_call_id,
@@ -484,9 +481,7 @@ class ChatToolCallAccumulator:
         events: list[RawProviderStreamItem] = []
         for state in self._states.values():
             assert state.tool_call_id is not None
-            events.extend(
-                self.builder.tool_call_end(tool_call_id=state.tool_call_id)
-            )
+            events.extend(self.builder.tool_call_end(tool_call_id=state.tool_call_id))
         self._states.clear()
         return events
 

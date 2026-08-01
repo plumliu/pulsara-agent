@@ -32,7 +32,10 @@ class McpConfigStore:
     path: Path = DEFAULT_USER_MCP_CONFIG
 
     def load(self) -> tuple[McpServerConfig, ...]:
-        return tuple(_config_from_entry(server_id, entry) for server_id, entry in _load_raw(self.path).items())
+        return tuple(
+            _config_from_entry(server_id, entry)
+            for server_id, entry in _load_raw(self.path).items()
+        )
 
     def upsert(self, config: McpServerConfig) -> None:
         raw = _load_raw(self.path)
@@ -63,7 +66,9 @@ def load_mcp_server_configs(
     user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
 ) -> tuple[McpServerConfig, ...]:
     merged: dict[str, McpServerConfig] = {}
-    for source in mcp_config_sources(workspace_root=workspace_root, user_config_path=user_config_path):
+    for source in mcp_config_sources(
+        workspace_root=workspace_root, user_config_path=user_config_path
+    ):
         for server_id, entry in _load_raw(source.path).items():
             config = _config_from_entry(server_id, entry)
             merged[config.server_id] = config
@@ -77,7 +82,12 @@ def mcp_config_sources(
 ) -> tuple[McpConfigSource, ...]:
     sources = [McpConfigSource(path=user_config_path.expanduser(), scope="user")]
     if workspace_root is not None:
-        sources.append(McpConfigSource(path=workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG, scope="workspace"))
+        sources.append(
+            McpConfigSource(
+                path=workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG,
+                scope="workspace",
+            )
+        )
     return tuple(sources)
 
 
@@ -113,7 +123,9 @@ def _write_raw(path: Path, raw: dict[str, dict[str, Any]]) -> None:
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"servers": {server_id: raw[server_id] for server_id in sorted(raw)}}
-    path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
 
 
 def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig:
@@ -154,8 +166,12 @@ def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig
         transport = McpStreamableHttpConfig(
             url=str(entry["url"]),
             bearer_token_env_var=entry.get("bearer_token_env_var"),
-            headers={str(k): str(v) for k, v in dict(entry.get("headers") or {}).items()},
-            env_headers={str(k): str(v) for k, v in dict(entry.get("env_headers") or {}).items()},
+            headers={
+                str(k): str(v) for k, v in dict(entry.get("headers") or {}).items()
+            },
+            env_headers={
+                str(k): str(v) for k, v in dict(entry.get("env_headers") or {}).items()
+            },
             follow_redirects=bool(entry.get("follow_redirects", False)),
         )
     else:
@@ -170,8 +186,12 @@ def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig
         startup_deadline_ms=int(entry.get("startup_deadline_ms", 30_000)),
         refresh_ttl_ms=int(entry.get("refresh_ttl_ms", 300_000)),
         tool_timeout_ms=int(entry.get("tool_timeout_ms", 30_000)),
-        supports_parallel_tool_calls=bool(entry.get("supports_parallel_tool_calls", False)),
-        enabled_tools=tuple(entry["enabled_tools"]) if entry.get("enabled_tools") else None,
+        supports_parallel_tool_calls=bool(
+            entry.get("supports_parallel_tool_calls", False)
+        ),
+        enabled_tools=tuple(entry["enabled_tools"])
+        if entry.get("enabled_tools")
+        else None,
         disabled_tools=tuple(entry.get("disabled_tools") or ()),
         default_approval_mode=entry.get("default_approval_mode"),
     )

@@ -42,10 +42,14 @@ def already_exists(
         return False
     expected = candidate_fingerprint(candidate)
     for record in graph.find_by_type(term, graph_id=graph_id):
-        if str(record.get(memory.STATUS.name, "")) in {
-            memory.NodeStatus.ACTIVE.value,
-            memory.NodeStatus.NEEDS_REVIEW.value,
-        } and _canonical_record_fingerprint(record, kind=candidate.kind) == expected:
+        if (
+            str(record.get(memory.STATUS.name, ""))
+            in {
+                memory.NodeStatus.ACTIVE.value,
+                memory.NodeStatus.NEEDS_REVIEW.value,
+            }
+            and _canonical_record_fingerprint(record, kind=candidate.kind) == expected
+        ):
             return True
     return False
 

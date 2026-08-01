@@ -116,9 +116,7 @@ class SubagentRunEntryDriver:
             if outcome.status == "unknown":
                 raise SubagentRunEntryCommitUntrusted(
                     durable_run_existence=DurableRunExistence.UNKNOWN,
-                    child_runtime_session_id=(
-                        child_agent.runtime_session_id
-                    ),
+                    child_runtime_session_id=(child_agent.runtime_session_id),
                     child_run_id=state.run_id,
                 ) from exc
             if outcome.status == "none":
@@ -127,7 +125,9 @@ class SubagentRunEntryDriver:
             stored = outcome.committed_events
             publication_status = "failed_after_commit"
             original_error = exc
-        business = tuple(event for event in stored if event.id in {item.id for item in candidates})
+        business = tuple(
+            event for event in stored if event.id in {item.id for item in candidates}
+        )
         if (
             len(business) != 2
             or not isinstance(business[0], RunStartEvent)

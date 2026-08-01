@@ -572,7 +572,8 @@ class ChildAdmissionSessionRegistry:
             active = run.status in {"running", "suspended"}
             owner_active = (
                 owner is not None
-                and owner.settlement_state not in {"released", "reconciliation_required"}
+                and owner.settlement_state
+                not in {"released", "reconciliation_required"}
                 and owner.child_composition_lease.state != "released"
             )
             if active and not owner_active:

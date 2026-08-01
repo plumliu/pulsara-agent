@@ -76,8 +76,8 @@ def test_agent_has_no_empty_basis_resume_fallback() -> None:
     assert "_exposure_from_state_or_resolve" not in source
     assert "_resolve_capability_exposure" not in source
     assert 'user_input=""' not in source
-    assert "scratchpad[\"capability_exposure\"]" not in source
-    assert "scratchpad.get(\"capability_exposure\")" not in source
+    assert 'scratchpad["capability_exposure"]' not in source
+    assert 'scratchpad.get("capability_exposure")' not in source
 
 
 def test_agent_accepts_only_committed_run_entries() -> None:
@@ -95,14 +95,14 @@ def test_agent_accepts_only_committed_run_entries() -> None:
 
 
 def test_run_turn_waiter_is_detach_only_not_implicit_stop() -> None:
-    source = (
-        SRC / "runtime" / "run_execution" / "service.py"
-    ).read_text(encoding="utf-8")
+    source = (SRC / "runtime" / "run_execution" / "service.py").read_text(
+        encoding="utf-8"
+    )
     assert "wait_public_result" not in source
     assert "public_completion" not in source
-    handle_source = (
-        SRC / "runtime" / "run_execution" / "handle.py"
-    ).read_text(encoding="utf-8")
+    handle_source = (SRC / "runtime" / "run_execution" / "handle.py").read_text(
+        encoding="utf-8"
+    )
     function = handle_source[handle_source.index("    async def wait_activation(") :]
     function = function[: function.index("    async def wait_run_completion(")]
     assert "await asyncio.shield(active.completion)" in function
@@ -126,9 +126,9 @@ def test_continuation_projection_intersection_uses_owned_identity_and_content() 
 
 
 def test_segment_registry_owns_task_creation_after_owner_install() -> None:
-    source = (
-        SRC / "runtime" / "run_execution" / "registry.py"
-    ).read_text(encoding="utf-8")
+    source = (SRC / "runtime" / "run_execution" / "registry.py").read_text(
+        encoding="utf-8"
+    )
     function = source[source.index("    def install_segment(") :]
     function = function[: function.index("    def complete_segment(")]
     assert "driver_factory" in function
@@ -171,7 +171,10 @@ def test_run_start_user_truth_has_no_legacy_metadata_fallback() -> None:
     violations: list[str] = []
     for path in _python_files(SRC):
         source = path.read_text(encoding="utf-8")
-        if 'metadata.get("user_input")' in source or "metadata.get('user_input')" in source:
+        if (
+            'metadata.get("user_input")' in source
+            or "metadata.get('user_input')" in source
+        ):
             violations.append(str(path.relative_to(SRC)))
     assert violations == []
 
@@ -188,9 +191,7 @@ def test_permission_vocabulary_has_one_low_level_definition() -> None:
                 definitions.append(f"{relative}:{node.lineno}")
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = (
-                    node.targets
-                    if isinstance(node, ast.Assign)
-                    else [node.target]
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
                 )
                 if any(
                     isinstance(target, ast.Name)
@@ -216,12 +217,14 @@ def test_production_stop_reasons_are_not_free_strings() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
-                if any(
-                    isinstance(target, ast.Attribute)
-                    and target.attr == "stop_reason"
-                    for target in node.targets
-                ) and isinstance(node.value, ast.Constant) and isinstance(
-                    node.value.value, str
+                if (
+                    any(
+                        isinstance(target, ast.Attribute)
+                        and target.attr == "stop_reason"
+                        for target in node.targets
+                    )
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
                 ):
                     violations.append(
                         f"{path.relative_to(SRC)}:{node.lineno}:{node.value.value}"
@@ -270,20 +273,19 @@ def test_run_draft_builder_consumes_explicit_prepared_facts_not_scratchpad() -> 
 def test_committed_run_uses_frozen_surface_and_child_borrow_path() -> None:
     agent = (SRC / "runtime" / "agent.py").read_text(encoding="utf-8")
     host = (SRC / "host" / "session.py").read_text(encoding="utf-8")
-    child_activation = (
-        SRC / "runtime" / "subagent" / "activation.py"
-    ).read_text(encoding="utf-8")
-    child_execution = (
-        SRC / "runtime" / "subagent" / "execution.py"
-    ).read_text(encoding="utf-8")
+    child_activation = (SRC / "runtime" / "subagent" / "activation.py").read_text(
+        encoding="utf-8"
+    )
+    child_execution = (SRC / "runtime" / "subagent" / "execution.py").read_text(
+        encoding="utf-8"
+    )
     assert "frozen_surface = draft.frozen_execution_surface" in agent
     assert 'state.scratchpad.get("frozen_capability_execution_surface")' not in agent
     assert "attempt.execution_handles = self._new_execution_handles(" in host
     assert "handles = attempt.execution_handles" in host
     assert "borrow_authority.borrow_child_tool_call()" in agent
     assert (
-        'child_resources.capability_execution_borrow_kind = "child"'
-        in child_activation
+        'child_resources.capability_execution_borrow_kind = "child"' in child_activation
     )
     assert "RunActivationFactory" in child_activation
     assert "RunExecutionHandleSet(" in child_activation
@@ -302,9 +304,7 @@ def test_execution_handle_tracker_does_not_own_mcp_pending_interactions() -> Non
     ):
         assert forbidden not in source
 
-    supervisor = (SRC / "runtime" / "mcp" / "supervisor.py").read_text(
-        encoding="utf-8"
-    )
+    supervisor = (SRC / "runtime" / "mcp" / "supervisor.py").read_text(encoding="utf-8")
     for required in (
         "promote_lease_to_pending",
         "borrow_pending_lease",
@@ -319,9 +319,7 @@ def test_production_child_driver_consumes_prepared_subagent_entry() -> None:
     activation = (SRC / "runtime" / "subagent" / "activation.py").read_text(
         encoding="utf-8"
     )
-    driver = (SRC / "runtime" / "subagent" / "run_entry.py").read_text(
-        encoding="utf-8"
-    )
+    driver = (SRC / "runtime" / "subagent" / "run_entry.py").read_text(encoding="utf-8")
     assert "prepared_child_entry = PreparedSubagentRunEntry(" in activation
     assert "prepared=prepared_child_entry" in activation
     assert "prepared: PreparedSubagentRunEntry" in driver
@@ -335,10 +333,10 @@ def test_boundary_confirmation_retains_payload_not_only_ids() -> None:
 
 
 def test_compaction_cancel_path_has_no_unbounded_commit_task_await() -> None:
-    source = (SRC / "runtime" / "compaction" / "commit.py").read_text(
-        encoding="utf-8"
-    )
-    runtime_port = source[source.index("class RuntimeSessionCompactionEventCommitPort") :]
+    source = (SRC / "runtime" / "compaction" / "commit.py").read_text(encoding="utf-8")
+    runtime_port = source[
+        source.index("class RuntimeSessionCompactionEventCommitPort") :
+    ]
     assert "class DirectEventLogCompactionEventCommitPort" not in source
     assert "result = await task" not in runtime_port
     assert "confirm_event_batch(" not in runtime_port

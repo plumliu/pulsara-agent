@@ -13,7 +13,11 @@ from pulsara_agent.capability.descriptor import (
 )
 from pulsara_agent.capability.provider import CapabilityProjectionOutput
 from pulsara_agent.capability.registry import CapabilityRegistrySnapshot
-from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityDiagnostic, ResolvedSkillCatalogEntry
+from pulsara_agent.capability.types import (
+    ActiveSkillInjection,
+    CapabilityDiagnostic,
+    ResolvedSkillCatalogEntry,
+)
 from pulsara_agent.llm.input import ToolSpec
 
 
@@ -36,7 +40,9 @@ class CapabilityExposurePlan:
         return {
             "registry_generation": self.registry_generation,
             "direct_descriptor_ids": [
-                self.descriptors_by_name[name].id for name in sorted(self.direct_names) if name in self.descriptors_by_name
+                self.descriptors_by_name[name].id
+                for name in sorted(self.direct_names)
+                if name in self.descriptors_by_name
             ],
             "deferred_descriptor_ids": [
                 self.descriptors_by_name[name].id
@@ -44,7 +50,9 @@ class CapabilityExposurePlan:
                 if name in self.descriptors_by_name
             ],
             "hidden_descriptor_ids": [
-                self.descriptors_by_name[name].id for name in sorted(self.hidden_names) if name in self.descriptors_by_name
+                self.descriptors_by_name[name].id
+                for name in sorted(self.hidden_names)
+                if name in self.descriptors_by_name
             ],
             "direct_names": sorted(self.direct_names),
             "deferred_names": sorted(self.deferred_names),
@@ -67,7 +75,10 @@ def build_exposure_plan(
     hidden_names: set[str] = set()
     direct_specs: list[ToolSpec] = []
 
-    diagnostics: list[CapabilityDiagnostic] = [*snapshot.diagnostics, *provider_output.diagnostics]
+    diagnostics: list[CapabilityDiagnostic] = [
+        *snapshot.diagnostics,
+        *provider_output.diagnostics,
+    ]
 
     for descriptor in sorted(descriptors, key=lambda item: item.name):
         missing_execution_binding = (

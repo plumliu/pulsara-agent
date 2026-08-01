@@ -13,7 +13,9 @@ from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import EventLogWriteConflict, InMemoryEventLog
 
 
-CTX = EventContext(run_id="run:event-log", turn_id="turn:event-log", reply_id="reply:event-log")
+CTX = EventContext(
+    run_id="run:event-log", turn_id="turn:event-log", reply_id="reply:event-log"
+)
 
 
 def _events(prefix: str, count: int = 3):
@@ -55,7 +57,9 @@ def test_in_memory_event_log_conditional_extend_conflict_writes_nothing() -> Non
     assert [event.sequence for event in log.iter()] == [1]
 
 
-def test_in_memory_event_log_batch_validation_failure_leaves_no_partial_events() -> None:
+def test_in_memory_event_log_batch_validation_failure_leaves_no_partial_events() -> (
+    None
+):
     log = InMemoryEventLog()
     first = _events("duplicate", 1)[0]
     duplicated = first.model_copy(update={"sequence": None})

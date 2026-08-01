@@ -24,6 +24,9 @@ from pulsara_agent.runtime.session import (
 from pulsara_agent.runtime.state import RunActivationWorkingState
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.ports.stored_event import (
+    GroupingIndependentOwnedEventReducerAdapter,
+)
 from tests.support.tools import (
     build_component_tool_executor,
     build_component_tool_registry,
@@ -168,7 +171,11 @@ def runtime_session_for_test_confirms_uncertain_commit_and_catches_up_reducer_an
         runtime.register_committed_reducer(
             reducer_id="test:uncertain-commit",
             through_sequence=0,
-            apply_committed=lambda events: reduced.extend(event.id for event in events),
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=lambda events: reduced.extend(
+                    event.id for event in events
+                ),
+            ),
         )
         candidate = make_text_block_segment_event(
             **CTX.event_fields(),
@@ -289,8 +296,10 @@ def runtime_session_for_test_cas_confirmation_catches_up_through_conflict_high_w
         runtime.register_committed_reducer(
             reducer_id="test:cas-confirmation-high-water",
             through_sequence=0,
-            apply_committed=lambda events: reduced.extend(
-                event.sequence for event in events if event.sequence is not None
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=lambda events: reduced.extend(
+                    event.sequence for event in events if event.sequence is not None
+                ),
             ),
         )
         candidate = make_text_block_segment_event(
@@ -328,10 +337,11 @@ def runtime_session_for_test_partial_batch_confirmation_latches_reconciliation(
         runtime.register_committed_reducer(
             reducer_id="test:partial-confirmation",
             through_sequence=0,
-            apply_committed=lambda events: rebuilt.extend(event.id for event in events),
-            rebuild_committed=lambda events: rebuilt.__setitem__(
-                slice(None),
-                [event.id for event in events],
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=lambda events: rebuilt.extend(
+                    event.id for event in events
+                ),
+                reset_owned_events=rebuilt.clear,
             ),
         )
         first = make_text_block_segment_event(
@@ -529,7 +539,7 @@ def runtime_session_for_test_emit_and_emit_many_publish_events(tmp_path) -> None
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="first"
             ),
-                    )
+        )
         many = await runtime.emit_many(
             [
                 make_text_block_segment_event(
@@ -539,7 +549,7 @@ def runtime_session_for_test_emit_and_emit_many_publish_events(tmp_path) -> None
                     **CTX.event_fields(), block_id="text:3", delta="third"
                 ),
             ],
-                    )
+        )
         assert first.sequence == 1
         assert [event.sequence for event in many] == [2, 3]
 

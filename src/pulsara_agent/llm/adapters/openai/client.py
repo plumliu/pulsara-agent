@@ -9,6 +9,8 @@ from openai import AsyncOpenAI
 
 OPENAI_RESPONSES_API = "openai_responses"
 OPENAI_CHAT_COMPLETIONS_API = "openai_chat_completions"
+
+
 def build_async_openai_client(
     *,
     api_key: str,

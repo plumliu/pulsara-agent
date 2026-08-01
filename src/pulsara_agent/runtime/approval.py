@@ -49,7 +49,9 @@ class PendingApproval:
         }
 
 
-def pending_approval_from_state(state: RunActivationWorkingState, host_session_id: str) -> PendingApproval:
+def pending_approval_from_state(
+    state: RunActivationWorkingState, host_session_id: str
+) -> PendingApproval:
     if state.status is not LoopStatus.WAITING_USER:
         raise ValueError("cannot create pending approval from a non-waiting state")
     if not state.pending_tool_calls:

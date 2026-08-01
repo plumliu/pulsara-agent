@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -318,15 +319,20 @@ class PostgresArtifactStore:
         session_id: str | None = None,
         deadline_monotonic: float | None = None,
     ) -> str:
-        with self._connect(deadline_monotonic) as connection:
-            with connection.cursor() as cursor:
-                self._apply_statement_deadline(cursor, deadline_monotonic)
-                row = self._artifact_row(cursor, blob_id)
-                self._validate_read_owner(row, session_id=session_id)
-                text_body = row["text_body"]
-                if text_body is None:
-                    raise ValueError(f"Artifact {blob_id!r} is not a text artifact")
-                return text_body
+        try:
+            with self._connect(deadline_monotonic) as connection:
+                with connection.cursor() as cursor:
+                    self._apply_statement_deadline(cursor, deadline_monotonic)
+                    row = self._artifact_row(cursor, blob_id)
+                    self._validate_read_owner(row, session_id=session_id)
+                    text_body = row["text_body"]
+                    if text_body is None:
+                        raise ValueError(f"Artifact {blob_id!r} is not a text artifact")
+                    return text_body
+        except psycopg.errors.QueryCanceled as exc:
+            if deadline_monotonic is None:
+                raise
+            raise TimeoutError("artifact database statement deadline exceeded") from exc
 
     def _connect(self, deadline_monotonic: float | None):
         deadline = postgres_operation_deadline(deadline_monotonic)
@@ -388,9 +394,7 @@ class PostgresArtifactStore:
                     row["session_id"] != session_id
                     or row["digest"] != digest
                     or row["media_type"] != media_type
-                    or (row["metadata"] or {}).get(
-                        "semantic_metadata_fingerprint"
-                    )
+                    or (row["metadata"] or {}).get("semantic_metadata_fingerprint")
                     != semantic_metadata_fingerprint
                 ):
                     raise ArtifactContentConflict(

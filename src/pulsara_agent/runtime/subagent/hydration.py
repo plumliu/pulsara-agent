@@ -108,7 +108,11 @@ class SubagentGraphHydrator:
                 )
                 task_complete = False
             else:
-                task_text, task_complete, artifact_diagnostics = await self._read_artifact(
+                (
+                    task_text,
+                    task_complete,
+                    artifact_diagnostics,
+                ) = await self._read_artifact(
                     fact.task_artifact_id,
                     entity_kind="run",
                     entity_id=fact.subagent_run_id,
@@ -119,7 +123,11 @@ class SubagentGraphHydrator:
         child_run_id: str | None = None
         child_terminal_status: str | None = None
         if include_child_native:
-            child_run_id, child_terminal_status, child_diagnostics = await asyncio.to_thread(
+            (
+                child_run_id,
+                child_terminal_status,
+                child_diagnostics,
+            ) = await asyncio.to_thread(
                 self._hydrate_child_native,
                 fact,
             )
@@ -263,7 +271,10 @@ class SubagentGraphHydrator:
                 ),
             )
         child_run_id = starts[0].run_id
-        if fact.reported_child_run_id is not None and fact.reported_child_run_id != child_run_id:
+        if (
+            fact.reported_child_run_id is not None
+            and fact.reported_child_run_id != child_run_id
+        ):
             return (
                 child_run_id,
                 None,

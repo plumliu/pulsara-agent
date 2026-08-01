@@ -60,7 +60,9 @@ class MemoryRelationEdge:
 
 
 class MemoryQuery(Protocol):
-    def fetch_nodes(self, ids: Sequence[str], *, graph_id: str | None = None) -> list[CanonicalNodeView]: ...
+    def fetch_nodes(
+        self, ids: Sequence[str], *, graph_id: str | None = None
+    ) -> list[CanonicalNodeView]: ...
 
     def lexical_candidates(
         self,
@@ -121,7 +123,9 @@ class PostgresMemoryQuery:
                 "PostgresMemoryQuery requires exactly one verified provider or transaction connection"
             )
 
-    def fetch_nodes(self, ids: Sequence[str], *, graph_id: str | None = None) -> list[CanonicalNodeView]:
+    def fetch_nodes(
+        self, ids: Sequence[str], *, graph_id: str | None = None
+    ) -> list[CanonicalNodeView]:
         ordered_ids = _dedupe_preserving_order(ids)
         if not ordered_ids:
             return []
@@ -158,13 +162,21 @@ class PostgresMemoryQuery:
             )
             incoming_rows = cursor.fetchall()
 
-        outgoing_by_id: dict[str, list[tuple[str, str]]] = {node_id: [] for node_id in ordered_ids}
+        outgoing_by_id: dict[str, list[tuple[str, str]]] = {
+            node_id: [] for node_id in ordered_ids
+        }
         for row in outgoing_rows:
-            outgoing_by_id.setdefault(row["source_id"], []).append((row["predicate"], row["target_id"]))
+            outgoing_by_id.setdefault(row["source_id"], []).append(
+                (row["predicate"], row["target_id"])
+            )
 
-        incoming_by_id: dict[str, list[tuple[str, str]]] = {node_id: [] for node_id in ordered_ids}
+        incoming_by_id: dict[str, list[tuple[str, str]]] = {
+            node_id: [] for node_id in ordered_ids
+        }
         for row in incoming_rows:
-            incoming_by_id.setdefault(row["target_id"], []).append((row["predicate"], row["source_id"]))
+            incoming_by_id.setdefault(row["target_id"], []).append(
+                (row["predicate"], row["source_id"])
+            )
 
         by_id = {
             row["id"]: _node_view_from_row(
@@ -258,7 +270,9 @@ class PostgresMemoryQuery:
         normalized_terms = _normalized_terms(terms)
         if not normalized_terms or limit <= 0:
             return []
-        where, params = _candidate_filters(graph_id=graph_id, scopes=scopes, types=types)
+        where, params = _candidate_filters(
+            graph_id=graph_id, scopes=scopes, types=types
+        )
         patterns = [f"%{term}%" for term in normalized_terms]
         where.append(
             """
@@ -271,7 +285,9 @@ class PostgresMemoryQuery:
             )
             """
         )
-        params.extend([normalized_terms, normalized_terms, normalized_terms, patterns, patterns])
+        params.extend(
+            [normalized_terms, normalized_terms, normalized_terms, patterns, patterns]
+        )
 
         with self._cursor() as cursor:
             cursor.execute(
@@ -286,10 +302,7 @@ class PostgresMemoryQuery:
             )
             rows = cursor.fetchall()
 
-        scored = [
-            (row["id"], _lexical_score(row, normalized_terms))
-            for row in rows
-        ]
+        scored = [(row["id"], _lexical_score(row, normalized_terms)) for row in rows]
         scored.sort(key=lambda item: (-item[1], item[0]))
         return scored[:limit]
 
@@ -305,7 +318,9 @@ class PostgresMemoryQuery:
         normalized = " ".join(query_text.split())
         if not normalized or limit <= 0:
             return []
-        where, params = _candidate_filters(graph_id=graph_id, scopes=scopes, types=types)
+        where, params = _candidate_filters(
+            graph_id=graph_id, scopes=scopes, types=types
+        )
         where.append("fts @@ q.query")
 
         with self._cursor() as cursor:
@@ -435,7 +450,11 @@ def _node_view_from_row(
     outgoing: tuple[tuple[str, str], ...],
     incoming: tuple[tuple[str, str], ...],
 ) -> CanonicalNodeView:
-    evidence_ids = tuple(source_id for predicate, source_id in incoming if predicate == memory.SUPPORTS.name)
+    evidence_ids = tuple(
+        source_id
+        for predicate, source_id in incoming
+        if predicate == memory.SUPPORTS.name
+    )
     return CanonicalNodeView(
         id=row["id"],
         memory_type=row["memory_type"],
@@ -443,9 +462,15 @@ def _node_view_from_row(
         status=memory.NodeStatus(row["status"]),
         statement=row["statement"],
         summary=row["summary"],
-        source_authority=_optional_enum(memory.SourceAuthority, row["source_authority"]),
-        verification_status=_optional_enum(memory.VerificationStatus, row["verification_status"]),
-        confidence_level=_optional_enum(memory.ConfidenceLevel, row["confidence_level"]),
+        source_authority=_optional_enum(
+            memory.SourceAuthority, row["source_authority"]
+        ),
+        verification_status=_optional_enum(
+            memory.VerificationStatus, row["verification_status"]
+        ),
+        confidence_level=_optional_enum(
+            memory.ConfidenceLevel, row["confidence_level"]
+        ),
         applies_when=row["applies_when"],
         do_not_apply_when=row["do_not_apply_when"],
         created_at=row["created_at"],

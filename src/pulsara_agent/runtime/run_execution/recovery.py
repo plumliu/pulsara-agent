@@ -12,7 +12,8 @@ from pulsara_agent.event import (
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
 )
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope, same_event_payload
+from pulsara_agent.event_log.protocol import same_event_payload
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.runtime.run_entry import (
     CommittedHostRunEntry,
     CommittedRunEntry,

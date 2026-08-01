@@ -45,9 +45,7 @@ from pulsara_agent.runtime.event_write_service import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = REPO_ROOT / "src" / "pulsara_agent" / "runtime"
 TOOLS_DIR = REPO_ROOT / "src" / "pulsara_agent" / "tools"
-MEMORY_GOVERNANCE_DIR = (
-    REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
-)
+MEMORY_GOVERNANCE_DIR = REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
 SOURCE_ROOT = REPO_ROOT / "src" / "pulsara_agent"
 
 
@@ -102,9 +100,7 @@ def test_terminal_monitor_hard_cut_has_no_watch_or_legacy_accumulator() -> None:
         source = path.read_text(encoding="utf-8")
         for marker in forbidden:
             if marker in source:
-                violations.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
-                )
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}")
     assert violations == []
 
     transcript_owners = (
@@ -132,9 +128,7 @@ def test_runtime_observation_hard_cut_has_no_legacy_carrier_or_rebase() -> None:
         source = path.read_text(encoding="utf-8")
         for marker in forbidden:
             if marker in source:
-                violations.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
-                )
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}")
     assert violations == []
 
 
@@ -256,9 +250,9 @@ def test_memory_candidate_producers_cannot_bypass_projection_ownership() -> None
                 violations.append(
                     f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
                 )
-    memory_tool = (
-        REPO_ROOT / "src/pulsara_agent/tools/builtins/memory.py"
-    ).read_text(encoding="utf-8")
+    memory_tool = (REPO_ROOT / "src/pulsara_agent/tools/builtins/memory.py").read_text(
+        encoding="utf-8"
+    )
     assert "uuid4" not in memory_tool
     assert "build_main_agent_memory_candidate_payload(" in memory_tool
     assert "self.candidate_type.model_validate(" not in memory_tool
@@ -282,9 +276,7 @@ def test_model_stream_delta_events_are_physically_deleted() -> None:
         source = path.read_text(encoding="utf-8")
         for symbol in forbidden:
             if symbol in source:
-                violations.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}"
-                )
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}")
     assert violations == []
 
 
@@ -302,9 +294,7 @@ def test_provider_adapters_only_emit_adapter_private_raw_items() -> None:
         source = path.read_text(encoding="utf-8")
         for symbol in forbidden:
             if symbol in source:
-                violations.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}"
-                )
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}")
     assert violations == []
 
     raw_types = (
@@ -337,19 +327,11 @@ def test_responses_adapter_never_synthesizes_tool_call_identity() -> None:
 
 
 def test_retry_provenance_has_no_legacy_durable_trace_path() -> None:
-    adapter_root = (
-        REPO_ROOT
-        / "src"
-        / "pulsara_agent"
-        / "llm"
-        / "adapters"
-        / "openai"
-    )
+    adapter_root = REPO_ROOT / "src" / "pulsara_agent" / "llm" / "adapters" / "openai"
     events_source = (adapter_root / "events.py").read_text(encoding="utf-8")
     assert "provider_data" not in events_source
     assert 'name="llm.retry"' not in "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(adapter_root.glob("*.py"))
+        path.read_text(encoding="utf-8") for path in sorted(adapter_root.glob("*.py"))
     )
     assert "ProviderRetrySummaryFact" in events_source
 
@@ -367,7 +349,7 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
 
 
 def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
-    assert AGENT_EVENT_SCHEMA_VERSION == 8
+    assert AGENT_EVENT_SCHEMA_VERSION == 9
     assert "CUSTOM" not in EventType.__members__
     assert all(
         getattr(event_type, "__name__", "") != "CustomEvent"
@@ -388,9 +370,7 @@ def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
         source = path.read_text(encoding="utf-8")
         for marker in old_vocabulary:
             if marker in source:
-                violations.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}"
-                )
+                violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}")
     assert violations == []
 
 
@@ -412,8 +392,7 @@ def test_typed_runtime_audit_events_are_explicit_non_transcript() -> None:
     registry = build_default_transcript_event_domain_registry_binding().contract
     by_type = {entry.event_type: entry for entry in registry.supported_events}
     assert {
-        event_type: by_type[event_type].event_domain
-        for event_type in sorted(expected)
+        event_type: by_type[event_type].event_domain for event_type in sorted(expected)
     } == {event_type: "non_transcript" for event_type in sorted(expected)}
 
 
@@ -523,7 +502,9 @@ def test_production_control_never_calls_raw_model_stream_materializer() -> None:
     assert violations == []
 
 
-def test_runtime_business_code_does_not_use_hook_manager_dispatch_as_main_path() -> None:
+def test_runtime_business_code_does_not_use_hook_manager_dispatch_as_main_path() -> (
+    None
+):
     violations: list[str] = []
 
     for path in sorted(RUNTIME_DIR.rglob("*.py")):
@@ -575,16 +556,56 @@ def test_long_horizon_semantic_truth_is_not_stored_in_runtime_scratchpad() -> No
 
 def test_long_horizon_production_hot_paths_do_not_full_scan_event_logs() -> None:
     targets = (
-        ("src/pulsara_agent/host/session.py", "HostSession", "_prepare_prior_messages_for_turn"),
-        ("src/pulsara_agent/runtime/subagent/runtime.py", "SubagentRuntime", "__init__"),
-        ("src/pulsara_agent/runtime/long_horizon/accounting.py", None, "resolve_run_rollout_binding"),
-        ("src/pulsara_agent/llm/execution.py", "ModelStreamExecutionHandle", "subscribe"),
-        ("src/pulsara_agent/llm/control.py", "RunModelCallControlOwner", "_validate_durable_result_attribution"),
-        ("src/pulsara_agent/runtime/long_horizon/window_compaction_service.py", "ContextWindowCompactionService", "compact"),
-        ("src/pulsara_agent/runtime/long_horizon/window_compaction_service.py", "ContextWindowCompactionService", "recover_interrupted"),
-        ("src/pulsara_agent/runtime/long_horizon/window_compaction_service.py", None, "_validate_source_refs"),
-        ("src/pulsara_agent/runtime/context_input/live.py", None, "_read_live_primary_event_slice"),
-        ("src/pulsara_agent/runtime/session.py", "RuntimeSession", "_validate_run_lifecycle_batch"),
+        (
+            "src/pulsara_agent/host/session.py",
+            "HostSession",
+            "_prepare_prior_messages_for_turn",
+        ),
+        (
+            "src/pulsara_agent/runtime/subagent/runtime.py",
+            "SubagentRuntime",
+            "__init__",
+        ),
+        (
+            "src/pulsara_agent/runtime/long_horizon/accounting.py",
+            None,
+            "resolve_run_rollout_binding",
+        ),
+        (
+            "src/pulsara_agent/llm/execution.py",
+            "ModelStreamExecutionHandle",
+            "subscribe",
+        ),
+        (
+            "src/pulsara_agent/llm/control.py",
+            "RunModelCallControlOwner",
+            "_validate_durable_result_attribution",
+        ),
+        (
+            "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+            "ContextWindowCompactionService",
+            "compact",
+        ),
+        (
+            "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+            "ContextWindowCompactionService",
+            "recover_interrupted",
+        ),
+        (
+            "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+            None,
+            "_validate_source_refs",
+        ),
+        (
+            "src/pulsara_agent/runtime/context_input/live.py",
+            None,
+            "_read_live_primary_event_slice",
+        ),
+        (
+            "src/pulsara_agent/runtime/session.py",
+            "RuntimeSession",
+            "_validate_run_lifecycle_batch",
+        ),
     )
     violations: list[str] = []
     for relative, class_name, function_name in targets:
@@ -629,7 +650,9 @@ def test_long_horizon_production_hot_paths_do_not_full_scan_event_logs() -> None
             )
 
     host_path = REPO_ROOT / "src/pulsara_agent/host/session.py"
-    host_tree = ast.parse(host_path.read_text(encoding="utf-8"), filename=str(host_path))
+    host_tree = ast.parse(
+        host_path.read_text(encoding="utf-8"), filename=str(host_path)
+    )
     pre_run = _find_callable(
         host_tree,
         class_name="HostSession",
@@ -728,12 +751,10 @@ def test_full_raw_transcript_fold_only_exists_in_privileged_doctor() -> None:
     assert "max_events=max_events" in doctor_text
     assert "max_payload_bytes=max_payload_bytes" in doctor_text
 
-    live_text = (
-        RUNTIME_DIR / "context_input/live.py"
-    ).read_text(encoding="utf-8")
-    live_reader = live_text.split(
-        "async def _read_live_primary_event_slice(", 1
-    )[1].split("\ndef _contiguous_exact_slices(", 1)[0]
+    live_text = (RUNTIME_DIR / "context_input/live.py").read_text(encoding="utf-8")
+    live_reader = live_text.split("async def _read_live_primary_event_slice(", 1)[
+        1
+    ].split("\ndef _contiguous_exact_slices(", 1)[0]
     assert "projection_delta_minimum_sequence()" in live_reader
     assert "minimum_sequence = 1" not in live_reader
     assert "if compacted_window else ()" not in live_reader
@@ -742,8 +763,7 @@ def test_full_raw_transcript_fold_only_exists_in_privileged_doctor() -> None:
 def test_authority_hard_cut_has_no_legacy_account_migration_path() -> None:
     authority_dir = RUNTIME_DIR / "authority_materialization"
     text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(authority_dir.glob("*.py"))
+        path.read_text(encoding="utf-8") for path in sorted(authority_dir.glob("*.py"))
     )
     assert "requires migration" not in text
     assert "legacy account" not in text
@@ -768,9 +788,7 @@ def test_model_call_and_transcript_reads_keep_physical_bounds_and_indexes() -> N
     assert "_MAX_TRANSCRIPT_CONTROL_EVENTS" in transcript
     assert "read_raw_replies_snapshot(" in transcript
     assert "read_raw_reply_events(" not in transcript
-    commit = (REPO_ROOT / "src/pulsara_agent/llm/commit.py").read_text(
-        encoding="utf-8"
-    )
+    commit = (REPO_ROOT / "src/pulsara_agent/llm/commit.py").read_text(encoding="utf-8")
     assert "event_log.iter(" not in commit
     assert "event_log.get_by_id(" not in commit
     assert "read_raw_events_by_id(" not in commit
@@ -796,7 +814,9 @@ def test_model_call_and_transcript_reads_keep_physical_bounds_and_indexes() -> N
 
 def test_runtime_async_event_writes_use_one_session_fifo_writer() -> None:
     session_path = REPO_ROOT / "src/pulsara_agent/runtime/session.py"
-    tree = ast.parse(session_path.read_text(encoding="utf-8"), filename=str(session_path))
+    tree = ast.parse(
+        session_path.read_text(encoding="utf-8"), filename=str(session_path)
+    )
     write_events = _find_callable(
         tree,
         class_name="RuntimeSession",
@@ -830,12 +850,12 @@ def test_runtime_async_event_writes_use_one_session_fifo_writer() -> None:
 
 
 def test_compacted_authority_and_rollup_cache_do_not_rebind_full_transcript() -> None:
-    live = (
-        REPO_ROOT / "src/pulsara_agent/runtime/context_input/live.py"
-    ).read_text(encoding="utf-8")
-    rollup = (
-        REPO_ROOT / "src/pulsara_agent/runtime/long_horizon/rollup.py"
-    ).read_text(encoding="utf-8")
+    live = (REPO_ROOT / "src/pulsara_agent/runtime/context_input/live.py").read_text(
+        encoding="utf-8"
+    )
+    rollup = (REPO_ROOT / "src/pulsara_agent/runtime/long_horizon/rollup.py").read_text(
+        encoding="utf-8"
+    )
     assert "source_through + 1" in live
     assert "ContextEventAuthorityView" in live
     cache_key = ast.parse(rollup, filename="rollup.py")
@@ -858,21 +878,21 @@ def test_runtime_blocking_services_reserve_a_critical_ledger_lane() -> None:
         assert "auxiliary_io_executor()" in text, relative
         assert "critical_ledger_executor()" not in text, relative
         assert "ThreadPoolExecutor(" not in text, relative
-    writer = (
-        REPO_ROOT / "src/pulsara_agent/runtime/event_write_service.py"
-    ).read_text(encoding="utf-8")
+    writer = (REPO_ROOT / "src/pulsara_agent/runtime/event_write_service.py").read_text(
+        encoding="utf-8"
+    )
     assert "critical_ledger_executor()" in writer
     assert "auxiliary_io_executor()" not in writer
     assert "ThreadPoolExecutor(" not in writer
 
 
 def test_event_log_readers_use_lane_aware_pool_and_no_direct_connect() -> None:
-    postgres = (
-        REPO_ROOT / "src/pulsara_agent/event_log/postgres.py"
-    ).read_text(encoding="utf-8")
-    pool = (
-        REPO_ROOT / "src/pulsara_agent/event_log/postgres_pool.py"
-    ).read_text(encoding="utf-8")
+    postgres = (REPO_ROOT / "src/pulsara_agent/event_log/postgres.py").read_text(
+        encoding="utf-8"
+    )
+    pool = (REPO_ROOT / "src/pulsara_agent/event_log/postgres_pool.py").read_text(
+        encoding="utf-8"
+    )
     assert "psycopg.connect(" not in postgres
     assert "PostgresConnectionLane.BOUNDED_READ" in postgres
     assert "_CRITICAL_WRITE_RESERVE" in pool
@@ -882,7 +902,9 @@ def test_event_log_readers_use_lane_aware_pool_and_no_direct_connect() -> None:
 def test_live_authority_hot_path_uses_one_bundle_read() -> None:
     path = REPO_ROOT / "src/pulsara_agent/runtime/context_input/live.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    target = _find_callable(tree, class_name=None, name="_read_live_primary_event_slice")
+    target = _find_callable(
+        tree, class_name=None, name="_read_live_primary_event_slice"
+    )
     calls = {
         item.func.attr
         for item in ast.walk(target)
@@ -1002,9 +1024,7 @@ def test_checkpoint_drain_closes_new_writers_and_waits_admitted_fifo() -> None:
         assert (
             await writer.execute(
                 lambda: "checkpoint-control",
-                admission_class=(
-                    LedgerWriteAdmissionClass.CHECKPOINT_BARRIER_CONTROL
-                ),
+                admission_class=(LedgerWriteAdmissionClass.CHECKPOINT_BARRIER_CONTROL),
                 checkpoint_id=drain.checkpoint_id,
             )
             == "checkpoint-control"
@@ -1111,9 +1131,7 @@ def test_production_code_does_not_call_owner_only_sync_event_confirmation() -> N
                 and node.func.attr == "confirm_event_batch"
             ):
                 continue
-            violations.append(
-                f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
-            )
+            violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}")
     assert violations == []
 
 

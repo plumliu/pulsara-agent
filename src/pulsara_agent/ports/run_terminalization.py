@@ -126,9 +126,7 @@ class RunTerminalizationUntrusted(FrozenRuntimeStateBase):
 
 
 RunTerminalizationCommitOutcome: TypeAlias = (
-    RunTerminalizationFull
-    | RunTerminalizationNone
-    | RunTerminalizationUntrusted
+    RunTerminalizationFull | RunTerminalizationNone | RunTerminalizationUntrusted
 )
 
 

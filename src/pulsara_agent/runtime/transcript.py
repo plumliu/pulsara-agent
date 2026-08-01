@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -78,7 +80,7 @@ def rebuild_prior_messages_bounded(
         deadline_monotonic=deadline_monotonic,
     )
     for raw in candidates:
-        event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if not isinstance(event, ContextCompactionCompletedEvent):
             raise ValueError("compaction checkpoint query returned another event type")
         try:
@@ -116,7 +118,8 @@ def rebuild_prior_messages_bounded(
         deadline_monotonic=deadline_monotonic,
     )
     events = [
-        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in sparse.events
+        decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
+        for item in sparse.events
     ]
     reply_ids = tuple(
         dict.fromkeys(
@@ -134,7 +137,7 @@ def rebuild_prior_messages_bounded(
         )
         reply_events_by_id = {
             group.reply_id: tuple(
-                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for item in group.events
             )
             for group in reply_snapshot.groups

@@ -8,7 +8,10 @@ from threading import RLock
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.runtime.subagent.facts import SubagentGraphState
-from pulsara_agent.runtime.subagent.reducer import apply_subagent_event, fold_subagent_graph
+from pulsara_agent.runtime.subagent.reducer import (
+    apply_subagent_event,
+    fold_subagent_graph,
+)
 
 
 class SubagentReducerApplyError(RuntimeError):

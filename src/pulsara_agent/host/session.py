@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import asyncio
+from hashlib import sha256
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -28,6 +31,9 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
     ProviderInputAppendCommittedEvent,
+    PromptQueueCommittedToProviderInputEvent,
+    PromptQueueReservationInstalledEvent,
+    UserSteerCommittedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
@@ -51,6 +57,7 @@ from pulsara_agent.host.run_boundary import (
     NewRunBoundaryInput,
     PreparedNewRunBoundary,
     PreparedNewRunBoundaryAuthority,
+    QueuedPromptRunDelivery,
     derive_continuation_basis,
 )
 from pulsara_agent.runtime.run_execution.continuation import (
@@ -90,6 +97,7 @@ from pulsara_agent.host.ingress import (
 )
 from pulsara_agent.ports.host_ingress import (
     ActiveRunMonitorSafePointLease,
+    ActiveRunPromptSteerSafePointLease,
     HostIngressAdmissionStale,
 )
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
@@ -145,6 +153,9 @@ from pulsara_agent.runtime.agent import (
     agent_run_result_from_terminal_outcome,
 )
 from pulsara_agent.runtime.execution_handles import RunExecutionHandleSet
+from pulsara_agent.runtime.terminal_presentation.history_capacity import (
+    presentation_run_growth_source_fingerprint,
+)
 from pulsara_agent.ports.run_execution import (
     RunActivationOutcome,
     RunReconciliationRequired,
@@ -701,6 +712,9 @@ class HostSession:
     _active_run_monitor_safe_point_lease: ActiveRunMonitorSafePointLease | None = field(
         default=None, init=False, repr=False
     )
+    _active_run_prompt_steer_safe_point_lease: (
+        ActiveRunPromptSteerSafePointLease | None
+    ) = field(default=None, init=False, repr=False)
     _stop_intent_revision: int = field(default=0, init=False, repr=False)
     _termination_intent_revision: int = field(default=0, init=False, repr=False)
     _background_model_call_admission_generation: int = field(
@@ -717,6 +731,10 @@ class HostSession:
     )
     _host_open_deadline_monotonic: float = field(init=False, repr=False)
     _subagent_dangling_repair_done: bool = field(default=False, init=False, repr=False)
+    _terminal_application_services: Any = field(default=None, init=False, repr=False)
+    _presentation_history_run_reservations: dict[str, str] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         runtime_session = self.wiring.runtime_wiring.runtime_session
@@ -747,6 +765,13 @@ class HostSession:
             host_session_id=self.host_session_id,
             permission_policy_fingerprint=default_permission_policy_fingerprint(),
         )
+        from pulsara_agent.runtime.terminal_application.services import (
+            TerminalApplicationServices,
+        )
+
+        self._terminal_application_services = TerminalApplicationServices(
+            host_session=self
+        )
         self.wiring.runtime_wiring.runtime_session.bind_host_ingress_commit_validator(
             self._ingress_coordinator.validate_run_start_event
         )
@@ -762,6 +787,12 @@ class HostSession:
             releaser=self._release_active_run_monitor_safe_point,
             commit_guard_factory=(self._active_run_monitor_safe_point_commit_guard),
         )
+        self.wiring.runtime_wiring.runtime_session.bind_active_run_prompt_steer_safe_point(
+            provider=self._borrow_active_run_prompt_steer_safe_point,
+            validator=self._validate_active_run_prompt_steer_safe_point,
+            releaser=self._release_active_run_prompt_steer_safe_point,
+            commit_guard_factory=self._active_run_prompt_steer_commit_guard,
+        )
         snapshot = self.wiring.runtime_wiring.event_log.read_raw_events_by_types(
             (EventType.PLAN_MODE_ENTERED.value, EventType.PLAN_MODE_EXITED.value),
             max_events=4_096,
@@ -770,7 +801,7 @@ class HostSession:
         )
         reduced = reduce_plan_workflow_state(
             tuple(
-                raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
                 for raw in snapshot.events
             )
         )
@@ -780,6 +811,7 @@ class HostSession:
             or reduced.latest_accepted_plan_artifact_id
         ):
             self.plan_state = reduced
+        self._terminal_application_services.resume_pending_queue_deliveries()
 
     @property
     def closed(self) -> bool:
@@ -793,6 +825,7 @@ class HostSession:
         """Synchronously close the mutation gate before async teardown starts."""
         if self._lifecycle is HostSessionLifecycle.OPEN:
             self._lifecycle = HostSessionLifecycle.CLOSING
+            self._terminal_application_services.stop_admission()
         lease = self._background_model_call_admission_lease
         if lease is not None:
             lease.release()
@@ -800,6 +833,12 @@ class HostSession:
     @property
     def runtime_session_id(self) -> str:
         return self.wiring.runtime_wiring.runtime_session.runtime_session_id
+
+    @property
+    def terminal_application_services(self):
+        """Renderer-neutral application boundary for terminal clients."""
+
+        return self._terminal_application_services
 
     async def repair_dangling_children_once(
         self,
@@ -1342,6 +1381,10 @@ class HostSession:
             run_id=run_ids[0],
             deadline_monotonic=deadline_monotonic,
         )
+        reservation_id = self.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service.adopt_recovered_run_growth(
+            recovered.run_id
+        )
+        self._presentation_history_run_reservations[recovered.run_id] = reservation_id
         if recovered.recovery_state == "awaiting_client_input":
             await self._sync_ingress_waiting_state()
             return
@@ -2023,18 +2066,41 @@ class HostSession:
             ingress_owner=prepared.ingress_owner,
             run_start=draft.run_start_event,
         )
-        candidates = (
+        candidates: tuple[AgentEvent, ...] = (
             draft.run_start_event,
             *notification_candidates,
             window_open,
             account_open,
             *pending_audits,
         )
+        transaction_companion = None
+        queue_delivery = prepared.queued_prompt_delivery
+        if queue_delivery is not None:
+            dispatch_batch = (
+                runtime_session.prompt_queue_mutation_service.prepare_commit_to_run(
+                    queue_item_id=queue_delivery.queue_item_id,
+                    reservation_fingerprint=(queue_delivery.reservation_fingerprint),
+                    command_id=(
+                        f"queue-dispatch:{queue_delivery.queue_item_id}:"
+                        f"{queue_delivery.reservation_generation}"
+                    ),
+                    event_context=event_context,
+                    run_start_event=draft.run_start_event,
+                    candidate_prefix=candidates,
+                )
+            )
+            candidates = dispatch_batch.prepared_events
+            transaction_companion = dispatch_batch.transaction_companion
         self._set_boundary_candidates(candidates)
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
         try:
-            stored = tuple(await runtime_session.emit_many(candidates))
+            stored = tuple(
+                await runtime_session.emit_many(
+                    candidates,
+                    transaction_companion=transaction_companion,
+                )
+            )
         except BaseException as exc:
             if isinstance(
                 exc,
@@ -2255,6 +2321,25 @@ class HostSession:
         await asyncio.to_thread(
             self.wiring.runtime_wiring.runtime_session.terminal_monitor_coordinator.recover_after_restart,
             deadline_monotonic=deadline_monotonic,
+        )
+
+    async def recover_terminal_command_owners_before_open(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Terminalize orphaned durable command admissions without replaying them."""
+
+        if deadline_monotonic != self._host_open_deadline_monotonic:
+            raise ValueError(
+                "terminal command recovery deadline diverged from Host open"
+            )
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError(
+                "Host open deadline expired before terminal command recovery"
+            )
+        await self._terminal_application_services.recover_pending_commands(
+            deadline_monotonic=deadline_monotonic
         )
 
     def activate_terminal_notification_dispatch_after_open(self) -> None:
@@ -2570,6 +2655,331 @@ class HostSession:
             )
             self._active_run_monitor_safe_point_lease = lease
             return lease
+
+    async def _borrow_active_run_prompt_steer_safe_point(
+        self,
+        run_id: str,
+        next_model_call_index: int,
+    ) -> ActiveRunPromptSteerSafePointLease | None:
+        """Reserve the oldest eligible steer for the next provider-input freeze."""
+
+        if (
+            next_model_call_index < 2
+            or self._lifecycle is not HostSessionLifecycle.OPEN
+        ):
+            return None
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        existing = self._active_run_prompt_steer_safe_point_lease
+        if existing is not None:
+            if (
+                existing.run_id == run_id
+                and existing.next_model_call_index == next_model_call_index
+            ):
+                return existing
+            raise HostIngressAdmissionStale(
+                "another active-run prompt steer safe point remains installed"
+            )
+        candidates = tuple(
+            item
+            for item in runtime_session.prompt_queue_projection_store.pending_items(
+                limit=256
+            )
+            if (
+                item.delivery_state == "accepted_pending"
+                and item.requested_delivery_mode in {"auto", "steer"}
+                or item.delivery_state == "steer_reserved"
+                and item.reservation is not None
+                and item.resolved_delivery_mode == "steer"
+                and item.reservation.target_run_id == run_id
+            )
+        )
+        if not candidates:
+            return None
+        item = candidates[0]
+        if item.delivery_state == "accepted_pending":
+            item = await runtime_session.prompt_queue_mutation_service.reserve(
+                queue_item_id=item.queue_item_id,
+                reservation_kind="steer",
+                target_run_id=run_id,
+                target_safe_point=(
+                    "after_tool_results_before_followup_model_input_freeze"
+                ),
+                command_id=(
+                    f"queue-steer-reserve:{item.queue_item_id}:{item.item_revision + 1}"
+                ),
+                event_context=(
+                    runtime_session.prompt_queue_mutation_service.source_event_context(
+                        item.queue_item_id
+                    )
+                ),
+            )
+        reservation = item.reservation
+        from pulsara_agent.runtime.terminal_application.prompt_queue import (
+            user_steer_event_id,
+            user_steer_message_id,
+        )
+
+        content = item.prepared_content
+        if (
+            reservation is None
+            or content is None
+            or content.canonical_byte_count > 64 * 1024
+        ):
+            return None
+        try:
+            canonical_text = await runtime_session.prompt_queue_mutation_service.materialize_content_text(
+                item.queue_item_id
+            )
+        except (TimeoutError, ValueError):
+            return None
+        with (
+            self._ingress_coordinator.authority_guard(),
+            runtime_session.write_coordinator.lock,
+        ):
+            service = self.wiring.run_activation_service
+            if service is None:
+                raise RuntimeError("runtime composition lacks its activation service")
+            active_state = service.active_safe_point_state(run_id)
+            current_item = runtime_session.prompt_queue_projection_store.item(
+                item.queue_item_id
+            )
+            if (
+                active_state is None
+                or self.active_run_id != run_id
+                or not self._ingress_coordinator.can_borrow_active_run_notifications()
+                or active_state.has_pending_interaction
+                or active_state.has_pending_tool_calls
+                or not active_state.terminal_open
+                or not active_state.termination_intent_absent
+                or current_item != item
+            ):
+                return None
+            previous_index = (
+                active_state.latest_model_control_disposition_model_call_index
+            )
+            disposition = runtime_session.event_log.get_by_id(
+                active_state.latest_model_control_disposition_event_id or ""
+            )
+            if (
+                previous_index is None
+                or previous_index >= next_model_call_index
+                or not isinstance(disposition, ModelCallControlDispositionResolvedEvent)
+                or disposition.model_call_index != previous_index
+                or disposition.run_id != run_id
+                or disposition.disposition is not ModelCallControlDisposition.ACCEPTED
+            ):
+                return None
+            previous_end = runtime_session.event_log.get_by_id(
+                disposition.model_call_end_event_id
+            )
+            run_start = runtime_session.event_log.get_by_id(
+                active_state.run_start_event_id
+            )
+            queue_head = runtime_session.event_log.get_by_id(item.head_event_id)
+            if (
+                not isinstance(previous_end, ModelCallEndEvent)
+                or previous_end.outcome != "completed"
+                or not isinstance(run_start, RunStartEvent)
+                or not isinstance(queue_head, PromptQueueReservationInstalledEvent)
+            ):
+                return None
+            host_state = self._ingress_coordinator.state_fact()
+            message_id = user_steer_message_id(
+                queue_item_id=item.queue_item_id,
+                reservation_fingerprint=reservation.reservation_fingerprint,
+            )
+            expected_event_id = user_steer_event_id(
+                queue_item_id=item.queue_item_id,
+                reservation_fingerprint=reservation.reservation_fingerprint,
+            )
+            lease = ActiveRunPromptSteerSafePointLease(
+                lease_id=context_fingerprint(
+                    "active-run-prompt-steer-safe-point-lease:v1",
+                    (
+                        run_id,
+                        next_model_call_index,
+                        item.row_fingerprint,
+                        host_state.state_fingerprint,
+                    ),
+                ).replace("sha256:", "active_steer_lease:"),
+                runtime_session_id=self.runtime_session_id,
+                run_id=run_id,
+                next_model_call_index=next_model_call_index,
+                queue_item_id=item.queue_item_id,
+                reservation_fingerprint=reservation.reservation_fingerprint,
+                command_id=(
+                    f"queue-steer-commit:{item.queue_item_id}:"
+                    f"{reservation.reservation_generation}"
+                ),
+                message_id=message_id,
+                expected_user_steer_event_id=expected_event_id,
+                text=canonical_text,
+                content_semantic_fingerprint=content.content_semantic_fingerprint,
+                queue_item_head_event_reference=event_reference_from_stored(
+                    queue_head, runtime_session_id=self.runtime_session_id
+                ),
+                queue_item_head_candidate_payload_fingerprint=(
+                    item.head_candidate_payload_fingerprint
+                ),
+                queue_item_revision=item.item_revision,
+                queue_account_revision=item.account_revision,
+                host_state_generation=host_state.state_generation,
+                close_intent_revision=host_state.close_intent_revision,
+                stop_intent_revision=self._stop_intent_revision,
+                termination_intent_revision=self._termination_intent_revision,
+                active_segment_id=active_state.segment_id,
+                active_segment_generation=active_state.segment_generation,
+                llm_lifecycle_generation=(
+                    runtime_session.model_stream_execution_registry.generation + 1
+                ),
+                run_start_event_reference=event_reference_from_stored(
+                    run_start, runtime_session_id=self.runtime_session_id
+                ),
+                previous_model_call_end_event_reference=event_reference_from_stored(
+                    previous_end, runtime_session_id=self.runtime_session_id
+                ),
+                prior_model_control_disposition_reference=event_reference_from_stored(
+                    disposition, runtime_session_id=self.runtime_session_id
+                ),
+            )
+            if expected_event_id != user_steer_event_id(
+                queue_item_id=lease.queue_item_id,
+                reservation_fingerprint=lease.reservation_fingerprint,
+            ):
+                raise AssertionError("stable UserSteer identity construction drifted")
+            self._active_run_prompt_steer_safe_point_lease = lease
+            return lease
+
+    @contextmanager
+    def _active_run_prompt_steer_commit_guard(self, **_kwargs):
+        with self._ingress_coordinator.authority_guard():
+            yield
+
+    def _release_active_run_prompt_steer_safe_point(
+        self, lease: ActiveRunPromptSteerSafePointLease
+    ) -> None:
+        if self._active_run_prompt_steer_safe_point_lease == lease:
+            self._active_run_prompt_steer_safe_point_lease = None
+
+    def _validate_active_run_prompt_steer_safe_point(
+        self,
+        *,
+        start_event: ModelCallStartEvent,
+        candidate_events: tuple[AgentEvent, ...],
+        guard,
+        run_id: str,
+    ) -> None:
+        """Revalidate queue, Host, segment, and same-batch joins under writer lock."""
+
+        lease = self._active_run_prompt_steer_safe_point_lease
+        if lease is None or lease.run_id != run_id:
+            raise HostIngressAdmissionStale(
+                "active-run prompt steer safe-point lease is unavailable"
+            )
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        service = self.wiring.run_activation_service
+        if service is None:
+            raise RuntimeError("runtime composition lacks its activation service")
+        active_state = service.active_safe_point_state(run_id)
+        host_state = self._ingress_coordinator.state_fact()
+        item = runtime_session.prompt_queue_projection_store.item(lease.queue_item_id)
+        if (
+            self._lifecycle is not HostSessionLifecycle.OPEN
+            or active_state is None
+            or self.active_run_id != run_id
+            or active_state.has_pending_interaction
+            or active_state.has_pending_tool_calls
+            or not active_state.terminal_open
+            or not active_state.termination_intent_absent
+            or active_state.segment_id != lease.active_segment_id
+            or active_state.segment_generation != lease.active_segment_generation
+            or self._stop_intent_revision != lease.stop_intent_revision
+            or self._termination_intent_revision != lease.termination_intent_revision
+            or host_state.state_generation != lease.host_state_generation
+            or host_state.close_intent_revision != lease.close_intent_revision
+            or runtime_session.model_stream_execution_registry.generation
+            != lease.llm_lifecycle_generation
+            or item is None
+            or item.delivery_state != "steer_reserved"
+            or item.item_revision != lease.queue_item_revision
+            or item.account_revision != lease.queue_account_revision
+            or item.head_event_id != lease.queue_item_head_event_reference.event_id
+            or item.head_candidate_payload_fingerprint
+            != lease.queue_item_head_candidate_payload_fingerprint
+            or item.reservation is None
+            or item.reservation.reservation_fingerprint != lease.reservation_fingerprint
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run prompt steer authority became stale"
+            )
+        if (
+            guard.runtime_session_id != lease.runtime_session_id
+            or guard.run_start_event_reference != lease.run_start_event_reference
+            or guard.active_segment_id != lease.active_segment_id
+            or guard.active_segment_generation != lease.active_segment_generation
+            or guard.expected_host_state_generation != lease.host_state_generation
+            or guard.expected_next_model_call_index != lease.next_model_call_index
+            or guard.expected_llm_lifecycle_generation != lease.llm_lifecycle_generation
+            or guard.expected_termination_intent_revision
+            != lease.termination_intent_revision
+            or guard.expected_stop_intent_revision != lease.stop_intent_revision
+            or guard.expected_close_intent_revision != lease.close_intent_revision
+            or guard.prior_model_control_disposition_reference
+            != lease.prior_model_control_disposition_reference
+            or guard.previous_model_call_end_event_reference
+            != lease.previous_model_call_end_event_reference
+            or guard.queue_item_id != lease.queue_item_id
+            or guard.queue_reservation_fingerprint != lease.reservation_fingerprint
+            or guard.queue_item_head_event_reference
+            != lease.queue_item_head_event_reference
+            or guard.queue_item_head_candidate_payload_fingerprint
+            != lease.queue_item_head_candidate_payload_fingerprint
+            or guard.expected_queue_item_revision != lease.queue_item_revision
+            or guard.expected_queue_account_revision != lease.queue_account_revision
+            or start_event.model_call_index != lease.next_model_call_index
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run prompt steer commit guard drifted"
+            )
+        appends = tuple(
+            event
+            for event in candidate_events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        )
+        steers = tuple(
+            event
+            for event in candidate_events
+            if isinstance(event, UserSteerCommittedEvent)
+        )
+        queue_commits = tuple(
+            event
+            for event in candidate_events
+            if isinstance(event, PromptQueueCommittedToProviderInputEvent)
+        )
+        if (
+            len(appends) != 1
+            or len(steers) != 1
+            or len(queue_commits) != 1
+            or appends[0].prepared_provider_input_candidate_fingerprint
+            != guard.prepared_provider_input_append_fingerprint
+            or steers[0].id != guard.expected_user_steer_event_id
+            or steers[0].queue_item_id != lease.queue_item_id
+            or steers[0].source_reservation_fingerprint != lease.reservation_fingerprint
+            or queue_commits[0].transition.queue_item_id != lease.queue_item_id
+            or queue_commits[0].source_reservation_fingerprint
+            != lease.reservation_fingerprint
+            or queue_commits[0].provider_input_append_event_identity
+            != stable_event_identity(
+                appends[0], runtime_session_id=self.runtime_session_id
+            )
+            or queue_commits[0].user_steer_event_identity
+            != stable_event_identity(
+                steers[0], runtime_session_id=self.runtime_session_id
+            )
+        ):
+            raise HostIngressAdmissionStale(
+                "active-run prompt steer candidate batch drifted"
+            )
 
     @contextmanager
     def _active_run_monitor_safe_point_commit_guard(
@@ -3007,6 +3417,7 @@ class HostSession:
         user_input: str,
         active_skill_names: frozenset[str],
         identity: HostRunBoundaryIdentityFact,
+        queued_prompt_delivery: QueuedPromptRunDelivery | None = None,
     ) -> tuple[AgentRunDraft, CommittedHostRunEntry, tuple[AgentEvent, ...]]:
         """The sole PRE_RUN coordinator, called with ``_run_lock`` held."""
 
@@ -3133,6 +3544,7 @@ class HostSession:
             pending_mcp_audits=pending_audits,
             long_horizon=long_horizon,
             diagnostics=(),
+            queued_prompt_delivery=queued_prompt_delivery,
         )
         attempt = self._boundary_attempt
         if attempt is None:
@@ -3197,6 +3609,7 @@ class HostSession:
         *,
         user_input: str,
         active_skill_names: frozenset[str],
+        queue_item_id: str | None = None,
     ) -> HostActivationResult:
         self._raise_if_not_open("starting an admitted turn")
         if self.stopping_run_id is not None:
@@ -3208,6 +3621,44 @@ class HostSession:
                 "pre_runtime_request" if ingress_owner.kind == "runtime" else "pre_run"
             ),
         )
+        queued_prompt_delivery = None
+        if queue_item_id is not None:
+            queue_service = (
+                self.wiring.runtime_wiring.runtime_session.prompt_queue_mutation_service
+            )
+            source_context = queue_service.source_event_context(queue_item_id)
+            reserved = await queue_service.reserve(
+                queue_item_id=queue_item_id,
+                reservation_kind="follow_up",
+                target_run_id=identity.run_id,
+                target_safe_point="next_host_run_boundary",
+                command_id=f"queue-reserve:{queue_item_id}:{identity.run_id}",
+                event_context=source_context,
+            )
+            reservation = reserved.reservation
+            content = reserved.prepared_content
+            if reservation is None or content is None:
+                raise RuntimeError("queued follow-up lost its reserved content")
+            encoded_user_input = user_input.encode("utf-8")
+            if (
+                len(encoded_user_input) != content.canonical_byte_count
+                or f"sha256:{sha256(encoded_user_input).hexdigest()}"
+                != content.canonical_payload_sha256
+            ):
+                await queue_service.reject_delivery(
+                    queue_item_id=queue_item_id,
+                    command_id=f"queue-reject:{queue_item_id}:{identity.run_id}",
+                    event_context=source_context,
+                    reason="content_unavailable",
+                    reservation_fingerprint=reservation.reservation_fingerprint,
+                )
+                raise RuntimeError("queued follow-up content cannot be materialized")
+            queued_prompt_delivery = QueuedPromptRunDelivery(
+                queue_item_id=queue_item_id,
+                reservation_fingerprint=reservation.reservation_fingerprint,
+                reservation_generation=reservation.reservation_generation,
+                content_semantic_fingerprint=content.content_semantic_fingerprint,
+            )
         boundary_input = NewRunBoundaryInput(
             identity=identity,
             user_input=user_input,
@@ -3215,6 +3666,7 @@ class HostSession:
             host_session_id=self.host_session_id,
             conversation_id=self.conversation_id,
             ingress_owner=ingress_owner,
+            queued_prompt_delivery=queued_prompt_delivery,
         )
         task = self._create_owned_boundary_task(
             lambda: self._run_turn_pipeline(
@@ -3250,8 +3702,125 @@ class HostSession:
                     identity.run_id
                 )
                 return agent_run_result_from_terminal_outcome(terminal)
+        except BaseException:
+            if queued_prompt_delivery is not None:
+                try:
+                    await self._settle_failed_queued_prompt_delivery(
+                        queued_prompt_delivery,
+                    )
+                except BaseException:
+                    # Preserve the boundary failure as the primary outcome.  A
+                    # reservation whose settlement cannot be durably confirmed
+                    # remains visible to reopen/repair instead of replacing the
+                    # causal failure with a second writer exception.
+                    pass
+            raise
         finally:
             self._boundary_stop_requested_run_ids.discard(identity.run_id)
+
+    async def run_queued_follow_up(self, queue_item_id: str) -> HostActivationResult:
+        """Consume one durable queue item through the ordinary Host ingress owner."""
+
+        self._host_event_loop = asyncio.get_running_loop()
+        runtime = self.wiring.runtime_wiring.runtime_session
+        item = runtime.prompt_queue_projection_store.item(queue_item_id)
+        if item is None:
+            raise KeyError(queue_item_id)
+        if item.delivery_state != "accepted_pending":
+            raise RuntimeError("queued follow-up is no longer pending")
+        content = item.prepared_content
+        if content is None:
+            await runtime.prompt_queue_mutation_service.reject_delivery(
+                queue_item_id=queue_item_id,
+                command_id=f"queue-reject:{queue_item_id}:content",
+                event_context=(
+                    runtime.prompt_queue_mutation_service.source_event_context(
+                        queue_item_id
+                    )
+                ),
+                reason="content_unavailable",
+            )
+            raise RuntimeError("queued follow-up content is unavailable")
+        try:
+            text = await runtime.prompt_queue_mutation_service.materialize_content_text(
+                queue_item_id
+            )
+        except (TimeoutError, ValueError) as exc:
+            await runtime.prompt_queue_mutation_service.reject_delivery(
+                queue_item_id=queue_item_id,
+                command_id=f"queue-reject:{queue_item_id}:hydrate",
+                event_context=(
+                    runtime.prompt_queue_mutation_service.source_event_context(
+                        queue_item_id
+                    )
+                ),
+                reason="content_unavailable",
+            )
+            raise RuntimeError("queued follow-up content is unavailable") from exc
+        ingress_id = context_fingerprint(
+            "queued-follow-up-host-ingress:v1",
+            {
+                "runtime_session_id": self.runtime_session_id,
+                "queue_item_id": item.queue_item_id,
+                "head_event_id": item.head_event_id,
+                "content_semantic_fingerprint": (content.content_semantic_fingerprint),
+            },
+        ).replace("sha256:", "host_ingress:")
+        return await self._ingress_coordinator.submit(
+            kind="human",
+            payload=(queue_item_id, content.content_semantic_fingerprint),
+            ingress_id=ingress_id,
+            reject_if_busy=False,
+            allow_deferred_while_waiting=True,
+            runner=lambda owner: self._run_human_ingress(
+                owner,
+                user_input=text,
+                active_skill_names=frozenset(),
+                queue_item_id=queue_item_id,
+            ),
+        )
+
+    async def _settle_failed_queued_prompt_delivery(
+        self,
+        delivery: QueuedPromptRunDelivery,
+    ) -> None:
+        runtime = self.wiring.runtime_wiring.runtime_session
+        if runtime.reconciliation_required:
+            return
+        item = runtime.prompt_queue_projection_store.item(delivery.queue_item_id)
+        if (
+            item is None
+            or item.delivery_state != "follow_up_reserved"
+            or item.reservation is None
+            or item.reservation.reservation_fingerprint
+            != delivery.reservation_fingerprint
+        ):
+            return
+        event_context = runtime.prompt_queue_mutation_service.source_event_context(
+            delivery.queue_item_id
+        )
+        if self._lifecycle is not HostSessionLifecycle.OPEN:
+            await runtime.prompt_queue_mutation_service.reject_delivery(
+                queue_item_id=delivery.queue_item_id,
+                command_id=(
+                    f"queue-reject:{delivery.queue_item_id}:"
+                    f"{delivery.reservation_generation}"
+                ),
+                event_context=event_context,
+                reason="session_closing",
+                reservation_fingerprint=delivery.reservation_fingerprint,
+            )
+            return
+        await runtime.prompt_queue_mutation_service.release_reservation(
+            queue_item_id=delivery.queue_item_id,
+            reservation_fingerprint=delivery.reservation_fingerprint,
+            command_id=(
+                f"queue-release:{delivery.queue_item_id}:"
+                f"{delivery.reservation_generation}"
+            ),
+            event_context=event_context,
+            reason="preflight_retryable",
+        )
 
     async def _run_turn_pipeline(
         self,
@@ -3259,6 +3828,7 @@ class HostSession:
         boundary_input: NewRunBoundaryInput,
     ) -> HostActivationResult:
         async with self._run_lock:
+            self._reserve_presentation_run_growth(boundary_input.identity.run_id)
             try:
                 for attempt_index in range(_MAX_RUN_SEED_REFREEZE_ATTEMPTS):
                     try:
@@ -3271,6 +3841,9 @@ class HostSession:
                             user_input=boundary_input.user_input,
                             active_skill_names=boundary_input.active_skill_names,
                             identity=boundary_input.identity,
+                            queued_prompt_delivery=(
+                                boundary_input.queued_prompt_delivery
+                            ),
                         )
                     except BaseException as exc:
                         if (
@@ -3297,6 +3870,9 @@ class HostSession:
             except BaseException as exc:
                 await self._terminalize_post_commit_pipeline_failure(
                     boundary_input.identity.run_id, exc
+                )
+                self._release_uncommitted_presentation_run_growth(
+                    boundary_input.identity.run_id
                 )
                 raise
 
@@ -3431,6 +4007,7 @@ class HostSession:
         boundary_input: NewRunBoundaryInput,
     ) -> AsyncIterator[AgentEvent]:
         async with self._run_lock:
+            self._reserve_presentation_run_growth(boundary_input.identity.run_id)
             try:
                 (
                     draft,
@@ -3459,6 +4036,9 @@ class HostSession:
             except BaseException as exc:
                 await self._terminalize_post_commit_pipeline_failure(
                     boundary_input.identity.run_id, exc
+                )
+                self._release_uncommitted_presentation_run_growth(
+                    boundary_input.identity.run_id
                 )
                 raise
 
@@ -4256,6 +4836,7 @@ class HostSession:
                     raise RuntimeError("RunEnd retry did not reach durable commit")
                 self._finish_active_run(active_run_id)
                 return result
+            run_completion = service.capture_run_completion(active_run_id)
             self._boundary_stop_requested_run_ids.add(active_run_id)
             await self._install_run_termination_intent_for_run(active_run_id, reason)
             stop_status = await service.request_active_stop_and_wait(
@@ -4268,7 +4849,7 @@ class HostSession:
             # The owned task (streaming drive or run coroutine) finalizes itself
             # on a stop_request; abort_run is idempotent and yields the result.
             result = agent_run_result_from_terminal_outcome(
-                await service.wait_run_completion(active_run_id)
+                await asyncio.shield(run_completion)
             )
             if not result.finalized:
                 result = await service.terminalize_resident_run(
@@ -4385,11 +4966,12 @@ class HostSession:
     # -- Close / teardown -----------------------------------------------------
 
     def close(self) -> None:
-        """Synchronous runtime-local close. Idempotent.
+        """Synchronous post-drain runtime-local finalizer. Idempotent.
 
         Does NOT release the shared workspace terminal lease (HostCore/supervisor
         owns that) and does NOT delete the workspace root (HostCore does that
-        last, after lease release) — see contract §6.2/§7.1.
+        last, after lease release). A published live session must first use
+        ``await aclose()`` so async physical owners cannot be bypassed.
         """
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
@@ -4397,6 +4979,7 @@ class HostSession:
         if attempt is not None and not attempt.owner_task.done():
             raise RuntimeError("cannot close HostSession with a live boundary owner")
         self._lifecycle = HostSessionLifecycle.CLOSED
+        self._terminal_application_services.close()
         self._boundary_attempt = None
         self.wiring.runtime_wiring.runtime_session.bind_terminal_notification_listener(
             None
@@ -4434,6 +5017,15 @@ class HostSession:
             await asyncio.gather(dispatch_task, return_exceptions=True)
         await self.drain_active_run(
             reason=reason, timeout_seconds=drain_timeout_seconds
+        )
+        await self._terminal_application_services.stop_and_drain_queue_deliveries(
+            deadline_monotonic=close_deadline
+        )
+        await self._terminal_application_services.stop_and_drain_commands(
+            deadline_monotonic=close_deadline
+        )
+        await self._terminal_application_services.retire_terminal_queue_content(
+            deadline_monotonic=close_deadline
         )
         await self._interaction_transition_port.aclose(
             deadline_monotonic=close_deadline
@@ -4515,6 +5107,9 @@ class HostSession:
         await runtime_session.transcript_projection_checkpoint_service.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
+        await runtime_session.prompt_queue_checkpoint_service.drain_pending(
+            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+        )
         window_compaction_service = runtime_session.window_compaction_service
         if window_compaction_service is not None:
             await window_compaction_service.drain_pending(
@@ -4544,6 +5139,9 @@ class HostSession:
         runtime_session.require_mutation_allowed()
         if self.mcp_supervisor is not None:
             await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
+        await runtime_session.terminal_presentation_foundation_service.stop_admission_and_drain(
+            deadline_monotonic=close_deadline
+        )
         await self._ingress_coordinator.finish_close()
         self.close()
 
@@ -4894,7 +5492,7 @@ class HostSession:
             max_payload_bytes=8 * 1024 * 1024,
         )
         status_events = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for raw in status_snapshot.events
         )
         latest_context = next(
@@ -5071,7 +5669,7 @@ class HostSession:
             )
         )
         compaction_events = tuple(
-            raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for raw in compaction_snapshot.events
         )
         started = {
@@ -6206,7 +6804,73 @@ class HostSession:
     def _retire_confirmed_run_owner(self, run_id: str) -> None:
         view = self._run_activation_service.run_view(run_id)
         if view is not None and view.terminal_state == "confirmed":
+            if view.terminal_event_sequence is None:
+                self._terminalize_presentation_run_growth(
+                    run_id, outcome="reconciliation_required"
+                )
+            else:
+                self._terminalize_presentation_run_growth_after_sequence(
+                    run_id,
+                    through_sequence=view.terminal_event_sequence,
+                    outcome="settled",
+                )
             self._run_activation_service.retire_confirmed(run_id)
+
+    def _reserve_presentation_run_growth(self, run_id: str) -> None:
+        if run_id in self._presentation_history_run_reservations:
+            return
+        foundation = self.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
+        source = presentation_run_growth_source_fingerprint(
+            runtime_session_id=self.runtime_session_id,
+            run_id=run_id,
+        )
+        reservation = foundation.reserve_ordinary_growth(
+            admission_kind="run_activation",
+            source_authority_fingerprint=source,
+            owner_kind="host_run",
+            owner_id=run_id,
+            owner_generation=1,
+        )
+        self._presentation_history_run_reservations[run_id] = (
+            reservation.growth_reservation_id
+        )
+
+    def _release_uncommitted_presentation_run_growth(self, run_id: str) -> None:
+        view = self._run_activation_service.run_view(run_id)
+        if view is not None:
+            if view.terminal_state == "confirmed":
+                self._terminalize_presentation_run_growth(run_id, outcome="settled")
+            return
+        self._terminalize_presentation_run_growth(run_id, outcome="released")
+
+    def _terminalize_presentation_run_growth(
+        self,
+        run_id: str,
+        *,
+        outcome: Literal["settled", "released", "reconciliation_required"],
+    ) -> None:
+        reservation_id = self._presentation_history_run_reservations.pop(run_id, None)
+        if reservation_id is None:
+            return
+        foundation = self.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
+        foundation.terminalize_ordinary_growth(reservation_id, outcome=outcome)
+
+    def _terminalize_presentation_run_growth_after_sequence(
+        self,
+        run_id: str,
+        *,
+        through_sequence: int,
+        outcome: Literal["settled", "released", "reconciliation_required"],
+    ) -> None:
+        reservation_id = self._presentation_history_run_reservations.pop(run_id, None)
+        if reservation_id is None:
+            return
+        foundation = self.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
+        foundation.terminalize_ordinary_growth_after_sequence(
+            reservation_id,
+            through_sequence=through_sequence,
+            outcome=outcome,
+        )
 
     async def _prepare_prior_messages_for_turn(
         self,

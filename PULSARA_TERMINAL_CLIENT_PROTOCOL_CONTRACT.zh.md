@@ -1,6 +1,6 @@
 # Pulsara Terminal Client Protocol Contract
 
-> 状态：DRAFT FOR REVIEW
+> 状态：PYTHON BOUNDARY IMPLEMENTED（2026-08-01）；Go/Bubble Tea consumer、PTY与默认TTY activation为DEFERRED
 > Requirement namespace：`TUI-PROTO-*`
 > 唯一owner：Python TerminalClientGateway与外部Terminal client之间的本地wire contract
 > Domain authority：`PULSARA_TERMINAL_PRESENTATION_FOUNDATION_IMPLEMENTATION.zh.md`
@@ -8,7 +8,7 @@
 
 ## 0. 核心裁决
 
-Bubble Tea是独立Go client，不能import Python DTO；Python runtime也不能import Go client类型。两者只通过versioned local protocol交互。
+长期目标中的Bubble Tea是独立Go client，不能import Python DTO；Python runtime也不能import Go client类型。当前INFRA-5只实现renderer-neutral Python server adapter与test-only headless conformance client，并通过同一versioned local protocol证明边界；它不实现或伪装Go renderer。
 
 V1冻结：
 
@@ -34,22 +34,18 @@ V1冻结：
 ## 2. Source tree与schema ownership
 
 ```text
-protocol/terminal/v1/terminal.proto                # unique wire definition
-protocol/terminal/buf.yaml                         # lint/breaking policy
-protocol/terminal/buf.gen.yaml                     # generated targets
-src/pulsara_agent/generated/terminal/v1/           # generated Python
-src/pulsara_agent/terminal_client_protocol/
-    codec.py
-    gateway.py
-    attachment.py
-    controller.py
-    command_registry.py
-    secret_channel.py
-    domain_adapter.py
-clients/terminal/internal/protocol/                 # generated Go
+src/pulsara_agent/terminal_protocol/
+    schema/terminal_client.proto                   # unique wire definition
+    generated/terminal_client_pb2.py               # generated Python
+    codec.py                                       # explicit domain/wire adapter
+    gateway.py                                     # Unix-socket server and framing owner
+tests/support/terminal_protocol.py                 # test-only headless consumer
+
+# DEFERRED；当前hard cut不得创建：
+clients/terminal/                                  # future generated Go + renderer
 ```
 
-Generated files不得手工修改。Python domain classes不得继承generated message；Go presentation model不得直接保存generated message作为长期state。
+Generated files不得手工修改。Python domain classes不得继承generated message；未来Go presentation model不得直接保存generated message作为长期state。Headless client必须位于`tests/support`并只经正式socket/framing/schema访问server。
 
 Architecture gate：
 
@@ -58,7 +54,8 @@ Python Foundation -> protocol domain adapter -> generated protobuf
 Go generated protobuf -> client transport adapter -> Bubble Tea model messages
 
 Foundation -X-> generated protobuf
-Bubble Tea model -X-> Python domain/event vocabulary
+Headless conformance client -X-> HostSession/RuntimeSession internals
+Future Bubble Tea model -X-> Python domain/event vocabulary
 ```
 
 ## 3. Physical transport
@@ -196,7 +193,7 @@ Takeover必须是显式command，验证same UID、target session、expected cont
 
 ### TUI-PROTO-ATTACH-004 Heartbeat
 
-Heartbeat只证明attachment liveness，不推进projection cursor。Server冻结interval、grace和maximum missed count。Event loop stall不得自动被解释为user cancel；expiry只revokeclient capabilities并detach observation。
+Heartbeat只证明attachment liveness，不推进projection cursor。Server冻结interval、grace和maximum missed count。Event loop stall不得自动被解释为user cancel；expiry只revokeclient capabilities并detach observation。V1同一physical connection串行处理request，因此任何`ObserveNext` long-poll上限必须严格小于heartbeat interval，并冻结为不超过interval的一半；hello只能广告该实际上限。合法的单次observation wait不得占满整段attachment lease或挤掉本连接下一次heartbeat。未来若允许更长等待，必须先引入独立并发reader/multiplexing contract，不能只提高数字。
 
 ## 6. Cursor模型
 
@@ -218,6 +215,8 @@ operational_cursor
 ```
 
 它不与durable sequence比较。Terminal operational owner replacement推进generation；同generation内cursor monotonic。
+
+Operational plane必须有正式的session-owned bounded store，而不是只返回空cursor：store拥有当前generation、monotonic cursor、bounded activity map/ring与snapshot fingerprint；`OperationalSnapshotRequest`返回当前bounded cells，`ObserveNext`按客户端generation/cursor返回typed ordered delta、no-change或GAP。Coalesce/drop只改变operational generation/cursor和activity bytes，不推进durable projection revision或history root。Store无durable replay承诺；process restart开启新generation，旧cursor收到GAP并重新请求operational snapshot。
 
 ### TUI-PROTO-CURSOR-004 Cursor join
 
@@ -740,6 +739,8 @@ TerminalSecretLeaseIdentity
 
 只有current controller可请求。Detach、controller takeover、interaction terminal、expiry或Host close revoke lease。Reconnect必须exact hydrate并签发新lease。
 
+`FORM_RESPONSE`并非仅按`interaction_id`密封。Opaque sealed handle在Python Host中还必须exact绑定当前elicitation batch owner ID/generation、round ordinal、request-set fingerprint、该request的fingerprint与wire `request_key`，以及attachment/controller generation、owner epoch、lease generation和UTC+monotonic TTL。Gateway不得丢弃`SecretFormSubmit.request_key`。Submit时先验证完整response key set与当前pending form batch一致，再密封整份atomic response map；consume时重新验证同一个exact owner仍为current。Batch/round替换、ABA owner变化、controller takeover、detach、interaction terminal、expiry或Host close都使未来consume fail closed，并best-effort overwrite/release mutable plaintext buffer。Sealed handle是process-local owner，不把这些内部attribution复制进ordinary wire或durable event。
+
 ### TUI-PROTO-SECRET-003 Frames
 
 ```text
@@ -813,15 +814,14 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 
 ## 13. 实施slice
 
-| Slice | Protocol交付 |
-|---|---|
-| S0 | fake stream、process supervision与TTY probe transport |
-| S1 | hello/attach、snapshot、history page |
-| S2 | delta、authority/projection join、operational cursor、GAP、reconnect、heartbeat |
-| S3 | controller lease、prompt/stop command、receipt/query |
-| S4 | interaction commands、secret lease/frame/revoke |
-| S5 | queue command/outcome与reconnect query |
-| S6 | capability finalization、version failure、distribution compatibility |
+| Slice | Protocol交付 | 当前状态 |
+|---|---|---|
+| INFRA-5A | schema、framing、hello/attach/heartbeat、snapshot/page | IMPLEMENTED |
+| INFRA-5B | projection/operational delta、GAP、bounded reconnect | IMPLEMENTED |
+| INFRA-5C | controller、closed mutation、durable receipt/query | IMPLEMENTED |
+| INFRA-5D | interaction、secret lease/reveal/submit/revoke | IMPLEMENTED |
+| INFRA-5E | test-only Python headless attach/snapshot/delta/page/GAP/command/detach conformance | IMPLEMENTED |
+| TUI-BT-S0/S1-S6 | Go process supervision、TTY、renderer、cross-language packaging | DEFERRED |
 
 ## 14. Tests与gate
 
@@ -841,6 +841,7 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 - partial/oversize/malformed frame；
 - concurrent observer/controller；
 - heartbeat expiry/takeover；
+- 最大合法observation long-poll期间连接仍能在advertised heartbeat期限前返回；advertised wait严格小于heartbeat interval；
 - output queue overflow/GAP；
 - socket close与stale cleanup。
 
@@ -878,6 +879,7 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 - old-root empty-after-page不能覆盖new latest cursor pair，follow-tail/eviction rehydrate只使用latest pair；pinned cursor只读取自身root；
 - run lifecycle golden vector是`AuditCell(run_lifecycle)`，protocol schema不含`RunLifecycleCell`；
 - operational activity coalesce/drop不改变projection revision、history root或history page bytes；
+- headless happy-path只在目标assistant terminal cell真实出现在正式snapshot后继续；任意high-water advance不构成完成证明。目标cell出现后仍允许RunEnd/audit合法推进，client必须通过snapshot/observation追随successor root，直到从最新cursor得到真实`no_change`；
 - cross-language golden vectors覆盖每个branch、latest generation/root hints与unknown branch fail-closed。
 
 ### TUI-PROTO-GATE-005 Secret
@@ -888,10 +890,11 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 - failed delivery不缓存plaintext；
 - reconnect签发新lease；
 - bounded bytes/deadline。
+- FORM_RESPONSE wire request key必须exact匹配current form slot；stale batch/round owner、controller/attachment generation、owner epoch与TTL均拒绝，expired/ABA handle不能被后续resolve消费；
 
 ## 15. Definition of Done
 
-1. `.proto`是唯一wire schema owner，Python/Go generated code来自同一commit。
+1. `.proto`是唯一wire schema owner，当前Python generated code来自同一commit；Go generation属于deferred `TUI-BT-*`。
 2. Protocol major/minor、capability与hard limits在hello中exact协商。
 3. Runtime directory、socket和peer UID均fail closed。
 4. `authority_high_water`、`projection_revision`和operational cursor物理分离。
@@ -899,19 +902,23 @@ Python launcher/Host process是runtime、Gateway和socket owner；Go child是TTY
 6. 所有mutation command稳定幂等并可在reconnect后查询winner。
 7. UI backpressure永不进入Runtime writer等待链。
 8. GAP后只能snapshot rebuild，不猜测缺失delta。
-9. Go client永远不接收或解释`AgentEvent`/raw storage authority。
+9. 任意client永远不接收或解释`AgentEvent`/raw storage authority；当前由headless conformance client证明。
 10. Secret frame无普通replay、snapshot、diagnostic或log路径。
 11. Client crash/detach不取消run；server close不遗留attachment/lease。
-12. Protocol mapper、schema compatibility和cross-language golden vectors全绿。
+12. Python Protocol mapper、schema compatibility、wire golden与headless socket conformance全绿；cross-language golden在Go client落地前保持deferred。
 13. History wire contract穷尽表达page、stale、rebase与reconciliation；后三者绝不伪装为history end。
 14. V1 mutation union不存在queue edit/reclassify；编辑只由cancel成功后新submit表达。
 15. History direction只由每次request拥有；cursor与server port method不保存第二份direction。
-16. Protocol只暴露一种unified presentation history root和一个page RPC；每个root只有一对directionless cursor，每个attachment只有一个latest pair及bounded pinned old-root cursors。Request/cursor均不含feed kind，Go不做transcript/audit merge。
+16. Protocol只暴露一种unified presentation history root和一个page RPC；每个root只有一对directionless cursor，每个attachment只有一个latest pair及bounded pinned old-root cursors。Request/cursor均不含feed kind，client不做transcript/audit merge。
 17. `PresentationHistoryRootIdentity`显式绑定presentation-policy与audit-extractor registry fingerprints；cursor通过root fingerprint间接绑定它们。
 18. Durable/operational cell oneof物理分离；`RunLifecycleCell`不存在，run lifecycle只是`AuditCell.audit_kind=RUN_LIFECYCLE`。
 19. Checkpoint root rollover只通过`PresentationHistoryRootAdvancedFrame`交付；`AuthorityAdvanceFrame`无法改变confirmed root，new latest cursors与active head永不分离。
 20. Client wire state区分一个latest-root cursor pair与retention-bound pinned-root cursors；旧root可浏览但不能遮蔽new checkpointed history。
 21. History entry/tree/cursor不携带连续ordinal；stable placement key + entry ID是唯一durable anchor，display rank只绑定单个root/active-head view。
-22. Root-advanced wire branch完整携带consumed segment prefix、retained segment suffix与closed resident transition；noop-only suffix不会因zero mutations丢失，Python/Go无标签-only或自由JSON fallback。
+22. Root-advanced wire branch完整携带consumed segment prefix、retained segment suffix与closed resident transition；noop-only suffix不会因zero mutations丢失，Python server/headless consumer无标签-only或自由JSON fallback。
 23. Capacity state、request-specific growth admission decision与`StartSuccessorSessionCommand`是typed contract；客户端不重算quote/reserve，不能通过继续submit或本地截断绕过session rotation/hard exhaustion。
-24. `PresentationHistoryPlacementKey`携带exact registered contract identity与fixed 75-byte framing；Python/Go对unknown binding或typed/bytes mismatch统一fail closed。
+24. `PresentationHistoryPlacementKey`携带exact registered contract identity与fixed 75-byte framing；Python boundary对unknown binding或typed/bytes mismatch统一fail closed，未来Go adapter必须复用同一golden。
+25. 同连接串行V1的observation wait hard max严格小于heartbeat interval；合法long-poll不会使attachment因无法发送heartbeat而自我过期。
+26. Operational snapshot/delta消费正式bounded session store并拥有generation/cursor/GAP语义，不是空壳cursor，也不进入durable history identity。
+27. FORM_RESPONSE sealed handle exact绑定wire request key、current elicitation batch/round/request-set、controller/attachment generation、owner epoch和TTL；Gateway不丢字段，stale/expired handle未来访问fail closed。
+28. Headless conformance happy path按目标assistant terminal cell而非任意high-water推进判定交付完成；后续RunEnd/audit root通过正式observation/snapshot追随至真实`no_change`，不假定两个RPC之间projection静止。

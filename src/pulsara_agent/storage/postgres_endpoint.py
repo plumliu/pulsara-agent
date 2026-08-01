@@ -199,9 +199,7 @@ class ResolvedPostgresConnectionFactory:
             "application_name": self.application_name,
         }
         mismatches = tuple(
-            field
-            for field in expected
-            if str(observed[field]) != str(expected[field])
+            field for field in expected if str(observed[field]) != str(expected[field])
         )
         if mismatches:
             raise PostgresSchemaError(
@@ -256,9 +254,7 @@ def classify_postgres_physical_failure(
 def _validate_conninfo(dsn: str) -> dict[str, str]:
     if not dsn.strip():
         raise ValueError("PostgreSQL DSN must be non-empty")
-    inherited = sorted(
-        name for name in _FORBIDDEN_LIBPQ_ENVIRONMENT if os.getenv(name)
-    )
+    inherited = sorted(name for name in _FORBIDDEN_LIBPQ_ENVIRONMENT if os.getenv(name))
     if inherited:
         raise PostgresSchemaError(
             PostgresSchemaFailureCode.CONNINFO_UNSUPPORTED,
@@ -288,7 +284,11 @@ def _validate_conninfo(dsn: str) -> dict[str, str]:
             PostgresSchemaFailureCode.CONNINFO_UNSUPPORTED,
             "multi-host PostgreSQL conninfo is not supported",
         )
-    if not parameters.get("host") or not parameters.get("dbname") or not parameters.get("user"):
+    if (
+        not parameters.get("host")
+        or not parameters.get("dbname")
+        or not parameters.get("user")
+    ):
         raise PostgresSchemaError(
             PostgresSchemaFailureCode.CONNINFO_UNSUPPORTED,
             "PostgreSQL conninfo must explicitly name host, database, and user",

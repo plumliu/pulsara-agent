@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,7 +62,9 @@ def garbage_collect_subagent_graph_checkpoint_artifacts(
         )
         checkpoints: list[SubagentGraphCheckpointCommittedEvent] = []
         for raw in raw_events:
-            decoded = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            decoded = decode_raw_stored_event_envelope(
+                raw, DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
             if not isinstance(decoded, SubagentGraphCheckpointCommittedEvent):
                 raise RuntimeError("checkpoint GC catalog contains wrong event type")
             if decoded.checkpoint.parent_runtime_session_id != runtime_session_id:
@@ -85,9 +89,7 @@ def garbage_collect_subagent_graph_checkpoint_artifacts(
                 session_id=runtime_session_id,
                 digest=artifact.content_sha256,
                 media_type=artifact.media_type,
-                semantic_metadata_fingerprint=(
-                    artifact.semantic_metadata_fingerprint
-                ),
+                semantic_metadata_fingerprint=(artifact.semantic_metadata_fingerprint),
             )
             target = deleted if removed else missing
             target.append(event.checkpoint.checkpoint_id)

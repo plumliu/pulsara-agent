@@ -108,7 +108,7 @@ def test_mcp_continuation_companion_commits_and_rolls_back_atomically(
         expected_last_sequence=0,
     )
 
-    assert stored[0].sequence == 1
+    assert stored.owned_stored_events[0].sequence == 1
     stored_record = repository.read(
         prepared.continuation.durable_fact.continuation_carrier_id
     )

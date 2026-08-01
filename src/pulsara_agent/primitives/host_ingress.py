@@ -426,6 +426,53 @@ class HostActiveRunMonitorDeliveryFact(FrozenFactBase):
 
 
 @_fact(
+    "active_run_prompt_steer_commit_guard.v1",
+    "guard_fingerprint",
+    "active-run-prompt-steer-commit-guard:v1",
+)
+class ActiveRunPromptSteerCommitGuardFact(FrozenFactBase):
+    schema_version: Literal["active_run_prompt_steer_commit_guard.v1"] = (
+        "active_run_prompt_steer_commit_guard.v1"
+    )
+    runtime_session_id: str = Field(min_length=1)
+    run_start_event_reference: ContextEventReferenceFact
+    active_segment_id: str = Field(min_length=1)
+    active_segment_generation: int = Field(ge=1)
+    expected_host_state_generation: int = Field(ge=0)
+    expected_next_model_call_index: int = Field(ge=1)
+    expected_llm_lifecycle_generation: int = Field(ge=0)
+    expected_termination_intent_revision: int = Field(ge=0)
+    expected_stop_intent_revision: int = Field(ge=0)
+    expected_close_intent_revision: int = Field(ge=0)
+    prior_model_control_disposition_reference: ContextEventReferenceFact
+    previous_model_call_end_event_reference: ContextEventReferenceFact
+    expected_provider_input_generation_id: str = Field(min_length=1)
+    expected_provider_input_generation_revision: int = Field(ge=0)
+    expected_provider_input_committed_state_fingerprint: Fingerprint
+    queue_item_id: str = Field(min_length=1)
+    queue_reservation_fingerprint: Fingerprint
+    queue_item_head_event_reference: ContextEventReferenceFact
+    queue_item_head_candidate_payload_fingerprint: Fingerprint
+    expected_queue_item_revision: int = Field(ge=1)
+    expected_queue_account_revision: int = Field(ge=1)
+    expected_user_steer_event_id: str = Field(min_length=1)
+    prepared_provider_input_append_fingerprint: Fingerprint
+    guard_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _ledger(self) -> "ActiveRunPromptSteerCommitGuardFact":
+        refs = (
+            self.run_start_event_reference,
+            self.prior_model_control_disposition_reference,
+            self.previous_model_call_end_event_reference,
+            self.queue_item_head_event_reference,
+        )
+        if any(item.runtime_session_id != self.runtime_session_id for item in refs):
+            raise ValueError("active-run prompt steer crosses runtime ledgers")
+        return self
+
+
+@_fact(
     "human_current_input_message.v1",
     "fact_fingerprint",
     "human-current-input-message:v1",

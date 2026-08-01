@@ -61,7 +61,9 @@ class ProductionRolloutBudgetFeasibilityReport(BaseModel):
             raise ValueError("rollout feasibility report has inconsistent failed pairs")
         if self.feasible != (not expected):
             raise ValueError("rollout feasibility report has inconsistent status")
-        if any(row.policy_fingerprint != self.policy_fingerprint for row in self.matrix):
+        if any(
+            row.policy_fingerprint != self.policy_fingerprint for row in self.matrix
+        ):
             raise ValueError("rollout feasibility matrix mixes policy identities")
         return self
 
@@ -79,7 +81,9 @@ class ProductionRolloutBudgetConfigurationError(ValueError):
             )
             for row in report.infeasible_pairs
         )
-        super().__init__(f"production rollout budget configuration is infeasible: {pairs}")
+        super().__init__(
+            f"production rollout budget configuration is infeasible: {pairs}"
+        )
 
 
 class ProductionRolloutBudgetFeasibilityDrift(RuntimeError):

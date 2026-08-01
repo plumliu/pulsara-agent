@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -77,7 +79,10 @@ def derive_rollout_status_shadow(
     """Derive the non-model-visible L0B status shadow from one frozen ledger slice."""
 
     decoded = tuple(
-        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        (
+            stored,
+            decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY),
+        )
         for stored in event_slice.events
     )
     account, state = _fold_account(decoded=decoded, account_id=account_id)
@@ -102,9 +107,7 @@ def derive_rollout_status_shadow(
     }
     return RolloutStatusShadowProjectionFact(
         **payload,
-        derivation_fingerprint=context_fingerprint(
-            "rollout-status-shadow:v1", payload
-        ),
+        derivation_fingerprint=context_fingerprint("rollout-status-shadow:v1", payload),
     )
 
 
@@ -117,7 +120,10 @@ def derive_rollout_status_candidate(
     """Derive the sole model-visible status fact from one frozen ledger slice."""
 
     decoded = tuple(
-        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        (
+            stored,
+            decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY),
+        )
         for stored in event_slice.events
     )
     account, state = _fold_account(decoded=decoded, account_id=account_id)
@@ -152,7 +158,10 @@ def derive_rollout_status_candidate_from_state(
     if account.account_id != state.account_id:
         raise RolloutStatusProjectionError("rollout account/state identity mismatch")
     decoded = tuple(
-        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        (
+            stored,
+            decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY),
+        )
         for stored in event_slice.events
     )
     outcomes = _settled_tool_outcomes(
@@ -181,7 +190,7 @@ def fold_sparse_rollout_state(
     """Fold complete rollout facts while treating omitted event families as no-ops."""
 
     decoded = tuple(
-        stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decode_raw_stored_event_envelope(stored, DEFAULT_EVENT_SCHEMA_REGISTRY)
         for stored in event_slice.events
     )
     openings = tuple(
@@ -222,9 +231,7 @@ def fold_sparse_rollout_state(
             raise RolloutStatusProjectionError("sparse rollout state disappeared")
         state = next_state
     target_through = (
-        event_slice.through_sequence
-        if through_sequence is None
-        else through_sequence
+        event_slice.through_sequence if through_sequence is None else through_sequence
     )
     if target_through < event_slice.through_sequence:
         raise RolloutStatusProjectionError(
@@ -290,7 +297,11 @@ def derive_rollout_status_candidate_for_run(
         for stored in event_slice.events
         if stored.run_id == run_id
         if isinstance(
-            (event := stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            (
+                event := decode_raw_stored_event_envelope(
+                    stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+                )
+            ),
             RunStartEvent,
         )
     )
@@ -300,7 +311,10 @@ def derive_rollout_status_candidate_for_run(
         )
     start = starts[0]
     contract = start.long_horizon
-    if contract.rollout_account_owner_runtime_session_id != event_slice.runtime_session_id:
+    if (
+        contract.rollout_account_owner_runtime_session_id
+        != event_slice.runtime_session_id
+    ):
         # Child ledgers do not contain the parent account. A future child status
         # carrier must use its own frozen child-account facts, not a live parent read.
         return None
@@ -316,16 +330,15 @@ def render_rollout_status_candidate(
 ) -> str:
     """Render neutral state facts without prescribing whether work should continue."""
 
-    allowed = ",".join(item.value for item in candidate.allowed_action_classes) or "none"
+    allowed = (
+        ",".join(item.value for item in candidate.allowed_action_classes) or "none"
+    )
     lines = [
         "[rollout status]",
         f"phase={candidate.rollout_phase.value}",
         f"settled_model_calls={candidate.settled_model_call_count}",
         f"settled_tool_calls={candidate.settled_tool_call_count}",
-        (
-            "exploration_consumed="
-            f"{candidate.exploration_consumption_ratio_ppm}ppm"
-        ),
+        (f"exploration_consumed={candidate.exploration_consumption_ratio_ppm}ppm"),
         (
             "remaining_exploration_milliunits="
             f"{candidate.remaining_exploration_milliunits}"
@@ -457,9 +470,7 @@ def _settled_tool_outcomes(
             raise RolloutStatusProjectionError(
                 "settled tool result lacks action classification"
             )
-        classifications = tuple(
-            event.action_classification for event in eligible_gates
-        )
+        classifications = tuple(event.action_classification for event in eligible_gates)
         assert all(item is not None for item in classifications)
         fingerprints = {
             item.classification_fingerprint
@@ -589,11 +600,7 @@ def _status_source_refs(
             else {}
         ),
         **(
-            {
-                transitions[-1].event_id: transitions[-1].to_reference(
-                    runtime_session_id
-                )
-            }
+            {transitions[-1].event_id: transitions[-1].to_reference(runtime_session_id)}
             if transitions
             else {}
         ),
@@ -606,7 +613,9 @@ def _status_source_refs(
 def _sequence(event: object) -> int:
     sequence = getattr(event, "sequence", None)
     if not isinstance(sequence, int) or sequence < 1:
-        raise RolloutStatusProjectionError("status projection requires committed events")
+        raise RolloutStatusProjectionError(
+            "status projection requires committed events"
+        )
     return sequence
 
 

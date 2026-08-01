@@ -7,6 +7,8 @@ reconciliation confirmations returned here.
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from collections.abc import Sequence
 
 from pulsara_agent.event import AgentEvent
@@ -208,7 +210,7 @@ def _stored_matches_candidate(raw, candidate) -> bool:
         != candidate.event_domain_contract_fingerprint
     ):
         return False
-    stored = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    stored = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
     unsequenced = freeze_event_write_candidate(
         stored.model_copy(update={"sequence": None})
     )

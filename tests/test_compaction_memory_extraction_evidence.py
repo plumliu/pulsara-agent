@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 from time import monotonic
 
@@ -35,6 +37,7 @@ from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
 )
 from pulsara_agent.runtime.projection_jobs.source import source_event_reference
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.support.event_write import restore_transcript_projection_fixture
 
 
 @dataclass(frozen=True)
@@ -96,7 +99,7 @@ def _world(
         runtime_session_id=runtime_session_id,
         documents=TranscriptProjectionDocumentRegistry(),
     )
-    reducer.apply_committed(tuple(committed))
+    restore_transcript_projection_fixture(event_log=log, reducer=reducer)
     authority = reducer.capture_governance_authority_snapshot()
     plan = build_human_evidence_manifest_plan(
         runtime_session_id=runtime_session_id,
@@ -150,7 +153,9 @@ def _select(
         nonlocal exact_reads
         exact_reads += 1
         envelope = raw_by_id[reference.event_id]
-        event = envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        event = decode_raw_stored_event_envelope(
+            envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         stored = build_frozen_fact(
             GovernanceStoredEventReferenceFact,
             schema_version="governance_stored_event_reference.v1",
@@ -198,8 +203,7 @@ def _select(
         request_event_reference=request_reference_override or request_reference,
         durable_job_id="projection-job:evidence",
         durable_job_source_reference=(
-            durable_source_reference_override
-            or source_event_reference(run_starts[0])
+            durable_source_reference_override or source_event_reference(run_starts[0])
         ),
         manifest_reference=world.plan.reference,
         archive=world.archive,
@@ -268,8 +272,14 @@ def test_selector_scans_long_manifest_but_exact_reads_at_most_256() -> None:
     assert len(selected.ordered_nodes) == 256
     assert exact_reads == 256
     assert selected.permanent_omission_count == 44
-    assert selected.ordered_nodes[0].semantic.sanitized_full_message_text == "preference 44"
-    assert selected.ordered_nodes[-1].semantic.sanitized_full_message_text == "preference 299"
+    assert (
+        selected.ordered_nodes[0].semantic.sanitized_full_message_text
+        == "preference 44"
+    )
+    assert (
+        selected.ordered_nodes[-1].semantic.sanitized_full_message_text
+        == "preference 299"
+    )
 
 
 def test_selector_skips_newer_nonfitting_leaf_and_backfills_older() -> None:

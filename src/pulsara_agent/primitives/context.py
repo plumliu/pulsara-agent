@@ -1147,9 +1147,7 @@ TranscriptBlockFact: TypeAlias = (
 
 class TranscriptMessageFact(FrozenContextFact):
     message_id: str = Field(min_length=1)
-    role: Literal[
-        "user", "assistant", "runtime_request", "runtime_observation"
-    ]
+    role: Literal["user", "assistant", "runtime_request", "runtime_observation"]
     name: str | None
     run_id: str | None
     turn_id: str | None

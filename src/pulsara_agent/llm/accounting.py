@@ -46,13 +46,10 @@ def build_model_reservation_settlement_event(
     usage = model_end.usage
     if basis == "provider_reported_usage":
         if usage is None:
-            raise ModelCallAccountingError(
-                "reported model settlement lacks usage"
-            )
+            raise ModelCallAccountingError("reported model settlement lacks usage")
         cached = usage.cached_input_tokens or 0
         charged = (
-            (usage.input_tokens - cached)
-            * account.policy.non_cached_input_weight_milli
+            (usage.input_tokens - cached) * account.policy.non_cached_input_weight_milli
             + cached * account.policy.cached_input_weight_milli
             + usage.output_tokens * account.policy.output_weight_milli
         )

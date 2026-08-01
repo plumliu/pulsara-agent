@@ -95,9 +95,13 @@ def validate_skill_dir(skill_dir: Path) -> SkillManifest:
     name = frontmatter.get("name")
     description = frontmatter.get("description")
     if not isinstance(name, str) or not name.strip():
-        raise SkillValidationError("frontmatter field 'name' must be a non-empty string")
+        raise SkillValidationError(
+            "frontmatter field 'name' must be a non-empty string"
+        )
     if not isinstance(description, str) or not description.strip():
-        raise SkillValidationError("frontmatter field 'description' must be a non-empty string")
+        raise SkillValidationError(
+            "frontmatter field 'description' must be a non-empty string"
+        )
 
     name = name.strip()
     description = description.strip()
@@ -116,7 +120,9 @@ def validate_skill_dir(skill_dir: Path) -> SkillManifest:
 def reject_symlinks(skill_dir: Path) -> None:
     for path in skill_dir.rglob("*"):
         if path.is_symlink():
-            raise SkillValidationError(f"skill directory contains a symlink, refusing to copy: {path}")
+            raise SkillValidationError(
+                f"skill directory contains a symlink, refusing to copy: {path}"
+            )
 
 
 def manifest_to_json(manifest: SkillManifest, path: Path) -> str:

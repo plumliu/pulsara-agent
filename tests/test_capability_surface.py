@@ -1599,6 +1599,8 @@ def test_approval_resume_uses_committed_descriptor_after_provider_removal(
     assert [event.decision for event in decisions] == ["wait_for_user", "allow"]
     assert decisions[-1].descriptor_id is not None
     assert decisions[-1].reason_code is None
+
+
 def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
     tmp_path,
 ) -> None:

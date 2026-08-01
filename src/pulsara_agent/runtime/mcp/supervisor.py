@@ -109,9 +109,7 @@ class McpServerSupervisor:
     _owned_background_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     _candidate_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     _candidate_cleanup_managers: dict[int, Any] = field(default_factory=dict)
-    _retiring_slot_cleanup_tasks: set[asyncio.Task[None]] = field(
-        default_factory=set
-    )
+    _retiring_slot_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     _orphan_connections: dict[int, SdkMcpConnection] = field(default_factory=dict)
     _candidates: list[McpServerCandidate] = field(default_factory=list)
     _slots: dict[str, McpManagerSlot] = field(default_factory=dict)
@@ -124,7 +122,9 @@ class McpServerSupervisor:
     _refresh_due_monotonic: dict[str, float] = field(default_factory=dict)
     _stale_discard_count: dict[str, int] = field(default_factory=dict)
     _lifecycle: str = "open"
-    _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _state_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
     _close_attempt: _CloseAttempt | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -174,7 +174,13 @@ class McpServerSupervisor:
         *,
         trigger: str,
     ) -> McpReconcileTicket:
-        if trigger not in {"initial", "config_change", "ttl_refresh", "retry", "manual_refresh"}:
+        if trigger not in {
+            "initial",
+            "config_change",
+            "ttl_refresh",
+            "retry",
+            "manual_refresh",
+        }:
             raise ValueError(f"invalid MCP reconcile trigger: {trigger}")
         with self._state_lock:
             if self._lifecycle != "open":
@@ -211,7 +217,9 @@ class McpServerSupervisor:
                 config.server_id: McpServerRuntimeSpec(
                     config=config,
                     runtime_config_fingerprint=runtime_by_server[config.server_id],
-                    event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+                    event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(
+                        config
+                    ),
                 )
                 for config in ordered
             }
@@ -265,7 +273,8 @@ class McpServerSupervisor:
                 installed_slot = self._installed_slot_for_server(server_id)
                 same_runtime = (
                     installed_slot is not None
-                    and installed_slot.runtime_config_fingerprint == spec.runtime_config_fingerprint
+                    and installed_slot.runtime_config_fingerprint
+                    == spec.runtime_config_fingerprint
                 )
                 current_runtime = self._current_attempts.get(server_id)
                 current_attempt_is_same_runtime = (
@@ -285,9 +294,7 @@ class McpServerSupervisor:
                 )
                 due = now >= self._refresh_due_monotonic.get(server_id, 0.0)
                 retry_deadline = self._next_retry_monotonic.get(server_id)
-                retry_due = (
-                    retry_deadline is not None and now >= retry_deadline
-                )
+                retry_due = retry_deadline is not None and now >= retry_deadline
                 force = trigger in {"manual_refresh", "ttl_refresh", "retry"}
                 if same_runtime and not force and not due:
                     continue
@@ -340,10 +347,14 @@ class McpServerSupervisor:
                 worker.add_done_callback(self._discovery_worker_tasks.discard)
                 self._own_background_task(worker)
             required_ids = tuple(
-                config.server_id for config in ordered if config.enabled and config.required
+                config.server_id
+                for config in ordered
+                if config.enabled and config.required
             )
             optional_ids = tuple(
-                config.server_id for config in ordered if config.enabled and not config.required
+                config.server_id
+                for config in ordered
+                if config.enabled and not config.required
             )
             required_deadline = max(
                 (
@@ -364,7 +375,9 @@ class McpServerSupervisor:
                 required_wait_deadline_monotonic=required_deadline,
             )
 
-    async def await_required(self, ticket: McpReconcileTicket) -> McpRequiredStartupResult:
+    async def await_required(
+        self, ticket: McpReconcileTicket
+    ) -> McpRequiredStartupResult:
         failures: list[str] = []
         diagnostics: list[McpDiagnosticFact] = []
         for server_id in ticket.required_server_ids:
@@ -399,7 +412,10 @@ class McpServerSupervisor:
                     failures.append(server_id)
                 continue
             runtime = self._current_attempts.get(server_id)
-            if runtime is None or runtime.attempt.reconcile_attempt_id != attempt.reconcile_attempt_id:
+            if (
+                runtime is None
+                or runtime.attempt.reconcile_attempt_id != attempt.reconcile_attempt_id
+            ):
                 failures.append(server_id)
                 continue
             task = self._workers.get(server_id)
@@ -415,7 +431,10 @@ class McpServerSupervisor:
             except TimeoutError:
                 failures.append(server_id)
             candidate = self._latest_candidate(server_id, attempt.reconcile_attempt_id)
-            if candidate is None or candidate.server_snapshot.status is not McpServerStatus.READY:
+            if (
+                candidate is None
+                or candidate.server_snapshot.status is not McpServerStatus.READY
+            ):
                 failures.append(server_id)
                 diagnostics.append(
                     McpDiagnosticFact(
@@ -503,8 +522,7 @@ class McpServerSupervisor:
             if (
                 attempt is None
                 or current is None
-                or current.attempt.reconcile_attempt_id
-                != attempt.reconcile_attempt_id
+                or current.attempt.reconcile_attempt_id != attempt.reconcile_attempt_id
                 or current.attempt.reserved_discovery_generation
                 != attempt.reserved_discovery_generation
             ):
@@ -534,7 +552,9 @@ class McpServerSupervisor:
                 if candidate.config_epoch != expected_epoch:
                     stale.append(candidate)
                     continue
-                current = self._current_attempts.get(candidate.server_snapshot.server_id)
+                current = self._current_attempts.get(
+                    candidate.server_snapshot.server_id
+                )
                 if (
                     current is not None
                     and current.attempt.reconcile_attempt_id
@@ -635,7 +655,8 @@ class McpServerSupervisor:
                 self._installed_slot_by_server[server_id] = slot.slot_id
                 subscription_managers.append(slot.manager)
                 self._refresh_due_monotonic[server_id] = (
-                    time.monotonic() + candidate.runtime_spec.config.refresh_ttl_ms / 1000
+                    time.monotonic()
+                    + candidate.runtime_spec.config.refresh_ttl_ms / 1000
                 )
         for manager in subscription_managers:
             manager.activate_subscription()
@@ -696,14 +717,17 @@ class McpServerSupervisor:
             if self._lifecycle != "open":
                 raise RuntimeError("MCP supervisor is closing")
             slot = self._slots.get(identity.slot_id)
-            if slot is None or slot.binding_identity != identity or slot.lifecycle != "installed":
+            if (
+                slot is None
+                or slot.binding_identity != identity
+                or slot.lifecycle != "installed"
+            ):
                 raise RuntimeError("mcp_binding_generation_unavailable")
             desired = self._desired_specs.get(identity.server_id)
             if (
                 desired is None
                 or not desired.config.enabled
-                or desired.runtime_config_fingerprint
-                != slot.runtime_config_fingerprint
+                or desired.runtime_config_fingerprint != slot.runtime_config_fingerprint
             ):
                 raise RuntimeError("mcp_binding_generation_unavailable")
             slot.borrower_count += 1
@@ -869,8 +893,7 @@ class McpServerSupervisor:
             if (
                 desired is None
                 or not desired.config.enabled
-                or desired.runtime_config_fingerprint
-                != slot.runtime_config_fingerprint
+                or desired.runtime_config_fingerprint != slot.runtime_config_fingerprint
             ):
                 raise RuntimeError("mcp_recovery_binding_generation_unavailable")
             slot.borrower_count += 1
@@ -908,7 +931,11 @@ class McpServerSupervisor:
     ) -> McpManagerLease:
         with self._state_lock:
             owner = self._pending_leases.get(interaction_id)
-            if owner is None or not owner.confirmed or owner.lease.binding_identity != binding_identity:
+            if (
+                owner is None
+                or not owner.confirmed
+                or owner.lease.binding_identity != binding_identity
+            ):
                 raise RuntimeError("MCP pending lease binding mismatch")
             owner.active_borrows += 1
             return owner.lease
@@ -959,9 +986,7 @@ class McpServerSupervisor:
             if cleanup_tasks:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise McpDrainError(
-                        "timed out draining retiring MCP slot cleanup"
-                    )
+                    raise McpDrainError("timed out draining retiring MCP slot cleanup")
                 _done, cleanup_pending = await asyncio.wait(
                     cleanup_tasks,
                     timeout=remaining,
@@ -969,9 +994,7 @@ class McpServerSupervisor:
                 with self._state_lock:
                     self._retiring_slot_cleanup_tasks.difference_update(_done)
                 if cleanup_pending:
-                    raise McpDrainError(
-                        "timed out draining retiring MCP slot cleanup"
-                    )
+                    raise McpDrainError("timed out draining retiring MCP slot cleanup")
             with self._state_lock:
                 closable = [
                     slot
@@ -1098,13 +1121,9 @@ class McpServerSupervisor:
                 timeout=remaining,
             )
             if pending:
-                raise McpDrainError(
-                    "timed out draining background MCP manager cleanup"
-                )
+                raise McpDrainError("timed out draining background MCP manager cleanup")
         with self._state_lock:
-            orphan_candidate_managers = tuple(
-                self._candidate_cleanup_managers.values()
-            )
+            orphan_candidate_managers = tuple(self._candidate_cleanup_managers.values())
         for manager in orphan_candidate_managers:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1121,9 +1140,7 @@ class McpServerSupervisor:
                 )
             with self._state_lock:
                 self._candidates = [
-                    current
-                    for current in self._candidates
-                    if current is not candidate
+                    current for current in self._candidates if current is not candidate
                 ]
         while True:
             with self._state_lock:
@@ -1165,9 +1182,9 @@ class McpServerSupervisor:
             for candidate in self._candidates
             if candidate.server_snapshot.server_id != server_id
         ]
-        self._stale_discard_count[server_id] = (
-            self._stale_discard_count.get(server_id, 0) + len(stale)
-        )
+        self._stale_discard_count[server_id] = self._stale_discard_count.get(
+            server_id, 0
+        ) + len(stale)
         for candidate in stale:
             self._schedule_candidate_close(candidate)
 
@@ -1326,10 +1343,12 @@ class McpServerSupervisor:
             accepted = (
                 self._lifecycle == "open"
                 and current is not None
-                and current.attempt.reconcile_attempt_id == runtime.attempt.reconcile_attempt_id
+                and current.attempt.reconcile_attempt_id
+                == runtime.attempt.reconcile_attempt_id
                 and current.attempt.reserved_discovery_generation
                 == runtime.attempt.reserved_discovery_generation
-                and current.spec.runtime_config_fingerprint == spec.runtime_config_fingerprint
+                and current.spec.runtime_config_fingerprint
+                == spec.runtime_config_fingerprint
                 and self._epoch == runtime.attempt.config_epoch
             )
             if accepted:
@@ -1363,7 +1382,9 @@ class McpServerSupervisor:
             with self._state_lock:
                 self._orphan_connections[id(connection)] = connection
 
-    def _reserve_attempt(self, spec: McpServerRuntimeSpec, *, now: float) -> McpServerAttempt:
+    def _reserve_attempt(
+        self, spec: McpServerRuntimeSpec, *, now: float
+    ) -> McpServerAttempt:
         server_id = spec.config.server_id
         generation = self._generation_by_server.get(server_id, 0) + 1
         self._generation_by_server[server_id] = generation
@@ -1503,11 +1524,7 @@ class McpServerSupervisor:
     def _schedule_retry(self, server_id: str) -> None:
         with self._state_lock:
             spec = self._desired_specs.get(server_id)
-            if (
-                self._lifecycle != "open"
-                or spec is None
-                or not spec.config.enabled
-            ):
+            if self._lifecycle != "open" or spec is None or not spec.config.enabled:
                 return
             attempt = self._retry_attempts.get(server_id, 0) + 1
             self._retry_attempts[server_id] = attempt
@@ -1545,8 +1562,7 @@ class McpServerSupervisor:
                         ):
                             return
                         configs = tuple(
-                            current.config
-                            for current in self._desired_specs.values()
+                            current.config for current in self._desired_specs.values()
                         )
                     self.prepare(configs, trigger="retry")
                 finally:
@@ -1590,8 +1606,7 @@ class McpServerSupervisor:
             ):
                 return
             configs = tuple(
-                spec.config
-                for _, spec in sorted(self._desired_specs.items())
+                spec.config for _, spec in sorted(self._desired_specs.items())
             )
             self._subscription_retry_servers.add(server_id)
         self.prepare(configs, trigger="manual_refresh")

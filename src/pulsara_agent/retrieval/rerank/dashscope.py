@@ -143,7 +143,9 @@ class DashScopeRerankProvider:
 def _parse_qwen3_rerank_response(payload: dict[str, Any]) -> list[RerankResult]:
     rows = payload.get("results")
     if not isinstance(rows, list):
-        raise RerankServiceError(f"DashScope rerank response missing results: {payload!r}")
+        raise RerankServiceError(
+            f"DashScope rerank response missing results: {payload!r}"
+        )
     parsed: list[RerankResult] = []
     for row in rows:
         try:

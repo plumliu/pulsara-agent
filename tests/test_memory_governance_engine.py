@@ -807,7 +807,9 @@ def _harness(tmp_path: Path, replies: list[ScriptedReply]) -> _Harness:
 
 
 async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
-    state = RunActivationWorkingState(session_id=harness.wiring.runtime_session.runtime_session_id)
+    state = RunActivationWorkingState(
+        session_id=harness.wiring.runtime_session.runtime_session_id
+    )
     state.messages.append(
         UserMsg(
             name="user",
@@ -820,18 +822,18 @@ async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
         )
         events = await harness.reflection.reflect(
             view=memory_hook_view(state),
-        event_store=harness.wiring.event_log,
-        trigger_reasons=["cheap_memory_hint"],
-        cheap_hints=[
-            MemoryReflectionHint(
-                source="cheap_string_match",
-                reason="test hint",
-                signal="remember",
-                excerpt="Please remember that I prefer concise summaries.",
-            )
-        ],
-        safe_point="on_session_end",
-    )
+            event_store=harness.wiring.event_log,
+            trigger_reasons=["cheap_memory_hint"],
+            cheap_hints=[
+                MemoryReflectionHint(
+                    source="cheap_string_match",
+                    reason="test hint",
+                    signal="remember",
+                    excerpt="Please remember that I prefer concise summaries.",
+                )
+            ],
+            safe_point="on_session_end",
+        )
     assert events == []
     completed = tuple(
         event

@@ -120,8 +120,7 @@ class ModelStreamLiveSemanticCursor:
                 != self.confirmed_durable_event_count
                 or span.first_transport_sequence_index
                 != self.confirmed_source_item_count
-                or span.source_accumulator_before
-                != self.confirmed_source_accumulator
+                or span.source_accumulator_before != self.confirmed_source_accumulator
             ):
                 raise RuntimeError("model stream semantic cursor continuity drifted")
             self.confirmed_source_item_count += span.source_item_count
@@ -269,7 +268,9 @@ class ModelStreamExecutionHandle:
         self, start: ModelCallStartEvent
     ) -> ModelStreamLiveSemanticCursor:
         if start.sequence is None:
-            raise ValueError("model stream start must be committed before cursor install")
+            raise ValueError(
+                "model stream start must be committed before cursor install"
+            )
         if start.resolved_call.resolved_model_call_id != self.resolved_model_call_id:
             raise ValueError("model stream start/cursor call identity mismatch")
         candidate = ModelStreamLiveSemanticCursor(
@@ -344,9 +345,7 @@ class ModelStreamExecutionHandle:
             subscription._finish(
                 _closed_from_completion(
                     completion,
-                    last_confirmed_sequence=(
-                        subscription.last_confirmed_sequence
-                    ),
+                    last_confirmed_sequence=(subscription.last_confirmed_sequence),
                 )
             )
         else:
@@ -401,9 +400,7 @@ class ModelStreamExecutionHandle:
             raise RuntimeError("model stream cancellation signal lost its reason")
         return reason, stamp
 
-    def register_physical_operation(
-        self, operation: asyncio.Future[object]
-    ) -> str:
+    def register_physical_operation(self, operation: asyncio.Future[object]) -> str:
         operation_id = f"model_physical:{uuid4().hex}"
         self._physical_operations[operation_id] = operation
         return operation_id
@@ -461,9 +458,7 @@ class ModelStreamExecutionHandle:
             subscription._finish(
                 _closed_from_completion(
                     completion,
-                    last_confirmed_sequence=(
-                        subscription.last_confirmed_sequence
-                    ),
+                    last_confirmed_sequence=(subscription.last_confirmed_sequence),
                 )
             )
 
@@ -502,9 +497,7 @@ class ModelStreamExecutionHandle:
         subscription._finish(
             ModelStreamSubscriptionClosed(
                 close_reason=reason,
-                last_confirmed_sequence=(
-                    subscription.last_confirmed_sequence
-                ),
+                last_confirmed_sequence=(subscription.last_confirmed_sequence),
                 terminal_sequence=None,
                 can_resume_from_cursor=True,
             ),
@@ -552,9 +545,7 @@ class ModelStreamExecutionRegistry:
                 handle._fail(exc)
             else:
                 handle._finish(completion)
-                retain_owner = (
-                    completion.terminal_outcome == "reconciliation_blocked"
-                )
+                retain_owner = completion.terminal_outcome == "reconciliation_blocked"
             finally:
                 if not retain_owner and self._handles.get(handle_id) is handle:
                     self._handles.pop(handle_id, None)
@@ -588,7 +579,9 @@ class ModelStreamExecutionRegistry:
                     return_exceptions=False,
                 )
         except TimeoutError as exc:
-            raise TimeoutError("model stream execution drain exceeded deadline") from exc
+            raise TimeoutError(
+                "model stream execution drain exceeded deadline"
+            ) from exc
         if any(
             completion.terminal_outcome == "reconciliation_blocked"
             for completion in completions

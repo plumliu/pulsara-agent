@@ -215,8 +215,7 @@ class GovernanceCandidateAttributionFact(GovernanceEvidenceFrozenFact):
             self.payload_kind != self.canonical_candidate_payload.payload_kind
             or self.canonical_payload_utf8_bytes != actual_bytes
             or semantic is None
-            or semantic.semantic_fingerprint
-            != self.candidate_semantic_fingerprint
+            or semantic.semantic_fingerprint != self.candidate_semantic_fingerprint
         ):
             raise ValueError("candidate payload attribution drifted")
         return self
@@ -311,19 +310,15 @@ class ReflectionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
     semantic_fingerprint: Fingerprint
 
 
-class CompactionExtractionGovernanceSourceSemanticFact(
-    GovernanceEvidenceFrozenFact
-):
-    schema_version: Literal[
-        "compaction_extraction_governance_source_semantic.v1"
-    ]
+class CompactionExtractionGovernanceSourceSemanticFact(GovernanceEvidenceFrozenFact):
+    schema_version: Literal["compaction_extraction_governance_source_semantic.v1"]
     evidence_kind: Literal["compaction"]
     candidate_payload_semantic_fingerprint: Fingerprint
     evidence_set_semantic_fingerprint: Fingerprint
     extraction_semantic_contract_fingerprint: Fingerprint
-    ordered_evidence_semantics: tuple[
-        GovernanceQuotedEvidenceSemanticFact, ...
-    ] = Field(min_length=1, max_length=8)
+    ordered_evidence_semantics: tuple[GovernanceQuotedEvidenceSemanticFact, ...] = (
+        Field(min_length=1, max_length=8)
+    )
     semantic_fingerprint: Fingerprint
 
 
@@ -613,9 +608,7 @@ class ImmutableGovernanceCandidateSnapshotFact(GovernanceEvidenceFrozenFact):
         source = self.source_evidence_semantic
         if isinstance(source, ReflectionGovernanceSourceSemanticFact):
             semantic_quotes = source.ordered_quoted_evidence_semantics
-        elif isinstance(
-            source, CompactionExtractionGovernanceSourceSemanticFact
-        ):
+        elif isinstance(source, CompactionExtractionGovernanceSourceSemanticFact):
             semantic_quotes = source.ordered_evidence_semantics
         else:
             semantic_quotes = (

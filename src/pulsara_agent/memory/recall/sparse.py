@@ -31,7 +31,9 @@ class SparseCandidateService:
     def _collect_sync(self, query: RecallQuery, graph_id: str | None) -> CandidateBatch:
         terms = tuple(dict.fromkeys(self.tokenizer.tokenize(query.text)))
         if not terms:
-            return CandidateBatch(metadata={"lexical_candidate_ids": [], "fts_candidate_ids": []})
+            return CandidateBatch(
+                metadata={"lexical_candidate_ids": [], "fts_candidate_ids": []}
+            )
         lexical = self.memory_query.lexical_candidates(
             terms=terms,
             scopes=query.scopes or None,
@@ -48,7 +50,9 @@ class SparseCandidateService:
             memory_id for memory_id, score in lexical if score < lexical_min_score
         ]
         lexical = [
-            (memory_id, score) for memory_id, score in lexical if score >= lexical_min_score
+            (memory_id, score)
+            for memory_id, score in lexical
+            if score >= lexical_min_score
         ]
         fts = self.memory_query.fts_candidates(
             query_text=query.text,
@@ -58,7 +62,9 @@ class SparseCandidateService:
             graph_id=graph_id,
         )
         candidates = tuple(
-            ChannelCandidate(memory_id=memory_id, channel=channel, raw_score=score, rank=rank)
+            ChannelCandidate(
+                memory_id=memory_id, channel=channel, raw_score=score, rank=rank
+            )
             for channel, rows in (("lexical", lexical), ("fts", fts))
             for rank, (memory_id, score) in enumerate(rows, start=1)
         )

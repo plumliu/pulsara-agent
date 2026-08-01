@@ -107,9 +107,7 @@ def provider_user_carrier_binding(
         carrier_kind=carrier.carrier_kind,
         semantic_fact_schema_version=semantic.schema_version,
         carrier_semantic_fingerprint=carrier.semantic_fingerprint,
-        occurrence_semantic_fingerprint=(
-            carrier.occurrence_semantic_fingerprint
-        ),
+        occurrence_semantic_fingerprint=(carrier.occurrence_semantic_fingerprint),
         canonical_wire_utf8_sha256=carrier.canonical_utf8_sha256,
         canonical_wire_utf8_bytes=carrier.canonical_utf8_bytes,
     )
@@ -228,7 +226,9 @@ def encode_runtime_request(
             ),
             ordered_model_visible_fragments=(),
             input_document_semantic_fingerprints=(
-                context_fingerprint("runtime-operation-request-document:v1", normalized_text),
+                context_fingerprint(
+                    "runtime-operation-request-document:v1", normalized_text
+                ),
             ),
             output_contract_fingerprint=context_fingerprint(
                 "runtime-operation-request-output:v1", request_kind
@@ -248,7 +248,9 @@ def encode_runtime_request(
     if resolved_lifecycle != kind_contract.lifecycle_class:
         raise ValueError("runtime request lifecycle differs from registered contract")
     if payload.schema_version != kind_contract.payload_schema_version:
-        raise ValueError("runtime request payload schema differs from registered contract")
+        raise ValueError(
+            "runtime request payload schema differs from registered contract"
+        )
     wire = canonical_user_carrier_json(
         {
             RUNTIME_REQUEST_ENVELOPE_KEY: {
@@ -290,9 +292,7 @@ def encode_runtime_request(
         canonical_utf8_bytes=len(wire_bytes),
         semantic_fingerprint=fact.semantic_fingerprint,
         semantic_fact=fact,
-        occurrence_semantic_fingerprint=(
-            business_occurrence_semantic_fingerprint
-        ),
+        occurrence_semantic_fingerprint=(business_occurrence_semantic_fingerprint),
     )
 
 
@@ -353,7 +353,10 @@ def context_source_observation_payload(
     lifecycle_class: str,
     replacement_revision: int = 1,
     predecessor_observation_semantic_id: str | None = None,
-) -> ContextSourceAppendObservationPayloadFact | ContextSourceReplacementObservationPayloadFact:
+) -> (
+    ContextSourceAppendObservationPayloadFact
+    | ContextSourceReplacementObservationPayloadFact
+):
     content = unicodedata.normalize("NFC", model_visible_content)
     content_bytes = content.encode("utf-8")
     common = dict(
@@ -464,11 +467,17 @@ def encode_runtime_observation(
 
     kind_contract = runtime_observation_kind_contract(observation_kind)
     if lifecycle_class != kind_contract.lifecycle_class:
-        raise ValueError("runtime observation lifecycle differs from registered contract")
+        raise ValueError(
+            "runtime observation lifecycle differs from registered contract"
+        )
     if authority_class != kind_contract.authority_class:
-        raise ValueError("runtime observation authority differs from registered contract")
+        raise ValueError(
+            "runtime observation authority differs from registered contract"
+        )
     if payload.schema_version != kind_contract.payload_schema_version:
-        raise ValueError("runtime observation payload schema differs from registered contract")
+        raise ValueError(
+            "runtime observation payload schema differs from registered contract"
+        )
     _validate_runtime_observation_payload_binding(
         observation_kind=observation_kind,
         lifecycle_class=lifecycle_class,
@@ -530,9 +539,7 @@ def encode_runtime_observation(
         canonical_utf8_bytes=len(wire_bytes),
         semantic_fingerprint=fact.wire_semantic_fingerprint,
         semantic_fact=fact,
-        occurrence_semantic_fingerprint=(
-            causal_occurrence_semantic_fingerprint
-        ),
+        occurrence_semantic_fingerprint=(causal_occurrence_semantic_fingerprint),
     )
 
 
@@ -626,10 +633,7 @@ def _validate_human_input_body(body: Mapping[str, object]) -> None:
         default_provider_user_carrier_protocol,
     )
 
-    maximum = (
-        default_provider_user_carrier_protocol()
-        .human_input_protocol.maximum_text_utf8_bytes
-    )
+    maximum = default_provider_user_carrier_protocol().human_input_protocol.maximum_text_utf8_bytes
     if len(text.encode("utf-8")) > maximum:
         raise ValueError("human input text exceeds protocol bound")
 
@@ -771,7 +775,10 @@ def decode_runtime_observation_wire_semantic(
     lifecycle = body.get("lifecycle")
     authority = body.get("authority_class")
     payload = body.get("payload")
-    if not all(isinstance(item, str) for item in (kind, source_instance_id, lifecycle, authority)):
+    if not all(
+        isinstance(item, str)
+        for item in (kind, source_instance_id, lifecycle, authority)
+    ):
         raise ValueError("runtime observation carrier identity is malformed")
     if not isinstance(payload, dict):
         raise ValueError("runtime observation payload is not an object")
@@ -785,9 +792,7 @@ def decode_runtime_observation_wire_semantic(
         source_instance_id=source_instance_id,
         lifecycle_class=lifecycle,
         authority_class=authority,
-        causal_occurrence_semantic_fingerprint=(
-            causal_occurrence_semantic_fingerprint
-        ),
+        causal_occurrence_semantic_fingerprint=(causal_occurrence_semantic_fingerprint),
     )
     if encoded.canonical_text != text:
         raise ValueError("runtime observation wire semantic cannot be rebound exactly")
@@ -861,9 +866,7 @@ def rebind_provider_user_carrier_semantic(
             canonical_utf8_bytes=semantic.canonical_wire_utf8_bytes,
             semantic_fingerprint=semantic.wire_semantic_fingerprint,
             semantic_fact=semantic,
-            occurrence_semantic_fingerprint=(
-                binding.occurrence_semantic_fingerprint
-            ),
+            occurrence_semantic_fingerprint=(binding.occurrence_semantic_fingerprint),
         )
     if (
         encoded.canonical_text != text
@@ -1067,9 +1070,7 @@ def validate_provider_user_carrier_messages(
             raise ValueError("typed provider-user message lacks durable binding")
         if validate_provider_user_carrier_text(content[0]) != expected[role]:
             raise ValueError("typed provider-user message owner/envelope mismatch")
-        rebound = rebind_provider_user_carrier_semantic(
-            content[0], binding=binding
-        )
+        rebound = rebind_provider_user_carrier_semantic(content[0], binding=binding)
         if rebound != semantic:
             raise ValueError("typed provider-user message semantic fact drifted")
 

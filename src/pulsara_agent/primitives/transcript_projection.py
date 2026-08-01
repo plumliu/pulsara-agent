@@ -215,9 +215,7 @@ TimingOverlayKind = Literal[
 class TranscriptMessageProviderPlacementRuleFact(FrozenFactBase):
     schema_version: Literal["transcript_message_provider_placement_rule.v2"]
     source_segment: Segment
-    message_role: Literal[
-        "user", "assistant", "runtime_request", "runtime_observation"
-    ]
+    message_role: Literal["user", "assistant", "runtime_request", "runtime_observation"]
     normalized_lane: ProviderLane
     lowering_scope: LoweringScope
     timing_overlay_kind: TimingOverlayKind
@@ -253,9 +251,7 @@ class TranscriptMessageProviderPlacementSemanticFact(FrozenFactBase):
 
 class TranscriptMessageProviderSemanticFact(FrozenFactBase):
     schema_version: Literal["transcript_message_provider_semantic.v4"]
-    role: Literal[
-        "user", "assistant", "runtime_request", "runtime_observation"
-    ]
+    role: Literal["user", "assistant", "runtime_request", "runtime_observation"]
     name: str | None = Field(default=None, max_length=256)
     placement_semantic: TranscriptMessageProviderPlacementSemanticFact
     ordered_block_semantic_fingerprints: tuple[Fingerprint, ...]
@@ -397,7 +393,9 @@ class TranscriptProviderProjectionFact(FrozenFactBase):
         section_indexes = tuple(item.section_index for item in self.sections)
         if section_indexes != tuple(range(len(self.sections))):
             raise ValueError("provider projection section indexes are not contiguous")
-        expected = tuple(item.semantic_identity.semantic_fingerprint for item in self.sections)
+        expected = tuple(
+            item.semantic_identity.semantic_fingerprint for item in self.sections
+        )
         if self.semantic_identity.ordered_section_semantic_fingerprints != expected:
             raise ValueError("provider projection section semantic mismatch")
         return self
@@ -412,8 +410,13 @@ class InlineNormalizedMessageContentFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _block_join(self) -> "InlineNormalizedMessageContentFact":
-        expected = tuple(item.provider_semantic_identity.semantic_fingerprint for item in self.blocks)
-        if self.provider_semantic_identity.ordered_block_semantic_fingerprints != expected:
+        expected = tuple(
+            item.provider_semantic_identity.semantic_fingerprint for item in self.blocks
+        )
+        if (
+            self.provider_semantic_identity.ordered_block_semantic_fingerprints
+            != expected
+        ):
             raise ValueError("inline message block semantic mismatch")
         return self
 
@@ -710,9 +713,7 @@ class TranscriptProjectionRootManifestRefFact(FrozenFactBase):
 
 
 class EmptyTranscriptProjectionCheckpointMaterializationFact(FrozenFactBase):
-    schema_version: Literal[
-        "empty_transcript_projection_checkpoint_materialization.v1"
-    ]
+    schema_version: Literal["empty_transcript_projection_checkpoint_materialization.v1"]
     root_kind: Literal["empty"]
     semantic_state_fingerprint: Fingerprint
     root_manifest_ref: TranscriptProjectionRootManifestRefFact
@@ -973,7 +974,9 @@ class ModelVisibleNamedFactSemanticSelectionFact(FrozenFactBase):
 
     @model_validator(mode="after")
     def _unique_items(self) -> "ModelVisibleNamedFactSemanticSelectionFact":
-        keys = tuple((item.source_kind, item.semantic_key) for item in self.selected_items)
+        keys = tuple(
+            (item.source_kind, item.semantic_key) for item in self.selected_items
+        )
         if len(keys) != len(set(keys)):
             raise ValueError("named semantic selection contains duplicate keys")
         return self
@@ -1094,68 +1097,304 @@ class ContextTranscriptAuthorityFact(FrozenFactBase):
 
 _OWN: tuple[tuple[str, str | None, str], ...] = (
     ("transcript_projection_scope.v1", None, "transcript-projection-scope:v1"),
-    ("transcript_projection_semantic_source.v1", "semantic_source_fingerprint", "transcript-projection-semantic-source:v1"),
+    (
+        "transcript_projection_semantic_source.v1",
+        "semantic_source_fingerprint",
+        "transcript-projection-semantic-source:v1",
+    ),
     ("transcript_projection_ordinal.v1", None, "transcript-projection-ordinal:v1"),
-    ("transcript_projection_tree_contract.v1", "tree_contract_fingerprint", "transcript-projection-tree-contract:v1"),
-    ("transcript_projection_root_manifest_contract.v1", "contract_fingerprint", "transcript-projection-root-manifest-contract:v1"),
-    ("transcript_provider_text_block_semantic.v1", "semantic_fingerprint", "transcript-provider-text-block-semantic:v1"),
-    ("transcript_provider_thinking_block_semantic.v1", "semantic_fingerprint", "transcript-provider-thinking-block-semantic:v1"),
-    ("transcript_provider_data_placeholder_semantic.v1", "semantic_fingerprint", "transcript-provider-data-placeholder-semantic:v1"),
-    ("transcript_provider_tool_call_block_semantic.v1", "semantic_fingerprint", "transcript-provider-tool-call-block-semantic:v1"),
-    ("transcript_provider_tool_result_ref_semantic.v1", "semantic_fingerprint", "transcript-provider-tool-result-ref-semantic:v1"),
-    ("transcript_inline_block_attribution.v1", "attribution_fingerprint", "transcript-inline-block-attribution:v1"),
+    (
+        "transcript_projection_tree_contract.v1",
+        "tree_contract_fingerprint",
+        "transcript-projection-tree-contract:v1",
+    ),
+    (
+        "transcript_projection_root_manifest_contract.v1",
+        "contract_fingerprint",
+        "transcript-projection-root-manifest-contract:v1",
+    ),
+    (
+        "transcript_provider_text_block_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-text-block-semantic:v1",
+    ),
+    (
+        "transcript_provider_thinking_block_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-thinking-block-semantic:v1",
+    ),
+    (
+        "transcript_provider_data_placeholder_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-data-placeholder-semantic:v1",
+    ),
+    (
+        "transcript_provider_tool_call_block_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-tool-call-block-semantic:v1",
+    ),
+    (
+        "transcript_provider_tool_result_ref_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-tool-result-ref-semantic:v1",
+    ),
+    (
+        "transcript_inline_block_attribution.v1",
+        "attribution_fingerprint",
+        "transcript-inline-block-attribution:v1",
+    ),
     ("transcript_inline_block.v1", "fact_fingerprint", "transcript-inline-block:v1"),
-    ("transcript_message_provider_placement_rule.v2", "rule_fingerprint", "transcript-message-provider-placement-rule:v2"),
-    ("transcript_message_provider_placement_contract.v2", "contract_fingerprint", "transcript-message-provider-placement-contract:v2"),
-    ("transcript_message_provider_placement_semantic.v2", "semantic_fingerprint", "transcript-message-provider-placement-semantic:v2"),
-    ("transcript_message_provider_semantic.v4", "semantic_fingerprint", "transcript-message-provider-semantic:v4"),
-    ("transcript_message_attribution.v2", "attribution_fingerprint", "transcript-message-attribution:v2"),
-    ("transcript_provider_lowering_order_rule.v1", "rule_fingerprint", "transcript-provider-lowering-order-rule:v1"),
-    ("transcript_provider_lowering_order_contract.v1", "contract_fingerprint", "transcript-provider-lowering-order-contract:v1"),
-    ("transcript_timing_overlay_rule.v1", "rule_fingerprint", "transcript-timing-overlay-rule:v1"),
-    ("transcript_timing_overlay_contract.v1", "contract_fingerprint", "transcript-timing-overlay-contract:v1"),
-    ("transcript_provider_invocation_rendering_contract.v1", "contract_fingerprint", "transcript-provider-invocation-rendering-contract:v1"),
-    ("transcript_provider_section_timing_semantic.v1", "semantic_fingerprint", "transcript-provider-section-timing-semantic:v1"),
-    ("transcript_provider_section_semantic.v1", "semantic_fingerprint", "transcript-provider-section-semantic:v1"),
-    ("transcript_provider_section_projection.v1", "fact_fingerprint", "transcript-provider-section-projection:v1"),
-    ("transcript_provider_projection_semantic.v1", "semantic_fingerprint", "transcript-provider-projection-semantic:v1"),
-    ("transcript_provider_projection.v1", "fact_fingerprint", "transcript-provider-projection:v1"),
-    ("inline_normalized_message_content.v3", "fact_fingerprint", "inline-normalized-message-content:v3"),
-    ("normalized_message_content_artifact_contract.v1", "contract_fingerprint", "normalized-message-content-artifact-contract:v1"),
-    ("normalized_message_content_artifact.v1", "fact_fingerprint", "normalized-message-content-artifact:v1"),
-    ("normalized_message_content_artifact_ref.v1", "reference_fingerprint", "normalized-message-content-artifact-ref:v1"),
-    ("terminal_projection_message_content_ref.v3", "reference_fingerprint", "terminal-projection-message-content-ref:v3"),
-    ("transcript_message_leaf_semantic.v2", "semantic_fingerprint", "transcript-message-leaf-semantic:v2"),
-    ("transcript_tool_pair_leaf_semantic.v2", "semantic_fingerprint", "transcript-tool-pair-leaf-semantic:v2"),
-    ("transcript_tool_result_leaf_semantic.v2", "semantic_fingerprint", "transcript-tool-result-leaf-semantic:v2"),
-    ("transcript_message_leaf_entry.v4", "fact_fingerprint", "transcript-message-leaf-entry:v4"),
-    ("transcript_tool_pair_leaf_entry.v3", "fact_fingerprint", "transcript-tool-pair-leaf-entry:v3"),
-    ("transcript_tool_result_leaf_entry.v3", "fact_fingerprint", "transcript-tool-result-leaf-entry:v3"),
-    ("transcript_projection_leaf_entry_reference.v2", "reference_fingerprint", "transcript-projection-leaf-entry-reference:v2"),
-    ("transcript_projection_node_ref.v1", "node_ref_fingerprint", "transcript-projection-node-ref:v1"),
-    ("transcript_projection_leaf_node.v1", "node_fingerprint", "transcript-projection-leaf-node:v1"),
-    ("transcript_projection_internal_node.v1", "node_fingerprint", "transcript-projection-internal-node:v1"),
-    ("empty_transcript_projection_root.v2", "materialization_fingerprint", "empty-transcript-projection-root:v2"),
-    ("non_empty_transcript_projection_root.v2", "materialization_fingerprint", "non-empty-transcript-projection-root:v2"),
-    ("transcript_projection_root_ref.v3", "ref_fingerprint", "transcript-projection-root-ref:v3"),
-    ("empty_transcript_projection_checkpoint_materialization.v1", "materialization_fingerprint", "empty-transcript-projection-checkpoint-materialization:v1"),
-    ("non_empty_transcript_projection_checkpoint_materialization.v1", "materialization_fingerprint", "non-empty-transcript-projection-checkpoint-materialization:v1"),
-    ("run_transcript_seed_semantic.v2", "seed_semantic_fingerprint", "run-transcript-seed-semantic:v2"),
-    ("run_transcript_seed_artifact_contract.v2", "contract_fingerprint", "run-transcript-seed-artifact-contract:v2"),
-    ("run_transcript_seed_artifact.v2", "fact_fingerprint", "run-transcript-seed-artifact:v2"),
-    ("run_transcript_seed_ref.v1", "reference_fingerprint", "run-transcript-seed-ref:v1"),
-    ("transcript_projection_acceleration.v1", "acceleration_fingerprint", "transcript-projection-acceleration:v1"),
-    ("projection_base_semantic_identity.v2", "semantic_fingerprint", "projection-base-semantic-identity:v2"),
-    ("projection_base_common.v2", "common_fact_fingerprint", "projection-base-common:v2"),
+    (
+        "transcript_message_provider_placement_rule.v2",
+        "rule_fingerprint",
+        "transcript-message-provider-placement-rule:v2",
+    ),
+    (
+        "transcript_message_provider_placement_contract.v2",
+        "contract_fingerprint",
+        "transcript-message-provider-placement-contract:v2",
+    ),
+    (
+        "transcript_message_provider_placement_semantic.v2",
+        "semantic_fingerprint",
+        "transcript-message-provider-placement-semantic:v2",
+    ),
+    (
+        "transcript_message_provider_semantic.v4",
+        "semantic_fingerprint",
+        "transcript-message-provider-semantic:v4",
+    ),
+    (
+        "transcript_message_attribution.v2",
+        "attribution_fingerprint",
+        "transcript-message-attribution:v2",
+    ),
+    (
+        "transcript_provider_lowering_order_rule.v1",
+        "rule_fingerprint",
+        "transcript-provider-lowering-order-rule:v1",
+    ),
+    (
+        "transcript_provider_lowering_order_contract.v1",
+        "contract_fingerprint",
+        "transcript-provider-lowering-order-contract:v1",
+    ),
+    (
+        "transcript_timing_overlay_rule.v1",
+        "rule_fingerprint",
+        "transcript-timing-overlay-rule:v1",
+    ),
+    (
+        "transcript_timing_overlay_contract.v1",
+        "contract_fingerprint",
+        "transcript-timing-overlay-contract:v1",
+    ),
+    (
+        "transcript_provider_invocation_rendering_contract.v1",
+        "contract_fingerprint",
+        "transcript-provider-invocation-rendering-contract:v1",
+    ),
+    (
+        "transcript_provider_section_timing_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-section-timing-semantic:v1",
+    ),
+    (
+        "transcript_provider_section_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-section-semantic:v1",
+    ),
+    (
+        "transcript_provider_section_projection.v1",
+        "fact_fingerprint",
+        "transcript-provider-section-projection:v1",
+    ),
+    (
+        "transcript_provider_projection_semantic.v1",
+        "semantic_fingerprint",
+        "transcript-provider-projection-semantic:v1",
+    ),
+    (
+        "transcript_provider_projection.v1",
+        "fact_fingerprint",
+        "transcript-provider-projection:v1",
+    ),
+    (
+        "inline_normalized_message_content.v3",
+        "fact_fingerprint",
+        "inline-normalized-message-content:v3",
+    ),
+    (
+        "normalized_message_content_artifact_contract.v1",
+        "contract_fingerprint",
+        "normalized-message-content-artifact-contract:v1",
+    ),
+    (
+        "normalized_message_content_artifact.v1",
+        "fact_fingerprint",
+        "normalized-message-content-artifact:v1",
+    ),
+    (
+        "normalized_message_content_artifact_ref.v1",
+        "reference_fingerprint",
+        "normalized-message-content-artifact-ref:v1",
+    ),
+    (
+        "terminal_projection_message_content_ref.v3",
+        "reference_fingerprint",
+        "terminal-projection-message-content-ref:v3",
+    ),
+    (
+        "transcript_message_leaf_semantic.v2",
+        "semantic_fingerprint",
+        "transcript-message-leaf-semantic:v2",
+    ),
+    (
+        "transcript_tool_pair_leaf_semantic.v2",
+        "semantic_fingerprint",
+        "transcript-tool-pair-leaf-semantic:v2",
+    ),
+    (
+        "transcript_tool_result_leaf_semantic.v2",
+        "semantic_fingerprint",
+        "transcript-tool-result-leaf-semantic:v2",
+    ),
+    (
+        "transcript_message_leaf_entry.v4",
+        "fact_fingerprint",
+        "transcript-message-leaf-entry:v4",
+    ),
+    (
+        "transcript_tool_pair_leaf_entry.v3",
+        "fact_fingerprint",
+        "transcript-tool-pair-leaf-entry:v3",
+    ),
+    (
+        "transcript_tool_result_leaf_entry.v3",
+        "fact_fingerprint",
+        "transcript-tool-result-leaf-entry:v3",
+    ),
+    (
+        "transcript_projection_leaf_entry_reference.v2",
+        "reference_fingerprint",
+        "transcript-projection-leaf-entry-reference:v2",
+    ),
+    (
+        "transcript_projection_node_ref.v1",
+        "node_ref_fingerprint",
+        "transcript-projection-node-ref:v1",
+    ),
+    (
+        "transcript_projection_leaf_node.v1",
+        "node_fingerprint",
+        "transcript-projection-leaf-node:v1",
+    ),
+    (
+        "transcript_projection_internal_node.v1",
+        "node_fingerprint",
+        "transcript-projection-internal-node:v1",
+    ),
+    (
+        "empty_transcript_projection_root.v2",
+        "materialization_fingerprint",
+        "empty-transcript-projection-root:v2",
+    ),
+    (
+        "non_empty_transcript_projection_root.v2",
+        "materialization_fingerprint",
+        "non-empty-transcript-projection-root:v2",
+    ),
+    (
+        "transcript_projection_root_ref.v3",
+        "ref_fingerprint",
+        "transcript-projection-root-ref:v3",
+    ),
+    (
+        "empty_transcript_projection_checkpoint_materialization.v1",
+        "materialization_fingerprint",
+        "empty-transcript-projection-checkpoint-materialization:v1",
+    ),
+    (
+        "non_empty_transcript_projection_checkpoint_materialization.v1",
+        "materialization_fingerprint",
+        "non-empty-transcript-projection-checkpoint-materialization:v1",
+    ),
+    (
+        "run_transcript_seed_semantic.v2",
+        "seed_semantic_fingerprint",
+        "run-transcript-seed-semantic:v2",
+    ),
+    (
+        "run_transcript_seed_artifact_contract.v2",
+        "contract_fingerprint",
+        "run-transcript-seed-artifact-contract:v2",
+    ),
+    (
+        "run_transcript_seed_artifact.v2",
+        "fact_fingerprint",
+        "run-transcript-seed-artifact:v2",
+    ),
+    (
+        "run_transcript_seed_ref.v1",
+        "reference_fingerprint",
+        "run-transcript-seed-ref:v1",
+    ),
+    (
+        "transcript_projection_acceleration.v1",
+        "acceleration_fingerprint",
+        "transcript-projection-acceleration:v1",
+    ),
+    (
+        "projection_base_semantic_identity.v2",
+        "semantic_fingerprint",
+        "projection-base-semantic-identity:v2",
+    ),
+    (
+        "projection_base_common.v2",
+        "common_fact_fingerprint",
+        "projection-base-common:v2",
+    ),
     ("run_seed_projection_base.v2", "fact_fingerprint", "run-seed-projection-base:v2"),
-    ("checkpoint_projection_base.v2", "fact_fingerprint", "checkpoint-projection-base:v2"),
-    ("model_visible_named_fact_semantic_identity.v1", "semantic_fingerprint", "model-visible-named-fact-semantic-identity:v1"),
-    ("model_visible_named_fact_semantic_selection.v1", "named_facts_semantic_fingerprint", "model-visible-named-fact-semantic-selection:v1"),
-    ("model_visible_named_fact_artifact_ref.v1", "reference_fingerprint", "model-visible-named-fact-artifact-ref:v1"),
-    ("model_visible_named_fact_selection_entry.v1", "entry_fact_fingerprint", "model-visible-named-fact-selection-entry:v1"),
-    ("model_visible_named_fact_selection.v2", "selection_fact_fingerprint", "model-visible-named-fact-selection:v2"),
-    ("context_transcript_provider_semantic_identity.v2", "provider_semantic_fingerprint", "context-transcript-provider-semantic-identity:v2"),
-    ("context_transcript_authority.v6", "fact_fingerprint", "context-transcript-authority:v6"),
+    (
+        "checkpoint_projection_base.v2",
+        "fact_fingerprint",
+        "checkpoint-projection-base:v2",
+    ),
+    (
+        "model_visible_named_fact_semantic_identity.v1",
+        "semantic_fingerprint",
+        "model-visible-named-fact-semantic-identity:v1",
+    ),
+    (
+        "model_visible_named_fact_semantic_selection.v1",
+        "named_facts_semantic_fingerprint",
+        "model-visible-named-fact-semantic-selection:v1",
+    ),
+    (
+        "model_visible_named_fact_artifact_ref.v1",
+        "reference_fingerprint",
+        "model-visible-named-fact-artifact-ref:v1",
+    ),
+    (
+        "model_visible_named_fact_selection_entry.v1",
+        "entry_fact_fingerprint",
+        "model-visible-named-fact-selection-entry:v1",
+    ),
+    (
+        "model_visible_named_fact_selection.v2",
+        "selection_fact_fingerprint",
+        "model-visible-named-fact-selection:v2",
+    ),
+    (
+        "context_transcript_provider_semantic_identity.v2",
+        "provider_semantic_fingerprint",
+        "context-transcript-provider-semantic-identity:v2",
+    ),
+    (
+        "context_transcript_authority.v6",
+        "fact_fingerprint",
+        "context-transcript-authority:v6",
+    ),
 )
 
 for _schema, _field, _domain in _OWN:
@@ -1166,4 +1405,18 @@ for _schema, _field, _domain in _OWN:
     )
 
 
-__all__ = [name for name in globals() if name.startswith(("Transcript", "RunTranscript", "Normalized", "Inline", "Empty", "NonEmpty", "PreparedAuthority"))]
+__all__ = [
+    name
+    for name in globals()
+    if name.startswith(
+        (
+            "Transcript",
+            "RunTranscript",
+            "Normalized",
+            "Inline",
+            "Empty",
+            "NonEmpty",
+            "PreparedAuthority",
+        )
+    )
+]

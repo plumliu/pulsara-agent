@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
 )
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.primitives.stored_event import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.capability import CapabilityResolveBasisFact
@@ -37,7 +39,9 @@ def owner_identity_from_stored_run_start(
 ) -> RunOwnerIdentity:
     if event.sequence is None:
         raise ValueError("RunOwnerIdentity requires a stored RunStart")
-    decoded = stored_envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    decoded = decode_raw_stored_event_envelope(
+        stored_envelope, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(decoded, RunStartEvent) or decoded != event:
         raise ValueError("RunOwnerIdentity requires the exact stored RunStart envelope")
     reservation = build_prepared_run_owner_reservation_key(

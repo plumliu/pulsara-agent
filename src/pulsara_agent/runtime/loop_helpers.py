@@ -19,7 +19,9 @@ def _final_text(messages: list[Msg]) -> str:
     for message in reversed(messages):
         if message.role != "assistant" or _tool_call_blocks(message):
             continue
-        return "\n".join(block.text for block in message.content if isinstance(block, TextBlock))
+        return "\n".join(
+            block.text for block in message.content if isinstance(block, TextBlock)
+        )
     return ""
 
 

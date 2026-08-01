@@ -410,14 +410,18 @@ class GovernanceBatchStateTransitionCompanion:
             or not self.terminal_event_id
             or self.claim_companion.terminal_record_id != self.terminal_event_id
         ):
-            raise ValueError("terminal input transition requires matching terminal claims")
+            raise ValueError(
+                "terminal input transition requires matching terminal claims"
+            )
 
     def apply_postgres(
         self,
         cursor,
         stored_events: Sequence[AgentEvent],
     ) -> None:
-        if not isinstance(self.repository, PostgresGovernanceBatchPreparationRepository):
+        if not isinstance(
+            self.repository, PostgresGovernanceBatchPreparationRepository
+        ):
             raise TypeError("in-memory governance input cannot join PostgreSQL")
         carrier_id = _transition_carrier_id(
             stored_events,
@@ -433,7 +437,9 @@ class GovernanceBatchStateTransitionCompanion:
         )
 
     def apply_in_memory(self, stored_events: Sequence[AgentEvent]) -> None:
-        if not isinstance(self.repository, InMemoryGovernanceBatchPreparationRepository):
+        if not isinstance(
+            self.repository, InMemoryGovernanceBatchPreparationRepository
+        ):
             raise TypeError("PostgreSQL governance input cannot join in-memory ledger")
         claim_repository = self.claim_companion.repository
         if not isinstance(
@@ -463,8 +469,6 @@ class GovernanceBatchStateTransitionCompanion:
                 target_status=self.target_status,
                 carrier_event_id=carrier_id,
             )
-
-
 
 
 def _validate_status_transition(

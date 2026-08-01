@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import hashlib
 import json
 from dataclasses import dataclass
@@ -14,7 +16,6 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
-    RawStoredEventEnvelope,
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole
 from pulsara_agent.llm.request import LLMContext, llm_context_fingerprint
@@ -805,7 +806,7 @@ def _stored_event_reference(
     *,
     runtime_session_id: str,
 ) -> GovernanceStoredEventReferenceFact:
-    raw = RawStoredEventEnvelope.from_stored_event(
+    raw = build_raw_stored_event_envelope(
         event=event,
         runtime_session_id=runtime_session_id,
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,

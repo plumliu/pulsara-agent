@@ -1,6 +1,6 @@
 # Pulsara Terminal Presentation Foundation Hard-Cut 实施规格
 
-> 状态：DRAFT FOR REVIEW
+> 状态：IMPLEMENTED（2026-08-01；INFRA-0 至 INFRA-5 renderer-neutral Python infrastructure hard cut）
 > Requirement namespace：`TUI-FND-*`
 > 唯一owner：Python renderer-neutral presentation foundation、durable prompt queue与Terminal application services
 > 上位产品基线：`PULSARA_TERMINAL_UI_UX_RESEARCH_AND_DESIGN.zh.md`
@@ -52,7 +52,9 @@ Foundation必须做到：
 - desktop/web协议；
 - arbitrary plugin renderer。
 
-## 2. 当前代码真值
+## 2. Hard cut 前代码真值（迁移基线）
+
+本节记录实施前的migration observation，不再描述当前代码。当前最终owner、路径与验证证据以第14至17节及仓库内`tests/test_terminal_infrastructure_architecture.py`为准。
 
 ### 2.1 Event storage
 
@@ -61,7 +63,7 @@ Foundation必须做到：
 - PostgreSQL writer在`src/pulsara_agent/event_log/postgres.py`分配canonical sequence并构造transcript-prefix accounting。
 - RuntimeSession在`src/pulsara_agent/runtime/session.py`把完整stored batch投影成caller-facing business与accounting events。
 
-当前缺口是raw envelope没有作为唯一canonical row carrier返回上层，confirmation只有decoded events，UI若自行构造会重复序列化并污染critical path。
+该缺口已由INFRA-1关闭：raw envelope现在贯穿encoder-built pair、physical commit receipt、exact confirmation与restored range proof；normal writer不再从decoded `AgentEvent`重新编码。
 
 ### 2.2 Runtime observation
 
@@ -198,6 +200,7 @@ DecoderHydratedStoredEventPair
 
 - 数量相同且非空；
 - runtime session、event ID、sequence、event type、schema binding一致；
+- `canonical_json_bytes(owned_stored_event.model_dump(mode="json"))`逐byte等于raw envelope已经拥有的`canonical_payload_bytes`；只比较wrapper identity而payload不同必须拒绝；
 - canonical sequence严格连续；
 - pair proof与当前owned/raw对象identity及fingerprint一致；
 - ordered join fingerprint由完整physical order中央重算。
@@ -339,6 +342,8 @@ CommittedPresentationTapEntry
 
 Central factory必须验证raw envelope tuple与complete receipt逐项相同，并验证fold result的source batch identity、first/last sequence与envelope accumulator完全一致。`tap_entry_fingerprint = H("committed-presentation-tap-entry:v1", runtime_session_id, first/last sequence, stored batch ordered join fingerprint, source envelope accumulator, fold_result_fingerprint)`，不得覆盖subscriber、ring generation或delivery timing。某个physical batch可以产生empty transcript leaf delta，但仍必须有覆盖同一receipt的fold result。Ring eviction、subscriber delivery和bootstrap copy都以完整entry为最小单位；raw evidence与canonical fold result不得分开存放或独立淘汰。
 
+Foundation background consumer只能在HostSession成功publish并成为live owner后激活；RuntimeSession构造或尚未publish的Host open attempt不得启动async worker，否则failed-open同步rollback无法证明physical drain。Publish前已经FULL的receipt仍由tap ring/monotonic observed high-water保留，worker激活后走同一bounded bootstrap/catch-up，不建立第二条replay路径。Gateway attach可以幂等确保worker已启动，但不能成为唯一projection owner。
+
 `offer_nowait()`不得：
 
 - await；
@@ -357,6 +362,8 @@ Tap维护session-scoped bounded ring，按sequence覆盖范围保存完整`Commi
 - 任意partial overlap，即使重叠envelope完全相同：不得拆分entry，detach generation并要求ledger catch-up/rebootstrap；
 - gap、同sequence不同envelope fingerprint或same batch identity不同fold result：detach generation，要求ledger catch-up/rebootstrap；
 - capacity overflow：推进ring floor并通知observer gap，不阻塞writer。
+
+Tap必须在ring之外维护单调的`latest_valid_observed_sequence`。该值只在完整receipt/tap-entry重新验证成功后推进，但不因ring eviction、generation rollover或subscriber detach回退。Subscriber进入GAP时，Foundation保留已经FULL的checkpoint/root installation，先退休该次exact delivery owner，再以当前projection high-water和`latest_valid_observed_sequence`重新bootstrap；缺失suffix只能由canonical raw range proof恢复。Background worker不能因为旧subscriber被detach而继续空转，也不能把`_worker is not None`当作“已经重新订阅”的证明。每次正常wake应冻结并fold当前全部pending whole entries，再形成一个checkpoint candidate；不得对每条tap entry串行执行一次artifact/SQL checkpoint后才ack，否则正常burst会把bounded subscriber人为推入GAP。
 
 ### TUI-FND-OBS-003 Bootstrap线性化
 
@@ -501,7 +508,7 @@ TranscriptAuditDispositionFact =
 
 旧`apply_committed(tuple[AgentEvent, ...])`与`rebuild(tuple[AgentEvent, ...])`必须物理删除。任何live path只能调用`apply_live_committed(receipt)`；任何reopen/catch-up/doctor/repair只能从checkpoint/base恢复后调用一个或多个`fold_restored_range(range_proof)`。不得在restore代码中为任意page构造fake receipt。
 
-RuntimeSession generic committed-reducer registration必须在同一S1 hard cut升级为双入口port：
+RuntimeSession generic committed-reducer registration必须在同一INFRA-2 hard cut升级为双入口port：
 
 ```text
 CommittedReducerIngressPort
@@ -1336,9 +1343,9 @@ Root artifact是immutable快照，旧cursor在自身root的retention horizon内�
 
 `previous_projection_root_reference`是weak lineage attribution，不是tree/content retention edge：hydrating current root只需current root node reference，不递归hydrate全部previous roots；GC不得因为current root携带weak predecessor reference而永久保留旧root。Root无checkpoint reference、无active cursor lease，并且已超出generation window或TTL任一上限时即可retire；node只有在不再被任何retained root的tree root node强可达时才可删除。Compatible-successor confirmation只能沿仍retained的weak lineage targets证明；target已GC时不得伪造proof，只能把winner作为unconfirmed conflict并从exact current checkpoint重新build。Cursor root已合法retire才返回`CURSOR_STALE`；不得因新root出现而强制rebase。
 
-Canonical generation-0冻结为：`checkpoint_generation=0`、`projection_generation=0`、`through_authority_sequence=0`、`presentation_source_segment_count=0`、`presentation_source_prefix_accumulator=P0`、`source_prefix_transition_proof=None`、`root_kind=empty`、`tree_height=0`、`entry_count=0`、first/last placement key为`None`、canonical empty spine/entry accumulators、无node reference、canonical empty root artifact，并绑定activation时的全部current contract/policy fingerprints。`previous_checkpoint_fingerprint=None`与`previous_projection_root_reference=None`只对generation-0合法；任何non-genesis root的previous reference必须exact-read并与predecessor checkpoint root join。新session在首次Terminal attachment准入前exact-confirm genesis；existing session在S1 activation preparation或background rebuild中安装非genesis checkpoint，未安装前attachment返回typed `REBASE_REQUIRED`，不从session genesis同步全量扫描。
+Canonical generation-0冻结为：`checkpoint_generation=0`、`projection_generation=0`、`through_authority_sequence=0`、`presentation_source_segment_count=0`、`presentation_source_prefix_accumulator=P0`、`source_prefix_transition_proof=None`、`root_kind=empty`、`tree_height=0`、`entry_count=0`、first/last placement key为`None`、canonical empty spine/entry accumulators、无node reference、canonical empty root artifact，并绑定activation时的全部current contract/policy fingerprints。`previous_checkpoint_fingerprint=None`与`previous_projection_root_reference=None`只对generation-0合法；任何non-genesis root的previous reference必须exact-read并与predecessor checkpoint root join。新session在首次Terminal attachment准入前exact-confirm genesis；existing session在INFRA-3 activation preparation或background rebuild中安装非genesis checkpoint，未安装前attachment返回typed `REBASE_REQUIRED`，不从session genesis同步全量扫描。
 
-Checkpoint maintenance拥有service-owned bounded physical operation、absolute deadline、artifact/DB dependency leases与close drain责任。Live presentation在confirmed checkpoint之后只能保留以下process-local、受events/bytes硬上限的tail owner：
+Checkpoint maintenance拥有service-owned bounded physical operation、absolute deadline、artifact/DB dependency leases与close drain责任。Stable candidate一旦形成，service必须持有exact candidate、raw checkpoint candidate、artifact tuple、attempt generation/guard和最后一次typed confirmation receipt，直至FULL并完成root installation与tap delivery。`NONE | UNKNOWN | CONFLICT`都不能由普通exception丢弃该owner：live owner使用bounded backoff重试相同candidate的write/exact-confirm；waiter cancellation只detach；Host close在共享absolute deadline内继续drain，期限耗尽时明确返回close blocked。任何rebuild/new candidate只能在已有attempt由typed supersession/reconciliation协议退休之后开始。Live presentation在confirmed checkpoint之后只能保留以下process-local、受events/bytes硬上限的tail owner：
 
 ```text
 PresentationHistoryActiveHeadFact
@@ -1623,6 +1630,8 @@ notifications
 ```
 
 读取snapshot不得执行SQL、artifact、graph、MCP或manager调用。
+
+Foundation在每次confirmed root installation后原子更新resident viewport cache；Gateway snapshot只能读取该cache以及queue/interaction/operational resident projections。History page仍可读取immutable tree artifacts，但必须经session-owned bounded async I/O service执行：admission有硬上限，caller timeout/cancellation只结束waiter，physical executor operation继续由session owner追踪；Host close在同一个absolute deadline下等待其真实退出。Gateway event loop不得直接调用同步`ArtifactStore`/PostgreSQL page、root hydration或checkpoint API。
 
 ## 9. Terminal application services
 
@@ -2225,34 +2234,35 @@ Client detach、buffer overflow、decode failure或renderer crash不得：
 
 RuntimeSession close顺序：
 
-1. stop new UI attachments/commands；
-2. revokecontroller与secret leases；
-3. detach observation subscribers；
-4. drain foundation-owned checkpoint/artifact preparation physical operations；
-5. complete existingRuntimeSession/run/queue close contract；
-6. releaseDB/artifact dependencies。
+1. stop new external UI attachments/commands，并停止新的Foundation I/O admission；
+2. 完成既有RuntimeSession/run/queue terminalization，使其最后一批durable events进入tap；
+3. revoke external controller、secret与client root leases；external observation subscriber可立即detach；
+4. 保留Foundation-owned internal tap subscriber，drain stable checkpoint/catch-up/root-install delivery owner以及全部executor中的artifact/DB physical operations；
+5. internal owner全部terminal后才detach internal tap subscriber，并关闭Foundation service；
+6. releaseRuntime reducer、DB与artifact dependencies。
 
-UI subscribers本身不参与close blocker；foundation-ownedphysical operations必须参与。
+External UI subscribers本身不参与close blocker；Foundation-owned internal tap subscription只是收口工具，不是client dependency。Stable checkpoint attempt、confirmed-but-undelivered root以及已经physical-start的I/O必须参与close blocker。取消async worker不能代表底层executor operation已取消；共享deadline到期而任一physical operation或checkpoint owner仍未terminal时，Host close必须明确blocked，不能继续关闭reducer、connection pool或artifact dependency。
 
 ## 14. 实施切片归属
 
-Foundation按vertical slice提供能力，不按F0-F5独立长期堆积：
+当前renderer-neutral hard cut按INFRA-0至INFRA-5完成；它们是同一Python authority边界的可独立验证切片，不依赖真实renderer：
 
-| Slice | Foundation交付 |
-|---|---|
-| S0 | 仅提供fake snapshot fixture；不接生产runtime |
-| S1 | stored receipt、tap、bootstrap、unified history root/checkpoint、viewport |
-| S2 | delta revision、ring/catch-up、gap/reconnect |
-| S3 | prompt/stop application services与command confirmation |
-| S4 | interaction views、secret issuer、resolution service |
-| S5 | durable queue、artifact hold、checkpoint、safe-point consumption |
-| S6 | semantic grouping、status values、production close/audit |
+| Slice | Foundation交付 | 当前状态 |
+|---|---|---|
+| INFRA-0 | 最终DTO/port/registry owner、fingerprint与AST import rule | IMPLEMENTED |
+| INFRA-1 | stored envelope、built pair、physical receipt、confirmation与restored range proof | IMPLEMENTED |
+| INFRA-2 | canonical live/restored fold、committed tap、bootstrap/catch-up/GAP、operational store | IMPLEMENTED |
+| INFRA-3 | unified history projection、persistent tree、checkpoint、capacity、viewport/page | IMPLEMENTED |
+| INFRA-4 | application services、durable queue、artifact hold、secret lease与bounded reopen | IMPLEMENTED |
+| INFRA-5 | versioned Python protocol server与test-only headless conformance consumer | IMPLEMENTED |
+
+Bubble Tea S0 feasibility、全部`TUI-BT-*`、Go packaging、PTY renderer与默认TTY activation继续为`DEFERRED`；它们不参与Foundation完成判定。
 
 ## 15. 文件修改面
 
 ### 15.1 Event vocabulary与PostgreSQL hard cut
 
-当前代码真值为`AGENT_EVENT_SCHEMA_VERSION = 8`、PostgreSQL migration head `10`。S1的raw-envelope owner迁移不新增durable event；S5启用queue时必须在同一个不可拆分cutover中：
+Hard cut前代码真值为`AGENT_EVENT_SCHEMA_VERSION = 8`、PostgreSQL migration head `10`。INFRA-1的raw-envelope owner迁移不新增durable event；INFRA-4启用queue时必须在同一个不可拆分cutover中：
 
 ```text
 AGENT_EVENT_SCHEMA_VERSION: 8 -> 9
@@ -2354,7 +2364,7 @@ prompt_queue_artifact_preparation_holds
 
 ### 15.4 Raw envelope无shim迁移集合
 
-S1必须迁移当前AST inventory中的全部25个production consumer；该集合是hard-cut baseline，不是抽样文件清单：
+INFRA-1必须迁移baseline AST inventory中的全部25个production consumer；该集合是hard-cut baseline，不是抽样文件清单：
 
 ```text
 src/pulsara_agent/event_log/__init__.py
@@ -2461,20 +2471,26 @@ src/pulsara_agent/runtime/terminal/process.py
 - 在旧placement key之间插入audit、删除entry或interval replacement时，未受影响suffix的entry/node key byte-identical，只path-copy affected leaves/ancestor paths；root-local display rank可变化但不进入durable fingerprint；
 - materialization policy所有node/tree/tail/capacity-reserve/retention/read数字逐项进入fingerprint，soft<hard与tree capacity validator全绿；
 - checkpoint normal/cancel/timeout分别覆盖FULL/NONE/UNKNOWN/CONFLICT，byte-identical winner与proved compatible successor adoption，UNKNOWN reopen reconciliation；
+- checkpoint NONE/UNKNOWN/CONFLICT后重复使用同一个attempt/candidate fingerprint，live retry最终FULL；close deadline前未收口时typed blocked且owner不丢失；
 - checkpoint candidate冻结后并发append/noop增长tail：每个noop sequence仍形成空mutation segment；FULL只消费proved segment prefix、保留exact segment suffix，resulting head允许non-empty tail；compatible successor逐跳重放durable source-prefix transition proof后消费proved longer prefix；post-cut rewrite/retirement废弃candidate或typed rebuild；
 - checkpoint FULL后root-advance delivery原子携带new active head、new latest cursor pair、old pinned-root relation、consumed segment prefix、retained segment suffix与closed resident transition；frame丢失由projection revision gap重建；
 - resident unchanged/changes/rebase validators分别覆盖equal-vector proof、ordered upsert/remove count+bytes+accumulator、exact target root/head token；malformed branch全部fail closed；
 - capacity逐项验证`confirmed + current tail + active remaining reservations + requested quote`；tail materialization与reservation remaining在同一lock结算而不重复计数；terminalization maintenance reserve只参与`soft + reserve <= hard maximum`。NONE释放、FULL结算unused、UNKNOWN保留reservation；soft threshold返回typed rotation且已准入terminalization仍可完成；hard maximum不silent truncate/evict；
 - cursor与request均不含feed kind，page直接返回unified globally ordered entries；
 - operational activity不进入durable history page，也不因coalesce/drop改变history root或projection revision；
+- tap subscriber在checkpoint physical I/O期间overflow进入GAP后，以durable observed high-water重新bootstrap并最终追到latest sequence；不会留下仍alive但无subscriber的worker；
 - presentation projection idempotence与revision；
 - viewport hard bounds、paged history、cursor stale/rebase矩阵；
+- cached snapshot不执行I/O；重启后的首次history page通过session-owned bounded executor执行，阻塞artifact/SQL read不冻结event loop；waiter cancellation后Host close仍等待physical read真实退出；
+- history page、anchor lookup、viewport materialization与checkpoint path-copy使用调用方冻结的同一个absolute deadline；root/tree每次`ArtifactStore.get_text()`都必须原样传递该deadline，PostgreSQL connection checkout与statement timeout不得续期或回退为`None`；真实PostgreSQL表锁测试必须在blocker仍持有时观察目标read自行timeout并物理退出；
 - Long-Horizon rewrite后旧cursor可以继续读取其仍retained的旧immutable root，但不得按cell ID静默映射到新root；跨root只接受proved replacement cursor或typed rebase；
 - cursor不含direction，`read_page()`只消费request-owned direction；
 - queue V1 cancel+replacement，任何`PromptQueueEditedEvent`/in-place content mutation均不存在；
 - identical content跨不同artifact preparation/write receipt保持相同semantic fingerprint与queue identity，attribution/fact fingerprint不同；
 - queue transition、artifact hold、charge、checkpoint与safe-point CAS；
-- close/drain与client detach isolation。
+- close/drain与client detach isolation；
+- stored-event pair同wrapper identity、不同canonical payload bytes必须拒绝；receipt进入transcript fold/tap前再次验证owned payload与raw bytes join；
+- MCP form response错误request key、stale batch/round owner、controller/attachment generation、owner epoch或TTL均拒绝并best-effort zero mutable buffer。
 
 ### TUI-FND-GATE-003 PostgreSQL
 
@@ -2506,7 +2522,7 @@ src/pulsara_agent/runtime/terminal/process.py
 14. Legacy REPL与Gateway都不能绕过closed application services创建新mutation semantics。
 15. V1 queue不存在`PromptQueueEditedEvent`或in-place content update；编辑只由cancel FULL加new acceptance表达。
 16. Raw envelope DTO、builder、historical decoder分别只有一个final owner，old import path及全部AST observations为零。
-17. Event schema generation 9与PostgreSQL migration 0011在同一S5 hard cut激活，catalog/grants/protected registry/reset审计全绿。
+17. Event schema generation 9与PostgreSQL migration 0011在同一INFRA-4 hard cut激活，catalog/grants/protected registry/reset审计全绿。
 18. Durable history只有一种`PresentationHistoryProjectionRootFact`和一个page port；每个root只有一对directionless cursor，每个attachment恰有一个latest pair及policy-bounded pinned old-root cursors。Root绑定transcript reducer、event-domain registry、presentation policy registry与audit extractor registry完整contract；rewrite不改写旧root，跨root或旧root退役时只返回proved replacement cursor或typed stale/rebase。
 19. Normal writer通过encoder-built pair形成receipt且不重复decode；只有exact candidate FULL confirmation可通过historical decoder形成同形receipt；generic restore只形成range proof。
 20. Transcript reducer用同一pure core处理live receipt与restored range，最终canonical state与physical batch/page grouping无关；tap只保存live raw+fold复合entry。
@@ -2517,7 +2533,7 @@ src/pulsara_agent/runtime/terminal/process.py
 25. RuntimeSession与subagent的全部committed-reducer registrations使用双入口port；initial catch-up、reconcile、doctor、restore和repair没有tuple/fake-receipt旁路。
 26. Unified history root只拥有placement/order；canonical transcript leaf与durable audit cell的语义owner保持不变，server/client都不存在cross-feed merge。
 27. Presentation history checkpoint拥有canonical generation-0、bounded persistent tree、path-copy node/root、完整materialization policy、typed CAS confirmation、bounded production restore与offline doctor rebuild。
-28. `RunLifecycleCell`物理不存在；run lifecycle使用closed `AuditCell(run_lifecycle)`通过Foundation、Protocol与Go。
+28. `RunLifecycleCell`物理不存在；run lifecycle使用closed `AuditCell(run_lifecycle)`贯穿Foundation与Protocol；未来Go adapter必须消费同一closed branch。
 29. `DurableHistoryCell`与`OperationalActivityCell`是两个不相交closed union；operational activity只使用独立generation/cursor，不进入history checkpoint/page。
 30. `durable_feed_kind`从Foundation cursor与Protocol request物理删除；unified root是history ordering与paging的唯一authority。
 31. Canonical transcript placement只消费reducer-owned stable spine coordinate、transition proof与anchor tombstone；replacement/retirement继承原位置，audit只能以proved `before_leaf | after_leaf | ledger_sequence` anchor合并。Placement key由唯一registered fixed-width contract编码，并在tree/root/cursor/wire/historical decoder间exact rebind。
@@ -2525,5 +2541,11 @@ src/pulsara_agent/runtime/terminal/process.py
 33. Checkpoint candidate跨retry byte-identical，physical guard可换代；FULL/NONE/UNKNOWN/CONFLICT、compatible winner与reopen reconciliation均有唯一状态出口。
 34. History persistent tree只按stable placement key寻址；continuous history ordinal被物理删除，display rank只在root/active-head ranked view中派生。
 35. Active tail以逐EventLog sequence segment tuple为可切分authority；checkpoint cut、durable source-prefix recurrence与segment suffix retention形成单一swap协议。Noop-only concurrent tail仍有独立carrier，checkpoint I/O期间新增tail既不丢失也不重复，rewrite/retirement不能伪装append suffix。
-36. Root resident transition三个branch均为完整closed DTO并与Protocol/Go逐字段映射；不存在标签-only或自由payload实现。
+36. Root resident transition三个branch均为完整closed DTO并与Python Protocol逐字段映射；不存在标签-only或自由payload实现。Go映射属于deferred `TUI-BT-*`验收。
 37. Tree soft rotation threshold通过central growth quote/reservation为ordinary growth建立typed session fence；ordinary projected count只计算confirmed、tail、active remaining reservations与requested quote，不重复计算terminalization maintenance reserve。Hard exhaustion只能新建session或privileged repair，不截断历史。
+38. Stored-event pair/receipt逐项证明owned event canonical payload与raw envelope bytes完全相同；mutable owned event在fold/tap前被修改会fail closed，不能与raw presentation feed分叉。
+39. Foundation checkpoint owner在NONE/UNKNOWN/CONFLICT及waiter cancellation后保留stable candidate并live retry；Host close使用共享deadline等待logical owner和executor physical operation，超时明确blocked。
+40. Tap GAP/overflow通过monotonic durable observed high-water和canonical raw range重新bootstrap；正常burst按frozen pending batch checkpoint，不存在alive worker永久失去subscriber的状态。
+41. Gateway snapshot是resident O(1)读取；history/root artifact读取只经session-owned bounded async I/O，caller cancellation不遗失physical operation owner。
+42. MCP FORM_RESPONSE sealed handle exact绑定request key、interaction batch owner/generation/round/request-set、controller/attachment generation、owner epoch与TTL；owner变化或expiry使未来consume fail closed并释放plaintext buffer。
+43. History root/tree所有durable artifact读取都消费同一调用级absolute deadline；page与checkpoint path-copy均有deadline传播回归，PostgreSQL阻塞read不依赖测试手工释放即可由statement timeout真实退出。

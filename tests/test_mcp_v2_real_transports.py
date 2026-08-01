@@ -104,13 +104,10 @@ def test_real_sdk_v2_stdio_generation_and_tool_call() -> None:
             assert binding is not None
             receipt = binding.negotiation_wire_receipt
             assert (
-                authority.discovery_attribution.negotiation
-                .negotiation_wire_receipt_fingerprint
+                authority.discovery_attribution.negotiation.negotiation_wire_receipt_fingerprint
                 == receipt.receipt_fingerprint
             )
-            if protocol.behavior_era is (
-                McpProtocolBehaviorEra.STATELESS_PER_REQUEST
-            ):
+            if protocol.behavior_era is (McpProtocolBehaviorEra.STATELESS_PER_REQUEST):
                 assert isinstance(receipt, McpFinalDiscoverWireReceiptFact)
             else:
                 assert isinstance(receipt, McpLegacyInitializeWireReceiptFact)

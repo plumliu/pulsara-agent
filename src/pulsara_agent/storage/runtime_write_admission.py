@@ -24,7 +24,7 @@ from pulsara_agent.projection_jobs.contracts import (
 
 
 _V5_RESOURCE_NAME = "0005_runtime_write_protected_relations_v1.json"
-_LATEST_RESOURCE_NAME = "0010_runtime_write_protected_relations_v1.json"
+_LATEST_RESOURCE_NAME = "0011_runtime_write_protected_relations_v1.json"
 
 
 def _resource_payload(
@@ -33,7 +33,29 @@ def _resource_payload(
     resource = files("pulsara_agent.storage.migrations.resources").joinpath(
         resource_name
     )
-    return json.loads(resource.read_text(encoding="utf-8"))
+    payload = json.loads(resource.read_text(encoding="utf-8"))
+    parent_name = payload.get("extends")
+    if parent_name is None:
+        return payload
+    if not isinstance(parent_name, str) or parent_name == resource_name:
+        raise ValueError("runtime write registry overlay parent is invalid")
+    parent = _resource_payload(parent_name)
+    parent_relations = tuple(parent["relations"])
+    overlay_relations = tuple(payload["relations"])
+    identities = {
+        (str(item["schema_name"]), str(item["relation_name"]))
+        for item in parent_relations
+    }
+    if any(
+        (str(item["schema_name"]), str(item["relation_name"])) in identities
+        for item in overlay_relations
+    ):
+        raise ValueError("runtime write registry overlay replaces an existing relation")
+    return {
+        "schema_version": "runtime_write_protected_relation_registry_resource.v1",
+        "registry_version": payload["registry_version"],
+        "relations": (*parent_relations, *overlay_relations),
+    }
 
 
 def _trigger_name(schema_name: str, relation_name: str) -> str:

@@ -177,7 +177,9 @@ ProviderTransportStreamItem: TypeAlias = (
 )
 
 
-def build_semantic_draft(draft_type: type[ProviderSemanticDraftBase], **payload: object):
+def build_semantic_draft(
+    draft_type: type[ProviderSemanticDraftBase], **payload: object
+):
     """Build a semantic draft with its canonical fingerprint."""
 
     provisional = draft_type.model_construct(draft_fingerprint="pending", **payload)
@@ -194,9 +196,7 @@ def build_terminal_draft(**payload: object) -> ProviderTransportTerminalDraft:
     provisional = ProviderTransportTerminalDraft.model_construct(
         terminal_fingerprint="pending", **payload
     )
-    canonical = provisional.model_dump(
-        mode="json", exclude={"terminal_fingerprint"}
-    )
+    canonical = provisional.model_dump(mode="json", exclude={"terminal_fingerprint"})
     fingerprint = sha256_fingerprint(
         "provider-transport-terminal-draft:v2",
         canonical,

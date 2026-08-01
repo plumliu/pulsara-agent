@@ -99,7 +99,9 @@ def test_embedding_provider_runs_concurrent_chunks_on_one_event_loop() -> None:
         try:
             await asyncio.sleep(0.02)
             value = float(kwargs["input"][0])
-            return SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[value] * 3)])
+            return SimpleNamespace(
+                data=[SimpleNamespace(index=0, embedding=[value] * 3)]
+            )
         finally:
             active -= 1
 
@@ -132,7 +134,11 @@ def test_rerank_provider_runs_concurrent_chunks_through_shared_client() -> None:
             await asyncio.sleep(0.02)
             return httpx.Response(
                 200,
-                json={"results": [{"index": 0, "relevance_score": float(json["documents"][0])}]},
+                json={
+                    "results": [
+                        {"index": 0, "relevance_score": float(json["documents"][0])}
+                    ]
+                },
             )
         finally:
             active -= 1

@@ -23,6 +23,7 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.event_write import committed_event_write_result_fixture
 from tests.support.mcp import (
     install_prepared_test_mcp_pending_handle,
     prepare_test_mcp_input_required_suspension,
@@ -160,7 +161,6 @@ from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
     EventPublicationError,
     EventWriteCancelled,
-    EventWriteResult,
 )
 from pulsara_agent.runtime.recovery import InRunRecoveryCause
 from pulsara_agent.runtime.state import (
@@ -1153,21 +1153,17 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
         **_kwargs,
     ):
         assert self.runtime_session is runtime_session
-        committed = tuple(
-            runtime_session.event_log.extend(
-                (*tuple(terminal_candidates), settlement_candidate)
-            )
+        receipt = runtime_session.event_log.commit_batch(
+            (*tuple(terminal_candidates), settlement_candidate)
         )
+        committed = receipt.owned_stored_events
         terminal = next(
             event for event in committed if isinstance(event, ToolResultEndEvent)
         )
-        result = EventWriteResult(
-            committed_events=committed,
-            commit_status="committed",
-            reducer_high_waters={},
-            reconciliation_required=False,
-            reducer_errors=(),
-            publication_status="completed",
+        result = committed_event_write_result_fixture(
+            committed,
+            runtime_session_id=runtime_session.runtime_session_id,
+            receipt=receipt,
             publisher_enqueued_through_sequence=terminal.sequence,
             publication_errors=(
                 EventPublicationError(
@@ -2503,7 +2499,9 @@ def test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path) -> 
     assert len(compactor.calls) == 1
     transition, pending_count, visible_count = compactor.calls[0]
     assert transition is LoopTransition.CONTINUE_AFTER_TOOL
-    assert pending_count == 1
+    # A completed durable tool batch is no longer "pending" at the legal
+    # pre-follow-up safe point; the protected projection carries its pairing.
+    assert pending_count == 0
     assert visible_count >= 3
 
 

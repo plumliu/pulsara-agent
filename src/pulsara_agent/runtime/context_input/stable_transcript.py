@@ -92,9 +92,7 @@ def project_stable_context_transcript(
     terminal_content_text_by_artifact_id: Mapping[str, str] | None = None,
     compaction_summary_text: str | None = None,
     compaction_terminal_event: (
-        ContextCompactionCompletedEvent
-        | ContextWindowCompactionCompletedEvent
-        | None
+        ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent | None
     ) = None,
     window_compaction_source_document: WindowCompactionSourceDocumentFact | None = None,
 ) -> NormalizedContextTranscript:
@@ -103,7 +101,9 @@ def project_stable_context_transcript(
     if through_sequence < 1:
         raise TranscriptNormalizationError("stable transcript high-water is empty")
     if projection_window.protected_run_through_sequence != through_sequence:
-        raise TranscriptNormalizationError("stable transcript/window high-water mismatch")
+        raise TranscriptNormalizationError(
+            "stable transcript/window high-water mismatch"
+        )
     _validate_entry_order(stable_entries)
     message_documents = {
         item.fact_fingerprint: item for item in hydrated_message_contents
@@ -139,14 +139,10 @@ def project_stable_context_transcript(
         if window_baseline is not None
         else ()
     )
-    if (
-        len(current_user_candidates)
-        + len(baseline_current_user_candidates)
-        != 1
-    ):
+    if len(current_user_candidates) + len(baseline_current_user_candidates) != 1:
         raise TranscriptNormalizationError(
             "stable transcript requires one exact current-user anchor"
-    )
+        )
     if current_user_candidates:
         current_run_id = current_user_candidates[0].attribution.run_id
     else:
@@ -192,11 +188,12 @@ def project_stable_context_transcript(
             pair_entries[entry.pair_id] = entry
 
     paired_result_ordinals = {
-        entry.semantic_identity.result_block_position
-        for entry in pair_entries.values()
+        entry.semantic_identity.result_block_position for entry in pair_entries.values()
     }
     if set(result_entries) != paired_result_ordinals:
-        raise ToolResultPairingError("stable result/pair projection cardinality mismatch")
+        raise ToolResultPairingError(
+            "stable result/pair projection cardinality mismatch"
+        )
 
     messages_by_id = {message.message_id: message for message in messages}
     for pair_entry in sorted(
@@ -212,7 +209,9 @@ def project_stable_context_transcript(
             raise ToolResultPairingError("stable tool pair has no assistant message")
         assistant = messages_by_id.get(assistant_entry.attribution.message_id)
         if assistant is None:
-            raise ToolResultPairingError("stable tool pair assistant was not normalized")
+            raise ToolResultPairingError(
+                "stable tool pair assistant was not normalized"
+            )
         call_id = semantic.assistant_tool_call_id
         matching_calls = tuple(
             (index, block)
@@ -229,7 +228,9 @@ def project_stable_context_transcript(
             raise ToolResultPairingError("stable tool-result document kind drifted")
         tool_semantic = document.semantic_identity
         if tool_semantic.projection_kind != "tool_result":
-            raise ToolResultPairingError("stable result does not reference tool semantics")
+            raise ToolResultPairingError(
+                "stable result does not reference tool semantics"
+            )
         if (
             call_block.model_tool_name != semantic.tool_name
             or result_entry.semantic_identity.tool_name != semantic.tool_name
@@ -240,8 +241,7 @@ def project_stable_context_transcript(
             f"{result_entry.source_event_refs[-1].event_id}"
         )
         unit_id = (
-            f"tool-result-unit:{call_id}:"
-            f"{result_entry.source_event_refs[-1].event_id}"
+            f"tool-result-unit:{call_id}:{result_entry.source_event_refs[-1].event_id}"
         )
         result_message = _tool_result_message(
             entry=result_entry,
@@ -297,17 +297,13 @@ def project_stable_context_transcript(
         (pair.call_message_id, pair.tool_call_id): pair for pair in baseline_pairs
     }
     for unit in baseline_units:
-        pair = baseline_pair_by_call.get(
-            (unit.call_message_id, unit.tool_call_id)
-        )
+        pair = baseline_pair_by_call.get((unit.call_message_id, unit.tool_call_id))
         if pair is None:
             raise TranscriptNormalizationError(
                 "window baseline result unit lacks its durable pair"
             )
         try:
-            call_position = positions[
-                (pair.call_message_id, pair.call_block_index)
-            ]
+            call_position = positions[(pair.call_message_id, pair.call_block_index)]
             result_position = positions[
                 (pair.result_message_id, pair.result_block_index)
             ]
@@ -330,9 +326,7 @@ def project_stable_context_transcript(
         )
     for (call_message_id, call_id), unit in units_by_interaction.items():
         assistant = next(
-            message
-            for message in messages
-            if message.message_id == call_message_id
+            message for message in messages if message.message_id == call_message_id
         )
         call_index = next(
             index
@@ -463,7 +457,9 @@ def _select_entries(
     if projection_window.window_kind == "window_compaction":
         through = projection_window.compacted_through_sequence
         if through is None:
-            raise TranscriptNormalizationError("window compaction high-water is missing")
+            raise TranscriptNormalizationError(
+                "window compaction high-water is missing"
+            )
         return tuple(
             entry
             for entry in entries
@@ -641,7 +637,9 @@ def _model_projection_blocks(
         if isinstance(semantic, ModelProviderErrorSemanticFact):
             raise TranscriptNormalizationError("provider error cannot enter transcript")
         if getattr(semantic, "completion_status", "completed") != "completed":
-            raise TranscriptNormalizationError("interrupted model block entered transcript")
+            raise TranscriptNormalizationError(
+                "interrupted model block entered transcript"
+            )
         if isinstance(semantic, ModelTextBlockSemanticFact):
             text = _terminal_content_text(item.content, terminal_content_texts)
             blocks.append(
@@ -693,11 +691,14 @@ def _model_projection_blocks(
                     source_events=source_refs,
                 )
             )
-    if tuple(
-        item.semantic_identity.projection_order
-        for item in document.payload.items
-        if item.semantic_identity.projection_order in selected
-    ) != selected_orders:
+    if (
+        tuple(
+            item.semantic_identity.projection_order
+            for item in document.payload.items
+            if item.semantic_identity.projection_order in selected
+        )
+        != selected_orders
+    ):
         raise TranscriptNormalizationError("selected model projection order drifted")
     return tuple(blocks)
 
@@ -756,7 +757,10 @@ def _tool_result_unit(
         sorted(
             {
                 ref.event_id: ref
-                for ref in (*assistant.blocks[call_block_index].source_events, *result_entry.source_event_refs)
+                for ref in (
+                    *assistant.blocks[call_block_index].source_events,
+                    *result_entry.source_event_refs,
+                )
             }.values(),
             key=lambda item: item.sequence,
         )
@@ -849,8 +853,7 @@ def _terminal_content_text(
         encoded = text.encode("utf-8")
         if (
             len(encoded) != content.artifact_bytes
-            or f"sha256:{sha256(encoded).hexdigest()}"
-            != content.artifact_sha256
+            or f"sha256:{sha256(encoded).hexdigest()}" != content.artifact_sha256
         ):
             raise TranscriptNormalizationError("terminal content artifact drifted")
         return text
@@ -862,9 +865,7 @@ def _compaction_window(
     projection_window: TranscriptProjectionWindowFact,
     compaction_summary_text: str | None,
     compaction_terminal_event: (
-        ContextCompactionCompletedEvent
-        | ContextWindowCompactionCompletedEvent
-        | None
+        ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent | None
     ),
     source_document: WindowCompactionSourceDocumentFact | None,
     runtime_session_id: str,
@@ -879,7 +880,9 @@ def _compaction_window(
                 source_document,
             )
         ):
-            raise TranscriptNormalizationError("uncompacted projection got compaction facts")
+            raise TranscriptNormalizationError(
+                "uncompacted projection got compaction facts"
+            )
         return None
     if compaction_summary_text is None or compaction_terminal_event is None:
         raise TranscriptNormalizationError("compacted projection facts are incomplete")
@@ -946,9 +949,7 @@ def _compaction_window(
         summary_message_id=message_id,
         source_event=terminal_ref,
         source_started_event=(
-            projection_window.window_compaction_started_ref
-            if not is_prefix
-            else None
+            projection_window.window_compaction_started_ref if not is_prefix else None
         ),
     )
     del runtime_session_id
@@ -971,7 +972,9 @@ def _validate_entry_order(
         raise TranscriptNormalizationError("stable transcript ordinals are invalid")
     for entry in entries:
         if not entry.source_event_refs:
-            raise TranscriptNormalizationError("stable transcript entry lacks authority")
+            raise TranscriptNormalizationError(
+                "stable transcript entry lacks authority"
+            )
 
 
 __all__ = [

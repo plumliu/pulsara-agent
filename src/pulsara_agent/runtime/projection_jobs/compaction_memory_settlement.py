@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
+
 import asyncio
 from dataclasses import dataclass, field
 from functools import partial
@@ -14,7 +16,6 @@ from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionMemoryExtractionCompletedEvent,
 )
-from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     FrozenEventWriteCandidate,
@@ -93,7 +94,7 @@ def _thaw_event_candidate(
 def _stored_reference(
     *, event: AgentEvent, runtime_session_id: str
 ) -> GovernanceStoredEventReferenceFact:
-    envelope = RawStoredEventEnvelope.from_stored_event(
+    envelope = build_raw_stored_event_envelope(
         event=event,
         runtime_session_id=runtime_session_id,
         schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -581,9 +582,7 @@ def _outcome(
     reconciliation_required: bool,
 ) -> CompactionMemoryExtractionSettlementOutcome:
     event = _thaw_event_candidate(result_candidate)
-    runtime_session_id = (
-        event.occurrence_attribution.request_event_reference.stable_identity.runtime_session_id
-    )
+    runtime_session_id = event.occurrence_attribution.request_event_reference.stable_identity.runtime_session_id
     payload = {
         "confirmation": confirmation,
         "result_candidate_id": result_candidate.result_candidate_id,

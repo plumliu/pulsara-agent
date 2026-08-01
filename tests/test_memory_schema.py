@@ -17,12 +17,11 @@ def test_memory_substrate_is_owned_by_cumulative_manifest() -> None:
 
 def test_memory_manifest_freezes_vector_and_function_contracts() -> None:
     manifest = POSTGRES_LATEST_SCHEMA_MANIFEST
-    assert tuple(
-        item["extension_name"] for item in manifest.required_extensions
-    ) == ("vector", "pgcrypto")
-    assert tuple(item["type_name"] for item in manifest.required_types) == (
+    assert tuple(item["extension_name"] for item in manifest.required_extensions) == (
         "vector",
+        "pgcrypto",
     )
+    assert tuple(item["type_name"] for item in manifest.required_types) == ("vector",)
     assert "pulsara_jsonb_text_array" in {
         item["function_name"] for item in manifest.required_functions
     }
@@ -32,7 +31,9 @@ def test_memory_manifest_freezes_vector_and_function_contracts() -> None:
         if item["relation_name"] == "memory_vector_index"
     )
     embedding = next(
-        item for item in vector_relation["columns"] if item["column_name"] == "embedding"
+        item
+        for item in vector_relation["columns"]
+        if item["column_name"] == "embedding"
     )
     assert embedding["type_schema"] == "public"
     assert embedding["type_name"] == "vector"

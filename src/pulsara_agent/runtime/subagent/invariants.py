@@ -24,10 +24,10 @@ def run_attribution_error(
         and child_runtime_session_id != expected_child_runtime_session_id
     ):
         return "subagent_task_run_attribution_mismatch"
-    if (
-        reported_child_run_id is not None
-        and expected_reported_child_run_id not in {None, reported_child_run_id}
-    ):
+    if reported_child_run_id is not None and expected_reported_child_run_id not in {
+        None,
+        reported_child_run_id,
+    }:
         return "child_run_attribution_mismatch"
     return None
 

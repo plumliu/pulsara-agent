@@ -29,7 +29,9 @@ def test_jieba_search_tokenizer_drops_short_and_stopword_noise() -> None:
 def test_regex_word_split_tokenizer_preserves_codeish_tokens() -> None:
     tokenizer = RegexWordSplitTokenizer(min_token_length=1, lowercase=True)
 
-    tokens = tokenizer.tokenize("Use memory_search on src/pulsara_agent/host/core.py:42")
+    tokens = tokenizer.tokenize(
+        "Use memory_search on src/pulsara_agent/host/core.py:42"
+    )
 
     assert "memory_search" in tokens
     assert "src/pulsara_agent/host/core.py:42" in tokens

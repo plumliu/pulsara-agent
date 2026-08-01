@@ -15,7 +15,9 @@ from pulsara_agent.capability.bundled_skills import (
 )
 
 
-def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(tmp_path) -> None:
+def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
+    tmp_path,
+) -> None:
     source = tmp_path / "bundled-source"
     pulsara_home = tmp_path / "pulsara-home"
     _write_source_skill(source, "pulsara-alpha", description="Alpha bundled skill.")
@@ -26,9 +28,13 @@ def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
     assert result.manifest_written is True
     target = pulsara_home / "skills" / "pulsara-alpha"
     assert (target / "SKILL.md").is_file()
-    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(encoding="utf-8")
+    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
+        encoding="utf-8"
+    )
     assert "pulsara-alpha:" in manifest
-    provenance = json.loads((target / ".pulsara-skill-source.json").read_text(encoding="utf-8"))
+    provenance = json.loads(
+        (target / ".pulsara-skill-source.json").read_text(encoding="utf-8")
+    )
     assert provenance["source"] == "bundled"
     assert provenance["bundled_from"] == "pulsara-agent"
 
@@ -43,9 +49,13 @@ def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
     assert discovery.skills[0].location == "~/.pulsara/skills/pulsara-alpha/SKILL.md"
 
 
-def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(tmp_path) -> None:
+def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(
+    tmp_path,
+) -> None:
     pulsara_home = tmp_path / "pulsara-home"
-    skill_dir = _write_source_skill(pulsara_home / "skills", "pulsara-alpha", description="Alpha bundled skill.")
+    skill_dir = _write_source_skill(
+        pulsara_home / "skills", "pulsara-alpha", description="Alpha bundled skill."
+    )
     (skill_dir / ".pulsara-skill-source.json").write_text(
         json.dumps(
             {
@@ -92,7 +102,9 @@ def test_sync_bundled_skills_does_not_overwrite_user_modified_skill(tmp_path) ->
     result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
 
     assert [item.action for item in result.items] == ["skipped_modified"]
-    assert (target / "user-note.txt").read_text(encoding="utf-8") == "user modification\n"
+    assert (target / "user-note.txt").read_text(
+        encoding="utf-8"
+    ) == "user modification\n"
     assert "# Original" in (target / "SKILL.md").read_text(encoding="utf-8")
 
 
@@ -111,7 +123,9 @@ def test_sync_bundled_skills_does_not_restore_user_deleted_skill(tmp_path) -> No
     assert status.statuses[0].state == "deleted"
 
 
-def test_sync_bundled_skills_removes_manifest_entry_when_source_is_removed(tmp_path) -> None:
+def test_sync_bundled_skills_removes_manifest_entry_when_source_is_removed(
+    tmp_path,
+) -> None:
     source = tmp_path / "bundled-source"
     pulsara_home = tmp_path / "pulsara-home"
     _write_source_skill(source, "pulsara-alpha")
@@ -121,7 +135,9 @@ def test_sync_bundled_skills_removes_manifest_entry_when_source_is_removed(tmp_p
     result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
 
     assert [item.action for item in result.items] == ["source_removed"]
-    assert (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(encoding="utf-8") == ""
+    assert (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
+        encoding="utf-8"
+    ) == ""
     assert (pulsara_home / "skills" / "pulsara-alpha").exists()
 
 
@@ -143,14 +159,16 @@ def test_sync_bundled_skills_skips_existing_unmanaged_skill(tmp_path) -> None:
     source = tmp_path / "bundled-source"
     pulsara_home = tmp_path / "pulsara-home"
     _write_source_skill(source, "pulsara-alpha", body="# Bundled\n")
-    _write_source_skill(pulsara_home / "skills", "pulsara-alpha", body="# User existing\n")
+    _write_source_skill(
+        pulsara_home / "skills", "pulsara-alpha", body="# User existing\n"
+    )
 
     result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
 
     assert [item.action for item in result.items] == ["skipped_existing_unmanaged"]
-    assert "# User existing" in (pulsara_home / "skills" / "pulsara-alpha" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    assert "# User existing" in (
+        pulsara_home / "skills" / "pulsara-alpha" / "SKILL.md"
+    ).read_text(encoding="utf-8")
     assert not (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).exists()
 
 
@@ -170,18 +188,24 @@ description: Modified by user.
         encoding="utf-8",
     )
 
-    result = reset_bundled_skill("pulsara-alpha", pulsara_home=pulsara_home, source_root=source)
+    result = reset_bundled_skill(
+        "pulsara-alpha", pulsara_home=pulsara_home, source_root=source
+    )
 
     assert result.action == "reset"
     assert result.backup_path is not None
     assert (result.backup_path / "SKILL.md").is_file()
     assert "# Bundled source" in (target / "SKILL.md").read_text(encoding="utf-8")
     assert result.origin_hash == compute_skill_dir_hash(source / "pulsara-alpha")
-    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(encoding="utf-8")
+    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
+        encoding="utf-8"
+    )
     assert f"pulsara-alpha:{result.origin_hash}\n" in manifest
 
 
-def test_bundled_skills_status_reports_available_to_sync_without_writing(tmp_path) -> None:
+def test_bundled_skills_status_reports_available_to_sync_without_writing(
+    tmp_path,
+) -> None:
     source = tmp_path / "bundled-source"
     pulsara_home = tmp_path / "pulsara-home"
     _write_source_skill(source, "pulsara-alpha")

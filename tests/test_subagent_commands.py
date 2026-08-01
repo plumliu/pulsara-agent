@@ -34,7 +34,9 @@ from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
 
-CTX = EventContext(run_id="run:planner", turn_id="turn:planner", reply_id="reply:planner")
+CTX = EventContext(
+    run_id="run:planner", turn_id="turn:planner", reply_id="reply:planner"
+)
 
 
 def test_command_plan_derives_affected_ids_and_records_reservation() -> None:
@@ -51,7 +53,9 @@ def test_command_plan_derives_affected_ids_and_records_reservation() -> None:
         required_reservations=(reservation,),
     )
 
-    validated = SubagentCommandPlanner().validate(plan, state=SubagentGraphState.empty())
+    validated = SubagentCommandPlanner().validate(
+        plan, state=SubagentGraphState.empty()
+    )
 
     assert validated.command_id.startswith("subagent_command:")
     assert validated.affected_task_ids == ("task:planner",)
@@ -124,7 +128,9 @@ def test_command_planner_rejects_explicit_result_replacement_before_commit() -> 
         result_artifact_id="artifact:replacement",
         artifact_ids=["artifact:replacement"],
     )
-    with pytest.raises(SubagentCommandPlanError, match="replace explicit result identity"):
+    with pytest.raises(
+        SubagentCommandPlanError, match="replace explicit result identity"
+    ):
         _validate_one(state, replacement)
 
     changed_body = replacement.model_copy(
@@ -139,7 +145,9 @@ def test_command_planner_rejects_explicit_result_replacement_before_commit() -> 
         _validate_one(state, changed_body)
 
 
-def test_command_planner_rejects_running_task_terminal_without_terminal_owning_run() -> None:
+def test_command_planner_rejects_running_task_terminal_without_terminal_owning_run() -> (
+    None
+):
     task, started, message, task_started = _start_batch()
     state = _fold(task, started, message, task_started)
     task_failed = SubagentTaskFailedEvent(
@@ -340,7 +348,9 @@ def test_command_planner_rejects_reducer_attribution_drift_before_commit() -> No
     changed_completion = result.model_copy(
         update={"child_run_id": "child-run:replacement"}
     )
-    with pytest.raises(SubagentCommandPlanError, match="reported child run attribution"):
+    with pytest.raises(
+        SubagentCommandPlanError, match="reported child run attribution"
+    ):
         _validate_one(reported_state, changed_completion)
 
 
@@ -430,7 +440,9 @@ def test_command_planner_reducer_guard_rejects_result_cross_event_drift() -> Non
         _validate_one(completed_task_state, wrong_summary)
 
 
-def _start_batch(key: str = "planner") -> tuple[
+def _start_batch(
+    key: str = "planner",
+) -> tuple[
     SubagentTaskCreatedEvent,
     SubagentRunStartedEvent,
     SubagentMessageSentEvent,

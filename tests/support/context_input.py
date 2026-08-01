@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 from dataclasses import dataclass
 
 from pulsara_agent.event import RunStartEvent
@@ -56,7 +58,9 @@ def render_event_log_transcript(
         snapshot=read,
     )
     start_stored = full.event_by_id(run_start_event_id)
-    start = start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    start = decode_raw_stored_event_envelope(
+        start_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(start, RunStartEvent):
         raise TypeError("typed context fixture requires a RunStart event")
     entry = start.new_run_boundary or start.subagent_run_entry

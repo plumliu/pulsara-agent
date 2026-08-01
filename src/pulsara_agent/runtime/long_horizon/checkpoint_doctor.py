@@ -72,10 +72,7 @@ def verify_or_rebuild_subagent_graph_checkpoint(
     if mode not in {"verify", "rebuild"}:
         raise ValueError("checkpoint doctor mode is invalid")
     with maintenance_authority.acquire_exclusive(runtime_session_id) as permit:
-        if (
-            not permit.exclusive
-            or permit.runtime_session_id != runtime_session_id
-        ):
+        if not permit.exclusive or permit.runtime_session_id != runtime_session_id:
             raise RuntimeError("checkpoint maintenance permit identity mismatch")
         try:
             binding = reducer_registry.resolve_binding(
@@ -200,9 +197,7 @@ def _report_for_prepared(
         graph_event_count=checkpoint.graph_event_count,
         graph_semantic_accumulator=checkpoint.graph_semantic_accumulator,
         ledger_continuity_accumulator=checkpoint.ledger_continuity_accumulator,
-        graph_state_semantic_fingerprint=(
-            checkpoint.graph_state_semantic_fingerprint
-        ),
+        graph_state_semantic_fingerprint=(checkpoint.graph_state_semantic_fingerprint),
         checkpoint_id=checkpoint.checkpoint_id,
         checkpoint_artifact_id=prepared.artifact.artifact_id,
         scanned_event_count=scanned_event_count,

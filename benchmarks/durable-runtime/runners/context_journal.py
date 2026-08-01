@@ -207,9 +207,7 @@ class ContextSuiteJournal:
     ) -> None:
         self.output_directory = output_directory.expanduser().resolve()
         self.output_directory.mkdir(parents=True, exist_ok=True)
-        self.inprogress_path = (
-            self.output_directory / "context-suite.inprogress.json"
-        )
+        self.inprogress_path = self.output_directory / "context-suite.inprogress.json"
         self.summary_path = self.output_directory / "context-suite.summary.json"
         if self.inprogress_path.exists() or self.summary_path.exists():
             raise FileExistsError(
@@ -248,9 +246,7 @@ class ContextSuiteJournal:
                 "benchmark_run_id": benchmark_run_id,
                 "sample_count": sample_count,
                 "raw_sample_vector_sha256": raw_sample_vector_sha256,
-                "measurement_contract_adhered": (
-                    measurement_contract_adhered
-                ),
+                "measurement_contract_adhered": (measurement_contract_adhered),
                 "production_acceptance_passed": production_acceptance_passed,
             }
         )
@@ -301,9 +297,7 @@ class ContextSuiteJournal:
             "schema_version": "pulsara.context-suite-journal.v1",
             "status": status,
             "dataset_id": self._dataset_id,
-            "manifest_contract_fingerprint": (
-                self._manifest_contract_fingerprint
-            ),
+            "manifest_contract_fingerprint": (self._manifest_contract_fingerprint),
             "git_commit": self._git_commit,
             "expected_scenario_ids": self._expected,
             "completed_scenarios": tuple(self._completed),

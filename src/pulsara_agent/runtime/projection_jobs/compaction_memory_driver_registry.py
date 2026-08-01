@@ -228,11 +228,7 @@ class ProcessCompactionMemoryExtractionDriverRegistry:
     ) -> bool:
         with self._lock:
             item = self._registrations.get(identity.runtime_session_id)
-            return bool(
-                item is not None
-                and item.active
-                and item.identity == identity
-            )
+            return bool(item is not None and item.active and item.identity == identity)
 
     def _revoke(self, identity: DriverRegistrationLeaseIdentity) -> None:
         with self._lock:
@@ -248,9 +244,7 @@ class ProcessCompactionMemoryExtractionDriverRegistry:
         borrow_identity: DriverBorrowIdentity,
     ) -> None:
         with self._lock:
-            item = self._registrations.get(
-                registration_identity.runtime_session_id
-            )
+            item = self._registrations.get(registration_identity.runtime_session_id)
             if item is None or item.identity != registration_identity:
                 raise RuntimeError("driver borrow registration identity was lost")
             if (

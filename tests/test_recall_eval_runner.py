@@ -46,17 +46,23 @@ def test_recall_eval_runner_measures_versioned_semantic_only_fixture() -> None:
     assert report.gate_passed
 
 
-def test_recall_eval_runner_gate_entrypoint_exits_cleanly_without_blocking_floor() -> None:
-    exit_code = runner.main(["--fixture", "evals/recall/fixtures/v1_golden.jsonl", "--gate", "--json"])
+def test_recall_eval_runner_gate_entrypoint_exits_cleanly_without_blocking_floor() -> (
+    None
+):
+    exit_code = runner.main(
+        ["--fixture", "evals/recall/fixtures/v1_golden.jsonl", "--gate", "--json"]
+    )
 
     assert exit_code == 0
 
 
 def test_recall_eval_floor_matches_fixture_hash() -> None:
     fixture = Path("evals/recall/fixtures/v1_golden.jsonl")
-    floor = json.loads(Path("evals/recall/baseline/v1_floor.json").read_text(encoding="utf-8"))
+    floor = json.loads(
+        Path("evals/recall/baseline/v1_floor.json").read_text(encoding="utf-8")
+    )
     config = Path("evals/recall/config.yaml").read_text(encoding="utf-8")
     digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
 
     assert floor["golden_set_sha"] == f"sha256:{digest}"
-    assert f"golden_set_sha: \"sha256:{digest}\"" in config
+    assert f'golden_set_sha: "sha256:{digest}"' in config

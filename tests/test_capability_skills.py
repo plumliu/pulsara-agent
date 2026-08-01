@@ -11,7 +11,10 @@ from pulsara_agent.capability import (
     render_active_skill_prompt,
     render_catalog_prompt,
 )
-from pulsara_agent.capability.types import ActiveSkillInjection, ResolvedSkillCatalogEntry
+from pulsara_agent.capability.types import (
+    ActiveSkillInjection,
+    ResolvedSkillCatalogEntry,
+)
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.primitives.capability import (
     CapabilityDescriptorBindingIdentityFact,
@@ -56,7 +59,9 @@ def _execution_surface(*tool_names: str):
     )
 
 
-def test_local_skill_provider_discovers_workspace_skill_and_filters_tool_refs(tmp_path) -> None:
+def test_local_skill_provider_discovers_workspace_skill_and_filters_tool_refs(
+    tmp_path,
+) -> None:
     skill_file = _write_skill(
         tmp_path,
         "review-pr",
@@ -77,7 +82,9 @@ Read the diff before commenting.
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset({"read_file"}))
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset({"read_file"})
+    )
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
@@ -120,7 +127,9 @@ cli_usage_kind: read
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset({"terminal"}))
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset({"terminal"})
+    )
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
@@ -159,7 +168,9 @@ cli_usage_kind: admin
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset({"terminal"}))
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset({"terminal"})
+    )
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
@@ -225,7 +236,9 @@ description: Workspace product-home skill.
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
@@ -267,7 +280,9 @@ description: User product-home skill.
     assert discovery.diagnostics == ()
 
 
-def test_local_skill_provider_uses_pulsara_home_for_user_product_skills(tmp_path, monkeypatch) -> None:
+def test_local_skill_provider_uses_pulsara_home_for_user_product_skills(
+    tmp_path, monkeypatch
+) -> None:
     pulsara_home = tmp_path / "custom-pulsara-home"
     skill_file = _write_skill_at_root(
         pulsara_home / "skills",
@@ -307,13 +322,17 @@ description: Hidden system cache should not be scanned as a normal skill.
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
     assert discovery.diagnostics == ()
 
 
-def test_local_skill_provider_rejects_missing_required_frontmatter_fields(tmp_path) -> None:
+def test_local_skill_provider_rejects_missing_required_frontmatter_fields(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "bad",
@@ -324,10 +343,14 @@ body
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
-    assert [diagnostic.code for diagnostic in discovery.diagnostics] == ["skill_missing_description"]
+    assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
+        "skill_missing_description"
+    ]
 
 
 def test_local_skill_provider_supports_yaml_block_scalar_description(tmp_path) -> None:
@@ -344,14 +367,21 @@ body
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert len(discovery.skills) == 1
-    assert discovery.skills[0].description == "Review pull requests carefully.\nUse when asked for review."
+    assert (
+        discovery.skills[0].description
+        == "Review pull requests carefully.\nUse when asked for review."
+    )
     assert discovery.diagnostics == ()
 
 
-def test_local_skill_provider_preserves_indented_fence_inside_block_scalar(tmp_path) -> None:
+def test_local_skill_provider_preserves_indented_fence_inside_block_scalar(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "blocky",
@@ -368,11 +398,16 @@ This is the real skill body.
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
-    assert skill.description == "Review pull requests carefully.\n---\nUse when asked for review."
+    assert (
+        skill.description
+        == "Review pull requests carefully.\n---\nUse when asked for review."
+    )
     assert skill.content.startswith("---\nname: blocky")
     assert "# Body\n\nThis is the real skill body." in skill.content
     assert discovery.diagnostics == ()
@@ -390,7 +425,9 @@ body
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
     assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
@@ -412,7 +449,9 @@ body
 """,
     )
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
     assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
@@ -435,14 +474,19 @@ description: Too large.
 """,
     )
 
-    discovery = LocalSkillProvider(max_skill_file_bytes=80, include_user_skills=False).discover(
+    discovery = LocalSkillProvider(
+        max_skill_file_bytes=80, include_user_skills=False
+    ).discover(
         tmp_path,
         available_tool_names=frozenset(),
     )
 
     assert len(discovery.skills) == 1
     assert discovery.skills[0].body_too_large is True
-    assert any(diagnostic.code == "skill_body_too_large" for diagnostic in discovery.diagnostics)
+    assert any(
+        diagnostic.code == "skill_body_too_large"
+        for diagnostic in discovery.diagnostics
+    )
 
 
 def test_local_skill_provider_rejects_skill_symlink_escape(tmp_path) -> None:
@@ -461,13 +505,19 @@ body
     skills_root.mkdir(parents=True)
     (skills_root / "escaped").symlink_to(outside, target_is_directory=True)
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
-    assert [diagnostic.code for diagnostic in discovery.diagnostics] == ["skill_symlink_escape"]
+    assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
+        "skill_symlink_escape"
+    ]
 
 
-def test_local_skill_provider_rejects_workspace_skill_root_symlink_escape(tmp_path) -> None:
+def test_local_skill_provider_rejects_workspace_skill_root_symlink_escape(
+    tmp_path,
+) -> None:
     outside_root = tmp_path.parent / f"{tmp_path.name}-outside-root"
     outside_root.mkdir()
     _write_skill_at_root(
@@ -484,10 +534,14 @@ body
     agents_dir.mkdir()
     (agents_dir / "skills").symlink_to(outside_root, target_is_directory=True)
 
-    discovery = _workspace_only_provider().discover(tmp_path, available_tool_names=frozenset())
+    discovery = _workspace_only_provider().discover(
+        tmp_path, available_tool_names=frozenset()
+    )
 
     assert discovery.skills == ()
-    assert [diagnostic.code for diagnostic in discovery.diagnostics] == ["skill_symlink_escape"]
+    assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
+        "skill_symlink_escape"
+    ]
 
 
 def test_render_catalog_escapes_metadata_and_uses_relative_location() -> None:
@@ -507,9 +561,14 @@ def test_render_catalog_escapes_metadata_and_uses_relative_location() -> None:
     assert "<available_skill_index>" in rendered.text
     assert "<skill_details>" in rendered.text
     assert "<name>review-pr</name>" in rendered.text
-    assert "&lt;/description&gt;&lt;/skill&gt;&lt;skill&gt;&lt;name&gt;evil&lt;/name&gt;" in rendered.text
+    assert (
+        "&lt;/description&gt;&lt;/skill&gt;&lt;skill&gt;&lt;name&gt;evil&lt;/name&gt;"
+        in rendered.text
+    )
     assert "&lt;/available_skills&gt;" in rendered.text
-    assert str(Path("/tmp/secret/.agents/skills/review-pr/SKILL.md")) not in rendered.text
+    assert (
+        str(Path("/tmp/secret/.agents/skills/review-pr/SKILL.md")) not in rendered.text
+    )
 
 
 def test_render_catalog_includes_cli_hints_as_guidance_not_permissions() -> None:
@@ -555,11 +614,18 @@ def test_render_catalog_preserves_late_skills_when_details_are_omitted() -> None
     assert "<available_skill_index>" in rendered.text
     assert "skill-00" in rendered.text
     assert "skill-24" in rendered.text
-    assert any(diagnostic.code == "skill_catalog_details_omitted" for diagnostic in rendered.diagnostics)
-    assert any("mode=hybrid" in diagnostic.message for diagnostic in rendered.diagnostics)
+    assert any(
+        diagnostic.code == "skill_catalog_details_omitted"
+        for diagnostic in rendered.diagnostics
+    )
+    assert any(
+        "mode=hybrid" in diagnostic.message for diagnostic in rendered.diagnostics
+    )
 
 
-def test_render_catalog_falls_back_to_name_location_index_before_dropping_skills() -> None:
+def test_render_catalog_falls_back_to_name_location_index_before_dropping_skills() -> (
+    None
+):
     entries = tuple(
         ResolvedSkillCatalogEntry(
             name=f"skill-{index}",
@@ -569,16 +635,22 @@ def test_render_catalog_falls_back_to_name_location_index_before_dropping_skills
         for index in range(3)
     )
 
-    rendered = render_catalog_prompt(entries, budget_chars=1_500, compact_description_chars=1_000)
+    rendered = render_catalog_prompt(
+        entries, budget_chars=1_500, compact_description_chars=1_000
+    )
 
     assert rendered.text is not None
     assert "skill-0" in rendered.text
     assert "skill-2" in rendered.text
     assert "<description>" not in rendered.text
-    assert any("mode=compact" in diagnostic.message for diagnostic in rendered.diagnostics)
+    assert any(
+        "mode=compact" in diagnostic.message for diagnostic in rendered.diagnostics
+    )
 
 
-def test_render_catalog_truncates_index_only_when_name_location_index_exceeds_budget() -> None:
+def test_render_catalog_truncates_index_only_when_name_location_index_exceeds_budget() -> (
+    None
+):
     rendered = render_catalog_prompt(
         tuple(
             ResolvedSkillCatalogEntry(
@@ -595,11 +667,18 @@ def test_render_catalog_truncates_index_only_when_name_location_index_exceeds_bu
     assert rendered.text is not None
     assert "skill-0" in rendered.text
     assert "skill-19" not in rendered.text
-    assert any(diagnostic.code == "skill_catalog_budget_truncated" for diagnostic in rendered.diagnostics)
-    assert any("mode=truncated" in diagnostic.message for diagnostic in rendered.diagnostics)
+    assert any(
+        diagnostic.code == "skill_catalog_budget_truncated"
+        for diagnostic in rendered.diagnostics
+    )
+    assert any(
+        "mode=truncated" in diagnostic.message for diagnostic in rendered.diagnostics
+    )
 
 
-def test_render_active_prompt_keeps_raw_markdown_and_uses_sentinel_fence(tmp_path) -> None:
+def test_render_active_prompt_keeps_raw_markdown_and_uses_sentinel_fence(
+    tmp_path,
+) -> None:
     content = """---
 name: review-pr
 description: Review PRs.
@@ -673,7 +752,9 @@ def test_render_active_prompt_retries_sentinel_collision() -> None:
     assert not rendered.diagnostics
 
 
-def test_render_active_prompt_reports_when_no_collision_free_sentinel(monkeypatch, tmp_path) -> None:
+def test_render_active_prompt_reports_when_no_collision_free_sentinel(
+    monkeypatch, tmp_path
+) -> None:
     import pulsara_agent.capability.render as render
 
     class FakeHash:
@@ -682,13 +763,13 @@ def test_render_active_prompt_reports_when_no_collision_free_sentinel(monkeypatc
 
     monkeypatch.setattr(render, "sha256", lambda _data: FakeHash())
     content = "\n".join(
-            [
-                "BEGIN_PULSARA_SKILL_BODY_forced000000",
-                "END_PULSARA_SKILL_BODY_forced000000",
-                "BEGIN_PULSARA_SKILL_BODY_forced000000_1",
-                "END_PULSARA_SKILL_BODY_forced000000_1",
-            ]
-        )
+        [
+            "BEGIN_PULSARA_SKILL_BODY_forced000000",
+            "END_PULSARA_SKILL_BODY_forced000000",
+            "BEGIN_PULSARA_SKILL_BODY_forced000000_1",
+            "END_PULSARA_SKILL_BODY_forced000000_1",
+        ]
+    )
     injection = ActiveSkillInjection(
         name="collision",
         path=tmp_path / ".agents/skills/collision/SKILL.md",
@@ -701,10 +782,14 @@ def test_render_active_prompt_reports_when_no_collision_free_sentinel(monkeypatc
     rendered = render_active_skill_prompt((injection,), max_delimiter_attempts=2)
 
     assert rendered.text is None
-    assert [diagnostic.code for diagnostic in rendered.diagnostics] == ["skill_body_delimiter_collision"]
+    assert [diagnostic.code for diagnostic in rendered.diagnostics] == [
+        "skill_body_delimiter_collision"
+    ]
 
 
-def test_local_skill_capability_provider_activates_explicit_mentions_and_preserves_scopes(tmp_path) -> None:
+def test_local_skill_capability_provider_activates_explicit_mentions_and_preserves_scopes(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "review-pr",
@@ -734,14 +819,23 @@ provides_tools: [read_file]
     )
 
     assert [entry.name for entry in resolved.catalog_entries] == ["review-pr"]
-    assert [entry.provides_tools for entry in resolved.catalog_entries] == [("read_file",)]
+    assert [entry.provides_tools for entry in resolved.catalog_entries] == [
+        ("read_file",)
+    ]
     assert [injection.name for injection in resolved.active_injections] == ["review-pr"]
-    assert resolved.catalog_prompt and ".agents/skills/review-pr/SKILL.md" in resolved.catalog_prompt
-    assert resolved.active_skill_prompt and "# Review PR" in resolved.active_skill_prompt
+    assert (
+        resolved.catalog_prompt
+        and ".agents/skills/review-pr/SKILL.md" in resolved.catalog_prompt
+    )
+    assert (
+        resolved.active_skill_prompt and "# Review PR" in resolved.active_skill_prompt
+    )
     assert domain.read_scopes == frozenset({"ctx:user", workspace_scope(str(tmp_path))})
 
 
-def test_local_skill_cli_hints_do_not_generate_callable_cli_descriptors(tmp_path) -> None:
+def test_local_skill_cli_hints_do_not_generate_callable_cli_descriptors(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "firecrawl-search",
@@ -767,10 +861,14 @@ external_services: [firecrawl]
 
     assert not hasattr(resolved, "descriptors")
     assert [entry.name for entry in resolved.catalog_entries] == ["firecrawl-search"]
-    assert [injection.name for injection in resolved.active_injections] == ["firecrawl-search"]
+    assert [injection.name for injection in resolved.active_injections] == [
+        "firecrawl-search"
+    ]
 
 
-def test_local_skill_capability_provider_reports_active_skill_health_diagnostics(tmp_path) -> None:
+def test_local_skill_capability_provider_reports_active_skill_health_diagnostics(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "hf-cli",
@@ -803,7 +901,11 @@ auth_required: optional
     )
 
     assert seen == ["hf", "git"]
-    assert [diagnostic.code for diagnostic in resolved.diagnostics if diagnostic.code.startswith("skill_")] == [
+    assert [
+        diagnostic.code
+        for diagnostic in resolved.diagnostics
+        if diagnostic.code.startswith("skill_")
+    ] == [
         "skill_required_binary_missing",
         "skill_auth_required",
         "skill_network_required",
@@ -846,21 +948,27 @@ required_binaries: [catalog-bin]
 
     provider = LocalSkillCapabilityProvider(
         provider=_workspace_only_provider(),
-        skill_health_resolver=SkillHealthResolver(ttl_seconds=60.0, which=fake_which, monotonic=fake_monotonic),
+        skill_health_resolver=SkillHealthResolver(
+            ttl_seconds=60.0, which=fake_which, monotonic=fake_monotonic
+        ),
     )
     context = _projection_context(tmp_path, user_input="$active-skill")
 
-    first = provider.resolve_projection(
-        context, execution_surface=_execution_surface()
-    )
+    first = provider.resolve_projection(context, execution_surface=_execution_surface())
     second = provider.resolve_projection(
         context, execution_surface=_execution_surface()
     )
 
     assert seen == ["missing-bin"]
     assert "catalog-bin" not in seen
-    assert any(diagnostic.code == "skill_required_binary_missing" for diagnostic in first.diagnostics)
-    assert any(diagnostic.code == "skill_required_binary_missing" for diagnostic in second.diagnostics)
+    assert any(
+        diagnostic.code == "skill_required_binary_missing"
+        for diagnostic in first.diagnostics
+    )
+    assert any(
+        diagnostic.code == "skill_required_binary_missing"
+        for diagnostic in second.diagnostics
+    )
 
 
 def test_skill_health_uses_supplied_terminal_path_for_binary_lookup(tmp_path) -> None:
@@ -879,16 +987,25 @@ def test_skill_health_uses_supplied_terminal_path_for_binary_lookup(tmp_path) ->
         required_binaries=("terminal-only", "missing-cli"),
     )
     resolver = SkillHealthResolver(
-        path_supplier=lambda: SkillBinaryLookupPath(path=str(bin_dir), source="terminal PATH"),
+        path_supplier=lambda: SkillBinaryLookupPath(
+            path=str(bin_dir), source="terminal PATH"
+        ),
     )
 
     diagnostics = resolver.diagnostics_for_active_skills((injection,))
 
-    assert [diagnostic.code for diagnostic in diagnostics] == ["skill_required_binary_missing"]
-    assert diagnostics[0].message == "Active skill requires CLI binary not found on terminal PATH: missing-cli"
+    assert [diagnostic.code for diagnostic in diagnostics] == [
+        "skill_required_binary_missing"
+    ]
+    assert (
+        diagnostics[0].message
+        == "Active skill requires CLI binary not found on terminal PATH: missing-cli"
+    )
 
 
-def test_local_skill_capability_provider_hides_disabled_model_catalog_but_allows_host_activation(tmp_path) -> None:
+def test_local_skill_capability_provider_hides_disabled_model_catalog_but_allows_host_activation(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "private-skill",
@@ -912,11 +1029,15 @@ disable_model_invocation: true
     )
 
     assert resolved.catalog_entries == ()
-    assert [injection.name for injection in resolved.active_injections] == ["private-skill"]
+    assert [injection.name for injection in resolved.active_injections] == [
+        "private-skill"
+    ]
     assert "Reason: host_command" in (resolved.active_skill_prompt or "")
 
 
-def test_local_skill_capability_provider_does_not_activate_oversized_skill_body(tmp_path) -> None:
+def test_local_skill_capability_provider_does_not_activate_oversized_skill_body(
+    tmp_path,
+) -> None:
     _write_skill(
         tmp_path,
         "big",
@@ -938,7 +1059,9 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
     assert resolved.active_injections == ()
     assert resolved.active_skill_prompt is None
-    assert any(diagnostic.code == "skill_body_too_large" for diagnostic in resolved.diagnostics)
+    assert any(
+        diagnostic.code == "skill_body_too_large" for diagnostic in resolved.diagnostics
+    )
 
 
 def _write_skill(root: Path, name: str, content: str) -> Path:

@@ -64,7 +64,9 @@ def triples_for_document(document: dict[str, Any], default_context: Any) -> list
     return _triples_for_node(subject, document, context, blank_counter)
 
 
-def document_from_rows(subject_iri: str, rows: list[dict[str, Any]], context: Any) -> dict[str, Any]:
+def document_from_rows(
+    subject_iri: str, rows: list[dict[str, Any]], context: Any
+) -> dict[str, Any]:
     values: dict[str, list[Any]] = {}
     blank_values: dict[str, dict[str, list[Any]]] = {}
     seen_main: set[tuple[str, str]] = set()
@@ -76,8 +78,15 @@ def document_from_rows(subject_iri: str, rows: list[dict[str, Any]], context: An
         if (predicate, object_key) not in seen_main:
             seen_main.add((predicate, object_key))
             values.setdefault(predicate, []).append(obj)
-        if isinstance(obj, dict) and obj.get("_type") == "bnode" and "bp" in row and "bo" in row:
-            blank_values.setdefault(str(obj["id"]), {}).setdefault(row_iri(row["bp"], context), []).append(row["bo"])
+        if (
+            isinstance(obj, dict)
+            and obj.get("_type") == "bnode"
+            and "bp" in row
+            and "bo" in row
+        ):
+            blank_values.setdefault(str(obj["id"]), {}).setdefault(
+                row_iri(row["bp"], context), []
+            ).append(row["bo"])
 
     document: dict[str, Any] = {
         "@context": deepcopy(context),
@@ -85,14 +94,15 @@ def document_from_rows(subject_iri: str, rows: list[dict[str, Any]], context: An
     }
     for predicate, objects in values.items():
         if predicate == RDF_TYPE:
-            document["@type"] = [compact_type(row_iri(obj, context), context) for obj in objects]
+            document["@type"] = [
+                compact_type(row_iri(obj, context), context) for obj in objects
+            ]
             continue
         key = compact_predicate(predicate, context)
-        decoded = [
-            _decode_object(obj, blank_values, context)
-            for obj in objects
-        ]
-        document[key] = decoded if len(decoded) != 1 or key in FORCE_LIST_KEYS else decoded[0]
+        decoded = [_decode_object(obj, blank_values, context) for obj in objects]
+        document[key] = (
+            decoded if len(decoded) != 1 or key in FORCE_LIST_KEYS else decoded[0]
+        )
     return document
 
 
@@ -166,11 +176,13 @@ def expand_term(term_name: str, context: Any) -> str:
 
 
 def compact_iri(iri: str, context: Any) -> str:
-    for prefix, base in sorted(_prefixes(context).items(), key=lambda item: len(item[1]), reverse=True):
+    for prefix, base in sorted(
+        _prefixes(context).items(), key=lambda item: len(item[1]), reverse=True
+    ):
         if iri.startswith(base):
-            return f"{prefix}:{iri[len(base):]}"
+            return f"{prefix}:{iri[len(base) :]}"
     if iri.startswith(GRAPH_BASE):
-        return f"graph:{iri[len(GRAPH_BASE):]}"
+        return f"graph:{iri[len(GRAPH_BASE) :]}"
     return iri
 
 
@@ -200,7 +212,9 @@ def literal_token(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _expanded_values_for_node(document: dict[str, Any], context: Any) -> dict[str, list[Any]]:
+def _expanded_values_for_node(
+    document: dict[str, Any], context: Any
+) -> dict[str, list[Any]]:
     values: dict[str, list[Any]] = {}
     seen: set[tuple[str, str]] = set()
     for key, value in document.items():
@@ -228,9 +242,13 @@ def _expanded_object(value: Any, context: Any, is_type: bool = False) -> Any:
             for key, item in value.items():
                 if key == "@id":
                     continue
-                expanded[compact_predicate(expand_term(key, context), context)] = _expanded_object(item, context)
+                expanded[compact_predicate(expand_term(key, context), context)] = (
+                    _expanded_object(item, context)
+                )
             return expanded
-        return _document_properties_from_expanded_values(_expanded_values_for_node(value, context), context)
+        return _document_properties_from_expanded_values(
+            _expanded_values_for_node(value, context), context
+        )
     return value
 
 
@@ -254,14 +272,15 @@ def _document_properties_from_expanded_values(
     document: dict[str, Any] = {}
     for predicate, objects in values.items():
         if predicate == RDF_TYPE:
-            document["@type"] = [compact_type(row_iri(obj, context), context) for obj in objects]
+            document["@type"] = [
+                compact_type(row_iri(obj, context), context) for obj in objects
+            ]
             continue
         key = compact_predicate(predicate, context)
-        decoded = [
-            _decode_normalized_object(obj, context)
-            for obj in objects
-        ]
-        document[key] = decoded if len(decoded) != 1 or key in FORCE_LIST_KEYS else decoded[0]
+        decoded = [_decode_normalized_object(obj, context) for obj in objects]
+        document[key] = (
+            decoded if len(decoded) != 1 or key in FORCE_LIST_KEYS else decoded[0]
+        )
     return document
 
 
@@ -274,7 +293,9 @@ def _decode_normalized_object(value: Any, context: Any) -> Any:
             if key == "@id":
                 decoded[key] = compact_iri(expand_id(str(item), context), context)
                 continue
-            decoded[compact_predicate(expand_term(key, context), context)] = _decode_normalized_object(item, context)
+            decoded[compact_predicate(expand_term(key, context), context)] = (
+                _decode_normalized_object(item, context)
+            )
         return decoded
     if isinstance(value, list):
         return [_decode_normalized_object(item, context) for item in value]
@@ -294,7 +315,9 @@ def _triples_for_node(
         values = value if isinstance(value, list) else [value]
         predicate = iri_token(RDF_TYPE if key == "@type" else expand_term(key, context))
         for item in values:
-            object_token, nested = _object_token(item, context, blank_counter, key == "@type")
+            object_token, nested = _object_token(
+                item, context, blank_counter, key == "@type"
+            )
             triples.append(f"{subject} {predicate} {object_token} .")
             triples.extend(nested)
     return triples
@@ -326,7 +349,9 @@ def _object_token(
     return literal_token(str(value)), []
 
 
-def _decode_object(value: Any, blank_values: dict[str, dict[str, list[Any]]], context: Any) -> Any:
+def _decode_object(
+    value: Any, blank_values: dict[str, dict[str, list[Any]]], context: Any
+) -> Any:
     if isinstance(value, dict) and value.get("_type") == "bnode":
         properties = blank_values.get(str(value["id"]), {})
         return {
@@ -345,5 +370,7 @@ def _prefixes(context: Any) -> dict[str, str]:
     return {
         key: value
         for key, value in mapping.items()
-        if isinstance(key, str) and isinstance(value, str) and value.endswith(("/", "#"))
+        if isinstance(key, str)
+        and isinstance(value, str)
+        and value.endswith(("/", "#"))
     }

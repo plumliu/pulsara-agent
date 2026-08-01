@@ -89,9 +89,7 @@ class PreparedTranscriptProjectionMaterialization:
 def prepare_authority_artifact_write_reservation(
     *,
     operation_id: str,
-    owner_kind: Literal[
-        "run_seed_materialization", "checkpoint_materialization"
-    ],
+    owner_kind: Literal["run_seed_materialization", "checkpoint_materialization"],
     artifacts: tuple[PreparedContentAddressedArtifact, ...],
     limits: AuthorityMaterializationLimits,
     absolute_deadline_monotonic: float,
@@ -305,14 +303,16 @@ def prepare_run_transcript_seed(
         artifact_id=seed_id,
         canonical_bytes=seed_bytes,
         media_type=RUN_TRANSCRIPT_SEED_MEDIA_TYPE,
-        semantic_metadata=_artifact_semantic_metadata({
-            "artifact_kind": "run_transcript_seed",
-            "seed_semantic_fingerprint": seed_semantic.seed_semantic_fingerprint,
-            "root_materialization_fingerprint": (
-                materialization.root_manifest.materialization_fingerprint
-            ),
-            "artifact_contract_fingerprint": contracts.run_seed.contract_fingerprint,
-        }),
+        semantic_metadata=_artifact_semantic_metadata(
+            {
+                "artifact_kind": "run_transcript_seed",
+                "seed_semantic_fingerprint": seed_semantic.seed_semantic_fingerprint,
+                "root_materialization_fingerprint": (
+                    materialization.root_manifest.materialization_fingerprint
+                ),
+                "artifact_contract_fingerprint": contracts.run_seed.contract_fingerprint,
+            }
+        ),
     )
     return PreparedRunTranscriptSeed(
         seed_semantic=seed_semantic,
@@ -409,7 +409,9 @@ def persist_prepared_transcript_projection_materialization(
     )
     for artifact in prepared.artifacts:
         if monotonic() >= deadline_monotonic:
-            raise TimeoutError("transcript checkpoint materialization deadline exceeded")
+            raise TimeoutError(
+                "transcript checkpoint materialization deadline exceeded"
+            )
         archive.put_text_if_absent_or_confirm_identical(
             artifact.artifact_id,
             artifact.canonical_bytes.decode("utf-8"),
@@ -480,7 +482,10 @@ def _externalize_oversized_messages(
             blocks=entry.content.blocks,
         )
         document_bytes = canonical_json_bytes(document.model_dump(mode="json"))
-        if len(document_bytes) > contracts.normalized_message_content.max_document_bytes:
+        if (
+            len(document_bytes)
+            > contracts.normalized_message_content.max_document_bytes
+        ):
             raise ValueError("normalized message content exceeds artifact contract")
         digest = _sha256(document_bytes)
         artifact_id = (
@@ -517,13 +522,15 @@ def _externalize_oversized_messages(
                 artifact_id=artifact_id,
                 canonical_bytes=document_bytes,
                 media_type=NORMALIZED_MESSAGE_CONTENT_MEDIA_TYPE,
-                semantic_metadata=_artifact_semantic_metadata({
-                    "artifact_kind": "normalized_message_content",
-                    "document_fact_fingerprint": document.fact_fingerprint,
-                    "artifact_contract_fingerprint": (
-                        contracts.normalized_message_content.contract_fingerprint
-                    ),
-                }),
+                semantic_metadata=_artifact_semantic_metadata(
+                    {
+                        "artifact_kind": "normalized_message_content",
+                        "document_fact_fingerprint": document.fact_fingerprint,
+                        "artifact_contract_fingerprint": (
+                            contracts.normalized_message_content.contract_fingerprint
+                        ),
+                    }
+                ),
             )
         )
     return tuple(persisted), tuple(artifacts)
@@ -643,14 +650,16 @@ def _materialize_tree(
             artifact_id=root_id,
             canonical_bytes=root_bytes,
             media_type=TRANSCRIPT_TREE_MEDIA_TYPE,
-            semantic_metadata=_artifact_semantic_metadata({
-                "artifact_kind": "transcript_projection_root",
-                "root_kind": root.root_kind,
-                "materialization_fingerprint": root.materialization_fingerprint,
-                "root_manifest_contract_fingerprint": (
-                    contracts.root_manifest.contract_fingerprint
-                ),
-            }),
+            semantic_metadata=_artifact_semantic_metadata(
+                {
+                    "artifact_kind": "transcript_projection_root",
+                    "root_kind": root.root_kind,
+                    "materialization_fingerprint": root.materialization_fingerprint,
+                    "root_manifest_contract_fingerprint": (
+                        contracts.root_manifest.contract_fingerprint
+                    ),
+                }
+            ),
         )
     )
     return root, root_ref, tuple(artifacts)
@@ -691,11 +700,13 @@ def _node_artifact(
         artifact_id=artifact_id,
         canonical_bytes=node_bytes,
         media_type=TRANSCRIPT_TREE_MEDIA_TYPE,
-        semantic_metadata=_artifact_semantic_metadata({
-            "artifact_kind": f"transcript_projection_{node_kind}_node",
-            "node_fingerprint": node.node_fingerprint,
-            "tree_contract_fingerprint": contracts.tree.tree_contract_fingerprint,
-        }),
+        semantic_metadata=_artifact_semantic_metadata(
+            {
+                "artifact_kind": f"transcript_projection_{node_kind}_node",
+                "node_fingerprint": node.node_fingerprint,
+                "tree_contract_fingerprint": contracts.tree.tree_contract_fingerprint,
+            }
+        ),
     )
 
 
@@ -709,7 +720,9 @@ def _normalized_transcript_fingerprint(
 
 
 def _subtree_fingerprint(fingerprints: tuple[str, ...]) -> str:
-    return context_fingerprint("transcript-projection-subtree-semantic:v1", fingerprints)
+    return context_fingerprint(
+        "transcript-projection-subtree-semantic:v1", fingerprints
+    )
 
 
 def _sha256(value: bytes) -> str:

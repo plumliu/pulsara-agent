@@ -102,7 +102,9 @@ def test_projection_executor_is_process_owned_and_bounded() -> None:
     assert capacity.critical_ledger_workers == 4
 
 
-def runtime_session_for_test_bootstrap_is_the_only_python_session_insert_owner() -> None:
+def runtime_session_for_test_bootstrap_is_the_only_python_session_insert_owner() -> (
+    None
+):
     owners: set[str] = set()
     for path in _python_sources(_SOURCE):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -264,8 +266,7 @@ def test_compaction_extension_live_capabilities_are_not_pydantic_fields() -> Non
                 continue
             pydantic_model = any(
                 isinstance(base, ast.Name)
-                and base.id
-                in {"BaseModel", "FrozenFactBase", "FrozenRuntimeStateBase"}
+                and base.id in {"BaseModel", "FrozenFactBase", "FrozenRuntimeStateBase"}
                 for base in node.bases
             )
             if not pydantic_model:
@@ -279,22 +280,20 @@ def test_compaction_extension_live_capabilities_are_not_pydantic_fields() -> Non
                     if isinstance(child, ast.Name)
                 }
                 if annotation_names & protocol_names:
-                    offenders.append(
-                        f"{path.relative_to(_ROOT)}:{node.name}"
-                    )
+                    offenders.append(f"{path.relative_to(_ROOT)}:{node.name}")
     assert offenders == []
 
 
 def test_compaction_result_authority_contains_only_immutable_plans() -> None:
-    extension_text = (
-        _SOURCE / "ports" / "compaction_extensions.py"
-    ).read_text(encoding="utf-8")
+    extension_text = (_SOURCE / "ports" / "compaction_extensions.py").read_text(
+        encoding="utf-8"
+    )
     assert "request_event_candidate: FrozenEventWriteCandidate" in extension_text
     assert "request_event: AgentEvent" not in extension_text
 
-    durable_text = (
-        _SOURCE / "projection_jobs" / "compaction_memory.py"
-    ).read_text(encoding="utf-8")
+    durable_text = (_SOURCE / "projection_jobs" / "compaction_memory.py").read_text(
+        encoding="utf-8"
+    )
     forbidden_fields = (
         "ordered_candidate_outbox_rows",
         "expected_job_lease_fingerprint",
@@ -306,12 +305,7 @@ def test_compaction_result_authority_contains_only_immutable_plans() -> None:
 
 
 def test_compaction_result_settlement_cannot_mutate_background_budget() -> None:
-    path = (
-        _SOURCE
-        / "runtime"
-        / "projection_jobs"
-        / "compaction_memory_settlement.py"
-    )
+    path = _SOURCE / "runtime" / "projection_jobs" / "compaction_memory_settlement.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     forbidden: list[str] = []
     for node in ast.walk(tree):

@@ -144,9 +144,7 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
-        candidate_snapshots: Mapping[
-            str, ImmutableGovernanceCandidateSnapshotFact
-        ]
+        candidate_snapshots: Mapping[str, ImmutableGovernanceCandidateSnapshotFact]
         | None = None,
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
@@ -172,9 +170,7 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
-        candidate_snapshots: Mapping[
-            str, ImmutableGovernanceCandidateSnapshotFact
-        ]
+        candidate_snapshots: Mapping[str, ImmutableGovernanceCandidateSnapshotFact]
         | None = None,
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
@@ -226,9 +222,7 @@ class MemoryGovernanceExecutor:
         governance_batch_id: str,
         relatedness_context: RelatednessExecutionContext | None,
         target_entries: tuple[PooledMemoryCandidate, ...],
-        candidate_snapshots: Mapping[
-            str, ImmutableGovernanceCandidateSnapshotFact
-        ],
+        candidate_snapshots: Mapping[str, ImmutableGovernanceCandidateSnapshotFact],
         execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         if isinstance(decision, SkipDecision):
@@ -485,9 +479,7 @@ class MemoryGovernanceExecutor:
         *,
         candidate,
         target_entries: tuple[PooledMemoryCandidate, ...],
-        candidate_snapshots: Mapping[
-            str, ImmutableGovernanceCandidateSnapshotFact
-        ],
+        candidate_snapshots: Mapping[str, ImmutableGovernanceCandidateSnapshotFact],
         uow: GovernanceWriteUnitOfWork,
     ) -> None:
         compaction_targets = tuple(
@@ -511,19 +503,17 @@ class MemoryGovernanceExecutor:
                 raise ValueError("compaction governance evidence snapshot drifted")
             source = snapshot.source_evidence_semantic
             attribution = snapshot.source_evidence_attribution
-            if not isinstance(
-                source, CompactionExtractionGovernanceSourceSemanticFact
-            ):
+            if not isinstance(source, CompactionExtractionGovernanceSourceSemanticFact):
                 raise ValueError("compaction candidate lost compaction evidence")
             payload = target.payload
             if not isinstance(payload, ValidCandidatePayload):
-                raise ValueError("compaction governance target is not a valid candidate")
+                raise ValueError(
+                    "compaction governance target is not a valid candidate"
+                )
             node_ids = payload.candidate.evidence_ids
             quote_semantics = source.ordered_evidence_semantics
             quote_attributions = attribution.quoted_evidence_attributions
-            if not (
-                len(node_ids) == len(quote_semantics) == len(quote_attributions)
-            ):
+            if not (len(node_ids) == len(quote_semantics) == len(quote_attributions)):
                 raise ValueError("compaction evidence node cardinality drifted")
             for node_id, semantic, occurrence in zip(
                 node_ids,
@@ -541,8 +531,7 @@ class MemoryGovernanceExecutor:
                     not isinstance(source_event, RunStartEvent)
                     or source_event.sequence != source_ref.sequence
                     or source_event.id != source_ref.stable_identity.event_id
-                    or source_event.type.value
-                    != source_ref.stable_identity.event_type
+                    or source_event.type.value != source_ref.stable_identity.event_type
                 ):
                     raise ValueError("compaction evidence source event drifted")
                 sanitized = sanitize_compaction_evidence(
@@ -552,8 +541,7 @@ class MemoryGovernanceExecutor:
                     sanitized.text != semantic.text
                     or sanitized.text_sha256 != semantic.text_sha256
                     or semantic.quote_kind != "canonical_sanitized_user_message"
-                    or semantic.verification_status
-                    != "canonical_sanitized_match"
+                    or semantic.verification_status != "canonical_sanitized_match"
                 ):
                     raise ValueError("compaction evidence sanitizer projection drifted")
                 document = normalize_jsonld_document(

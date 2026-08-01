@@ -46,9 +46,7 @@ class MemoryHookRunOwnerRegistry:
         self._lock = RLock()
         self._owners: dict[tuple[str, str], MemoryHookRunOwner] = {}
 
-    def acquire(
-        self, *, runtime_session_id: str, run_id: str
-    ) -> MemoryHookRunOwner:
+    def acquire(self, *, runtime_session_id: str, run_id: str) -> MemoryHookRunOwner:
         key = (runtime_session_id, run_id)
         with self._lock:
             owner = self._owners.get(key)

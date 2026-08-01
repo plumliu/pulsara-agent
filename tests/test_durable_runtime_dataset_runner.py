@@ -11,20 +11,9 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RUNNER = (
-    REPO_ROOT
-    / "benchmarks"
-    / "durable-runtime"
-    / "runners"
-    / "run_dataset.py"
-)
+RUNNER = REPO_ROOT / "benchmarks" / "durable-runtime" / "runners" / "run_dataset.py"
 MANIFEST = (
-    REPO_ROOT
-    / "benchmarks"
-    / "durable-runtime"
-    / "datasets"
-    / "v1"
-    / "manifest.json"
+    REPO_ROOT / "benchmarks" / "durable-runtime" / "datasets" / "v1" / "manifest.json"
 )
 
 
@@ -105,9 +94,7 @@ def test_dataset_runner_exposes_only_the_production_segment_case() -> None:
         "--json",
     )
     acceptance_payload = json.loads(acceptance.stdout)
-    assert {
-        case["case_id"] for case in acceptance_payload["cases"]
-    } == {"segment-v1"}
+    assert {case["case_id"] for case in acceptance_payload["cases"]} == {"segment-v1"}
 
 
 def test_dataset_runner_parallel_smoke_uses_isolated_processes(
@@ -126,8 +113,7 @@ def test_dataset_runner_parallel_smoke_uses_isolated_processes(
         str(output),
     )
     rows = [
-        json.loads(line)
-        for line in output.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()
     ]
 
     assert "expanded_cases=14" in completed.stdout
@@ -138,10 +124,7 @@ def test_dataset_runner_parallel_smoke_uses_isolated_processes(
     assert all(row["allowed_local_services"] == ["postgresql"] for row in rows)
     assert all(row["worker_pid"] != os.getpid() for row in rows)
     assert all(row["case_contract_fingerprint"].startswith("sha256:") for row in rows)
-    assert [
-        (row["case_ordinal"], row["iteration"])
-        for row in rows
-    ] == [
+    assert [(row["case_ordinal"], row["iteration"]) for row in rows] == [
         (case_ordinal, iteration)
         for case_ordinal in range(14)
         for iteration in range(2)
@@ -158,26 +141,20 @@ def test_dataset_typed_contract_rejects_invalid_long_plan_vector(
     context_root.mkdir()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     selected = "context-scenarios/long-plan-prefix-growth.json"
-    manifest["writer_scenarios"] = [
-        "writer-scenarios/model-semantic-batch-matrix.json"
-    ]
+    manifest["writer_scenarios"] = ["writer-scenarios/model-semantic-batch-matrix.json"]
     manifest["context_scenarios"] = [selected]
     (dataset_root / "manifest.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
     )
     source_writer = (
-        MANIFEST.parent
-        / "writer-scenarios"
-        / "model-semantic-batch-matrix.json"
+        MANIFEST.parent / "writer-scenarios" / "model-semantic-batch-matrix.json"
     )
     (writer_root / source_writer.name).write_text(
         source_writer.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    scenario = json.loads(
-        (MANIFEST.parent / selected).read_text(encoding="utf-8")
-    )
+    scenario = json.loads((MANIFEST.parent / selected).read_text(encoding="utf-8"))
     scenario["ledger"]["semantic_delta_events_per_call"] = [432]
     (dataset_root / selected).write_text(
         json.dumps(scenario),
@@ -388,11 +365,14 @@ def test_context_suite_contract_expands_to_322_trajectories() -> None:
         case_kind="production_valid",
     )
 
-    assert _context_trajectory_count(
-        cases,
-        diagnostic_warmup_iterations=None,
-        diagnostic_measured_iterations=None,
-    ) == 322
+    assert (
+        _context_trajectory_count(
+            cases,
+            diagnostic_warmup_iterations=None,
+            diagnostic_measured_iterations=None,
+        )
+        == 322
+    )
 
 
 def test_context_progress_reporter_emits_bounded_text_and_jsonl(
@@ -436,8 +416,7 @@ def test_context_progress_reporter_emits_bounded_text_and_jsonl(
     reporter.failed(failed, RuntimeError("must not enter progress output"))
 
     rows = [
-        json.loads(line)
-        for line in log_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [row["event_kind"] for row in rows] == [
         "trajectory_started",

@@ -21,9 +21,7 @@ from pulsara_agent.ports.run_execution import (
 class InteractionSuspensionRequest(FrozenRuntimeStateBase):
     owner_identity: RunOwnerIdentity
     activation_identity: RunActivationIdentity
-    authority: PendingInteractionAuthority = Field(
-        discriminator="interaction_kind"
-    )
+    authority: PendingInteractionAuthority = Field(discriminator="interaction_kind")
     expected_termination_revision: int = Field(ge=0)
     stable_candidate_fingerprint: str = Field(min_length=1)
 

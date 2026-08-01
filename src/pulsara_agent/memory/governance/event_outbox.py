@@ -113,7 +113,9 @@ class GovernanceEventOutboxRepository:
             )
             row = cursor.fetchone()
         if row is None:
-            raise GovernanceEventDispatchError("governance event outbox insert vanished")
+            raise GovernanceEventDispatchError(
+                "governance event outbox insert vanished"
+            )
         durable = _ticket_from_row(outbox_id, row)
         if durable != ticket:
             raise GovernanceEventDispatchError(
@@ -160,7 +162,9 @@ class PostgresGovernanceEventOutboxStore:
             deadline_monotonic=monotonic() + 30.0,
         )
 
-    def claim(self, outbox_id: str | None = None) -> _ClaimedGovernanceEventBatch | None:
+    def claim(
+        self, outbox_id: str | None = None
+    ) -> _ClaimedGovernanceEventBatch | None:
         claim_token = f"governance-event-claim:{uuid4().hex}"
         with self._connection(row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
@@ -408,7 +412,10 @@ def _validate_committed_batch(
             "governance event commit returned another event batch"
         )
     for candidate, event in zip(ticket.events, stored, strict=True):
-        if event.sequence is None or event.model_copy(update={"sequence": None}) != candidate:
+        if (
+            event.sequence is None
+            or event.model_copy(update={"sequence": None}) != candidate
+        ):
             raise GovernanceEventDispatchError(
                 "governance event commit payload differs from durable outbox"
             )

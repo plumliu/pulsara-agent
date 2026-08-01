@@ -320,7 +320,9 @@ def test_mcp_config_store_rejects_unowned_oauth_profile(tmp_path: Path) -> None:
 
 
 def test_mcp_http_redirects_fail_closed_before_auth_can_leak() -> None:
-    with pytest.raises(ValueError, match="redirects require an owned same-origin policy"):
+    with pytest.raises(
+        ValueError, match="redirects require an owned same-origin policy"
+    ):
         McpStreamableHttpConfig(
             url="https://example.test/mcp",
             bearer_token_env_var="PULSARA_TEST_MCP_TOKEN",

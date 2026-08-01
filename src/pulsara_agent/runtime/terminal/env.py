@@ -133,7 +133,9 @@ class TerminalEnvConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "TerminalEnvConfig":
         env = env or os.environ
         return cls(
-            enable_shell_snapshot=_env_bool(env.get("PULSARA_TERMINAL_SHELL_SNAPSHOT"), default=True),
+            enable_shell_snapshot=_env_bool(
+                env.get("PULSARA_TERMINAL_SHELL_SNAPSHOT"), default=True
+            ),
             shell_snapshot_ttl_seconds=_env_float(
                 env.get("PULSARA_TERMINAL_SHELL_SNAPSHOT_TTL_SECONDS"),
                 default=300.0,
@@ -144,10 +146,18 @@ class TerminalEnvConfig:
                 default=5.0,
                 minimum=0.1,
             ),
-            inherit_allowlist=_parse_env_names(env.get("PULSARA_TERMINAL_ENV_INHERIT_ALLOWLIST", "")),
-            passthrough_names=_parse_env_names(env.get("PULSARA_TERMINAL_ENV_PASSTHROUGH_NAMES", "")),
-            extra_path_prepends=_parse_paths(env.get("PULSARA_TERMINAL_EXTRA_PATH_PREPENDS", "")),
-            enable_venv_overlay=_env_bool(env.get("PULSARA_TERMINAL_VENV_OVERLAY"), default=True),
+            inherit_allowlist=_parse_env_names(
+                env.get("PULSARA_TERMINAL_ENV_INHERIT_ALLOWLIST", "")
+            ),
+            passthrough_names=_parse_env_names(
+                env.get("PULSARA_TERMINAL_ENV_PASSTHROUGH_NAMES", "")
+            ),
+            extra_path_prepends=_parse_paths(
+                env.get("PULSARA_TERMINAL_EXTRA_PATH_PREPENDS", "")
+            ),
+            enable_venv_overlay=_env_bool(
+                env.get("PULSARA_TERMINAL_VENV_OVERLAY"), default=True
+            ),
         )
 
 
@@ -178,7 +188,9 @@ class TerminalEnvBuilder:
     parent_env: Mapping[str, str] | None = None
     time_fn: Callable[[], float] = time.monotonic
     # Shared by sessions in today's synchronous tool loop; add a lock before enabling concurrent tool execution.
-    _snapshot_cache: _SnapshotCacheEntry | None = field(default=None, init=False, repr=False)
+    _snapshot_cache: _SnapshotCacheEntry | None = field(
+        default=None, init=False, repr=False
+    )
 
     def build(
         self,
@@ -192,7 +204,9 @@ class TerminalEnvBuilder:
             parent_env,
             config=self.config,
         )
-        snapshot = self._snapshot(shell=shell, parent_env=sanitized_parent, workspace_root=workspace_root)
+        snapshot = self._snapshot(
+            shell=shell, parent_env=sanitized_parent, workspace_root=workspace_root
+        )
 
         env = dict(sanitized_parent)
         snapshot_path = ""
@@ -204,12 +218,21 @@ class TerminalEnvBuilder:
 
         parent_path = sanitized_parent.get("PATH", "")
         venv_overlay = (
-            find_nearest_venv_bin(cwd, workspace_root) if self.config.enable_venv_overlay else None
+            find_nearest_venv_bin(cwd, workspace_root)
+            if self.config.enable_venv_overlay
+            else None
         )
         path_entries = merge_path_entries(
             [
-                *(str(path) for path in ([venv_overlay] if venv_overlay is not None else [])),
-                *(str(path) for path in self.config.extra_path_prepends if path.exists()),
+                *(
+                    str(path)
+                    for path in ([venv_overlay] if venv_overlay is not None else [])
+                ),
+                *(
+                    str(path)
+                    for path in self.config.extra_path_prepends
+                    if path.exists()
+                ),
                 *split_path(snapshot_path),
                 *split_path(parent_path),
                 *SANE_FALLBACK_PATH,
@@ -220,7 +243,9 @@ class TerminalEnvBuilder:
         diagnostics: dict[str, object] = {
             **parent_diag,
             "shell_snapshot_used": bool(snapshot and snapshot.error is None),
-            "shell_snapshot_error": snapshot.error if snapshot and snapshot.error else None,
+            "shell_snapshot_error": snapshot.error
+            if snapshot and snapshot.error
+            else None,
             "venv_overlay": str(venv_overlay) if venv_overlay is not None else None,
             "path_entries_count": len(path_entries),
         }
@@ -236,10 +261,15 @@ class TerminalEnvBuilder:
         if not self.config.enable_shell_snapshot:
             return None
         now = self.time_fn()
-        key = self._snapshot_cache_key(shell=shell, parent_env=parent_env, workspace_root=workspace_root)
+        key = self._snapshot_cache_key(
+            shell=shell, parent_env=parent_env, workspace_root=workspace_root
+        )
         if self._snapshot_cache is not None:
             cached = self._snapshot_cache.snapshot
-            if self._snapshot_cache.key == key and now - cached.created_at <= self.config.shell_snapshot_ttl_seconds:
+            if (
+                self._snapshot_cache.key == key
+                and now - cached.created_at <= self.config.shell_snapshot_ttl_seconds
+            ):
                 return cached
         snapshot = capture_shell_env_snapshot(
             shell=shell,
@@ -258,8 +288,14 @@ class TerminalEnvBuilder:
         workspace_root: Path,
     ) -> tuple[object, ...]:
         home = parent_env.get("HOME", "")
-        allowed_names = DEFAULT_ENV_ALLOWLIST | self.config.inherit_allowlist | self.config.passthrough_names
-        safe_signature = tuple(sorted((name, parent_env.get(name, "")) for name in allowed_names))
+        allowed_names = (
+            DEFAULT_ENV_ALLOWLIST
+            | self.config.inherit_allowlist
+            | self.config.passthrough_names
+        )
+        safe_signature = tuple(
+            sorted((name, parent_env.get(name, "")) for name in allowed_names)
+        )
         return (
             str(shell.path),
             home,
@@ -277,7 +313,9 @@ def sanitize_subprocess_env(
     config: TerminalEnvConfig | None = None,
 ) -> tuple[dict[str, str], dict[str, object]]:
     config = config or TerminalEnvConfig(enable_shell_snapshot=False)
-    allowed = DEFAULT_ENV_ALLOWLIST | config.inherit_allowlist | config.passthrough_names
+    allowed = (
+        DEFAULT_ENV_ALLOWLIST | config.inherit_allowlist | config.passthrough_names
+    )
     result: dict[str, str] = {}
     removed_count = 0
     secret_value_removed_count = 0
@@ -304,7 +342,9 @@ def sanitize_subprocess_env(
 
 
 def build_default_subprocess_env() -> dict[str, str]:
-    env, _ = sanitize_subprocess_env(os.environ, config=TerminalEnvConfig(enable_shell_snapshot=False))
+    env, _ = sanitize_subprocess_env(
+        os.environ, config=TerminalEnvConfig(enable_shell_snapshot=False)
+    )
     if not env.get("PATH"):
         env["PATH"] = os.pathsep.join(SANE_FALLBACK_PATH)
     return env
@@ -326,7 +366,9 @@ def capture_shell_env_snapshot(
             source="login_shell",
             error="shell path is not an executable absolute path",
         )
-    probe_shell = TerminalShellConfig(path=shell.path, login=True, interactive_init=True)
+    probe_shell = TerminalShellConfig(
+        path=shell.path, login=True, interactive_init=True
+    )
     command = f"printf '%s\\0' {_SHELL_SNAPSHOT_SENTINEL}; env -0"
     try:
         proc = subprocess.Popen(
@@ -339,7 +381,9 @@ def capture_shell_env_snapshot(
             start_new_session=True,
         )
         try:
-            stdout = _read_bounded_stdout(proc, timeout_seconds=config.shell_snapshot_timeout_seconds)
+            stdout = _read_bounded_stdout(
+                proc, timeout_seconds=config.shell_snapshot_timeout_seconds
+            )
             if proc.returncode is None:
                 proc.wait(timeout=0.2)
         except subprocess.TimeoutExpired:
@@ -439,7 +483,9 @@ def _parse_env0_after_sentinel(stdout: bytes) -> dict[str, str]:
     return result
 
 
-def _read_bounded_stdout(proc: subprocess.Popen[bytes], *, timeout_seconds: float) -> bytes:
+def _read_bounded_stdout(
+    proc: subprocess.Popen[bytes], *, timeout_seconds: float
+) -> bytes:
     if proc.stdout is None:
         return b""
     deadline = time.monotonic() + timeout_seconds
@@ -486,7 +532,9 @@ def _is_path_structural_env_name(name: str) -> bool:
     )
 
 
-def _startup_file_signature(shell: TerminalShellConfig, home: str) -> tuple[tuple[str, int | None, int | None], ...]:
+def _startup_file_signature(
+    shell: TerminalShellConfig, home: str
+) -> tuple[tuple[str, int | None, int | None], ...]:
     if not home:
         return ()
     home_path = Path(home).expanduser()
@@ -523,7 +571,9 @@ def _parse_env_names(value: str) -> frozenset[str]:
 
 
 def _parse_paths(value: str) -> tuple[Path, ...]:
-    return tuple(Path(item).expanduser() for item in value.split(os.pathsep) if item.strip())
+    return tuple(
+        Path(item).expanduser() for item in value.split(os.pathsep) if item.strip()
+    )
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:

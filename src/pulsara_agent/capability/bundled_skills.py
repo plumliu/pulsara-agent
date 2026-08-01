@@ -47,7 +47,9 @@ BundledSkillStatusState = Literal[
     "unmanaged_collision",
     "source_removed",
 ]
-BundledSkillResetAction = Literal["reset", "restored_deleted", "unchanged", "not_bundled"]
+BundledSkillResetAction = Literal[
+    "reset", "restored_deleted", "unchanged", "not_bundled"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +68,9 @@ class BundledSkillSyncItem:
                 "name": self.name,
                 "action": self.action,
                 "message": self.message,
-                "target_path": str(self.target_path) if self.target_path is not None else None,
+                "target_path": str(self.target_path)
+                if self.target_path is not None
+                else None,
                 "source_hash": self.source_hash,
                 "manifest_hash": self.manifest_hash,
                 "target_hash": self.target_hash,
@@ -88,7 +92,9 @@ class BundledSkillSyncResult:
         return {
             "pulsara_home": str(self.pulsara_home),
             "skills_root": str(self.skills_root),
-            "source_root": str(self.source_root) if self.source_root is not None else None,
+            "source_root": str(self.source_root)
+            if self.source_root is not None
+            else None,
             "opt_out": self.opt_out,
             "manifest_path": str(self.manifest_path),
             "manifest_written": self.manifest_written,
@@ -111,7 +117,9 @@ class BundledSkillStatus:
             {
                 "name": self.name,
                 "state": self.state,
-                "target_path": str(self.target_path) if self.target_path is not None else None,
+                "target_path": str(self.target_path)
+                if self.target_path is not None
+                else None,
                 "source_hash": self.source_hash,
                 "manifest_hash": self.manifest_hash,
                 "target_hash": self.target_hash,
@@ -133,7 +141,9 @@ class BundledSkillStatusResult:
         return {
             "pulsara_home": str(self.pulsara_home),
             "skills_root": str(self.skills_root),
-            "source_root": str(self.source_root) if self.source_root is not None else None,
+            "source_root": str(self.source_root)
+            if self.source_root is not None
+            else None,
             "opt_out": self.opt_out,
             "manifest_path": str(self.manifest_path),
             "statuses": [status.to_dict() for status in self.statuses],
@@ -157,7 +167,9 @@ class BundledSkillResetResult:
                 "action": self.action,
                 "message": self.message,
                 "target_path": str(self.target_path),
-                "backup_path": str(self.backup_path) if self.backup_path is not None else None,
+                "backup_path": str(self.backup_path)
+                if self.backup_path is not None
+                else None,
                 "origin_hash": self.origin_hash,
                 "manifest_written": self.manifest_written,
             }
@@ -439,7 +451,9 @@ def reset_bundled_skill(
         origin_hash = compute_skill_dir_hash(source_dir)
         manifest = _read_manifest(manifest_path)
         provenance = _read_provenance(target_dir) if target_dir.exists() else {}
-        target_is_bundled = manifest.get(name) is not None or provenance.get("source") == "bundled"
+        target_is_bundled = (
+            manifest.get(name) is not None or provenance.get("source") == "bundled"
+        )
         if target_dir.exists() and not target_is_bundled:
             return BundledSkillResetResult(
                 name=name,
@@ -496,7 +510,9 @@ def reset_bundled_skill(
 
 def compute_skill_dir_hash(skill_dir: Path) -> str:
     digest = sha256()
-    for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
+    for path in sorted(
+        skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()
+    ):
         if not path.is_file():
             continue
         relative = path.relative_to(skill_dir).as_posix()
@@ -548,8 +564,12 @@ def _read_manifest(path: Path) -> dict[str, str]:
 
 def _write_manifest_atomic(path: Path, manifest: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{name}:{origin_hash}\n" for name, origin_hash in sorted(manifest.items())]
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    lines = [
+        f"{name}:{origin_hash}\n" for name, origin_hash in sorted(manifest.items())
+    ]
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -606,7 +626,10 @@ def _write_provenance(
         "origin_hash": origin_hash,
     }
     path = skill_dir / BUNDLED_SKILL_PROVENANCE_FILE_NAME
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _ensure_provenance(
@@ -637,7 +660,9 @@ def _ensure_provenance(
 
 def _read_provenance(skill_dir: Path) -> dict[str, object]:
     try:
-        data = json.loads((skill_dir / BUNDLED_SKILL_PROVENANCE_FILE_NAME).read_text(encoding="utf-8"))
+        data = json.loads(
+            (skill_dir / BUNDLED_SKILL_PROVENANCE_FILE_NAME).read_text(encoding="utf-8")
+        )
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -647,7 +672,12 @@ def _backup_existing_skill(target_dir: Path, *, skills_root: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup_dir = skills_root / RESTORE_BACKUPS_DIR_NAME / timestamp / target_dir.name
     while backup_dir.exists():
-        backup_dir = skills_root / RESTORE_BACKUPS_DIR_NAME / f"{timestamp}-{uuid4().hex[:8]}" / target_dir.name
+        backup_dir = (
+            skills_root
+            / RESTORE_BACKUPS_DIR_NAME
+            / f"{timestamp}-{uuid4().hex[:8]}"
+            / target_dir.name
+        )
     backup_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(target_dir, backup_dir, ignore=_copy_ignore)
     return backup_dir

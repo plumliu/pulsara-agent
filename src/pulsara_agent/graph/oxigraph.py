@@ -46,7 +46,13 @@ class OxigraphGraphStore:
         triples = _triples_for_document(document, self.default_context)
         update = f"DELETE WHERE {{ GRAPH {graph} {{ {subject} ?p ?o . }} }}"
         if triples:
-            update += ";\nINSERT DATA { GRAPH " + graph + " {\n" + "\n".join(triples) + "\n} }"
+            update += (
+                ";\nINSERT DATA { GRAPH "
+                + graph
+                + " {\n"
+                + "\n".join(triples)
+                + "\n} }"
+            )
         self.update(update)
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
@@ -80,9 +86,13 @@ ASK {{
         result = self._sparql_query(sparql)
         return bool(result.get("boolean"))
 
-    def find_by_type(self, type_name, graph_id: str | None = None) -> list[dict[str, Any]]:
+    def find_by_type(
+        self, type_name, graph_id: str | None = None
+    ) -> list[dict[str, Any]]:
         graph_key = _graph_key(graph_id)
-        type_iri = getattr(type_name, "value", None) or _expand_type(str(type_name.name), self.default_context)
+        type_iri = getattr(type_name, "value", None) or _expand_type(
+            str(type_name.name), self.default_context
+        )
         sparql = f"""
 SELECT ?s WHERE {{
   GRAPH {_iri_token(_expand_graph_id(graph_key, self.default_context))} {{
@@ -95,15 +105,24 @@ SELECT ?s WHERE {{
         for row in rows:
             subject = row.get("s")
             if isinstance(subject, dict) and "@id" in subject:
-                documents.append(self.get_jsonld(str(subject["@id"]), graph_id=graph_key))
+                documents.append(
+                    self.get_jsonld(str(subject["@id"]), graph_id=graph_key)
+                )
         return documents
 
-    def query(self, sparql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def query(
+        self, sparql: str, bindings: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         if bindings:
-            raise NotImplementedError("OxigraphGraphStore does not yet support query bindings")
+            raise NotImplementedError(
+                "OxigraphGraphStore does not yet support query bindings"
+            )
         result = self._sparql_query(sparql)
         return [
-            {name: _binding_to_jsonld(binding, self.default_context) for name, binding in row.items()}
+            {
+                name: _binding_to_jsonld(binding, self.default_context)
+                for name, binding in row.items()
+            }
             for row in result.get("results", {}).get("bindings", [])
         ]
 
@@ -115,15 +134,23 @@ SELECT ?s WHERE {{
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
                 if response.status not in {200, 204}:
-                    raise RuntimeError(f"Oxigraph update failed with status {response.status}")
+                    raise RuntimeError(
+                        f"Oxigraph update failed with status {response.status}"
+                    )
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Oxigraph update failed with status {exc.code}: {body}") from exc
+            raise RuntimeError(
+                f"Oxigraph update failed with status {exc.code}: {body}"
+            ) from exc
 
     def delete_graph(self, graph_id: str) -> None:
-        self.update(f"DROP SILENT GRAPH {_iri_token(_expand_graph_id(_graph_key(graph_id), self.default_context))}")
+        self.update(
+            f"DROP SILENT GRAPH {_iri_token(_expand_graph_id(_graph_key(graph_id), self.default_context))}"
+        )
 
     def _sparql_query(self, sparql: str) -> dict[str, Any]:
         data = urllib.parse.urlencode({"query": sparql}).encode("utf-8")
@@ -137,9 +164,13 @@ SELECT ?s WHERE {{
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Oxigraph query failed with status {exc.code}: {body}") from exc
+            raise RuntimeError(
+                f"Oxigraph query failed with status {exc.code}: {body}"
+            ) from exc
         return json.loads(payload)

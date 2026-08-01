@@ -57,7 +57,9 @@ def test_host_workspace_transient_resolution_uses_user_scope_only(tmp_path) -> N
     assert resolved.workspace_key.startswith("transient:")
 
 
-def test_host_workspace_auto_transient_resolution_keeps_root_by_default(tmp_path) -> None:
+def test_host_workspace_auto_transient_resolution_keeps_root_by_default(
+    tmp_path,
+) -> None:
     scratch_root = tmp_path / "scratch-root"
 
     resolved = resolve_workspace(
@@ -74,7 +76,9 @@ def test_host_workspace_auto_transient_resolution_keeps_root_by_default(tmp_path
     assert resolved.cleanup_workspace_root_on_close is False
 
 
-def test_host_workspace_auto_transient_resolution_can_opt_into_cleanup(tmp_path) -> None:
+def test_host_workspace_auto_transient_resolution_can_opt_into_cleanup(
+    tmp_path,
+) -> None:
     scratch_root = tmp_path / "scratch-root"
 
     resolved = resolve_workspace(
@@ -104,8 +108,14 @@ def test_host_workspace_project_requires_existing_directory(tmp_path) -> None:
     with pytest.raises(ValueError, match="requires workspace_root"):
         resolve_workspace(HostWorkspaceInput(workspace_kind="project"))
     with pytest.raises(ValueError, match="does not exist"):
-        resolve_workspace(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path / "missing"))
+        resolve_workspace(
+            HostWorkspaceInput(
+                workspace_kind="project", workspace_root=tmp_path / "missing"
+            )
+        )
     file_path = tmp_path / "file.txt"
     file_path.write_text("x", encoding="utf-8")
     with pytest.raises(ValueError, match="not a directory"):
-        resolve_workspace(HostWorkspaceInput(workspace_kind="project", workspace_root=Path(file_path)))
+        resolve_workspace(
+            HostWorkspaceInput(workspace_kind="project", workspace_root=Path(file_path))
+        )

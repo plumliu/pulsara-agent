@@ -559,9 +559,9 @@ class CompactionMemoryExtractionJobDeferralFact(FrozenFactBase):
 
 
 class CompactionMemoryExtractionSupersededReceiptFact(FrozenFactBase):
-    schema_version: Literal[
+    schema_version: Literal["compaction_memory_extraction_superseded_receipt.v1"] = (
         "compaction_memory_extraction_superseded_receipt.v1"
-    ] = "compaction_memory_extraction_superseded_receipt.v1"
+    )
     receipt_kind: Literal["compaction_memory_extraction_superseded"] = (
         "compaction_memory_extraction_superseded"
     )
@@ -572,9 +572,7 @@ class CompactionMemoryExtractionSupersededReceiptFact(FrozenFactBase):
     job_id: str
     target_key: str
     source_request_event_reference: DurableProjectionSourceEventReferenceFact
-    supersession_reason: Literal["graceful_session_close"] = (
-        "graceful_session_close"
-    )
+    supersession_reason: Literal["graceful_session_close"] = "graceful_session_close"
     dispatch_attempt_count: int = Field(ge=0)
     receipt_fingerprint: str
 
@@ -603,9 +601,7 @@ class DurableProjectionJobOperationalStateFact(FrozenFactBase):
     lease_expires_at: datetime | None
     next_attempt_at: datetime | None
     last_failure: BoundedRuntimeFailureDiagnosticFact | None
-    compaction_memory_deferral: (
-        CompactionMemoryExtractionJobDeferralFact | None
-    ) = None
+    compaction_memory_deferral: CompactionMemoryExtractionJobDeferralFact | None = None
     result_receipt_reference: DurableProjectionResultReceiptReferenceFact | None
     state_fingerprint: str
 

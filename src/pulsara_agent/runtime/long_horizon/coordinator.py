@@ -240,9 +240,7 @@ def allowed_action_classes_for_phase(
             LongHorizonActionClass.PROCESS_CONTROL,
         }
     elif phase is RolloutPhase.RESTRICTED:
-        values = set(LongHorizonActionClass) - {
-            LongHorizonActionClass.EXTERNAL_ACTION
-        }
+        values = set(LongHorizonActionClass) - {LongHorizonActionClass.EXTERNAL_ACTION}
     else:
         values = set(LongHorizonActionClass)
     return tuple(sorted(values, key=str))

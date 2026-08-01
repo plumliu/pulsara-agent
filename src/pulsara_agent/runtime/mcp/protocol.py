@@ -151,10 +151,7 @@ class McpClientInputRequiredLeg(FrozenRuntimeStateBase):
     @model_validator(mode="after")
     def _identity(self) -> "McpClientInputRequiredLeg":
         keys = tuple(item.key for item in self.input_requests)
-        if (
-            keys != self.ordered_request_keys
-            or keys != tuple(sorted(set(keys)))
-        ):
+        if keys != self.ordered_request_keys or keys != tuple(sorted(set(keys))):
             raise ValueError("MCP client-input request key set drifted")
         expected_set = context_fingerprint(
             "mcp-input-request-set:v1",
@@ -248,8 +245,7 @@ def lower_input_required_result(
         raise McpInputRequiredContractError("MCP requestState must be an opaque string")
     if (
         request_state is not None
-        and len(request_state.encode("utf-8"))
-        > bounds.maximum_request_state_utf8_bytes
+        and len(request_state.encode("utf-8")) > bounds.maximum_request_state_utf8_bytes
     ):
         raise McpInputRequiredContractError("MCP requestState exceeds its byte bound")
     requests = dict(input_requests or {})
@@ -405,7 +401,12 @@ def _lower_elicitation_request(
     ):
         raise McpElicitationUrlPolicyRejected("MCP elicitation URL exceeds policy")
     parsed = urlsplit(exact_url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
         raise McpElicitationUrlPolicyRejected(
             "MCP elicitation URL must be credential-free HTTPS"
         )
@@ -433,7 +434,9 @@ def _lower_elicitation_request(
         ascii_host=ascii_host,
         unicode_host=unicode_host,
         explicit_port=port,
-        punycode_warning_required=(ascii_host.startswith("xn--") or ".xn--" in ascii_host),
+        punycode_warning_required=(
+            ascii_host.startswith("xn--") or ".xn--" in ascii_host
+        ),
         commitment_key_id=commitment_key_id,
         keyed_full_url_commitment=commitment,
         url_policy_fingerprint=MCP_URL_POLICY_FINGERPRINT,

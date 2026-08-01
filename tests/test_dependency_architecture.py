@@ -15,6 +15,7 @@ from tests.support.dependency_rules import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 def test_d4_target_dependency_dag_has_no_exceptions() -> None:
     observations = scan_pulsara_imports(ROOT)
     assert forbidden_d4_observations(observations) == ()

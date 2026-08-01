@@ -153,9 +153,7 @@ def _projection_fixture(
             f"{model_start.resolved_call.resolved_model_call_id}:1"
         ),
         **ctx.event_fields(),
-        "resolved_model_call_id": (
-            model_start.resolved_call.resolved_model_call_id
-        ),
+        "resolved_model_call_id": (model_start.resolved_call.resolved_model_call_id),
         "model_call_start_event_id": model_start.id,
         "model_call_end_event_id": model_end.id,
         "model_call_index": 1,
@@ -167,8 +165,7 @@ def _projection_fixture(
         "termination_intent": None,
         "recovery_reason_code": (
             "process_restarted_before_control_resolution"
-            if control_disposition
-            is ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY
+            if control_disposition is ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY
             else None
         ),
     }
@@ -194,28 +191,28 @@ def _projection_fixture(
         run_start,
         window_open,
         ReplyStartEvent(
-                id=model_start.recovery_plan.reply_start_event_id,
-                **ctx.event_fields(),
-                name="assistant",
-            ),
+            id=model_start.recovery_plan.reply_start_event_id,
+            **ctx.event_fields(),
+            name="assistant",
+        ),
         model_start,
         make_tool_call_start_event(
-                **ctx.event_fields(),
-                tool_call_id="call:projection",
-                tool_call_name=tool_name,
-            ),
+            **ctx.event_fields(),
+            tool_call_id="call:projection",
+            tool_call_name=tool_name,
+        ),
         make_tool_call_arguments_segment_event(
-                **ctx.event_fields(),
-                tool_call_id="call:projection",
-                delta=raw_arguments_json,
-            ),
+            **ctx.event_fields(),
+            tool_call_id="call:projection",
+            delta=raw_arguments_json,
+        ),
         make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:projection"),
         model_end,
         ReplyEndEvent(
-                id=model_start.recovery_plan.stable_reply_end_event_id,
-                **ctx.event_fields(),
-                model_terminal_outcome=model_outcome,
-            ),
+            id=model_start.recovery_plan.stable_reply_end_event_id,
+            **ctx.event_fields(),
+            model_terminal_outcome=model_outcome,
+        ),
     ]
     if disposition is not None:
         events.append(disposition)
@@ -223,26 +220,26 @@ def _projection_fixture(
         events.extend(
             (
                 ToolResultStartEvent(
-                **ctx.event_fields(),
-                tool_call_id="call:projection",
-                tool_call_name=tool_name,
-            ),
-                ToolResultTextDeltaEvent(
-                **ctx.event_fields(),
-                tool_call_id="call:projection",
-                delta=result_text,
-            ),
-                ToolResultEndEvent(
-                **ctx.event_fields(),
-                **tool_result_end_contract_fields(
-                    "call:projection",
-                    tool_name=tool_name,
-                    state=result_state,
+                    **ctx.event_fields(),
+                    tool_call_id="call:projection",
+                    tool_call_name=tool_name,
                 ),
-                tool_call_id="call:projection",
-                state=result_state,
-                artifacts=list(artifacts),
-            ),
+                ToolResultTextDeltaEvent(
+                    **ctx.event_fields(),
+                    tool_call_id="call:projection",
+                    delta=result_text,
+                ),
+                ToolResultEndEvent(
+                    **ctx.event_fields(),
+                    **tool_result_end_contract_fields(
+                        "call:projection",
+                        tool_name=tool_name,
+                        state=result_state,
+                    ),
+                    tool_call_id="call:projection",
+                    state=result_state,
+                    artifacts=list(artifacts),
+                ),
             )
         )
     stored = log.extend(tuple(events))

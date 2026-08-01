@@ -542,8 +542,7 @@ class CoreDogfoodRunner:
                     f"{result.pending_interaction.interaction_kind}"
                 )
             self.progress(
-                f"{label}: run SUSPENDED "
-                f"run_id={result.owner_identity.run_id}"
+                f"{label}: run SUSPENDED run_id={result.owner_identity.run_id}"
             )
             return result
         _record_result(result, root_run_texts)
@@ -608,9 +607,7 @@ class CoreDogfoodRunner:
                     "runtime_session_ledger_reconciliation_required",
                 }:
                     failure = (
-                        extraction.get("job", {})
-                        .get("state", {})
-                        .get("last_failure")
+                        extraction.get("job", {}).get("state", {}).get("last_failure")
                     )
                     raise RuntimeError(
                         "compaction memory extraction reached terminal failure "

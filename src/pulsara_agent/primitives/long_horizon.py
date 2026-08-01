@@ -288,7 +288,9 @@ class SubagentGraphReducerContractFact(FrozenLongHorizonFact):
         if identities != tuple(sorted(identities)) or len(identities) != len(
             set(identities)
         ):
-            raise ValueError("supported graph event contracts must be sorted and unique")
+            raise ValueError(
+                "supported graph event contracts must be sorted and unique"
+            )
         expected = context_fingerprint(
             "subagent-graph-reducer-contract:v1",
             self.model_dump(
@@ -387,9 +389,9 @@ class SubagentGraphCheckpointStateFact(FrozenLongHorizonFact):
 
 class SubagentGraphCheckpointArtifactFact(FrozenLongHorizonFact):
     artifact_id: str = Field(min_length=1)
-    media_type: Literal[
+    media_type: Literal["application/vnd.pulsara.subagent-graph-checkpoint+json"] = (
         "application/vnd.pulsara.subagent-graph-checkpoint+json"
-    ] = "application/vnd.pulsara.subagent-graph-checkpoint+json"
+    )
     content_sha256: str = Field(min_length=1)
     byte_count: int = Field(ge=1)
     semantic_metadata_fingerprint: str = Field(min_length=1)
@@ -508,7 +510,10 @@ class LongHorizonContextBudgetDecisionFact(FrozenLongHorizonFact):
             self.final_input_tokens_after is None
         ):
             raise ValueError("post-decision token measurements must be paired")
-        if self.final_input_tokens_after is not None and self.projected_tool_tokens_after is not None:
+        if (
+            self.final_input_tokens_after is not None
+            and self.projected_tool_tokens_after is not None
+        ):
             if self.final_input_tokens_after != (
                 self.fixed_non_result_tokens + self.projected_tool_tokens_after
             ):
@@ -519,7 +524,9 @@ class LongHorizonContextBudgetDecisionFact(FrozenLongHorizonFact):
                 or self.final_input_tokens_after
                 != self.fixed_non_result_tokens + self.projected_tool_tokens_before
             ):
-                raise ValueError("within-target decision requires unchanged measurements")
+                raise ValueError(
+                    "within-target decision requires unchanged measurements"
+                )
         _validate_fingerprint(
             self,
             namespace="long-horizon-context-budget-decision:v1",
@@ -610,10 +617,7 @@ class RolloutBudgetPolicyFact(FrozenLongHorizonFact):
             raise ValueError("rollout phase thresholds must be strictly ordered")
         if self.emergency_model_call_limit <= self.finalization_reserved_model_calls:
             raise ValueError("emergency model-call limit is too small")
-        if (
-            self.emergency_tool_call_limit
-            <= self.finalization_reserved_tool_cost_units
-        ):
+        if self.emergency_tool_call_limit <= self.finalization_reserved_tool_cost_units:
             raise ValueError("emergency tool-call limit is too small")
         _validate_fingerprint(
             self,
@@ -825,15 +829,19 @@ class ToolObservationProjectionFact(FrozenLongHorizonFact):
 
     @model_validator(mode="after")
     def _projection(self) -> "ToolObservationProjectionFact":
-        if self.representation_rank != TOOL_OBSERVATION_REPRESENTATION_RANK[
-            self.representation
-        ]:
-            raise ValueError("tool observation representation rank mismatch")
-        if tuple(sorted(set(self.protected_reason_codes))) != self.protected_reason_codes:
-            raise ValueError("protected reason codes must be sorted and unique")
         if (
-            self.representation is ToolObservationRepresentation.ROLLUP_MEMBER
-        ) != (self.source_rollup_id is not None):
+            self.representation_rank
+            != TOOL_OBSERVATION_REPRESENTATION_RANK[self.representation]
+        ):
+            raise ValueError("tool observation representation rank mismatch")
+        if (
+            tuple(sorted(set(self.protected_reason_codes)))
+            != self.protected_reason_codes
+        ):
+            raise ValueError("protected reason codes must be sorted and unique")
+        if (self.representation is ToolObservationRepresentation.ROLLUP_MEMBER) != (
+            self.source_rollup_id is not None
+        ):
             raise ValueError("rollup member representation requires source rollup")
         _validate_fingerprint(
             self,
@@ -1006,7 +1014,10 @@ class PreparedObservationRollupUnit(FrozenLongHorizonFact):
             raise ValueError("prepared rollup artifact hash mismatch")
         if self.compile_unit.inline_content_sha256 != self.artifact_content_sha256:
             raise ValueError("prepared rollup inline/artifact hash mismatch")
-        if self.compile_unit.source_semantic_fingerprint != self.rollup.semantic_fingerprint:
+        if (
+            self.compile_unit.source_semantic_fingerprint
+            != self.rollup.semantic_fingerprint
+        ):
             raise ValueError("prepared rollup source fingerprint mismatch")
         member_ids = tuple(item.unit_id for item in self.rollup.member_facts)
         if self.ordered_member_unit_ids != member_ids:
@@ -1122,11 +1133,11 @@ class ToolObservationProjectionRewriteEntryFact(FrozenLongHorizonFact):
         if self.unit_id != self.to_projection.unit_id:
             raise ValueError("projection rewrite entry unit mismatch")
         if self.from_representation is not None:
-            old_rank = TOOL_OBSERVATION_REPRESENTATION_RANK[
-                self.from_representation
-            ]
+            old_rank = TOOL_OBSERVATION_REPRESENTATION_RANK[self.from_representation]
             if self.to_projection.representation_rank > old_rank:
-                raise ValueError("projection rewrite cannot increase representation rank")
+                raise ValueError(
+                    "projection rewrite cannot increase representation rank"
+                )
         return self
 
 
@@ -1175,8 +1186,7 @@ class ModelCallReservationQuoteFact(FrozenLongHorizonFact):
     @model_validator(mode="after")
     def _quote(self) -> "ModelCallReservationQuoteFact":
         expected = (
-            self.physical_input_token_upper_bound
-            * self.non_cached_input_weight_milli
+            self.physical_input_token_upper_bound * self.non_cached_input_weight_milli
             + self.output_token_upper_bound * self.output_weight_milli
         )
         if self.reserved_milliunits != expected:
@@ -1255,10 +1265,14 @@ class RolloutUsageChargeFact(FrozenLongHorizonFact):
         if self.accounting_basis == "not_started_zero":
             if self.charged_output_tokens != 0 or self.charged_milliunits != 0:
                 raise ValueError("not-started usage must charge zero")
-        elif self.accounting_basis in {
-            "reserved_missing_usage",
-            "cancelled_reserved",
-        } and self.charged_output_tokens != self.output_token_upper_bound:
+        elif (
+            self.accounting_basis
+            in {
+                "reserved_missing_usage",
+                "cancelled_reserved",
+            }
+            and self.charged_output_tokens != self.output_token_upper_bound
+        ):
             raise ValueError("reserved usage must charge full output bound")
         _validate_fingerprint(
             self,
@@ -1290,7 +1304,10 @@ class RolloutBudgetAccountFact(FrozenLongHorizonFact):
         )
         if self.finalization_reserve_milliunits != reserve:
             raise ValueError("finalization reserve breakdown mismatch")
-        if self.total_budget_milliunits != reserve + self.exploration_allowance_milliunits:
+        if (
+            self.total_budget_milliunits
+            != reserve + self.exploration_allowance_milliunits
+        ):
             raise ValueError("rollout account total mismatch")
         _validate_fingerprint(
             self,
@@ -1372,7 +1389,10 @@ class RolloutBudgetStateFact(FrozenLongHorizonFact):
         ids = tuple(item.reservation_id for item in self.active_reservations)
         if len(ids) != len(set(ids)):
             raise ValueError("rollout state contains duplicate reservations")
-        if sum(item.reserved_milliunits for item in self.active_reservations) != reserved:
+        if (
+            sum(item.reserved_milliunits for item in self.active_reservations)
+            != reserved
+        ):
             raise ValueError("active reservation total mismatch")
         if any(item.account_id != self.account_id for item in self.active_reservations):
             raise ValueError("active reservation account mismatch")
@@ -1450,8 +1470,7 @@ class ContextWindowCompactionPlanFact(FrozenLongHorizonFact):
         reservation = self.rollout_reservation
         if (
             reservation.owner_kind != "model_call"
-            or reservation.owner_id
-            != self.summarizer_call.resolved_model_call_id
+            or reservation.owner_id != self.summarizer_call.resolved_model_call_id
             or reservation.model_call_reservation_quote is None
         ):
             raise ValueError("window compaction reservation/call mismatch")
@@ -1466,7 +1485,9 @@ class ContextWindowCompactionPlanFact(FrozenLongHorizonFact):
             + self.summary_output_budget_tokens
             > self.post_compaction_target_tokens
         ):
-            raise ValueError("window compaction plan cannot fit its conservative target")
+            raise ValueError(
+                "window compaction plan cannot fit its conservative target"
+            )
         protected = set(self.protected_unit_ids)
         summarized = set(self.summarized_unit_ids)
         retained = set(self.retained_tail_unit_ids)
@@ -1807,8 +1828,7 @@ def calculate_model_call_reservation(
         reserved_milliunits=(
             target.context_budget.pre_margin_input_tokens
             * policy.non_cached_input_weight_milli
-            + target.context_budget.effective_output_tokens
-            * policy.output_weight_milli
+            + target.context_budget.effective_output_tokens * policy.output_weight_milli
         ),
         quote_semantic_fingerprint=semantic_fingerprint,
         quote_fact_fingerprint=fact_fingerprint,
@@ -1843,8 +1863,7 @@ def evaluate_rollout_budget_feasibility(
         * policy.total_input_budget_multiplier_milli
     )
     final_agent = (
-        primary_quote.reserved_milliunits
-        * policy.finalization_reserved_model_calls
+        primary_quote.reserved_milliunits * policy.finalization_reserved_model_calls
     )
     final_compaction = (
         summarizer_quote.reserved_milliunits

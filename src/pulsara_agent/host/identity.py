@@ -49,7 +49,9 @@ def resolve_workspace(
     if kind == "project":
         root = _resolve_project_root(workspace.workspace_root)
         stable_key = root.as_posix()
-        label = _display_label(workspace.display_label, default=root.name or root.as_posix())
+        label = _display_label(
+            workspace.display_label, default=root.name or root.as_posix()
+        )
         domain = MemoryDomainContext(
             memory_domain_id=workspace.memory_domain_id,
             workspace_kind="project",
@@ -66,7 +68,9 @@ def resolve_workspace(
             workspace_key=scope,
         )
 
-    root, host_created_root = _resolve_transient_root(workspace.workspace_root, scratch_root=scratch_root)
+    root, host_created_root = _resolve_transient_root(
+        workspace.workspace_root, scratch_root=scratch_root
+    )
     label = _display_label(workspace.display_label, default="Scratch")
     domain = MemoryDomainContext(
         memory_domain_id=workspace.memory_domain_id,
@@ -80,7 +84,8 @@ def resolve_workspace(
         memory_domain=domain,
         workspace_scope=None,
         workspace_key=f"transient:{uuid4().hex}",
-        cleanup_workspace_root_on_close=host_created_root and workspace.cleanup_workspace_root_on_close,
+        cleanup_workspace_root_on_close=host_created_root
+        and workspace.cleanup_workspace_root_on_close,
     )
 
 
@@ -106,7 +111,11 @@ def _resolve_transient_root(
         if not root.is_dir():
             raise ValueError(f"transient workspace_root is not a directory: {root}")
         return root, False
-    base = Path(scratch_root).expanduser().resolve() if scratch_root is not None else Path(tempfile.gettempdir())
+    base = (
+        Path(scratch_root).expanduser().resolve()
+        if scratch_root is not None
+        else Path(tempfile.gettempdir())
+    )
     root = base / f"pulsara-transient-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
     return root, True

@@ -61,7 +61,9 @@ class PostgresWorkingContextStore:
             deadline_monotonic=monotonic() + 30.0,
         )
 
-    def get_latest(self, *, memory_domain_id: str, now: datetime | None = None) -> WorkingContextSummary | None:
+    def get_latest(
+        self, *, memory_domain_id: str, now: datetime | None = None
+    ) -> WorkingContextSummary | None:
         now = now or _utc_now()
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -150,7 +152,9 @@ def propose_working_context_update(
     summary = _summary_text(timeline)
     if len(summary) < 24:
         return WorkingContextUpdate(False, reason="summary_too_short")
-    if existing_summary is not None and _normalized(summary) == _normalized(existing_summary.summary):
+    if existing_summary is not None and _normalized(summary) == _normalized(
+        existing_summary.summary
+    ):
         return WorkingContextUpdate(False, reason="summary_unchanged")
     return WorkingContextUpdate(
         True,
@@ -166,7 +170,9 @@ def propose_working_context_update(
     )
 
 
-def working_context_projection(summary: WorkingContextSummary, *, token_budget: int) -> dict[str, Any]:
+def working_context_projection(
+    summary: WorkingContextSummary, *, token_budget: int
+) -> dict[str, Any]:
     text = _clip(
         "\n".join(
             [
@@ -213,7 +219,11 @@ def _is_substantive_tool_trace(trace: Any) -> bool:
 def _summary_text(timeline: RunTimelineSummary) -> str:
     parts: list[str] = []
     if timeline.tool_traces:
-        tools = ", ".join(_dedupe(trace.tool_name for trace in timeline.tool_traces if trace.tool_name))
+        tools = ", ".join(
+            _dedupe(
+                trace.tool_name for trace in timeline.tool_traces if trace.tool_name
+            )
+        )
         if tools:
             parts.append(f"Recent run used tools: {tools}.")
         result_bits = [
@@ -222,11 +232,18 @@ def _summary_text(timeline: RunTimelineSummary) -> str:
             if trace.result_summary and trace.status == "success"
         ]
         if result_bits:
-            parts.append("Key tool result: " + _clip(" ".join(result_bits), max_chars=220))
+            parts.append(
+                "Key tool result: " + _clip(" ".join(result_bits), max_chars=220)
+            )
     if timeline.assistant_text.strip():
-        parts.append("Recent assistant summary: " + _clip(timeline.assistant_text.strip(), max_chars=260))
+        parts.append(
+            "Recent assistant summary: "
+            + _clip(timeline.assistant_text.strip(), max_chars=260)
+        )
     if timeline.errors:
-        parts.append("Recent run errors: " + _clip("; ".join(timeline.errors), max_chars=180))
+        parts.append(
+            "Recent run errors: " + _clip("; ".join(timeline.errors), max_chars=180)
+        )
     return _clip(" ".join(parts).strip(), max_chars=600)
 
 

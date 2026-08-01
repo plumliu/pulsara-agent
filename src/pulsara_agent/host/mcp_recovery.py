@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
+
 import hashlib
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -90,7 +92,7 @@ async def recover_host_mcp_run(
         deadline_monotonic=deadline_monotonic,
     )
     run_events = tuple(
-        envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        decode_raw_stored_event_envelope(envelope, DEFAULT_EVENT_SCHEMA_REGISTRY)
         for envelope in raw_run_events
     )
     starts = tuple(event for event in run_events if isinstance(event, RunStartEvent))
@@ -233,18 +235,19 @@ async def recover_host_mcp_run(
             workspace_root=host.workspace.workspace_root,
             memory_domain_id=host.workspace.memory_domain.memory_domain_id,
         )
-        frozen_surface, exposure_plan = (
-            await runtime_session.context_input_io_service.execute(
-                operation_name="host-mcp-restart-capability-rebind",
-                operation=lambda: _rebind_capability_surface(
-                    host=host,
-                    registry=registry,
-                    basis=basis,
-                    source=current_revision.source_exposure,
-                    deadline_monotonic=deadline_monotonic,
-                ),
+        (
+            frozen_surface,
+            exposure_plan,
+        ) = await runtime_session.context_input_io_service.execute(
+            operation_name="host-mcp-restart-capability-rebind",
+            operation=lambda: _rebind_capability_surface(
+                host=host,
+                registry=registry,
+                basis=basis,
+                source=current_revision.source_exposure,
                 deadline_monotonic=deadline_monotonic,
-            )
+            ),
+            deadline_monotonic=deadline_monotonic,
         )
 
         state = host.wiring.agent_runtime.new_state(

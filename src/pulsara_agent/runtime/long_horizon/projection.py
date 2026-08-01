@@ -333,11 +333,7 @@ def plan_new_result_ingest(
         raise ValueError("projection planner window/state mismatch")
     if source_through_sequence < current_state.through_sequence:
         raise ValueError("projection source high-water moved backwards")
-    if not (
-        len(units)
-        == len(rendered.fragments)
-        == len(rendered.canonical_decisions)
-    ):
+    if not (len(units) == len(rendered.fragments) == len(rendered.canonical_decisions)):
         raise ValueError("projection planner render tuple cardinality mismatch")
     existing = {item.unit_id: item for item in current_state.unit_projections}
     protection_by_id = _protection_facts_by_unit(
@@ -431,7 +427,9 @@ def plan_new_result_ingest(
     plan_fingerprint = context_fingerprint(
         "context-projection-rewrite-plan:v1", plan_payload
     )
-    rewrite_id = f"context_projection_rewrite:{plan_fingerprint.removeprefix('sha256:')}"
+    rewrite_id = (
+        f"context_projection_rewrite:{plan_fingerprint.removeprefix('sha256:')}"
+    )
     page_count = ceil(len(entries) / max_entries_per_page)
     events = tuple(
         ContextProjectionRewritePageEvent(
@@ -446,8 +444,7 @@ def plan_new_result_ingest(
             page_count=page_count,
             entries=tuple(
                 entries[
-                    page_index
-                    * max_entries_per_page : (page_index + 1)
+                    page_index * max_entries_per_page : (page_index + 1)
                     * max_entries_per_page
                 ]
             ),
@@ -534,7 +531,11 @@ def _projection_with_protection(
 ) -> ToolObservationProjectionFact:
     payload = projection.model_dump(
         mode="python",
-        exclude={"projection_generation", "protected_reason_codes", "semantic_fingerprint"},
+        exclude={
+            "projection_generation",
+            "protected_reason_codes",
+            "semantic_fingerprint",
+        },
     )
     payload.update(
         {
@@ -616,9 +617,7 @@ def plan_deterministic_projection_rewrite(
         protection_facts=protection_facts,
     )
     fragment_by_id = {item.unit_id: item for item in base_rendered.fragments}
-    decision_by_id = {
-        item.unit_id: item for item in base_rendered.canonical_decisions
-    }
+    decision_by_id = {item.unit_id: item for item in base_rendered.canonical_decisions}
     if len(unit_by_id) != len(units):
         raise ValueError("projection rewrite contains duplicate source units")
     current_by_id = {item.unit_id: item for item in current_state.unit_projections}
@@ -742,8 +741,8 @@ def plan_deterministic_projection_rewrite(
             )
 
     while total > target_projected_tokens and degradation_heap:
-        _rank, _sequence, _negative_savings, unit_id, ladder_index = (
-            heapq.heappop(degradation_heap)
+        _rank, _sequence, _negative_savings, unit_id, ladder_index = heapq.heappop(
+            degradation_heap
         )
         chosen = degradation_ladders[unit_id][ladder_index]
         savings = selected[unit_id].estimated_tokens - chosen.estimated_tokens
@@ -873,9 +872,7 @@ def _rollup_candidates(
     render_policy: ResolvedToolResultRenderPolicyFact,
     token_estimator: TokenEstimator,
     registry: ObservationRollupRendererRegistry,
-) -> list[
-    tuple[int, PreparedObservationRollupArtifact, dict[str, _Variant]]
-]:
+) -> list[tuple[int, PreparedObservationRollupArtifact, dict[str, _Variant]]]:
     projections = {item.unit_id: item for item in current_state.unit_projections}
     groups: dict[tuple[str, ...], list[ToolResultRenderUnit]] = {}
     for unit in units:
@@ -887,9 +884,12 @@ def _rollup_candidates(
             continue
         if projection.source_rollup_id is not None:
             continue
-        if projection.representation_rank <= TOOL_OBSERVATION_REPRESENTATION_RANK[
-            ToolObservationRepresentation.ROLLUP_MEMBER
-        ]:
+        if (
+            projection.representation_rank
+            <= TOOL_OBSERVATION_REPRESENTATION_RANK[
+                ToolObservationRepresentation.ROLLUP_MEMBER
+            ]
+        ):
             # A rollup may only narrow an observation. Older generations can
             # already have reduced a member to a pair stub before its family
             # becomes large enough to aggregate.
@@ -1159,7 +1159,9 @@ def _build_projection_rewrite_plan(
     plan_fingerprint = context_fingerprint(
         "context-projection-rewrite-plan:v1", plan_payload
     )
-    rewrite_id = f"context_projection_rewrite:{plan_fingerprint.removeprefix('sha256:')}"
+    rewrite_id = (
+        f"context_projection_rewrite:{plan_fingerprint.removeprefix('sha256:')}"
+    )
     page_count = ceil(len(entries) / max_entries_per_page)
     events = tuple(
         ContextProjectionRewritePageEvent(
@@ -1174,8 +1176,7 @@ def _build_projection_rewrite_plan(
             page_count=page_count,
             entries=tuple(
                 entries[
-                    page_index
-                    * max_entries_per_page : (page_index + 1)
+                    page_index * max_entries_per_page : (page_index + 1)
                     * max_entries_per_page
                 ]
             ),
