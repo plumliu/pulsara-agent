@@ -43,6 +43,8 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.prompt_queue import (
+    CLIENT_VISIBLE_ACTIVE_QUEUE_STATES,
+    MAX_ACTIVE_PROMPT_QUEUE_ITEMS,
     PROMPT_QUEUE_COMPANION_CHARGE_CONTRACT_FINGERPRINT,
     PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT,
     PROMPT_QUEUE_INLINE_MAX_UTF8_BYTES,
@@ -66,6 +68,9 @@ from pulsara_agent.primitives.prompt_queue import (
 from pulsara_agent.runtime.terminal_application.artifact_hold import (
     PromptQueueArtifactStoragePort,
     prompt_queue_content_semantic_fingerprint,
+)
+from pulsara_agent.runtime.terminal_presentation.public_text import (
+    bounded_terminal_safe_public_text,
 )
 
 
@@ -134,8 +139,14 @@ class PromptQueueProjectionSnapshot:
     queue_head_event_sequence: int
     queue_head_payload_fingerprint: str | None
     items: tuple[PromptQueueProjectedItem, ...]
+    active_client_item_count: int
+    active_client_item_accumulator: str
     row_set_accumulator: str
     pending_head_set_accumulator: str
+    bounded_tail_first_sequence: int
+    bounded_tail_last_sequence: int
+    bounded_tail_count: int
+    bounded_tail_accumulator: str
 
 
 @dataclass(slots=True)
@@ -152,6 +163,9 @@ class PromptQueueProjectionStore:
     transition_accumulator: str = field(init=False)
     _items: dict[str, PromptQueueProjectedItem] = field(
         default_factory=dict, init=False, repr=False
+    )
+    _bounded_tail_entries: list[tuple[str, int, str]] = field(
+        default_factory=list, init=False, repr=False
     )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -216,6 +230,12 @@ class PromptQueueProjectionStore:
         if _row_set_accumulator(items) != checkpoint.queue_row_set_accumulator:
             raise ValueError("prompt queue checkpoint row-set accumulator mismatch")
         if (
+            _active_client_item_count(items) != checkpoint.active_client_item_count
+            or _active_client_item_accumulator(items)
+            != checkpoint.active_client_item_accumulator
+        ):
+            raise ValueError("prompt queue checkpoint active projection mismatch")
+        if (
             _pending_head_set_accumulator(items)
             != checkpoint.pending_item_head_set_accumulator
         ):
@@ -239,6 +259,7 @@ class PromptQueueProjectionStore:
                 checkpoint.resulting_queue_head_payload_fingerprint
             )
             self._items = {item.queue_item_id: item for item in items}
+            self._bounded_tail_entries.clear()
 
     def validate_durable_projection(
         self,
@@ -271,6 +292,14 @@ class PromptQueueProjectionStore:
                 or account.row_set_accumulator != _row_set_accumulator(resident_items)
                 or account.pending_item_head_set_accumulator
                 != _pending_head_set_accumulator(resident_items)
+                or account.active_client_item_count
+                != _active_client_item_count(resident_items)
+                or account.active_client_item_accumulator
+                != _active_client_item_accumulator(resident_items)
+                or account.bounded_tail_count != len(self._bounded_tail_entries)
+                or account.bounded_tail_first_sequence
+                != self._bounded_tail_first_sequence()
+                or account.bounded_tail_accumulator != self._bounded_tail_accumulator()
             ):
                 raise ValueError("prompt queue account drifted from event authority")
 
@@ -288,6 +317,7 @@ class PromptQueueProjectionStore:
                 self.runtime_session_id
             )
             self._items.clear()
+            self._bounded_tail_entries.clear()
         self.apply_committed(tuple(events))
 
     def item(self, queue_item_id: str) -> PromptQueueProjectedItem | None:
@@ -309,6 +339,25 @@ class PromptQueueProjectionStore:
                     key=lambda item: item.accepted_ordinal,
                 )[:limit]
             )
+
+    def active_client_items(self) -> tuple[PromptQueueProjectedItem, ...]:
+        """Return the complete, bounded client-visible active set."""
+
+        with self._lock:
+            result = tuple(
+                sorted(
+                    (
+                        item
+                        for item in self._items.values()
+                        if item.delivery_state in CLIENT_VISIBLE_ACTIVE_QUEUE_STATES
+                        and item.content_retention_state == "active"
+                    ),
+                    key=lambda item: (item.accepted_ordinal, item.queue_item_id),
+                )
+            )
+        if len(result) > MAX_ACTIVE_PROMPT_QUEUE_ITEMS:
+            raise RuntimeError("active prompt queue projection exceeds 64 items")
+        return result
 
     def all_items(self) -> tuple[PromptQueueProjectedItem, ...]:
         with self._lock:
@@ -337,9 +386,59 @@ class PromptQueueProjectionStore:
                     self.head_candidate_payload_fingerprint
                 ),
                 items=items,
+                active_client_item_count=_active_client_item_count(items),
+                active_client_item_accumulator=_active_client_item_accumulator(items),
                 row_set_accumulator=_row_set_accumulator(items),
                 pending_head_set_accumulator=_pending_head_set_accumulator(items),
+                bounded_tail_first_sequence=self._bounded_tail_first_sequence(),
+                bounded_tail_last_sequence=self._bounded_tail_last_sequence(),
+                bounded_tail_count=len(self._bounded_tail_entries),
+                bounded_tail_accumulator=self._bounded_tail_accumulator(),
             )
+
+    def install_checkpoint_base(
+        self, checkpoint: PromptQueueDomainCheckpointFact
+    ) -> None:
+        """Advance only the acceleration base while preserving a concurrent suffix."""
+
+        with self._lock:
+            if checkpoint.transition_count > self.transition_count:
+                raise ValueError("prompt queue checkpoint exceeds live transition head")
+            self._bounded_tail_entries = [
+                entry
+                for entry in self._bounded_tail_entries
+                if entry[1] > checkpoint.through_sequence
+            ]
+            if len(self._bounded_tail_entries) != (
+                self.transition_count - checkpoint.transition_count
+            ):
+                raise ValueError(
+                    "prompt queue checkpoint cannot rebase its exact suffix"
+                )
+
+    def _bounded_tail_first_sequence(self) -> int:
+        return self._bounded_tail_entries[0][1] if self._bounded_tail_entries else 0
+
+    def _bounded_tail_last_sequence(self) -> int:
+        return self._bounded_tail_entries[-1][1] if self._bounded_tail_entries else 0
+
+    def _bounded_tail_accumulator(self) -> str:
+        accumulator = context_fingerprint("prompt-queue-bounded-tail:v1", ())
+        for (
+            event_id,
+            sequence,
+            candidate_payload_fingerprint,
+        ) in self._bounded_tail_entries:
+            accumulator = context_fingerprint(
+                "prompt-queue-bounded-tail-step:v1",
+                {
+                    "previous": accumulator,
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "candidate_payload_fingerprint": candidate_payload_fingerprint,
+                },
+            )
+        return accumulator
 
     def row_set_accumulator(self) -> str:
         with self._lock:
@@ -372,6 +471,8 @@ class PromptQueueProjectionStore:
             )
 
     def _apply_transition(self, event) -> None:
+        if len(self._bounded_tail_entries) >= 256:
+            raise ValueError("prompt queue bounded tail requires checkpoint admission")
         transition = event.transition
         if transition.runtime_session_id != self.runtime_session_id:
             raise ValueError("queue event crosses runtime sessions")
@@ -523,6 +624,9 @@ class PromptQueueProjectionStore:
         self.head_event_type = str(event.type)
         self.head_event_sequence = event.sequence
         self.head_candidate_payload_fingerprint = candidate_fingerprint
+        self._bounded_tail_entries.append(
+            (event.id, event.sequence, candidate_fingerprint)
+        )
 
 
 @dataclass(slots=True)
@@ -669,6 +773,8 @@ class PromptQueueTransactionCompanion:
         )
         row_set_accumulator = _row_set_accumulator(actual_items)
         pending_head_set_accumulator = _pending_head_set_accumulator(actual_items)
+        active_client_item_count = _active_client_item_count(actual_items)
+        active_client_item_accumulator = _active_client_item_accumulator(actual_items)
         account_row = cursor.execute(
             """
             SELECT checkpoint_generation, checkpoint_through_sequence,
@@ -764,6 +870,8 @@ class PromptQueueTransactionCompanion:
             reserved_item_count=reserved_count,
             artifact_bytes=resulting_artifact_bytes,
             pending_item_head_set_accumulator=pending_head_set_accumulator,
+            active_client_item_count=active_client_item_count,
+            active_client_item_accumulator=active_client_item_accumulator,
             row_set_accumulator=row_set_accumulator,
             reducer_contract_fingerprint=PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT,
             event_registry_fingerprint=PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT,
@@ -786,6 +894,8 @@ class PromptQueueTransactionCompanion:
                 reserved_item_count = %s,
                 artifact_bytes = %s,
                 pending_item_head_set_accumulator = %s,
+                active_client_item_count = %s,
+                active_client_item_accumulator = %s,
                 row_set_accumulator = %s,
                 account_fingerprint = %s,
                 updated_at = now()
@@ -807,6 +917,8 @@ class PromptQueueTransactionCompanion:
                 reserved_count,
                 resulting_artifact_bytes,
                 pending_head_set_accumulator,
+                active_client_item_count,
+                active_client_item_accumulator,
                 row_set_accumulator,
                 resulting_account.account_fingerprint,
                 self.runtime_session_id,
@@ -1076,6 +1188,8 @@ class TerminalPromptQueueMutationService:
                     ):
                         return existing
                     raise ValueError("stable queue item identity conflicts")
+                if len(self.store.active_client_items()) >= 64:
+                    raise RuntimeError("active prompt queue capacity is exhausted")
                 transition = _transition_head(
                     runtime_session_id=self.runtime_session.runtime_session_id,
                     queue_item_id=queue_item_id,
@@ -2347,6 +2461,78 @@ def _pending_head_set_accumulator(
             for item in sorted(items, key=lambda value: value.queue_item_id)
             if item.delivery_state
             in {"accepted_pending", "steer_reserved", "follow_up_reserved"}
+        ),
+    )
+
+
+def prompt_queue_item_public_view_payload(
+    item: PromptQueueProjectedItem,
+) -> dict[str, object]:
+    """Return the one reducer-owned public item projection payload."""
+
+    content = item.prepared_content
+    if content is None:
+        preview = ""
+    elif getattr(content, "content_kind", None) == "inline":
+        preview = bounded_terminal_safe_public_text(
+            content.canonical_utf8_text,
+            maximum_code_points=512,
+            maximum_utf8_bytes=2_048,
+        )
+    else:
+        preview = "[confirmed artifact content]"
+    return {
+        "queue_item_id": item.queue_item_id,
+        "accepted_ordinal": item.accepted_ordinal,
+        "delivery_state": item.delivery_state,
+        "content_retention_state": item.content_retention_state,
+        "requested_delivery_mode": item.requested_delivery_mode,
+        "resolved_delivery_mode": item.resolved_delivery_mode,
+        "public_preview": preview,
+        "head_event_id": item.head_event_id,
+        "item_revision": item.item_revision,
+    }
+
+
+def prompt_queue_item_public_view_fingerprint(
+    item: PromptQueueProjectedItem,
+) -> str:
+    return context_fingerprint(
+        "prompt-queue-item-view:v1", prompt_queue_item_public_view_payload(item)
+    )
+
+
+def _active_client_items(
+    items: Sequence[PromptQueueProjectedItem],
+) -> tuple[PromptQueueProjectedItem, ...]:
+    result = tuple(
+        sorted(
+            (
+                item
+                for item in items
+                if item.delivery_state in CLIENT_VISIBLE_ACTIVE_QUEUE_STATES
+                and item.content_retention_state == "active"
+            ),
+            key=lambda item: (item.accepted_ordinal, item.queue_item_id),
+        )
+    )
+    if len(result) > MAX_ACTIVE_PROMPT_QUEUE_ITEMS:
+        raise ValueError("active prompt queue projection exceeds its durable bound")
+    return result
+
+
+def _active_client_item_count(items: Sequence[PromptQueueProjectedItem]) -> int:
+    return len(_active_client_items(items))
+
+
+def _active_client_item_accumulator(
+    items: Sequence[PromptQueueProjectedItem],
+) -> str:
+    return context_fingerprint(
+        "terminal-active-prompt-queue-items:v1",
+        tuple(
+            prompt_queue_item_public_view_fingerprint(item)
+            for item in _active_client_items(items)
         ),
     )
 

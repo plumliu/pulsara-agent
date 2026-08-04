@@ -71,8 +71,12 @@ _PROJECTION_STAGED_MIGRATION_VERSIONS = frozenset({6, 7, 8, 9})
 _MCP_V2_SCHEMA_SUBCUT_VERSION = 10
 _MCP_V2_PROTECTED_RELATION_RESOURCE = "0010_runtime_write_protected_relations_v1.json"
 _TERMINAL_PRESENTATION_SCHEMA_SUBCUT_VERSION = 11
+_TERMINAL_ACTIVE_QUEUE_SCHEMA_SUBCUT_VERSION = 12
 _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE = (
     "0011_runtime_write_protected_relations_v1.json"
+)
+_TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE = (
+    "0012_runtime_write_protected_relations_v1.json"
 )
 
 
@@ -304,7 +308,10 @@ class PostgresMigrationRunner:
                         definition=definition,
                         deadline_monotonic=deadline_monotonic,
                     )
-                elif definition.version == _TERMINAL_PRESENTATION_SCHEMA_SUBCUT_VERSION:
+                elif definition.version in {
+                    _TERMINAL_PRESENTATION_SCHEMA_SUBCUT_VERSION,
+                    _TERMINAL_ACTIVE_QUEUE_SCHEMA_SUBCUT_VERSION,
+                }:
                     self._enter_terminal_presentation_maintenance(
                         admin,
                         definition=definition,
@@ -724,8 +731,8 @@ class PostgresMigrationRunner:
                         definition.version
                         == _TERMINAL_PRESENTATION_SCHEMA_SUBCUT_VERSION
                     ):
-                        from pulsara_agent.storage.prompt_queue_bootstrap import (
-                            install_prompt_queue_genesis,
+                        from pulsara_agent.storage.migrations.prompt_queue_v11 import (
+                            install_prompt_queue_v11_genesis_for_migration,
                         )
 
                         session_ids = tuple(
@@ -735,10 +742,9 @@ class PostgresMigrationRunner:
                             ).fetchall()
                         )
                         for runtime_session_id in session_ids:
-                            install_prompt_queue_genesis(
+                            install_prompt_queue_v11_genesis_for_migration(
                                 connection,
                                 runtime_session_id=runtime_session_id,
-                                require_empty_queue_chain=True,
                             )
                     if definition.version == 5:
                         from pulsara_agent.storage.runtime_write_admission import (
@@ -774,6 +780,13 @@ class PostgresMigrationRunner:
                         ):
                             resource_name = (
                                 _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE
+                            )
+                        elif (
+                            definition.version
+                            == _TERMINAL_ACTIVE_QUEUE_SCHEMA_SUBCUT_VERSION
+                        ):
+                            resource_name = (
+                                _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE
                             )
                         else:
                             raise PostgresSchemaError(
@@ -983,7 +996,11 @@ class PostgresMigrationRunner:
                                 else (
                                     _MCP_V2_PROTECTED_RELATION_RESOURCE
                                     if through_version == 10
-                                    else _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE
+                                    else (
+                                        _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE
+                                        if through_version == 11
+                                        else _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE
+                                    )
                                 )
                             )
                         )

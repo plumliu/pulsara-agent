@@ -86,6 +86,9 @@ from pulsara_agent.runtime.terminal_presentation.policy import (
     PresentationAuditExtractorBinding,
     PresentationPurposePolicyRegistry,
 )
+from pulsara_agent.runtime.terminal_presentation.public_text import (
+    bounded_terminal_safe_public_text,
+)
 
 
 _TRANSCRIPT_DISPOSITION_EXTRACTOR_ID = (
@@ -1455,7 +1458,11 @@ def _terminal_content_text(content, *, archive, runtime_session_id):
 
 
 def _text_block(text: str, *, role):
-    bounded = text[:32_000]
+    bounded = bounded_terminal_safe_public_text(
+        text,
+        maximum_code_points=32_000,
+        maximum_utf8_bytes=128_000,
+    )
     return build_frozen_fact(
         PresentationTextContentBlockFact,
         schema_version="presentation_text_content_block.v1",
@@ -1467,13 +1474,18 @@ def _text_block(text: str, *, role):
 
 
 def _data_block(*, media_type: str, public_text: str):
+    bounded = bounded_terminal_safe_public_text(
+        public_text,
+        maximum_code_points=32_000,
+        maximum_utf8_bytes=128_000,
+    )
     return build_frozen_fact(
         PresentationDataContentBlockFact,
         schema_version="presentation_data_content_block.v1",
         block_kind="data",
         media_type=media_type,
-        public_canonical_text=public_text,
-        public_utf8_bytes=len(public_text.encode("utf-8")),
+        public_canonical_text=bounded,
+        public_utf8_bytes=len(bounded.encode("utf-8")),
     )
 
 

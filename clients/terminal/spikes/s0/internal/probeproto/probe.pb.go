@@ -231,7 +231,7 @@ const file_probe_wire_probe_proto_rawDesc = "" +
 	"ProbeFrame\x12;\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x1d.pulsara.terminal.s0.SnapshotH\x00R\bsnapshot\x122\n" +
 	"\x05delta\x18\x02 \x01(\v2\x1a.pulsara.terminal.s0.DeltaH\x00R\x05deltaB\x06\n" +
-	"\x04bodyB/Z-pulsara.local/terminal-s0/internal/probeprotob\x06proto3"
+	"\x04bodyB/Z-github.com/plumliu/pulsara-agent/clients/terminal-s0/internal/probeprotob\x06proto3"
 
 var (
 	file_probe_wire_probe_proto_rawDescOnce sync.Once

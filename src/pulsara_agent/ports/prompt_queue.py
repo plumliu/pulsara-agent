@@ -27,6 +27,8 @@ class PromptQueueCheckpointCommitGuard:
     expected_queue_head_payload_fingerprint: str | None
     expected_row_set_accumulator: str
     expected_pending_item_head_set_accumulator: str
+    expected_active_client_item_count: int
+    expected_active_client_item_accumulator: str
     guard_generation: int
 
     def __post_init__(self) -> None:
@@ -34,6 +36,7 @@ class PromptQueueCheckpointCommitGuard:
             not self.runtime_session_id
             or self.expected_previous_through_sequence < 0
             or self.expected_account_revision < 0
+            or not 0 <= self.expected_active_client_item_count <= 64
             or self.guard_generation < 1
         ):
             raise ValueError("prompt queue checkpoint guard is malformed")

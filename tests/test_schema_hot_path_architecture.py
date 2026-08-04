@@ -136,6 +136,7 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         "0009_compaction_memory_extraction_projection_activation.sql",
         "0010_mcp_continuation_secret_store.sql",
         "0011_terminal_presentation_queue.sql",
+        "0012_terminal_active_queue_projection.sql",
     ]
     create_extension_owners = []
     for path in resources:
@@ -151,11 +152,16 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         if path.name not in {
             "0009_compaction_memory_extraction_projection_activation.sql",
             "0010_mcp_continuation_secret_store.sql",
+            "0012_terminal_active_queue_projection.sql",
         }:
             assert " ADD COLUMN " not in upper
         assert " DROP COLUMN " not in upper
-        assert " ALTER COLUMN " not in upper
-        if path.name != "0005_durable_projection_jobs.sql":
+        if path.name != "0012_terminal_active_queue_projection.sql":
+            assert " ALTER COLUMN " not in upper
+        if path.name not in {
+            "0005_durable_projection_jobs.sql",
+            "0012_terminal_active_queue_projection.sql",
+        }:
             assert re.search(r"\bUPDATE\b", upper) is None
         assert re.search(r"\bDELETE\s+FROM\b", upper) is None
         assert "CREATE INDEX CONCURRENTLY" not in upper

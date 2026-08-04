@@ -102,6 +102,7 @@ _RESOURCE_CHECKSUMS = (
     "f1c8d3fb3c62e10216b4ac659e4c2e87de1d789d316ca9211d37c56bba486229",
     "f193cffe490390b2e9d87a70c0ed2711f3f1faf558db898549cec26ded2dab9c",
     "351e59955e87cee541bb3e319b4ddaf57f5532f333fc0b92db54f296c5044d68",
+    "96f274f4505f0b8aea953f0a86319c4d93751f830991afca0ec84a6aca757458",
 )
 _NAMES = (
     "schema_migration_ledger",
@@ -116,6 +117,7 @@ _NAMES = (
     "compaction_memory_extraction_projection_activation",
     "mcp_continuation_secret_store",
     "terminal_presentation_queue",
+    "terminal_active_queue_projection",
 )
 _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
     (),
@@ -170,6 +172,12 @@ _AUXILIARY_RESOURCES: tuple[tuple[tuple[str, str], ...], ...] = (
         (
             "0011_runtime_write_protected_relations_v1.json",
             "a42841f95e6616a69cf96c154f5a29a3eb7af8f0afcb38f025b186b03ec94e84",
+        ),
+    ),
+    (
+        (
+            "0012_runtime_write_protected_relations_v1.json",
+            "b374cbbd25bd0ce9055de7e21ea21c922271621666b5777cbb8cfdaccc76cc1b",
         ),
     ),
 )

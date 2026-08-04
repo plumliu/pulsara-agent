@@ -109,6 +109,7 @@ _RELATIONS_INTRODUCED_BY_VERSION = (
     _COMPACTION_MEMORY_EXTRACTION_RELATIONS,
     _MCP_CONTINUATION_RELATIONS,
     _TERMINAL_PRESENTATION_QUEUE_RELATIONS,
+    (),
 )
 _ALL_RELATIONS = tuple(
     name
@@ -272,7 +273,7 @@ _V5_RUNTIME_EXECUTABLE_FUNCTIONS = {
 
 
 def _manifest_payload(through_version: int) -> dict[str, object]:
-    if through_version < 0 or through_version > 11:
+    if through_version < 0 or through_version > 12:
         raise ValueError("unsupported manifest version")
     relations: list[dict[str, object]] = [
         _relation(
@@ -442,7 +443,7 @@ def build_postgres_schema_manifest(
 
 
 POSTGRES_SCHEMA_MANIFESTS = tuple(
-    build_postgres_schema_manifest(version) for version in range(12)
+    build_postgres_schema_manifest(version) for version in range(13)
 )
 POSTGRES_LATEST_SCHEMA_MANIFEST = POSTGRES_SCHEMA_MANIFESTS[-1]
 PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)

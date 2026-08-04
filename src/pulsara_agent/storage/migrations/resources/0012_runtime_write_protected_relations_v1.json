@@ -1,0 +1,6 @@
+{
+  "schema_version": "runtime_write_protected_relation_registry_overlay.v1",
+  "registry_version": "12",
+  "extends": "0011_runtime_write_protected_relations_v1.json",
+  "relations": []
+}

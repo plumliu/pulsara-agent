@@ -26,12 +26,12 @@ from pulsara_agent.ports.prompt_queue import (
     PromptQueueRestoreBundle,
 )
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.prompt_queue import (
     PROMPT_QUEUE_EVENT_TYPE_VALUES,
     PromptQueueDomainCheckpointFact,
     PromptQueueHeadReceiptFact,
     build_prompt_queue_account_projection,
+    build_prompt_queue_head_receipt,
 )
 from pulsara_agent.storage.prompt_queue_bootstrap import (
     PROMPT_QUEUE_PROJECTION_KIND,
@@ -52,7 +52,9 @@ _ACCOUNT_COLUMNS = """
     bounded_tail_first_sequence, bounded_tail_count,
     bounded_tail_payload_bytes, bounded_tail_accumulator,
     pending_item_count, reserved_item_count, artifact_bytes,
-    pending_item_head_set_accumulator, row_set_accumulator,
+    pending_item_head_set_accumulator,
+    active_client_item_count, active_client_item_accumulator,
+    row_set_accumulator,
     reducer_contract_fingerprint, event_registry_fingerprint,
     account_fingerprint
 """
@@ -279,6 +281,10 @@ def commit_prompt_queue_checkpoint(
                     pending_item_head_set_accumulator=(
                         account.pending_item_head_set_accumulator
                     ),
+                    active_client_item_count=account.active_client_item_count,
+                    active_client_item_accumulator=(
+                        account.active_client_item_accumulator
+                    ),
                     row_set_accumulator=account.row_set_accumulator,
                     reducer_contract_fingerprint=(account.reducer_contract_fingerprint),
                     event_registry_fingerprint=account.event_registry_fingerprint,
@@ -421,6 +427,10 @@ def _confirm_after_failure(
         == checkpoint.transition_accumulator
         and bundle.checkpoint.queue_row_set_accumulator
         == checkpoint.queue_row_set_accumulator
+        and bundle.checkpoint.active_client_item_count
+        == checkpoint.active_client_item_count
+        and bundle.checkpoint.active_client_item_accumulator
+        == checkpoint.active_client_item_accumulator
     ):
         return _outcome(
             disposition="superseded_by_compatible_winner",
@@ -461,6 +471,10 @@ def _validate_candidate(
         }
         or candidate.validation_base_through_sequence
         != guard.expected_previous_through_sequence
+        or checkpoint.active_client_item_count
+        != guard.expected_active_client_item_count
+        or checkpoint.active_client_item_accumulator
+        != guard.expected_active_client_item_accumulator
     ):
         raise ValueError("prompt queue checkpoint candidate/guard mismatch")
 
@@ -482,6 +496,9 @@ def _validate_guard(
         or account.row_set_accumulator != guard.expected_row_set_accumulator
         or account.pending_item_head_set_accumulator
         != guard.expected_pending_item_head_set_accumulator
+        or account.active_client_item_count != guard.expected_active_client_item_count
+        or account.active_client_item_accumulator
+        != guard.expected_active_client_item_accumulator
     ):
         raise ValueError("prompt queue checkpoint guard no longer matches")
 
@@ -504,13 +521,8 @@ def _account_column_names() -> tuple[str, ...]:
 
 
 def _head_receipt(*, checkpoint, account) -> PromptQueueHeadReceiptFact:
-    return build_frozen_fact(
-        PromptQueueHeadReceiptFact,
-        schema_version="prompt_queue_head_receipt.v1",
-        reducer_contract_fingerprint=account.reducer_contract_fingerprint,
-        event_registry_fingerprint=account.event_registry_fingerprint,
-        checkpoint_generation=checkpoint.checkpoint_generation,
-        checkpoint_fingerprint=checkpoint.checkpoint_fingerprint,
+    return build_prompt_queue_head_receipt(
+        checkpoint=checkpoint,
         bounded_tail_first_sequence=account.bounded_tail_first_sequence,
         bounded_tail_last_sequence=(
             account.queue_chain_head_sequence if account.bounded_tail_count else 0
@@ -522,6 +534,10 @@ def _head_receipt(*, checkpoint, account) -> PromptQueueHeadReceiptFact:
             account.queue_chain_head_payload_fingerprint
         ),
         resulting_account_revision=account.account_revision,
+        resulting_active_client_item_count=account.active_client_item_count,
+        resulting_active_client_item_accumulator=(
+            account.active_client_item_accumulator
+        ),
         resulting_row_set_accumulator=account.row_set_accumulator,
     )
 

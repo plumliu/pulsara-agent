@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from time import monotonic
@@ -107,6 +107,32 @@ class TerminalAttachmentRegistry:
                 role=attachment.lease.role,
                 controller_generation=self._controller_generation,
                 now=now,
+            )
+            return attachment.lease
+
+    def rebind_connection(
+        self,
+        *,
+        attachment_id: str,
+        attachment_generation: int,
+        expected_previous_connection_id: str,
+        resulting_connection_id: str,
+    ) -> TerminalAttachmentLease:
+        """Move only the physical binding; preserve semantic lease identity/expiry."""
+
+        if not expected_previous_connection_id or not resulting_connection_id:
+            raise ValueError("terminal attachment rebind identity is incomplete")
+        now = monotonic()
+        with self._lock:
+            self._retire_expired_unlocked(now)
+            attachment = self._require_unlocked(attachment_id, attachment_generation)
+            if attachment.lease.connection_id == resulting_connection_id:
+                return attachment.lease
+            if attachment.lease.connection_id != expected_previous_connection_id:
+                raise PermissionError("terminal attachment physical binding is stale")
+            attachment.lease = replace(
+                attachment.lease,
+                connection_id=resulting_connection_id,
             )
             return attachment.lease
 

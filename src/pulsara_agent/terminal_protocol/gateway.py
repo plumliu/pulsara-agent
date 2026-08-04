@@ -11,6 +11,7 @@ import socket
 import stat
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable
@@ -42,21 +43,36 @@ from pulsara_agent.ports.terminal_presentation import (
 )
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.terminal_application.services import (
+    fit_projection_snapshot_bundle_resident_suffix,
     terminal_request_semantic_fingerprint,
+)
+from pulsara_agent.runtime.terminal_application.control_projection import (
+    ControlProjectionCursor,
+)
+from pulsara_agent.runtime.terminal_presentation.public_text import (
+    bounded_terminal_safe_public_text,
 )
 from pulsara_agent.terminal_protocol.codec import (
     HEARTBEAT_GRACE_MS,
     HEARTBEAT_INTERVAL_MS,
     HEARTBEAT_MAXIMUM_MISSED_COUNT,
     MAXIMUM_FRAME_BYTES,
+    MAXIMUM_ACTIVE_QUEUE_ITEMS,
+    MAXIMUM_CONTROL_OBSERVATION_BYTES,
+    MAXIMUM_DURABLE_OBSERVATION_BYTES,
     MAXIMUM_HISTORY_PAGE_BYTES,
     MAXIMUM_HISTORY_PAGE_CELLS,
     MAXIMUM_OBSERVATION_WAIT_MS,
+    MAXIMUM_OBSERVATION_BATCH_BYTES,
+    MAXIMUM_OPERATIONAL_ACTIVITY_CELLS,
+    MAXIMUM_OPERATIONAL_OBSERVATION_BYTES,
+    MAXIMUM_SERVER_CONTROL_NOTIFICATIONS,
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
     PROTOCOL_SCHEMA_FINGERPRINT,
     SECRET_FRAME_MAXIMUM_BYTES,
     attachment_to_wire,
+    control_cursor_to_wire,
     cursor_from_wire,
     cursor_to_wire,
     entry_to_wire,
@@ -69,24 +85,73 @@ from pulsara_agent.terminal_protocol.codec import (
     snapshot_to_wire,
 )
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
+from pulsara_agent.terminal_protocol.generated.terminal_client_fingerprint import (
+    attachment_challenge_commitment,
+    install_protobuf_fingerprint,
+    validate_protobuf_fingerprint,
+)
+from pulsara_agent.terminal_protocol.transport_auth import (
+    PREFACE_DEADLINE_SECONDS,
+    PREFACE_MAXIMUM_BYTES,
+    TerminalTransportAuthOwner,
+)
 
 
 SessionProvider = Callable[[str], object]
 CloseSession = Callable[[str, bool], Awaitable[None]]
 
-_SERVER_CAPABILITIES = (
-    "attachment_controller_v1",
-    "command_idempotency_v1",
-    "history_page_v1",
-    "mcp_secret_lease_v1",
-    "operational_cursor_v1",
-    "operational_snapshot_v1",
-    "presentation_root_advance_v1",
-    "projection_snapshot_v1",
+_SERVER_CAPABILITIES = tuple(
+    sorted(
+        (
+            wire.PRESENTATION_SNAPSHOT_V1,
+            wire.OPERATIONAL_SNAPSHOT_V1,
+            wire.BOOTSTRAP_CARRIER_V1,
+            wire.LAUNCH_AUTH_PREFACE_V1,
+            wire.ATTACH_ACK_V1,
+            wire.HISTORY_PAGE_V1,
+            wire.OBSERVATION_STREAM_V1,
+            wire.ROOT_ADVANCE_V1,
+            wire.GAP_REBUILD_V1,
+            wire.CONTROL_PROJECTION_OBSERVATION_V1,
+            wire.CONTROLLER_COMMAND_V1,
+            wire.COMMAND_QUERY_V1,
+            wire.TYPED_INTERACTION_ACTIONS_V1,
+            wire.SECRET_FORM_V1,
+            wire.SECRET_PRIVATE_URL_V1,
+            wire.SECRET_REVOKE_V1,
+            wire.PROMPT_QUEUE_MUTATION_V1,
+            wire.SESSION_SUCCESSOR_V1,
+        )
+    )
+)
+_S1_REQUIRED_CAPABILITIES = frozenset(
+    {
+        wire.PRESENTATION_SNAPSHOT_V1,
+        wire.OPERATIONAL_SNAPSHOT_V1,
+        wire.BOOTSTRAP_CARRIER_V1,
+        wire.LAUNCH_AUTH_PREFACE_V1,
+        wire.ATTACH_ACK_V1,
+    }
 )
 _MAXIMUM_CONNECTION_INPUT_BYTES = 512 * 1024 * 1024
 _MAXIMUM_CONNECTION_OUTPUT_BYTES = 512 * 1024 * 1024
 _MAXIMUM_UNIX_SOCKET_PATH_BYTES = 103
+_PLAN_EXIT_DECISION_FROM_WIRE = {
+    wire.APPROVE: "approve",
+    wire.REVISE: "revise",
+    wire.CANCEL: "cancel",
+}
+_TERMINAL_SECRET_KIND_TO_WIRE = {
+    "private_url": wire.PRIVATE_URL,
+    "form_response": wire.FORM_RESPONSE,
+}
+
+
+def _closed_wire_value(mapping: dict[str, int], value: str, *, field: str) -> int:
+    try:
+        return mapping[value]
+    except KeyError as exc:
+        raise ValueError(f"unknown {field}: {value!r}") from exc
 
 
 @dataclass(slots=True)
@@ -97,13 +162,45 @@ class _ConnectionState:
     client_instance_id: str | None = None
     requested_role: int | None = None
     attachment_challenge: bytes | None = None
-    hello_transcript_fingerprint: str | None = None
+    transport_auth_result: wire.TerminalTransportAuthResult | None = None
+    handshake_candidate: wire.HandshakeRecoveryCandidateIdentity | None = None
+    hello_negotiation_winner: wire.HelloNegotiationSemanticWinner | None = None
+    hello_receipt: wire.ServerHelloReceipt | None = None
+    attach_semantic_winner: wire.AttachSemanticWinner | None = None
+    attach_result_receipt: wire.AttachResultReceipt | None = None
+    transport_binding: wire.TerminalClientTransportBindingIdentity | None = None
+    attachment_acknowledged: bool = False
+    accepted_heartbeat_generation: int = 0
+    selected_capabilities: frozenset[int] = field(default_factory=frozenset)
     host_session: object | None = None
     attachment_id: str | None = None
     attachment_generation: int | None = None
     root_lease_ids: dict[str, str] = field(default_factory=dict)
     input_bytes: int = 0
     output_bytes: int = 0
+
+
+@dataclass(slots=True)
+class _HelloWinnerRecord:
+    candidate_fingerprint: str
+    winner: wire.HelloNegotiationSemanticWinner
+
+
+@dataclass(slots=True)
+class _AttachWinnerRecord:
+    host_session: object
+    handshake_candidate: wire.HandshakeRecoveryCandidateIdentity
+    hello_negotiation_winner: wire.HelloNegotiationSemanticWinner
+    semantic_winner: wire.AttachSemanticWinner
+    lease: object
+    binding_generation: int
+    current_binding: wire.TerminalClientTransportBindingIdentity
+    credential_id: str
+    recovery_expires_at_monotonic: float
+    acknowledged: bool = False
+    ack_result: wire.AttachAckResult | None = None
+    ack_tombstone_expires_at_monotonic: float | None = None
+    heartbeat_results: dict[str, wire.HeartbeatResult] = field(default_factory=dict)
 
 
 class TerminalProtocolServer:
@@ -117,16 +214,27 @@ class TerminalProtocolServer:
         close_session: CloseSession | None = None,
         maximum_frame_bytes: int = MAXIMUM_FRAME_BYTES,
         launch_capability: bytes | None = None,
+        launch_id: str | None = None,
     ) -> None:
         self.socket_path = socket_path.expanduser()
         self.session_provider = session_provider
         self.close_session = close_session
         self.maximum_frame_bytes = maximum_frame_bytes
         self.launch_capability = launch_capability or secrets.token_bytes(32)
-        if len(self.launch_capability) < 32:
-            raise ValueError("terminal launch capability is too short")
+        self.launch_id = launch_id or f"terminal-launch:{uuid4().hex}"
+        self._transport_auth = TerminalTransportAuthOwner(
+            initial_launch_id=self.launch_id,
+            initial_launch_capability=self.launch_capability,
+        )
+        self._hello_winners: dict[tuple[str, int], _HelloWinnerRecord] = {}
+        self._attach_winners: dict[tuple[str, int], _AttachWinnerRecord] = {}
         self._server: asyncio.AbstractServer | None = None
         self._connections: set[asyncio.Task[object]] = set()
+
+    def issue_launch_credential(self) -> tuple[str, bytes]:
+        """Issue a fresh one-shot parent-owned launch credential."""
+
+        return self._transport_auth.issue_initial()
 
     async def start(self) -> None:
         if self._server is not None:
@@ -201,6 +309,24 @@ class TerminalProtocolServer:
         state = _ConnectionState()
         try:
             _validate_peer_uid(writer)
+            async with asyncio.timeout(PREFACE_DEADLINE_SECONDS):
+                preface = await _read_message(
+                    reader,
+                    wire.TerminalTransportAuthPreface,
+                    maximum_bytes=PREFACE_MAXIMUM_BYTES,
+                )
+            auth_result = self._transport_auth.authenticate(
+                preface, connection_id=state.connection_id
+            )
+            auth_result = self._recover_acknowledged_attachment(
+                preface=preface,
+                ordinary_result=auth_result,
+                state=state,
+            )
+            await _write_frame(writer, auth_result, maximum_bytes=PREFACE_MAXIMUM_BYTES)
+            if auth_result.disposition == wire.TRANSPORT_AUTHENTICATION_REJECTED:
+                return
+            state.transport_auth_result = auth_result
             while True:
                 request = await _read_frame(
                     reader, wire.ClientFrame, maximum_bytes=self.maximum_frame_bytes
@@ -259,6 +385,27 @@ class TerminalProtocolServer:
     def _detach_connection_state(self, state: _ConnectionState) -> None:
         if state.host_session is None or state.attachment_id is None:
             return
+        candidate = state.handshake_candidate
+        if candidate is not None:
+            record = self._attach_winners.get(
+                (candidate.client_instance_id, candidate.attachment_attempt_generation)
+            )
+            if (
+                record is not None
+                and record.current_binding.connection_id != state.connection_id
+            ):
+                # A compatible retry already moved the semantic attachment to a
+                # newer physical binding.  The superseded connection owns no
+                # attachment-level cleanup authority.
+                return
+            if (
+                record is not None
+                and monotonic() < record.recovery_expires_at_monotonic
+            ):
+                # A pre-ACK response or ACK result may have been lost.  The
+                # bounded stable winner, not the physical connection, owns the
+                # attachment until recovery expiry.
+                return
         services = state.host_session.terminal_application_services
         foundation = state.host_session.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
         foundation.retention_owner.release_attachment(state.attachment_id)
@@ -281,39 +428,70 @@ class TerminalProtocolServer:
             raise PermissionError("terminal hello must be first")
         if branch == "attach":
             return self._attach(frame.attach, state)
+        if branch == "attach_ack":
+            return self._attach_ack(frame.attach_ack, state)
         host = _require_attached(state)
+        if not state.attachment_acknowledged:
+            raise PermissionError("terminal attach acknowledgement is required")
         services = host.terminal_application_services
         services.attachments.validate_attachment(_state_binding(state, host))
         if branch == "heartbeat":
-            request = frame.heartbeat
-            _require_attachment(request, state)
-            lease = services.attachments.heartbeat(
-                attachment_id=request.attachment_id,
-                attachment_generation=request.attachment_generation,
-            )
-            self._renew_root_leases(state, host)
-            return wire.ServerFrame(
-                heartbeat=wire.HeartbeatResponse(
-                    request_id=request.request_id,
-                    attachment=attachment_to_wire(lease),
-                )
-            )
+            return self._heartbeat(frame.heartbeat, state, host)
         if branch == "snapshot":
-            snapshot = services.query.snapshot()
+            request = frame.snapshot
+            validate_protobuf_fingerprint(
+                "terminal-projection-snapshot-request:v2",
+                request,
+                own_field="request_fingerprint",
+            )
+            if request.runtime_session_id != host.runtime_session_id:
+                raise PermissionError("terminal snapshot request crosses sessions")
+            bundle = services.query.snapshot_bundle()
+            response, bundle = _bounded_snapshot_response(
+                bundle,
+                request_id=request.request_id,
+                maximum_frame_bytes=self.maximum_frame_bytes,
+            )
+            snapshot = bundle.session_snapshot
             self._borrow_root(
                 state, host, snapshot.viewport.active_head.confirmed_root_identity
             )
-            return wire.ServerFrame(
-                snapshot=snapshot_to_wire(
-                    snapshot, request_id=frame.snapshot.request_id
-                )
-            )
+            return response
         if branch == "operational_snapshot":
+            request = frame.operational_snapshot
+            validate_protobuf_fingerprint(
+                "terminal-operational-snapshot-request:v1",
+                request,
+                own_field="request_fingerprint",
+            )
+            semantic = state.attach_semantic_winner
+            binding = state.transport_binding
+            if semantic is None or binding is None:
+                raise PermissionError(
+                    "terminal operational snapshot has no attachment authority"
+                )
+            if (
+                request.runtime_session_id != host.runtime_session_id
+                or request.attachment_id != state.attachment_id
+                or request.attachment_generation != state.attachment_generation
+                or request.attachment_identity_fingerprint
+                != semantic.attachment.identity_fingerprint
+                or request.current_transport_binding != binding
+                or request.current_transport_binding.connection_id
+                != state.connection_id
+                or (
+                    request.requested_after_operational_generation == 0
+                    and request.requested_after_operational_cursor != 0
+                )
+            ):
+                raise PermissionError(
+                    "terminal operational snapshot authority is stale"
+                )
             snapshot = host.wiring.runtime_wiring.runtime_session.ui_operational_activity_store.snapshot()
             return wire.ServerFrame(
                 operational_snapshot=operational_snapshot_to_wire(
                     snapshot,
-                    request_id=frame.operational_snapshot.request_id,
+                    request=request,
                 )
             )
         if branch == "observe_next":
@@ -333,6 +511,15 @@ class TerminalProtocolServer:
                     request.binding.attachment_id
                 )
                 services.secrets.revoke_attachment(request.binding.attachment_id)
+                candidate = state.handshake_candidate
+                if candidate is not None:
+                    self._attach_winners.pop(
+                        (
+                            candidate.client_instance_id,
+                            candidate.attachment_attempt_generation,
+                        ),
+                        None,
+                    )
                 state.host_session = None
                 state.attachment_id = None
                 state.attachment_generation = None
@@ -383,7 +570,11 @@ class TerminalProtocolServer:
                         controller_generation=lease.controller_generation,
                         interaction_id=lease.interaction_id,
                         request_key=lease.request_key,
-                        secret_kind=lease.secret_kind,
+                        terminal_secret_kind=_closed_wire_value(
+                            _TERMINAL_SECRET_KIND_TO_WIRE,
+                            lease.secret_kind,
+                            field="terminal secret kind",
+                        ),
                         owner_epoch=lease.owner_epoch,
                         lease_generation=lease.lease_generation,
                         expires_at_utc=lease.expires_at_utc,
@@ -410,121 +601,703 @@ class TerminalProtocolServer:
             )
         raise ValueError("terminal client frame branch is unknown")
 
-    def _hello(self, request, state: _ConnectionState) -> wire.ServerFrame:
-        if state.client_instance_id is not None:
-            raise ValueError("terminal hello is duplicated")
-        version = request.supported_version_range
-        role = request.requested_attachment_mode
+    def _recover_acknowledged_attachment(
+        self,
+        *,
+        preface: wire.TerminalTransportAuthPreface,
+        ordinary_result: wire.TerminalTransportAuthResult,
+        state: _ConnectionState,
+    ) -> wire.TerminalTransportAuthResult:
+        """Rebind one ACK-FULL semantic attachment without replaying Attach."""
+
+        if ordinary_result.disposition in {
+            wire.TRANSPORT_AUTHENTICATION_REJECTED,
+            wire.TRANSPORT_ACK_RESULT_RECOVERY,
+        }:
+            return ordinary_result
+        candidate_fingerprint = ordinary_result.authenticated_candidate_fingerprint
+        matching = tuple(
+            record
+            for record in self._attach_winners.values()
+            if record.acknowledged
+            and record.credential_id == ordinary_result.credential_id
+            and record.handshake_candidate.candidate_fingerprint
+            == candidate_fingerprint
+        )
+        if not matching:
+            return ordinary_result
+        if len(matching) != 1:
+            raise RuntimeError("terminal ACK tombstone identity is ambiguous")
+        record = matching[0]
         if (
-            version.major != PROTOCOL_MAJOR
-            or version.minimum_minor > PROTOCOL_MINOR
-            or version.maximum_minor < PROTOCOL_MINOR
-            or version.schema_contract_fingerprint != PROTOCOL_SCHEMA_FINGERPRINT
-            or role
-            not in {
+            record.ack_result is None
+            or record.ack_tombstone_expires_at_monotonic is None
+            or monotonic() >= record.ack_tombstone_expires_at_monotonic
+        ):
+            return ordinary_result
+        previous = record.current_binding
+        services = record.host_session.terminal_application_services
+        services.attachments.rebind_connection(
+            attachment_id=record.semantic_winner.attachment.attachment_id,
+            attachment_generation=(
+                record.semantic_winner.attachment.attachment_generation
+            ),
+            expected_previous_connection_id=previous.connection_id,
+            resulting_connection_id=state.connection_id,
+        )
+        record.binding_generation += 1
+        resulting_binding = _transport_binding(
+            attachment=record.semantic_winner.attachment,
+            connection_id=state.connection_id,
+            generation=record.binding_generation,
+        )
+        rebind = wire.RecoveredAttachmentTransportBinding(
+            previous_transport_binding_fingerprint=previous.binding_fingerprint,
+            resulting_transport_binding=resulting_binding,
+            disposition=wire.ATTACHMENT_TRANSPORT_REBOUND,
+        )
+        install_protobuf_fingerprint(
+            "terminal-attachment-transport-rebind:v1",
+            rebind,
+            own_field="rebind_receipt_fingerprint",
+        )
+        result = wire.TerminalTransportAuthResult(
+            auth_request_id=ordinary_result.auth_request_id,
+            auth_attempt_id=ordinary_result.auth_attempt_id,
+            connection_id=state.connection_id,
+            client_instance_id=ordinary_result.client_instance_id,
+            credential_id=ordinary_result.credential_id,
+            disposition=wire.TRANSPORT_ACK_RESULT_RECOVERY,
+            authenticated_candidate_fingerprint=candidate_fingerprint,
+            recovered_attach_ack_result=record.ack_result,
+            recovered_transport_binding=rebind,
+        )
+        install_protobuf_fingerprint(
+            "terminal-transport-auth-result:v1",
+            result,
+            own_field="result_fingerprint",
+        )
+        self._transport_auth.install_request_result(
+            credential_id=ordinary_result.credential_id,
+            auth_request_id=preface.auth_request_id,
+            expected_preface_fingerprint=preface.preface_fingerprint,
+            result=result,
+        )
+        record.current_binding = resulting_binding
+        self._install_recovered_connection_state(
+            state=state,
+            record=record,
+            auth_result=result,
+        )
+        return result
+
+    @staticmethod
+    def _install_recovered_connection_state(
+        *,
+        state: _ConnectionState,
+        record: _AttachWinnerRecord,
+        auth_result: wire.TerminalTransportAuthResult,
+    ) -> None:
+        candidate = wire.HandshakeRecoveryCandidateIdentity()
+        candidate.CopyFrom(record.handshake_candidate)
+        hello_winner = wire.HelloNegotiationSemanticWinner()
+        hello_winner.CopyFrom(record.hello_negotiation_winner)
+        semantic = wire.AttachSemanticWinner()
+        semantic.CopyFrom(record.semantic_winner)
+        state.client_instance_id = candidate.client_instance_id
+        state.requested_role = candidate.requested_attachment_role
+        state.transport_auth_result = auth_result
+        state.handshake_candidate = candidate
+        state.hello_negotiation_winner = hello_winner
+        state.attach_semantic_winner = semantic
+        state.transport_binding = record.current_binding
+        state.host_session = record.host_session
+        state.attachment_id = semantic.attachment.attachment_id
+        state.attachment_generation = semantic.attachment.attachment_generation
+        state.attachment_acknowledged = True
+        state.selected_capabilities = frozenset(hello_winner.selected_capabilities)
+
+    def _hello(self, request, state: _ConnectionState) -> wire.ServerFrame:
+        auth_result = state.transport_auth_result
+        if state.client_instance_id is not None or auth_result is None:
+            raise ValueError("terminal hello is duplicated")
+        candidate = request.handshake_candidate
+        validate_protobuf_fingerprint(
+            "terminal-handshake-recovery-candidate:v1",
+            candidate,
+            own_field="candidate_fingerprint",
+            clear_fields=("candidate_id",),
+        )
+        expected_candidate_id = (
+            "handshake:" + candidate.candidate_fingerprint.removeprefix("sha256:")
+        )
+        supported = tuple(candidate.supported_capabilities)
+        required = tuple(candidate.required_capabilities)
+        candidate_valid = (
+            candidate.candidate_version == 1
+            and candidate.candidate_id == expected_candidate_id
+            and candidate.client_instance_id == auth_result.client_instance_id
+            and candidate.attachment_attempt_generation == 1
+            and candidate.requested_attachment_role
+            in {
                 wire.ATTACHMENT_ROLE_OBSERVER,
                 wire.ATTACHMENT_ROLE_CONTROLLER,
             }
-            or not request.client_instance_id
-            or not hmac.compare_digest(
-                bytes(request.launch_capability), self.launch_capability
-            )
-        ):
-            return _error_frame(
-                request_id=request.request_id,
-                code="PROTOCOL_NEGOTIATION_REJECTED",
-                message="The protocol version or launch authority is incompatible.",
-            )
-        challenge = secrets.token_bytes(32)
-        transcript = context_fingerprint(
-            "terminal-protocol-hello-transcript:v1",
-            {
-                "request_id": request.request_id,
-                "client_instance_id": request.client_instance_id,
-                "client_build_identity": request.client_build_identity,
-                "supported_capabilities": tuple(request.supported_capabilities),
-                "requested_attachment_mode": role,
-                "selected_protocol": {
-                    "major": PROTOCOL_MAJOR,
-                    "minor": PROTOCOL_MINOR,
-                    "schema_contract_fingerprint": PROTOCOL_SCHEMA_FINGERPRINT,
-                },
-                "attachment_challenge_sha256": context_fingerprint(
-                    "terminal-attachment-challenge:v1", challenge.hex()
-                ),
-            },
+            and candidate.minimum_protocol_major == PROTOCOL_MAJOR
+            and candidate.maximum_protocol_major == PROTOCOL_MAJOR
+            and candidate.minimum_protocol_minor <= PROTOCOL_MINOR
+            and candidate.maximum_protocol_minor >= PROTOCOL_MINOR
+            and candidate.schema_contract_fingerprint == PROTOCOL_SCHEMA_FINGERPRINT
+            and supported == tuple(sorted(set(supported)))
+            and required == tuple(sorted(set(required)))
+            and 0 not in supported
+            and 0 not in required
+            and set(required).issubset(supported)
+            and _S1_REQUIRED_CAPABILITIES.issubset(required)
+            and set(required).issubset(_SERVER_CAPABILITIES)
+            and request.transport_auth_attempt_id == auth_result.auth_attempt_id
+            and request.transport_auth_result_fingerprint
+            == auth_result.result_fingerprint
+            and auth_result.authenticated_candidate_fingerprint
+            == candidate.candidate_fingerprint
         )
-        state.client_instance_id = request.client_instance_id
-        state.requested_role = role
-        state.attachment_challenge = challenge
-        state.hello_transcript_fingerprint = transcript
-        return wire.ServerFrame(
-            hello=wire.HelloResponse(
-                request_id=request.request_id,
-                selected_protocol=protocol_version(),
-                server_build_identity="pulsara-python-terminal-foundation:v1",
-                server_runtime_identity=f"process:{os.getpid()}",
-                negotiated_limits=wire.NegotiatedLimits(
-                    maximum_frame_bytes=self.maximum_frame_bytes,
-                    maximum_history_page_cells=MAXIMUM_HISTORY_PAGE_CELLS,
-                    maximum_history_page_decoded_bytes=MAXIMUM_HISTORY_PAGE_BYTES,
-                    maximum_observation_wait_ms=MAXIMUM_OBSERVATION_WAIT_MS,
-                    secret_frame_maximum_bytes=SECRET_FRAME_MAXIMUM_BYTES,
+        if not candidate_valid:
+            return self._hello_rejected(
+                request=request,
+                state=state,
+                candidate=candidate,
+                reason=wire.SERVER_NEGOTIATION_POLICY_REJECTED,
+            )
+        key = (
+            candidate.client_instance_id,
+            candidate.attachment_attempt_generation,
+        )
+        record = self._hello_winners.get(key)
+        if (
+            record is not None
+            and record.candidate_fingerprint != candidate.candidate_fingerprint
+        ):
+            raise PermissionError("terminal handshake candidate generation conflicts")
+        selected = tuple(item for item in supported if item in _SERVER_CAPABILITIES)
+        if record is None:
+            limits = wire.NegotiatedLimits(
+                maximum_frame_bytes=self.maximum_frame_bytes,
+                maximum_history_page_cells=MAXIMUM_HISTORY_PAGE_CELLS,
+                maximum_history_page_decoded_bytes=MAXIMUM_HISTORY_PAGE_BYTES,
+                maximum_observation_wait_ms=MAXIMUM_OBSERVATION_WAIT_MS,
+                secret_frame_maximum_bytes=SECRET_FRAME_MAXIMUM_BYTES,
+                maximum_active_queue_items=MAXIMUM_ACTIVE_QUEUE_ITEMS,
+                maximum_server_control_notifications=(
+                    MAXIMUM_SERVER_CONTROL_NOTIFICATIONS
                 ),
-                attachment_challenge=challenge,
-                supported_capabilities=_SERVER_CAPABILITIES,
-                hello_transcript_fingerprint=transcript,
+                maximum_operational_activity_cells=(MAXIMUM_OPERATIONAL_ACTIVITY_CELLS),
+                maximum_durable_observation_bytes=(MAXIMUM_DURABLE_OBSERVATION_BYTES),
+                maximum_operational_observation_bytes=(
+                    MAXIMUM_OPERATIONAL_OBSERVATION_BYTES
+                ),
+                maximum_control_observation_bytes=MAXIMUM_CONTROL_OBSERVATION_BYTES,
+                maximum_observation_batch_bytes=MAXIMUM_OBSERVATION_BATCH_BYTES,
+            )
+            capability_contract = context_fingerprint(
+                "terminal-client-capability-contract:v2",
+                {
+                    "server_supported": _SERVER_CAPABILITIES,
+                    "selected": selected,
+                    "required": required,
+                },
+            )
+            transcript = context_fingerprint(
+                "terminal-hello-negotiation-transcript:v1",
+                {
+                    "candidate_fingerprint": candidate.candidate_fingerprint,
+                    "selected_protocol": {
+                        "major": PROTOCOL_MAJOR,
+                        "minor": PROTOCOL_MINOR,
+                        "schema": PROTOCOL_SCHEMA_FINGERPRINT,
+                    },
+                    "server_runtime_compatibility_identity": "pulsara-terminal-runtime:v2",
+                    "limits": {
+                        field.name: getattr(limits, field.name)
+                        for field in limits.DESCRIPTOR.fields
+                    },
+                    "server_supported": _SERVER_CAPABILITIES,
+                    "selected": selected,
+                    "capability_contract": capability_contract,
+                },
+            )
+            winner = wire.HelloNegotiationSemanticWinner(
+                handshake_candidate_id=candidate.candidate_id,
+                handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+                attachment_attempt_generation=(candidate.attachment_attempt_generation),
+                selected_protocol=protocol_version(),
+                server_build_identity="pulsara-python-terminal-foundation:v2",
+                server_runtime_compatibility_identity="pulsara-terminal-runtime:v2",
+                negotiated_limits=limits,
+                server_supported_capabilities=_SERVER_CAPABILITIES,
+                selected_capabilities=selected,
+                capability_contract_fingerprint=capability_contract,
+                negotiation_transcript_fingerprint=transcript,
+            )
+            install_protobuf_fingerprint(
+                "terminal-hello-negotiation-winner:v1",
+                winner,
+                own_field="negotiation_winner_fingerprint",
+            )
+            record = _HelloWinnerRecord(
+                candidate_fingerprint=candidate.candidate_fingerprint,
+                winner=winner,
+            )
+            self._hello_winners[key] = record
+        winner = wire.HelloNegotiationSemanticWinner()
+        winner.CopyFrom(record.winner)
+        challenge = secrets.token_bytes(32)
+        commitment = attachment_challenge_commitment(
+            auth_attempt_id=auth_result.auth_attempt_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            candidate_id=candidate.candidate_id,
+            connection_id=state.connection_id,
+            negotiation_winner_fingerprint=winner.negotiation_winner_fingerprint,
+            request_id=request.request_id,
+            challenge=challenge,
+        )
+        receipt = wire.ServerHelloReceipt(
+            request_id=request.request_id,
+            transport_auth_attempt_id=auth_result.auth_attempt_id,
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            negotiation_winner_fingerprint=winner.negotiation_winner_fingerprint,
+            current_connection_id=state.connection_id,
+            attachment_challenge=challenge,
+            attachment_challenge_commitment=commitment,
+        )
+        install_protobuf_fingerprint(
+            "terminal-server-hello-receipt:v1",
+            receipt,
+            own_field="hello_receipt_fingerprint",
+        )
+        stored_candidate = wire.HandshakeRecoveryCandidateIdentity()
+        stored_candidate.CopyFrom(candidate)
+        state.client_instance_id = candidate.client_instance_id
+        state.requested_role = candidate.requested_attachment_role
+        state.attachment_challenge = challenge
+        state.handshake_candidate = stored_candidate
+        state.hello_negotiation_winner = winner
+        state.hello_receipt = receipt
+        state.selected_capabilities = frozenset(selected)
+        return wire.ServerFrame(
+            hello=wire.HelloOutcome(
+                accepted=wire.ServerHello(
+                    negotiation_winner=winner,
+                    receipt=receipt,
+                )
             )
         )
 
     def _attach(self, request, state: _ConnectionState) -> wire.ServerFrame:
-        if state.host_session is not None:
+        candidate = state.handshake_candidate
+        hello_winner = state.hello_negotiation_winner
+        hello_receipt = state.hello_receipt
+        auth_result = state.transport_auth_result
+        if state.host_session is not None or any(
+            item is None
+            for item in (candidate, hello_winner, hello_receipt, auth_result)
+        ):
             raise ValueError("terminal connection is already attached")
+        assert candidate is not None
+        assert hello_winner is not None
+        assert hello_receipt is not None
+        assert auth_result is not None
         if (
-            request.hello_transcript_fingerprint != state.hello_transcript_fingerprint
+            request.handshake_candidate_id != candidate.candidate_id
+            or request.handshake_candidate_fingerprint
+            != candidate.candidate_fingerprint
+            or request.negotiation_winner_fingerprint
+            != hello_winner.negotiation_winner_fingerprint
+            or request.current_hello_receipt_fingerprint
+            != hello_receipt.hello_receipt_fingerprint
             or not hmac.compare_digest(
                 bytes(request.attachment_challenge),
                 state.attachment_challenge or b"",
             )
-            or request.requested_role != state.requested_role
+            or request.attachment_challenge_commitment
+            != hello_receipt.attachment_challenge_commitment
         ):
             raise PermissionError("terminal attach proof is stale")
-        host = self.session_provider(request.host_session_id)
+        expected_commitment = attachment_challenge_commitment(
+            auth_attempt_id=auth_result.auth_attempt_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            candidate_id=candidate.candidate_id,
+            connection_id=state.connection_id,
+            negotiation_winner_fingerprint=(
+                hello_winner.negotiation_winner_fingerprint
+            ),
+            request_id=hello_receipt.request_id,
+            challenge=bytes(request.attachment_challenge),
+        )
+        if expected_commitment != request.attachment_challenge_commitment:
+            raise PermissionError("terminal attachment challenge is invalid")
+        host = self.session_provider(candidate.host_session_id)
+        if host.runtime_session_id != candidate.requested_runtime_session_id:
+            raise PermissionError("terminal requested runtime session is stale")
         services = host.terminal_application_services
+        key = (candidate.client_instance_id, candidate.attachment_attempt_generation)
+        existing = self._attach_winners.get(key)
+        if existing is not None:
+            if existing.acknowledged:
+                raise PermissionError(
+                    "terminal acknowledged attachment requires auth recovery"
+                )
+            if (
+                existing.semantic_winner.hello_negotiation_winner_fingerprint
+                != hello_winner.negotiation_winner_fingerprint
+                or existing.host_session is not host
+            ):
+                raise PermissionError("terminal pre-ACK attachment winner conflicts")
+            previous = existing.current_binding
+            services.attachments.rebind_connection(
+                attachment_id=existing.semantic_winner.attachment.attachment_id,
+                attachment_generation=(
+                    existing.semantic_winner.attachment.attachment_generation
+                ),
+                expected_previous_connection_id=previous.connection_id,
+                resulting_connection_id=state.connection_id,
+            )
+            existing.binding_generation += 1
+            binding = _transport_binding(
+                attachment=existing.semantic_winner.attachment,
+                connection_id=state.connection_id,
+                generation=existing.binding_generation,
+            )
+            receipt = wire.AttachResultReceipt(
+                request_id=request.request_id,
+                transport_auth_attempt_id=auth_result.auth_attempt_id,
+                handshake_candidate_id=candidate.candidate_id,
+                handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+                attach_semantic_winner=existing.semantic_winner,
+                current_transport_binding=binding,
+                previous_transport_binding_fingerprint=(previous.binding_fingerprint),
+                disposition=wire.ATTACH_REBOUND_PRE_ACK,
+            )
+            install_protobuf_fingerprint(
+                "terminal-attach-result-receipt:v1",
+                receipt,
+                own_field="receipt_fingerprint",
+            )
+            existing.current_binding = binding
+            state.host_session = host
+            state.attachment_id = existing.semantic_winner.attachment.attachment_id
+            state.attachment_generation = (
+                existing.semantic_winner.attachment.attachment_generation
+            )
+            state.attach_semantic_winner = existing.semantic_winner
+            state.attach_result_receipt = receipt
+            state.transport_binding = binding
+            return wire.ServerFrame(attach=receipt)
         lease = services.attachments.attach(
             connection_id=state.connection_id,
             client_instance_id=state.client_instance_id or "",
             request_controller=(
-                request.requested_role == wire.ATTACHMENT_ROLE_CONTROLLER
+                candidate.requested_attachment_role == wire.ATTACHMENT_ROLE_CONTROLLER
             ),
         )
         foundation = host.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
         foundation.start_background_if_possible()
+        attachment = attachment_to_wire(lease)
+        install_protobuf_fingerprint(
+            "terminal-attachment-identity:v2",
+            attachment,
+            own_field="identity_fingerprint",
+        )
+        controller_disposition = (
+            wire.CONTROLLER_GRANTED
+            if lease.role == "controller"
+            else (
+                wire.CONTROLLER_UNAVAILABLE_OBSERVER_ATTACHED
+                if candidate.requested_attachment_role
+                == wire.ATTACHMENT_ROLE_CONTROLLER
+                else wire.OBSERVER_ATTACHED
+            )
+        )
+        semantic_winner = wire.AttachSemanticWinner(
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            attachment_attempt_generation=candidate.attachment_attempt_generation,
+            hello_negotiation_winner_fingerprint=(
+                hello_winner.negotiation_winner_fingerprint
+            ),
+            attachment=attachment,
+            controller_disposition=controller_disposition,
+            bootstrap_requirement=(wire.PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED),
+            heartbeat_policy=wire.HeartbeatPolicy(
+                interval_ms=HEARTBEAT_INTERVAL_MS,
+                grace_ms=HEARTBEAT_GRACE_MS,
+                maximum_missed_count=HEARTBEAT_MAXIMUM_MISSED_COUNT,
+            ),
+        )
+        install_protobuf_fingerprint(
+            "terminal-attach-semantic-winner:v1",
+            semantic_winner,
+            own_field="semantic_winner_fingerprint",
+        )
+        binding = _transport_binding(
+            attachment=attachment,
+            connection_id=state.connection_id,
+            generation=1,
+        )
+        receipt = wire.AttachResultReceipt(
+            request_id=request.request_id,
+            transport_auth_attempt_id=auth_result.auth_attempt_id,
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            attach_semantic_winner=semantic_winner,
+            current_transport_binding=binding,
+            disposition=wire.ATTACH_CREATED,
+        )
+        install_protobuf_fingerprint(
+            "terminal-attach-result-receipt:v1",
+            receipt,
+            own_field="receipt_fingerprint",
+        )
         state.host_session = host
         state.attachment_id = lease.attachment_id
         state.attachment_generation = lease.attachment_generation
-        disposition = (
-            "controller_granted"
-            if lease.role == "controller"
-            else (
-                "controller_unavailable_observer_attached"
-                if request.requested_role == wire.ATTACHMENT_ROLE_CONTROLLER
-                else "observer_attached"
-            )
+        state.attach_semantic_winner = semantic_winner
+        state.attach_result_receipt = receipt
+        state.transport_binding = binding
+        stored_candidate = wire.HandshakeRecoveryCandidateIdentity()
+        stored_candidate.CopyFrom(candidate)
+        stored_hello_winner = wire.HelloNegotiationSemanticWinner()
+        stored_hello_winner.CopyFrom(hello_winner)
+        self._attach_winners[key] = _AttachWinnerRecord(
+            host_session=host,
+            handshake_candidate=stored_candidate,
+            hello_negotiation_winner=stored_hello_winner,
+            semantic_winner=semantic_winner,
+            lease=lease,
+            binding_generation=1,
+            current_binding=binding,
+            credential_id=auth_result.credential_id,
+            recovery_expires_at_monotonic=monotonic() + 30.0,
         )
-        return wire.ServerFrame(
-            attach=wire.AttachResponse(
+        return wire.ServerFrame(attach=receipt)
+
+    def _attach_ack(self, request, state: _ConnectionState) -> wire.ServerFrame:
+        candidate = state.handshake_candidate
+        semantic = state.attach_semantic_winner
+        receipt = state.attach_result_receipt
+        binding = state.transport_binding
+        auth_result = state.transport_auth_result
+        if any(
+            item is None
+            for item in (candidate, semantic, receipt, binding, auth_result)
+        ):
+            raise PermissionError("terminal attach acknowledgement is premature")
+        assert candidate is not None
+        assert semantic is not None
+        assert receipt is not None
+        assert binding is not None
+        assert auth_result is not None
+        validate_protobuf_fingerprint(
+            "terminal-attach-receipt-ack:v1",
+            request,
+            own_field="ack_fingerprint",
+        )
+        if (
+            request.attachment_id != state.attachment_id
+            or request.attachment_generation != state.attachment_generation
+            or request.semantic_winner_fingerprint
+            != semantic.semantic_winner_fingerprint
+            or request.current_transport_binding.binding_fingerprint
+            != binding.binding_fingerprint
+            or request.attach_result_receipt_fingerprint != receipt.receipt_fingerprint
+            or request.current_transport_binding != binding
+        ):
+            raise PermissionError("terminal attach acknowledgement proof is stale")
+        key = (candidate.client_instance_id, candidate.attachment_attempt_generation)
+        record = self._attach_winners.get(key)
+        if record is None:
+            raise RuntimeError("terminal attach winner is unavailable")
+        if record.ack_result is None:
+            result = wire.AttachAckResult(
                 request_id=request.request_id,
-                attachment=attachment_to_wire(lease),
-                controller_disposition=disposition,
-                bootstrap_requirement="projection_snapshot_required",
-                heartbeat_policy=wire.HeartbeatPolicy(
-                    interval_ms=HEARTBEAT_INTERVAL_MS,
-                    grace_ms=HEARTBEAT_GRACE_MS,
-                    maximum_missed_count=HEARTBEAT_MAXIMUM_MISSED_COUNT,
+                attachment_id=state.attachment_id,
+                attachment_generation=state.attachment_generation,
+                semantic_winner_fingerprint=semantic.semantic_winner_fingerprint,
+                acknowledged_transport_binding_fingerprint=(
+                    binding.binding_fingerprint
                 ),
+                disposition=wire.ATTACH_ACKNOWLEDGED,
+                retired_credential_id=auth_result.credential_id,
             )
+            install_protobuf_fingerprint(
+                "terminal-attach-ack-result:v1",
+                result,
+                own_field="ack_result_fingerprint",
+            )
+            record.ack_result = result
+            record.acknowledged = True
+            record.ack_tombstone_expires_at_monotonic = monotonic() + 30.0
+        else:
+            result = wire.AttachAckResult()
+            result.CopyFrom(record.ack_result)
+            result.request_id = request.request_id
+            result.disposition = wire.ATTACH_COMPATIBLE_ALREADY_ACKNOWLEDGED
+            install_protobuf_fingerprint(
+                "terminal-attach-ack-result:v1",
+                result,
+                own_field="ack_result_fingerprint",
+            )
+        self._transport_auth.mark_acknowledged(auth_result.credential_id)
+        state.attachment_acknowledged = True
+        return wire.ServerFrame(attach_ack=result)
+
+    def _heartbeat(self, request, state: _ConnectionState, host) -> wire.ServerFrame:
+        semantic = state.attach_semantic_winner
+        binding = state.transport_binding
+        candidate = state.handshake_candidate
+        if semantic is None or binding is None or candidate is None:
+            raise PermissionError("terminal heartbeat has no attachment authority")
+        validate_protobuf_fingerprint(
+            "terminal-heartbeat-request:v1",
+            request,
+            own_field="request_fingerprint",
         )
+        expected_candidate = _heartbeat_candidate_fingerprint(
+            runtime_session_id=host.runtime_session_id,
+            attachment_identity_fingerprint=(semantic.attachment.identity_fingerprint),
+            semantic_winner_fingerprint=semantic.semantic_winner_fingerprint,
+            heartbeat_generation=request.heartbeat_generation,
+            previous_accepted_generation=(
+                request.previous_accepted_heartbeat_generation
+            ),
+        )
+        if (
+            request.runtime_session_id != host.runtime_session_id
+            or request.attachment_id != state.attachment_id
+            or request.attachment_generation != state.attachment_generation
+            or request.attachment_identity_fingerprint
+            != semantic.attachment.identity_fingerprint
+            or request.attach_semantic_winner_fingerprint
+            != semantic.semantic_winner_fingerprint
+            or request.current_transport_binding != binding
+            or request.heartbeat_candidate_fingerprint != expected_candidate
+        ):
+            raise PermissionError("terminal heartbeat authority is stale")
+        key = (candidate.client_instance_id, candidate.attachment_attempt_generation)
+        record = self._attach_winners[key]
+        stored = record.heartbeat_results.get(expected_candidate)
+        if stored is not None:
+            branch = stored.WhichOneof("outcome")
+            stored_request_id = (
+                stored.accepted.request_id
+                if branch == "accepted"
+                else stored.rejected.request_id
+            )
+            if stored_request_id != request.request_id:
+                raise PermissionError(
+                    "terminal heartbeat retry changed its physical request identity"
+                )
+            result = wire.HeartbeatResult()
+            result.CopyFrom(stored)
+            return wire.ServerFrame(heartbeat=result)
+        if (
+            request.heartbeat_generation != state.accepted_heartbeat_generation + 1
+            or request.previous_accepted_heartbeat_generation
+            != state.accepted_heartbeat_generation
+        ):
+            raise PermissionError("terminal heartbeat generation is stale")
+        lease = host.terminal_application_services.attachments.heartbeat(
+            attachment_id=request.attachment_id,
+            attachment_generation=request.attachment_generation,
+        )
+        semantic_result = context_fingerprint(
+            "terminal-heartbeat-accepted-semantic-result:v1",
+            {
+                "candidate": expected_candidate,
+                "liveness_disposition": "attachment_active_lease_renewed",
+                "resulting_expiry": lease.expires_at_utc,
+            },
+        )
+        accepted = wire.HeartbeatAcceptedReceipt(
+            request_id=request.request_id,
+            runtime_session_id=host.runtime_session_id,
+            attachment_id=request.attachment_id,
+            attachment_generation=request.attachment_generation,
+            attachment_identity_fingerprint=(semantic.attachment.identity_fingerprint),
+            attach_semantic_winner_fingerprint=(semantic.semantic_winner_fingerprint),
+            acknowledged_transport_binding_fingerprint=(binding.binding_fingerprint),
+            heartbeat_generation=request.heartbeat_generation,
+            previous_accepted_heartbeat_generation=(
+                request.previous_accepted_heartbeat_generation
+            ),
+            heartbeat_candidate_fingerprint=expected_candidate,
+            resulting_attachment_lease_expires_at=lease.expires_at_utc,
+            liveness_disposition=wire.ATTACHMENT_ACTIVE_LEASE_RENEWED,
+            heartbeat_semantic_result_fingerprint=semantic_result,
+        )
+        install_protobuf_fingerprint(
+            "terminal-heartbeat-accepted-receipt:v1",
+            accepted,
+            own_field="receipt_fingerprint",
+        )
+        result = wire.HeartbeatResult(accepted=accepted)
+        record.heartbeat_results[expected_candidate] = result
+        minimum_retained_generation = max(1, request.heartbeat_generation - 1)
+        for fingerprint, retained in tuple(record.heartbeat_results.items()):
+            branch = retained.WhichOneof("outcome")
+            generation = (
+                retained.accepted.heartbeat_generation
+                if branch == "accepted"
+                else retained.rejected.heartbeat_generation
+            )
+            if generation < minimum_retained_generation:
+                record.heartbeat_results.pop(fingerprint, None)
+        if len(record.heartbeat_results) > 2:
+            raise AssertionError("terminal heartbeat tombstone registry is unbounded")
+        state.accepted_heartbeat_generation = request.heartbeat_generation
+        self._renew_root_leases(state, host)
+        return wire.ServerFrame(heartbeat=result)
+
+    def _hello_rejected(
+        self,
+        *,
+        request,
+        state: _ConnectionState,
+        candidate,
+        reason: int,
+    ) -> wire.ServerFrame:
+        auth_result = state.transport_auth_result
+        assert auth_result is not None
+        terminal = wire.HandshakeCandidateTerminalReceipt(
+            handshake_candidate_id=candidate.candidate_id or "unknown",
+            handshake_candidate_fingerprint=(
+                candidate.candidate_fingerprint or "sha256:" + "0" * 64
+            ),
+            attachment_attempt_generation=candidate.attachment_attempt_generation,
+            terminal_disposition=wire.HELLO_REJECTED,
+            terminal_reason=reason,
+            required_client_disposition=wire.FATAL_COMPATIBILITY,
+            candidate_registry_revision=1,
+        )
+        install_protobuf_fingerprint(
+            "terminal-handshake-candidate-terminal:v1",
+            terminal,
+            own_field="terminal_receipt_fingerprint",
+        )
+        rejected = wire.HelloRejected(
+            request_id=request.request_id,
+            transport_auth_attempt_id=auth_result.auth_attempt_id,
+            current_connection_id=state.connection_id,
+            handshake_candidate_id=terminal.handshake_candidate_id,
+            handshake_candidate_fingerprint=(terminal.handshake_candidate_fingerprint),
+            candidate_terminal_receipt=terminal,
+        )
+        install_protobuf_fingerprint(
+            "terminal-hello-rejected:v1",
+            rejected,
+            own_field="outcome_fingerprint",
+        )
+        return wire.ServerFrame(hello=wire.HelloOutcome(rejected=rejected))
 
     def _borrow_root(self, state: _ConnectionState, host, root_identity) -> None:
         fingerprint = root_identity.root_identity_fingerprint
@@ -561,6 +1334,13 @@ class TerminalProtocolServer:
                 state.root_lease_ids.pop(fingerprint, None)
 
     async def _observe_next(self, request, state, host) -> wire.ServerFrame:
+        if wire.CONTROL_PROJECTION_OBSERVATION_V1 not in state.selected_capabilities:
+            raise PermissionError(
+                "terminal control observation capability was not negotiated"
+            )
+        requested_control_cursor = _control_cursor_from_wire(
+            request.after_control_cursor
+        )
         maximum_wait = (
             min(max(request.maximum_wait_ms, 1), MAXIMUM_OBSERVATION_WAIT_MS) / 1000
         )
@@ -568,6 +1348,9 @@ class TerminalProtocolServer:
         runtime = host.wiring.runtime_wiring.runtime_session
         foundation = runtime.terminal_presentation_foundation_service
         while True:
+            control = host.terminal_application_services.query.read_control_after(
+                requested_control_cursor
+            )
             operational = runtime.ui_operational_activity_store.read_after(
                 operational_generation=request.after_operational_generation,
                 operational_cursor=request.after_operational_cursor,
@@ -577,100 +1360,206 @@ class TerminalProtocolServer:
             read = foundation.read_observation_after(
                 projection_revision=request.after_projection_revision
             )
+            durable_branch: wire.DurableObservationBranch | None = None
+            operational_branch: wire.OperationalObservationBranch | None = None
+            control_branch: wire.ControlObservationBranch | None = None
+
             if (
                 request.after_authority_high_water > read.latest_authority_high_water
                 or request.after_projection_revision > read.latest_projection_revision
-                or request.after_operational_generation > operational_generation
-                or (
-                    request.after_operational_generation == operational_generation
-                    and request.after_operational_cursor > operational_cursor
-                )
             ):
-                return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        gap=wire.ObservationGap(
-                            request_id=request.request_id,
-                            latest_authority_high_water=(
-                                read.latest_authority_high_water
-                            ),
-                            latest_projection_revision=(
-                                read.latest_projection_revision
-                            ),
-                            latest_operational_generation=operational_generation,
-                            latest_operational_cursor=operational_cursor,
-                            reason="client_cursor_ahead",
-                        )
-                    )
+                gap = wire.DurableObservationGapFrame(
+                    request_id=request.request_id,
+                    latest_authority_high_water=read.latest_authority_high_water,
+                    latest_projection_revision=read.latest_projection_revision,
+                    gap_reason=wire.CLIENT_CURSOR_AHEAD,
                 )
-            if read.status == "gap":
-                return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        gap=wire.ObservationGap(
-                            request_id=request.request_id,
-                            latest_authority_high_water=(
-                                read.latest_authority_high_water
-                            ),
-                            latest_projection_revision=(
-                                read.latest_projection_revision
-                            ),
-                            latest_operational_generation=operational_generation,
-                            latest_operational_cursor=operational_cursor,
-                            reason="projection_transition_evicted",
-                        )
-                    )
+                install_protobuf_fingerprint(
+                    "terminal-durable-observation-gap:v1",
+                    gap,
+                    own_field="frame_fingerprint",
                 )
-            if operational.status == "gap":
-                return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        gap=wire.ObservationGap(
-                            request_id=request.request_id,
-                            latest_authority_high_water=(
-                                read.latest_authority_high_water
-                            ),
-                            latest_projection_revision=(
-                                read.latest_projection_revision
-                            ),
-                            latest_operational_generation=operational_generation,
-                            latest_operational_cursor=operational_cursor,
-                            reason="operational_cursor_gap",
-                        )
-                    )
+                durable_branch = wire.DurableObservationBranch(gap=gap)
+            elif read.status == "gap":
+                gap = wire.DurableObservationGapFrame(
+                    request_id=request.request_id,
+                    latest_authority_high_water=read.latest_authority_high_water,
+                    latest_projection_revision=read.latest_projection_revision,
+                    gap_reason=wire.PROJECTION_TRANSITION_EVICTED,
                 )
-            if read.status == "next":
+                install_protobuf_fingerprint(
+                    "terminal-durable-observation-gap:v1",
+                    gap,
+                    own_field="frame_fingerprint",
+                )
+                durable_branch = wire.DurableObservationBranch(gap=gap)
+            elif read.status == "next":
                 assert read.root_advanced is not None
                 self._borrow_root(
                     state,
                     host,
                     read.root_advanced.resulting_active_head.confirmed_root_identity,
                 )
-                return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        root_advanced=root_advanced_to_wire(
-                            read.root_advanced, request_id=request.request_id
-                        )
+                durable_branch = wire.DurableObservationBranch(
+                    root_advanced=root_advanced_to_wire(
+                        read.root_advanced, request_id=request.request_id
                     )
                 )
-            if operational.status == "next":
-                return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        operational_delta=wire.OperationalDeltaFrame(
-                            request_id=request.request_id,
-                            operational_generation=operational_generation,
-                            operational_cursor=operational_cursor,
-                            ordered_changes=(
-                                operational_change_to_wire(item)
-                                for item in operational.ordered_changes
-                            ),
-                        )
+
+            if request.after_operational_generation > operational_generation or (
+                request.after_operational_generation == operational_generation
+                and request.after_operational_cursor > operational_cursor
+            ):
+                gap = wire.OperationalObservationGapFrame(
+                    request_id=request.request_id,
+                    latest_operational_generation=operational_generation,
+                    latest_operational_cursor=operational_cursor,
+                    gap_reason=wire.CLIENT_CURSOR_AHEAD,
+                )
+                install_protobuf_fingerprint(
+                    "terminal-operational-observation-gap:v1",
+                    gap,
+                    own_field="frame_fingerprint",
+                )
+                operational_branch = wire.OperationalObservationBranch(gap=gap)
+            elif operational.status == "gap":
+                gap = wire.OperationalObservationGapFrame(
+                    request_id=request.request_id,
+                    latest_operational_generation=operational_generation,
+                    latest_operational_cursor=operational_cursor,
+                    gap_reason=wire.OPERATIONAL_CURSOR_GAP,
+                )
+                install_protobuf_fingerprint(
+                    "terminal-operational-observation-gap:v1",
+                    gap,
+                    own_field="frame_fingerprint",
+                )
+                operational_branch = wire.OperationalObservationBranch(gap=gap)
+            elif operational.status == "next":
+                operational_branch = wire.OperationalObservationBranch(
+                    delta=wire.OperationalDeltaFrame(
+                        request_id=request.request_id,
+                        operational_generation=operational_generation,
+                        operational_cursor=operational_cursor,
+                        ordered_changes=(
+                            operational_change_to_wire(item)
+                            for item in operational.ordered_changes
+                        ),
                     )
+                )
+
+            if control.status == "gap":
+                reason = {
+                    "generation_changed": wire.CONTROL_GENERATION_CHANGED,
+                    "cursor_too_old": wire.CONTROL_CURSOR_TOO_OLD,
+                    "transition_not_contiguous": (
+                        wire.CONTROL_TRANSITION_NOT_CONTIGUOUS
+                    ),
+                    "contract_changed": wire.CONTROL_CONTRACT_CHANGED,
+                }[control.gap_reason]
+                gap = wire.ControlProjectionGapFrame(
+                    request_id=request.request_id,
+                    requested_control_cursor_fingerprint=(
+                        requested_control_cursor.cursor_fingerprint
+                    ),
+                    latest_control_cursor=control_cursor_to_wire(control.latest_cursor),
+                    stable_reason=reason,
+                    disposition=wire.CONTROL_PROJECTION_SNAPSHOT_REQUIRED,
+                )
+                install_protobuf_fingerprint(
+                    "terminal-control-projection-gap:v1",
+                    gap,
+                    own_field="frame_fingerprint",
+                )
+                control_branch = wire.ControlObservationBranch(gap=gap)
+            elif control.status == "changed":
+                changed = wire.ControlProjectionChangedFrame(
+                    request_id=request.request_id,
+                    validated_after_control_cursor_fingerprint=(
+                        requested_control_cursor.cursor_fingerprint
+                    ),
+                    control_generation=control.latest_cursor.control_generation,
+                    base_control_projection_revision=(
+                        requested_control_cursor.control_revision
+                    ),
+                    base_control_projection_fingerprint=(
+                        requested_control_cursor.control_projection_fingerprint
+                    ),
+                    resulting_control_projection_revision=(
+                        control.latest_cursor.control_revision
+                    ),
+                    resulting_control_projection_fingerprint=(
+                        control.latest_cursor.control_projection_fingerprint
+                    ),
+                    changed_sections=(
+                        _control_section_to_wire(item)
+                        for item in control.changed_sections
+                    ),
+                    consumed_transition_count=len(control.ordered_records),
+                    consumed_transition_range_accumulator=(
+                        control.transition_range_accumulator
+                    ),
+                    resulting_control_cursor=control_cursor_to_wire(
+                        control.latest_cursor
+                    ),
+                    disposition=wire.CONTROL_PROJECTION_SNAPSHOT_REQUIRED,
+                )
+                install_protobuf_fingerprint(
+                    "terminal-control-projection-changed:v1",
+                    changed,
+                    own_field="frame_fingerprint",
+                )
+                control_branch = wire.ControlObservationBranch(changed=changed)
+
+            if any(
+                item is not None
+                for item in (control_branch, durable_branch, operational_branch)
+            ):
+                batch = wire.ObservationBatchFrame(
+                    request_id=request.request_id,
+                    included_plane_count=sum(
+                        item is not None
+                        for item in (
+                            control_branch,
+                            durable_branch,
+                            operational_branch,
+                        )
+                    ),
+                )
+                if control_branch is not None:
+                    batch.control.CopyFrom(control_branch)
+                if durable_branch is not None:
+                    batch.durable.CopyFrom(durable_branch)
+                if operational_branch is not None:
+                    batch.operational.CopyFrom(operational_branch)
+                install_protobuf_fingerprint(
+                    "terminal-observation-batch:v1",
+                    batch,
+                    own_field="batch_fingerprint",
+                )
+                return wire.ServerFrame(
+                    observation=wire.ObservationResponse(batch=batch)
                 )
             if monotonic() >= deadline:
+                no_change = wire.ObservationNoChangeFrame(
+                    request_id=request.request_id,
+                    echoed_authority_high_water=request.after_authority_high_water,
+                    echoed_projection_revision=request.after_projection_revision,
+                    echoed_operational_generation=(
+                        request.after_operational_generation
+                    ),
+                    echoed_operational_cursor=request.after_operational_cursor,
+                    echoed_control_cursor_fingerprint=(
+                        requested_control_cursor.cursor_fingerprint
+                    ),
+                )
+                install_protobuf_fingerprint(
+                    "terminal-observation-no-change:v1",
+                    no_change,
+                    own_field="frame_fingerprint",
+                )
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
-                        no_change=wire.ObservationNoChange(
-                            request_id=request.request_id
-                        )
-                    )
+                    observation=wire.ObservationResponse(no_change=no_change)
                 )
             await asyncio.sleep(min(0.025, max(0.0, deadline - monotonic())))
 
@@ -874,12 +1763,14 @@ def _mutation_from_wire(item):
             **common,
         )
     elif branch == "resolve_plan_exit":
-        if body.decision not in {"approve", "revise", "cancel"}:
+        try:
+            decision = _PLAN_EXIT_DECISION_FROM_WIRE[body.plan_exit_decision]
+        except KeyError:
             raise ValueError("terminal plan-exit decision is unknown")
         request = ResolvePlanExitRequest(
             command_kind="resolve_plan_exit",
             interaction_id=body.interaction_id,
-            decision=body.decision,
+            decision=decision,
             user_feedback=body.user_feedback,
             **common,
         )
@@ -1002,7 +1893,125 @@ def _require_attachment(request, state: _ConnectionState) -> None:
         raise PermissionError("terminal attachment identity is stale")
 
 
-async def _read_frame(reader, message_type, *, maximum_bytes: int):
+def _transport_binding(
+    *,
+    attachment: wire.AttachmentIdentity,
+    connection_id: str,
+    generation: int,
+) -> wire.TerminalClientTransportBindingIdentity:
+    binding = wire.TerminalClientTransportBindingIdentity(
+        attachment_id=attachment.attachment_id,
+        attachment_generation=attachment.attachment_generation,
+        connection_id=connection_id,
+        transport_binding_generation=generation,
+        bound_at_utc=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    install_protobuf_fingerprint(
+        "terminal-client-transport-binding:v1",
+        binding,
+        own_field="binding_fingerprint",
+    )
+    return binding
+
+
+def _heartbeat_candidate_fingerprint(
+    *,
+    runtime_session_id: str,
+    attachment_identity_fingerprint: str,
+    semantic_winner_fingerprint: str,
+    heartbeat_generation: int,
+    previous_accepted_generation: int,
+) -> str:
+    return context_fingerprint(
+        "terminal-heartbeat-candidate:v1",
+        {
+            "runtime_session_id": runtime_session_id,
+            "attachment_identity_fingerprint": attachment_identity_fingerprint,
+            "semantic_winner_fingerprint": semantic_winner_fingerprint,
+            "heartbeat_generation": heartbeat_generation,
+            "previous_accepted_generation": previous_accepted_generation,
+        },
+    )
+
+
+def _control_cursor_from_wire(
+    value: wire.ControlProjectionCursor,
+) -> ControlProjectionCursor:
+    if value is None:
+        raise ValueError("terminal observation requires a control cursor")
+    return ControlProjectionCursor(
+        control_generation=value.control_generation,
+        control_revision=value.control_revision,
+        control_projection_fingerprint=value.control_projection_fingerprint,
+        transition_prefix_accumulator=value.transition_prefix_accumulator,
+        registry_contract_fingerprint=value.registry_contract_fingerprint,
+        cursor_fingerprint=value.cursor_fingerprint,
+    )
+
+
+def _control_section_to_wire(section: str) -> int:
+    try:
+        return {
+            "session_lifecycle": wire.CONTROL_SESSION_LIFECYCLE,
+            "run_control": wire.CONTROL_RUN_CONTROL,
+            "pending_interaction": wire.CONTROL_PENDING_INTERACTION,
+            "prompt_queue": wire.CONTROL_PROMPT_QUEUE,
+            "notifications": wire.CONTROL_NOTIFICATIONS,
+        }[section]
+    except KeyError as exc:  # pragma: no cover - runtime union is closed
+        raise ValueError("terminal control transition section is unknown") from exc
+
+
+def _bounded_snapshot_response(
+    bundle,
+    *,
+    request_id: str,
+    maximum_frame_bytes: int,
+):
+    """Select the largest newest resident suffix that fits one wire frame."""
+
+    def build(candidate_bundle):
+        return wire.ServerFrame(
+            snapshot=snapshot_to_wire(
+                candidate_bundle.session_snapshot,
+                control_snapshot=candidate_bundle.control_snapshot,
+                request_id=request_id,
+            )
+        )
+
+    full = build(bundle)
+    if len(full.SerializeToString(deterministic=True)) <= maximum_frame_bytes:
+        return full, bundle
+
+    available = len(bundle.session_snapshot.viewport.ordered_resident_entries)
+    lower = 0
+    upper = available - 1
+    winner = None
+    winner_bundle = None
+    while lower <= upper:
+        count = (lower + upper) // 2
+        candidate_bundle = fit_projection_snapshot_bundle_resident_suffix(
+            bundle,
+            maximum_entries=count,
+        )
+        candidate = build(candidate_bundle)
+        encoded_bytes = len(candidate.SerializeToString(deterministic=True))
+        if encoded_bytes <= maximum_frame_bytes:
+            winner = candidate
+            winner_bundle = candidate_bundle
+            lower = count + 1
+        else:
+            upper = count - 1
+    if winner is None or winner_bundle is None:
+        raise RuntimeError(
+            "terminal snapshot non-history envelope exceeds the frame bound"
+        )
+    if len(winner.SerializeToString(deterministic=True)) > maximum_frame_bytes:
+        raise AssertionError("bounded terminal snapshot exceeded its wire budget")
+    return winner, winner_bundle
+
+
+async def _read_message(reader, message_type, *, maximum_bytes: int):
     header = await reader.readexactly(4)
     size = int.from_bytes(header, "big")
     if size <= 0 or size > maximum_bytes:
@@ -1013,6 +2022,11 @@ async def _read_frame(reader, message_type, *, maximum_bytes: int):
         message.ParseFromString(payload)
     except DecodeError as exc:
         raise ValueError("terminal protocol frame is malformed") from exc
+    return message
+
+
+async def _read_frame(reader, message_type, *, maximum_bytes: int):
+    message = await _read_message(reader, message_type, maximum_bytes=maximum_bytes)
     if message.WhichOneof("request") is None:
         raise ValueError("terminal protocol frame has no request branch")
     return message
@@ -1057,7 +2071,11 @@ def _error_frame(*, request_id: str, code: str, message: str) -> wire.ServerFram
         error=wire.ProtocolError(
             request_id=request_id,
             stable_code=code[:128],
-            public_message=message[:512],
+            public_message=bounded_terminal_safe_public_text(
+                message,
+                maximum_code_points=512,
+                maximum_utf8_bytes=2_048,
+            ),
         )
     )
 

@@ -19,7 +19,9 @@ from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.prompt_queue import (
     PROMPT_QUEUE_EVENT_TYPE_VALUES,
     PromptQueueDomainCheckpointFact,
+    PromptQueueHeadReceiptFact,
     build_prompt_queue_domain_checkpoint,
+    build_prompt_queue_head_receipt,
 )
 from pulsara_agent.runtime.terminal_application.prompt_queue import (
     QUEUE_EVENT_TYPES,
@@ -57,6 +59,52 @@ class PromptQueueCheckpointService:
     @property
     def pending(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    def client_projection_authority(
+        self,
+    ) -> tuple[
+        PromptQueueDomainCheckpointFact,
+        PromptQueueProjectionSnapshot,
+        PromptQueueHeadReceiptFact,
+    ]:
+        """Return one compatible checkpoint/reducer view for client projection.
+
+        Checkpoint replacement is process-local acceleration.  A concurrent
+        replacement may occur while the reducer keeps advancing, so the read
+        retries until the checkpoint identity is stable around the reducer
+        snapshot.  The resulting tail is always derived from the same or a
+        newer reducer state; callers never inspect private checkpoint fields.
+        """
+
+        for _ in range(4):
+            checkpoint = self._checkpoint
+            snapshot = self.store.snapshot()
+            if checkpoint is self._checkpoint:
+                if checkpoint.transition_count > snapshot.transition_count:
+                    raise RuntimeError(
+                        "prompt queue checkpoint is ahead of live projection"
+                    )
+                receipt = build_prompt_queue_head_receipt(
+                    checkpoint=checkpoint,
+                    bounded_tail_first_sequence=(snapshot.bounded_tail_first_sequence),
+                    bounded_tail_last_sequence=snapshot.bounded_tail_last_sequence,
+                    bounded_tail_count=snapshot.bounded_tail_count,
+                    bounded_tail_accumulator=snapshot.bounded_tail_accumulator,
+                    resulting_queue_head_event_id=snapshot.queue_head_event_id,
+                    resulting_queue_head_payload_fingerprint=(
+                        snapshot.queue_head_payload_fingerprint
+                    ),
+                    resulting_account_revision=snapshot.account_revision,
+                    resulting_active_client_item_count=(
+                        snapshot.active_client_item_count
+                    ),
+                    resulting_active_client_item_accumulator=(
+                        snapshot.active_client_item_accumulator
+                    ),
+                    resulting_row_set_accumulator=snapshot.row_set_accumulator,
+                )
+                return checkpoint, snapshot, receipt
+        raise RuntimeError("prompt queue checkpoint changed during projection read")
 
     def initialize(self, *, deadline_monotonic: float | None) -> None:
         event_log = self.runtime_session.event_log
@@ -219,7 +267,7 @@ class PromptQueueCheckpointService:
             validation_base_state_payload=predecessor.state_payload,
             state_payload=state_payload,
             payload_fingerprint=context_fingerprint(
-                "prompt-queue-runtime-checkpoint-row:v1", payload
+                "prompt-queue-runtime-checkpoint-row:v2", payload
             ),
         )
         commit = getattr(
@@ -231,6 +279,7 @@ class PromptQueueCheckpointService:
             )
             self._raw_checkpoint = candidate
             self._checkpoint = checkpoint
+            self.store.install_checkpoint_base(checkpoint)
             return
         guard = PromptQueueCheckpointCommitGuard(
             runtime_session_id=snapshot.runtime_session_id,
@@ -244,6 +293,10 @@ class PromptQueueCheckpointService:
             expected_row_set_accumulator=snapshot.row_set_accumulator,
             expected_pending_item_head_set_accumulator=(
                 snapshot.pending_head_set_accumulator
+            ),
+            expected_active_client_item_count=snapshot.active_client_item_count,
+            expected_active_client_item_accumulator=(
+                snapshot.active_client_item_accumulator
             ),
             guard_generation=checkpoint.checkpoint_generation,
         )
@@ -264,6 +317,7 @@ class PromptQueueCheckpointService:
         )
         self._raw_checkpoint = bundle.raw_checkpoint
         self._checkpoint = bundle.checkpoint
+        self.store.install_checkpoint_base(bundle.checkpoint)
 
     async def drain_pending(self, *, deadline_monotonic: float) -> None:
         self.wake()
@@ -308,6 +362,8 @@ def _build_checkpoint(
         account_revision=snapshot.account_revision,
         next_accepted_ordinal=snapshot.next_accepted_ordinal,
         pending_item_head_set_accumulator=snapshot.pending_head_set_accumulator,
+        active_client_item_count=snapshot.active_client_item_count,
+        active_client_item_accumulator=snapshot.active_client_item_accumulator,
         queue_row_set_accumulator=snapshot.row_set_accumulator,
         resulting_queue_head_event_id=snapshot.queue_head_event_id,
         resulting_queue_head_payload_fingerprint=(

@@ -22,6 +22,9 @@ from pulsara_agent.primitives.terminal_presentation import (
     CommittedPresentationTapEntry,
     LiveCommittedFoldResult,
 )
+from pulsara_agent.runtime.terminal_presentation.public_text import (
+    bounded_terminal_safe_public_text,
+)
 
 
 def build_committed_presentation_tap_entry(
@@ -176,8 +179,10 @@ class UiOperationalActivityStore:
                 raise ValueError("operational activity identity is required")
             if owner_generation < 0:
                 raise ValueError("operational owner generation cannot be negative")
-            bounded_text = _truncate_utf8(
-                public_text, maximum_bytes=self.maximum_public_text_utf8_bytes
+            bounded_text = bounded_terminal_safe_public_text(
+                public_text,
+                maximum_code_points=8_000,
+                maximum_utf8_bytes=self.maximum_public_text_utf8_bytes,
             )
             with self._lock:
                 if (
@@ -836,10 +841,3 @@ def _operational_activity_type(activity_kind: OperationalActivityKind):
 
 def _change_cursor(change: OperationalActivityChange) -> int:
     return change.operational_cursor
-
-
-def _truncate_utf8(value: str, *, maximum_bytes: int) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= maximum_bytes:
-        return value
-    return encoded[:maximum_bytes].decode("utf-8", errors="ignore")

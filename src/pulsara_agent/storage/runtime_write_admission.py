@@ -24,7 +24,7 @@ from pulsara_agent.projection_jobs.contracts import (
 
 
 _V5_RESOURCE_NAME = "0005_runtime_write_protected_relations_v1.json"
-_LATEST_RESOURCE_NAME = "0011_runtime_write_protected_relations_v1.json"
+_LATEST_RESOURCE_NAME = "0012_runtime_write_protected_relations_v1.json"
 
 
 def _resource_payload(

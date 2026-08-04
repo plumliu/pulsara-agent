@@ -37,6 +37,11 @@ markers = [
     "retrieval_live: opt-in tests that call live retrieval-side model APIs",
 ]
 
+[tool.ruff]
+extend-exclude = [
+    "src/pulsara_agent/terminal_protocol/generated/terminal_client_pb2.py",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",

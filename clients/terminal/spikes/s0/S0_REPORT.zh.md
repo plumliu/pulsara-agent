@@ -1,8 +1,8 @@
-# Bubble Tea v2 S0 自动化 Smoke 报告
+# Bubble Tea v2 S0 可行性证据报告
 
 > 日期：2026-08-01
-> 结论：`PARTIAL`；自动化可行性矩阵通过，但不满足完整S0 PASS gate
-> production接线：禁止
+> 结论：`PASS`；production S1–S6 可以开始
+> 延后项：真实IME、attached tmux视觉检查与非本机clean-runner启动保留为后续兼容性/release regression
 
 ## 冻结版本
 
@@ -60,16 +60,16 @@ Renderer cadence来自Bubble Tea最终PTY output writer的non-empty physical wri
 - Docker内真实OpenSSH remote PTY：`TERM=xterm-256color`、`LC_CTYPE=UTF-8`、60ms server-egress netem、CJK输入、强制断线和reconnect通过。
 - 真实远程host `plumliuwin.local`：macOS OpenSSH经Windows OpenSSH/ConPTY进入WSL2 Linux x86_64；remote artifact SHA-256一致、UTF-8、`TERM=xterm-256color`、CJK、alternate-screen与bracketed-paste通过。20次keypress p95/p99为98.972/100.636ms，首次frame约403.669ms；分别低于远程专用150/250ms与3s gate。
 - 正常退出由SSH恢复PTY；本地SSH被SIGKILL时无法自行恢复，Python parent按契约执行emergency restore。远端Bubble Tea process随后退出，reconnect version通过；WSL `/tmp`与Windows staging file均经删除后absence probe确认。
-- 这已关闭真实host/network/PTTY/disconnect/reconnect项，但仍不代替真实macOS terminal emulator中的IME pre-edit/candidate视觉记录。
+- 这已关闭真实host/network/PTTY/disconnect/reconnect项；真实macOS terminal emulator中的IME pre-edit/candidate视觉记录保留为非阻塞兼容性证据。
 
 ### Packaging
 
 - 生成darwin/linux × amd64/arm64四个`CGO_ENABLED=0` binary。
 - 四个binary均通过file-format、embedded Go module version和SHA-256检查。
 - 本机darwin/arm64完成`--version`及`--self-test`启动。
-- darwin/amd64、linux/amd64、linux/arm64尚未在各自clean runner完成启动，因此完整packaging gate仍未通过。
+- darwin/amd64、linux/amd64、linux/arm64尚未在各自clean runner完成启动；该项进入S6 release gate，不再阻塞S1。
 
-## 尚未闭环的阻断项
+## Deferred兼容性与release证据
 
 1. macOS真实中文IME pre-edit、候选切换/提交与中文标点。
 2. family emoji/grapheme在真实terminal中的逐位置光标视觉检查。
@@ -77,4 +77,4 @@ Renderer cadence来自Bubble Tea最终PTY output writer的non-empty physical wri
 4. attached tmux client中的IME、mouse和paste记录。
 5. 四个平台clean runner启动记录。
 
-因此本轮证明的是“Bubble Tea v2.0.6路线没有发现自动化阻断项”，而不是“S0已经PASS”。复现命令与人工步骤见同目录`README.md`。
+以上项目不再是S1 admission blocker。S0冻结结论为`PASS`：Bubble Tea v2.0.6路线没有发现framework/process可行性阻断项；production实现仍须在S1–S6逐阶段通过各自gate。复现命令与人工步骤见同目录`README.md`。

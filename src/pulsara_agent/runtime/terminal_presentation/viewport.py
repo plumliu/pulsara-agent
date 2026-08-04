@@ -53,6 +53,8 @@ EMPTY_TAIL_SEGMENT_ACCUMULATOR = context_fingerprint(
 EMPTY_TAIL_MUTATION_ACCUMULATOR = context_fingerprint(
     "presentation-history-tail-mutations:v1", ()
 )
+MAXIMUM_SNAPSHOT_RESIDENT_CANONICAL_BYTES = 4 * 1024 * 1024
+MAXIMUM_SNAPSHOT_RESIDENT_RENDERED_BYTES = 4 * 1024 * 1024
 
 
 class PresentationHistoryViewportService:
@@ -112,7 +114,7 @@ class PresentationHistoryViewportService:
             max_node_reads=self.policy.read_max_node_reads,
             deadline_monotonic=deadline_monotonic,
         )
-        ranked = tuple(
+        available = tuple(
             _ranked_entry(
                 entry,
                 rank=rank,
@@ -126,34 +128,23 @@ class PresentationHistoryViewportService:
             )
             for entry, rank in page.ordered_ranked_entries
         )
-        vector_fingerprint = _resident_vector_fingerprint(ranked)
-        cursors = _cursor_pair(identity, ranked)
-        resident_bytes = sum(
-            len(canonical_json_bytes(item.model_dump(mode="json"))) for item in ranked
+        ranked = _fit_newest_resident_suffix(
+            available,
+            maximum_entries=self.resident_entry_limit,
+            maximum_canonical_bytes=min(
+                MAXIMUM_SNAPSHOT_RESIDENT_CANONICAL_BYTES,
+                self.policy.read_max_page_canonical_bytes,
+            ),
+            maximum_rendered_bytes=min(
+                MAXIMUM_SNAPSHOT_RESIDENT_RENDERED_BYTES,
+                self.policy.read_max_page_rendered_bytes,
+            ),
         )
-        return build_frozen_fact(
-            PresentationHistoryViewportSnapshotFact,
-            schema_version="presentation_history_viewport_snapshot.v1",
+        return _build_viewport_snapshot(
             runtime_session_id=self.runtime_session_id,
             projection_revision=self._projection_revision,
             active_head=active_head,
-            ordered_resident_entries=ranked,
-            latest_root_cursor_pair=cursors,
-            resident_cell_count=len(ranked),
-            resident_canonical_bytes=resident_bytes,
-            oldest_history_entry_id=(
-                ranked[0].history_entry.history_entry_id if ranked else None
-            ),
-            oldest_placement_key=(
-                ranked[0].history_entry.placement_key if ranked else None
-            ),
-            newest_history_entry_id=(
-                ranked[-1].history_entry.history_entry_id if ranked else None
-            ),
-            newest_placement_key=(
-                ranked[-1].history_entry.placement_key if ranked else None
-            ),
-            resident_vector_fingerprint=vector_fingerprint,
+            ranked=ranked,
         )
 
     def read_page(
@@ -524,9 +515,105 @@ def _rendered_public_bytes(ranked: PresentationHistoryRankedEntryView) -> int:
     return total
 
 
+def fit_viewport_snapshot_resident_suffix(
+    snapshot: PresentationHistoryViewportSnapshotFact,
+    *,
+    maximum_entries: int,
+    maximum_canonical_bytes: int = MAXIMUM_SNAPSHOT_RESIDENT_CANONICAL_BYTES,
+    maximum_rendered_bytes: int = MAXIMUM_SNAPSHOT_RESIDENT_RENDERED_BYTES,
+) -> PresentationHistoryViewportSnapshotFact:
+    """Return a pure newest-suffix projection of an already frozen viewport."""
+
+    ranked = _fit_newest_resident_suffix(
+        snapshot.ordered_resident_entries,
+        maximum_entries=maximum_entries,
+        maximum_canonical_bytes=maximum_canonical_bytes,
+        maximum_rendered_bytes=maximum_rendered_bytes,
+    )
+    if ranked == snapshot.ordered_resident_entries:
+        return snapshot
+    return _build_viewport_snapshot(
+        runtime_session_id=snapshot.active_head.runtime_session_id,
+        projection_revision=snapshot.projection_revision,
+        active_head=snapshot.active_head,
+        ranked=ranked,
+    )
+
+
+def _fit_newest_resident_suffix(
+    ranked: tuple[PresentationHistoryRankedEntryView, ...],
+    *,
+    maximum_entries: int,
+    maximum_canonical_bytes: int,
+    maximum_rendered_bytes: int,
+) -> tuple[PresentationHistoryRankedEntryView, ...]:
+    if min(maximum_entries, maximum_canonical_bytes, maximum_rendered_bytes) < 1:
+        return ()
+    selected_reversed: list[PresentationHistoryRankedEntryView] = []
+    canonical_bytes = 0
+    rendered_bytes = 0
+    for item in reversed(ranked):
+        if len(selected_reversed) >= maximum_entries:
+            break
+        item_canonical_bytes = len(
+            canonical_json_bytes(item.model_dump(mode="json"))
+        )
+        item_rendered_bytes = _rendered_public_bytes(item)
+        if (
+            canonical_bytes + item_canonical_bytes > maximum_canonical_bytes
+            or rendered_bytes + item_rendered_bytes > maximum_rendered_bytes
+        ):
+            break
+        selected_reversed.append(item)
+        canonical_bytes += item_canonical_bytes
+        rendered_bytes += item_rendered_bytes
+    return tuple(reversed(selected_reversed))
+
+
+def _build_viewport_snapshot(
+    *,
+    runtime_session_id: str,
+    projection_revision: int,
+    active_head: PresentationHistoryActiveHeadFact,
+    ranked: tuple[PresentationHistoryRankedEntryView, ...],
+) -> PresentationHistoryViewportSnapshotFact:
+    resident_bytes = sum(
+        len(canonical_json_bytes(item.model_dump(mode="json"))) for item in ranked
+    )
+    return build_frozen_fact(
+        PresentationHistoryViewportSnapshotFact,
+        schema_version="presentation_history_viewport_snapshot.v1",
+        runtime_session_id=runtime_session_id,
+        projection_revision=projection_revision,
+        active_head=active_head,
+        ordered_resident_entries=ranked,
+        latest_root_cursor_pair=_cursor_pair(
+            active_head.confirmed_root_identity, ranked
+        ),
+        resident_cell_count=len(ranked),
+        resident_canonical_bytes=resident_bytes,
+        oldest_history_entry_id=(
+            ranked[0].history_entry.history_entry_id if ranked else None
+        ),
+        oldest_placement_key=(
+            ranked[0].history_entry.placement_key if ranked else None
+        ),
+        newest_history_entry_id=(
+            ranked[-1].history_entry.history_entry_id if ranked else None
+        ),
+        newest_placement_key=(
+            ranked[-1].history_entry.placement_key if ranked else None
+        ),
+        resident_vector_fingerprint=_resident_vector_fingerprint(ranked),
+    )
+
+
 __all__ = [
     "EMPTY_TAIL_MUTATION_ACCUMULATOR",
     "EMPTY_TAIL_SEGMENT_ACCUMULATOR",
     "EMPTY_TAIL_SOURCE_RANGE_ACCUMULATOR",
+    "MAXIMUM_SNAPSHOT_RESIDENT_CANONICAL_BYTES",
+    "MAXIMUM_SNAPSHOT_RESIDENT_RENDERED_BYTES",
     "PresentationHistoryViewportService",
+    "fit_viewport_snapshot_resident_suffix",
 ]

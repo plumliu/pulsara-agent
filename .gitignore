@@ -55,3 +55,6 @@ temp/
 *.log
 logs/
 .pulsara/
+
+# Locally built terminal client binaries
+clients/terminal/bin/

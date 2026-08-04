@@ -1,6 +1,6 @@
 # Pulsara Terminal Presentation Foundation Hard-Cut 实施规格
 
-> 状态：IMPLEMENTED（2026-08-01；INFRA-0 至 INFRA-5 renderer-neutral Python infrastructure hard cut）
+> 状态：INFRA-0 至 INFRA-5 IMPLEMENTED；TUI-FND-QUEUE-006A active-client projection subcut SPEC FROZEN / NOT STARTED（Go S1 blocker）
 > Requirement namespace：`TUI-FND-*`
 > 唯一owner：Python renderer-neutral presentation foundation、durable prompt queue与Terminal application services
 > 上位产品基线：`PULSARA_TERMINAL_UI_UX_RESEARCH_AND_DESIGN.zh.md`
@@ -96,7 +96,8 @@ src/pulsara_agent/runtime/terminal_presentation/
     snapshot.py
     application.py
     prompt_queue.py
-    prompt_queue_checkpoint.py
+src/pulsara_agent/runtime/terminal_application/prompt_queue_checkpoint.py
+src/pulsara_agent/storage/prompt_queue_bootstrap.py
 src/pulsara_agent/event_log/postgres_prompt_queue.py
 src/pulsara_agent/event_log/historical_decoder.py
 ```
@@ -617,6 +618,8 @@ expires_or_replaced semantics
 ```
 
 它不使用EventLog sequence，不推进`authority_high_water`，可被coalesce/drop。durable terminal projection到达后必须退休对应live frame。
+
+V1 `TerminalOperationalActivityStore`是该plane的唯一resident owner，固定最多256个active identity keys与1 MiB canonical encoded payload。Store在同一锁内返回完整immutable snapshot：runtime session、generation、cursor、canonical ordered activity vector、count、encoded bytes、state fingerprint与snapshot contract fingerprint。Identity key固定为`(owner_kind, owner_id, owner_generation, coalesce_key)`；同key replace只保留最新confirmed cell，snapshot vector中不得出现duplicate key。Admission在mutation前验证count/bytes hard bound；超界必须按registered coalesce/retire policy先形成typed transition，仍不可容纳则拒绝新的operational item，不能让Gateway/client截断。Protocol mapper可从这份同锁vector生成wire-only ordered accumulator和outer request/frame fingerprint；它不得反向写store或把wire accumulator冒充Foundation state semantic identity。Nested cell/state/contract fingerprint仍由Foundation拥有。
 
 ## 7. Presentation semantics
 
@@ -1613,25 +1616,338 @@ Checkpoint FULL安装新root不是ordinary authority-only advance。Foundation�
 
 `strict_prefix_extended`只对old tree placement-key ordered entry vector是new tree exact prefix合法。只有应用consumed segment prefix/root swap并保留concurrent segment suffix后，before/after resident vectors逐项byte-identical，才允许`ResidentEntriesUnchangedFact`；其before/after fingerprints必须相等，equivalence proof覆盖root relation、candidate cut与retained suffix。`BoundedOrderedResidentChangesFact`必须在policy count/bytes内，ordered apply后精确得到resulting active head的resident vector与rank basis；duplicate change、same key conflicting upsert、missing expected previous或accumulator mismatch均fail closed。超界或rewrite无法给出bounded changes时使用`ResidentHistoryRebaseRequiredFact`，其target root/head必须与本frame resulting authority相同，token attachment-bound、single-purpose且有界过期。Rewrite使用`rewritten_generation`且不得伪造prefix。两种root relation都允许已发old cursor在retention horizon内继续浏览old root，但它们不再是latest cursor。Follow-tail、jump-to-end、近期页被evict后的rehydration和任何“从当前root继续”请求必须使用new latest cursor pair；old pinned cursor只服务已经明确绑定old root的历史浏览。Root advanced freeze或delivery前crash时，reopen从typed FULL checkpoint confirmation与segment cut/suffix proof重建同一个active head/cursor pair/relation/resident-transition candidate。
 
+### TUI-FND-VIEW-002A Atomic control projection
+
+Lifecycle、run control、pending interaction、prompt queue和server notification必须由一个Foundation-owned immutable view证明来自同一control revision；Gateway不得分别读取五个owner再拼接cursor：
+
+```text
+TerminalSessionLifecycleControlViewFact
+  schema_version
+  source_version: TerminalControlSectionSourceVersionFact
+  runtime_session_id / host_session_id
+  lifecycle: closed enum
+  lifecycle_generation
+  view_fingerprint
+
+TerminalRunControlViewFact
+  schema_version
+  source_version: TerminalControlSectionSourceVersionFact
+  active_run_id / suspended_run_id / stopping_run_id: optional exact IDs
+  run_control_generation
+  view_fingerprint
+
+TerminalPendingInteractionControlViewFact
+  schema_version
+  source_version: TerminalControlSectionSourceVersionFact
+  interaction: typed public view | None
+  source_authority_fingerprint: optional
+  view_fingerprint
+
+TerminalServerNotificationViewFact
+  schema_version
+  notification_ordinal: positive monotonic integer
+  notification_id
+  notification_kind: closed enum
+  public_text
+  source_authority_fingerprint
+  issued_at_utc / expires_at_utc
+  notification_fingerprint
+
+TerminalServerNotificationProjectionFact
+  schema_version
+  source_version: TerminalControlSectionSourceVersionFact
+  ordered_notifications: tuple[TerminalServerNotificationViewFact, ...]
+  notification_count
+  ordered_notification_accumulator
+  projection_fingerprint
+
+TerminalPromptQueueControlViewFact
+  schema_version
+  source_version: TerminalControlSectionSourceVersionFact
+  projection: PromptQueueClientProjectionFact
+  view_fingerprint
+
+TerminalControlSectionSourceVersionFact
+  schema_version
+  section_kind: SESSION_LIFECYCLE | RUN_CONTROL | PENDING_INTERACTION | PROMPT_QUEUE | NOTIFICATIONS
+  source_owner_id
+  source_owner_generation
+  source_owner_revision
+  source_view_fingerprint
+  source_version_fingerprint
+
+PreparedTerminalControlSectionCandidateFact
+  schema_version
+  section_kind
+  source_version: TerminalControlSectionSourceVersionFact
+  typed_section_view: exact discriminated section value
+  source_transition_proof: TerminalControlSourceSuccessorProofFact | None
+  candidate_fingerprint
+
+CapturedTerminalControlSectionCandidate           # store-owned process-local record
+  bootstrap_generation
+  capture_barrier_id
+  capture_ordinal
+  candidate: PreparedTerminalControlSectionCandidateFact
+  captured_candidate_fingerprint
+
+TerminalControlSourceCaptureFenceReceipt          # source-owner signed process-local receipt
+  section_kind
+  source_owner_id
+  source_owner_generation
+  snapshot_source_revision
+  snapshot_source_view_fingerprint
+  capture_through_revision
+  capture_through_view_fingerprint
+  capture_barrier_id
+  capture_registration_id
+  acknowledged_callback_count
+  acknowledged_callback_accumulator
+  fence_receipt_fingerprint
+
+TerminalControlCaptureRegistrationState =
+    CAPTURING
+  | LIVE_SUBSCRIPTION
+  | RELEASED_ON_BOOTSTRAP_FAILURE
+  | RELEASED_ON_GENERATION_REPLACEMENT
+  | RELEASED_ON_STORE_CLOSE
+
+TerminalControlSubscriptionDeliveryDisposition =
+    CAPTURED
+  | LIVE_APPLIED
+  | OVERFLOW
+  | STALE_BARRIER
+  | STALE_GENERATION
+
+TerminalControlLiveSubscriptionLease              # process-local, revocable, store-owned
+  section_kind
+  source_owner_id
+  source_owner_generation
+  capture_registration_id
+  capture_barrier_id
+  store_owner_id
+  store_generation
+  live_from_source_revision
+  live_from_source_view_fingerprint
+  promoted_fence_receipt_fingerprint
+  acceptance_sink_fingerprint
+  lease_generation
+  lease_fingerprint
+
+TerminalControlLiveSubscriptionReleaseReason =
+    BOOTSTRAP_FAILURE
+  | GENERATION_REPLACEMENT
+  | STORE_CLOSE
+
+TerminalControlLiveSubscriptionReleaseReceipt     # process-local source-owner proof
+  lease_fingerprint
+  release_reason
+  source_owner_id
+  source_owner_generation
+  last_delivered_source_revision
+  last_delivered_source_view_fingerprint
+  publication_sequencer_flush_fingerprint
+  release_receipt_fingerprint
+
+TerminalControlCaptureRegistrationReleaseReason =
+    BOOTSTRAP_FAILURE
+  | STORE_CLOSE
+
+TerminalControlCaptureRegistrationReleaseReceipt # process-local source-owner proof
+  capture_registration_id
+  capture_barrier_id
+  section_kind
+  source_owner_id
+  source_owner_generation
+  release_reason
+  last_accepted_source_revision
+  last_accepted_source_view_fingerprint
+  publication_sequencer_flush_fingerprint
+  release_receipt_fingerprint
+
+TerminalControlGenerationReplacementAttemptState =
+    PREPARING
+  | READY_TO_SWAP
+  | ACTIVE_SWAPPED_RETIRING_OLD
+  | DRAINING_OLD
+  | CANCELLING_FOR_STORE_CLOSE
+  | DRAINING_NEW_PARTIAL
+  | DRAINING_ALL_FOR_STORE_CLOSE
+  | TERMINAL
+  | BLOCKED
+
+TerminalControlGenerationReplacementAttemptIdentity # stable, process-local
+  replacement_attempt_id
+  replacement_attempt_generation
+  store_owner_id
+  base_active_store_generation
+  base_active_sink_fingerprint
+  base_active_live_lease_fingerprints: exact five
+  requested_new_store_generation
+  requested_new_sink_fingerprint
+  attempt_identity_fingerprint
+
+TerminalControlGenerationReplacementAttemptSnapshot # mutable state snapshot
+  identity: TerminalControlGenerationReplacementAttemptIdentity
+  state
+  state_revision
+  new_capture_registration_ids: bounded zero..five
+  new_capture_release_receipt_fingerprints: bounded zero..five
+  new_live_lease_fingerprints: bounded zero..five
+  new_live_release_receipt_fingerprints: bounded zero..five
+  admitted_source_operation_handles: bounded zero..five
+  source_operation_completion_receipt_fingerprints: bounded zero..five
+  prepared_new_ready_fingerprint: Fingerprint | None
+  installed_active_store_generation: uint64 | None
+  old_retiring_live_lease_fingerprints: bounded zero..five
+  old_release_receipt_fingerprints: bounded zero..five
+  blocked_reason: closed operational code | None
+  attempt_state_fingerprint
+
+TerminalControlSourceSuccessorProofFact
+  schema_version
+  section_kind / source_owner_id / source_owner_generation
+  base_source_revision / base_source_view_fingerprint
+  resulting_source_revision / resulting_source_view_fingerprint
+  ordered_source_transition_fingerprints: tuple[Fingerprint, ...]
+  transition_count: 1..64
+  encoded_transition_bytes <= 65536
+  transition_range_accumulator
+  proof_fingerprint
+
+TerminalControlSectionReplaceDisposition =
+    APPLIED
+  | EXACT_DUPLICATE
+  | STALE_SOURCE
+  | SOURCE_CONFLICT
+  | SOURCE_GAP
+  | STORE_NOT_READY
+
+TerminalControlProjectionViewFact
+  schema_version
+  runtime_session_id
+  session_lifecycle: TerminalSessionLifecycleControlViewFact
+  run_control: TerminalRunControlViewFact
+  pending_interaction: TerminalPendingInteractionControlViewFact
+  prompt_queue: TerminalPromptQueueControlViewFact
+  server_notifications: TerminalServerNotificationProjectionFact
+  control_view_fingerprint
+
+TerminalControlProjectionCursorFact
+  schema_version
+  control_generation / control_revision
+  control_projection_fingerprint
+  transition_prefix_accumulator
+  transition_registry_contract_fingerprint
+  cursor_fingerprint
+
+TerminalControlProjectionSnapshotFact
+  schema_version
+  view: TerminalControlProjectionViewFact
+  cursor: TerminalControlProjectionCursorFact
+  snapshot_fingerprint
+```
+
+`control_projection_fingerprint`必须等于nested `view.control_view_fingerprint`，generation/revision与store current state逐项相等。`TerminalControlProjectionStore.snapshot()`在同一把同步锁内返回完整`view + cursor`；唯一mutation port是`replace_section(candidate)`，caller不携带global expected cursor，也不能因为其他section先推进了global revision而伪造CAS conflict。Store在锁内把candidate rebase到最新完整view，复制未变化section，构造唯一resulting view/transition/prefix/cursor并原子安装。
+
+每个section的source owner必须以`source_owner_id + generation + revision + view fingerprint`冻结monotonic identity。同section决议矩阵是：
+
+| Candidate relation | disposition | mutation |
+|---|---|---|
+| same owner generation/revision + same source fingerprint | `EXACT_DUPLICATE` | no-op |
+| older generation/revision | `STALE_SOURCE` | no-op，记bounded diagnostic |
+| same generation/revision + different source fingerprint | `SOURCE_CONFLICT` | latch/fail closed |
+| exact next revision | `APPLIED` | 原子安装 |
+| revision gap + valid bounded successor proof | `APPLIED` | 验证proof后安装latest candidate，changed section只记一次 |
+| revision gap/mismatched owner without proof | `SOURCE_GAP` | 不安装，请求该source exact resnapshot |
+| bootstrap未完成 | `STORE_NOT_READY` | 进入bounded capture buffer |
+
+Successor proof必须从candidate source owner的registered transition port产生，base/result identity分别等于store当前section与candidate source version，count等于revision delta，ordered fingerprints按registered recurrence得到range accumulator/proof fingerprint。Caller不能传入untyped iterator、current-value-only boolean或无上限history；超过64次/64 KiB必须`SOURCE_GAP`后exact resnapshot。
+
+Pending interaction与notification owner不得继续只给一个当前value；它们必须像其他三个owner一样生产monotonic generation/revision与snapshot proof。Notification每项持有owner分配的stable `notification_ordinal`，canonical order唯一为`(notification_ordinal ASC, notification_id ASC)`；arrival time、map order或Gateway读取顺序都不得参与projection identity。
+
+Bootstrap使用唯一capture-then-snapshot协议关闭read/subscribe race：
+
+1. Store冻结`bootstrap_generation + capture_barrier_id + shared_absolute_deadline`，再通过五个registered `TerminalControlSourceCapturePort.install_capture()`安装exact registration和同一store-owned acceptance sink；任何snapshot read必须在该source registration FULL之后开始；
+2. 逐owner读取携exact source version的immutable snapshot，期间confirmed transition进入bounded capture buffer；`capture_ordinal`只由store capture owner在sink接受callback时分配并包装成process-local `CapturedTerminalControlSectionCandidate`，domain caller不能自报或把ordinal混入section semantic candidate；
+3. 每个source owner在自己的confirmed-transition publication sequencer中执行`flush_capture_fence(registration_id, barrier_id, absolute_deadline)`：fence必须排在该owner当前已confirmed transition之后，并等待这些transition的capture callback已被store sink接受/ack，才返回`TerminalControlSourceCaptureFenceReceipt`；“已入owner async queue”、已schedule task或current revision read都不构成fence；
+4. Store验证五张fence receipt的barrier/registration/source owner与snapshot exact join，且每个`capture_through_revision`及acknowledged callback recurrence已由snapshot revision连续推进得到；在store lock内安装五section base，按`capture_ordinal ASC`调用同一pure replace core回放已ack candidate；
+5. 五个registration在READY swap前不得卸载。Fence后新confirmed transition继续调用同一bounded acceptance sink；sink必须在source publication callback返回前同步给出closed `CAPTURED | LIVE_APPLIED | OVERFLOW | STALE_BARRIER | STALE_GENERATION`，不允许另一个未受管async mailbox。READY前成功accept只能是CAPTURED，current active generation成功replace只能是LIVE_APPLIED，retired generation只能是STALE_GENERATION，failed bootstrap barrier只能是STALE_BARRIER；Store lock将callback线性化为“READY前buffer/replay”或“READY后live replace”，不存在两者之间的丢失窗口；
+6. Store先在锁内冻结尚未对attachment可见的`prepared READY(view, cursor)`及预期registration/fence identities，然后释放store lock，再逐source调用`promote_capture_to_live(registration_id, fence_receipt_fingerprint, store_generation, acceptance_sink_fingerprint)`。Promotion只能执行`CAPTURING -> LIVE_SUBSCRIPTION`，必须继续复用原registration与原同步acceptance sink，并返回一张`TerminalControlLiveSubscriptionLease`；它不是unsubscribe，也不能更换callback、丢弃capture buffer或重置source revision；
+7. 五张live lease全部返回并与prepared READY、fence receipts和source versions exact join后，Store在同一把锁内重放promotion期间已经accepted的suffix，并原子publish `READY(view, cursor)`。锁竞争期间到达的callback只能在线性化点之前进入该suffix，或在线性化点之后通过同一lease进入live `replace_section()`；不存在无owner handoff窗口；
+8. Store持有五张live lease直到store close或完成generation replacement handoff。普通READY完成后绝不调用`release_capture()`；没有replacement attempt时，store close先转`CLOSING`、阻止新snapshot/attachment borrow，在锁外以共享close deadline调用五个`release_live_subscription(lease, STORE_CLOSE)`并取得release receipts，重新入锁验证lease/receipt集合后才可释放sink与依赖。存在preparing/partially-promoted/retiring replacement时必须改走下述replacement-attempt close矩阵，不能只drain当前active五张lease。任一release超时使close blocked，不能声称成功；
+9. capture overflow、source gap、generation rollover、same-revision conflict、fence timeout/验证失败必须restart bootstrap/fail closed。在store尚未进入`CLOSING`的ordinary bootstrap failure中，尚未promotion的registration只允许`release_capture(registration_id, BOOTSTRAP_FAILURE)`并转入`RELEASED_ON_BOOTSTRAP_FAILURE`；部分promotion成功后失败时，已promotion项必须先用`release_live_subscription(..., BOOTSTRAP_FAILURE)`退役，其余capture registration再释放。Store close则唯一使用下述`STORE_CLOSE`矩阵。禁止用五个不同时刻的当前值拼接baseline。
+
+`TerminalControlSourceCapturePort`是穷尽式composition contract，五个owner都必须提供：
+
+```text
+install_capture
+  -> read_immutable_snapshot
+  -> flush_capture_fence
+  -> promote_capture_to_live
+  -> release_live_subscription
+
+bootstrap failure before promotion:
+install_capture -> release_capture
+
+store close before promotion:
+install_capture -> release_capture(STORE_CLOSE)
+```
+
+不允许用generic callback/listener代替。Registration状态机唯一为：
+
+```text
+CAPTURING -> LIVE_SUBSCRIPTION
+CAPTURING -> RELEASED_ON_BOOTSTRAP_FAILURE
+CAPTURING -> RELEASED_ON_STORE_CLOSE
+
+LIVE_SUBSCRIPTION -> RELEASED_ON_BOOTSTRAP_FAILURE  # partial-promotion rollback only
+LIVE_SUBSCRIPTION -> RELEASED_ON_GENERATION_REPLACEMENT
+LIVE_SUBSCRIPTION -> RELEASED_ON_STORE_CLOSE
+```
+
+`release_capture()`只接受仍为`CAPTURING`的registration以及closed `BOOTSTRAP_FAILURE | STORE_CLOSE` reason，并在source publication sequencer flush后返回`TerminalControlCaptureRegistrationReleaseReceipt`；`STORE_CLOSE`只允许matching store已经线性化为`CLOSING`且该registration属于其active bootstrap/replacement attempt。`release_live_subscription()`只接受matching live lease和closed release reason，用于partial-promotion rollback、generation replacement或store close，并返回source publication sequencer flush后的`TerminalControlLiveSubscriptionReleaseReceipt`。重复promotion、promotion后调用`release_capture()`、READY后无replacement/close就release、用新callback替换原sink、lease generation/owner/store mismatch均fail closed。Capture release receipt使用`terminal-control-capture-registration-release:v1`；live lease fingerprint使用`terminal-control-live-subscription-lease:v1`，live release receipt使用`terminal-control-live-subscription-release:v1`，均覆盖除自身外全部字段。三者只做process-local ownership/handoff/close proof，不进入control semantic fingerprint或wire DTO。
+
+Generation replacement由store-owned唯一`TerminalControlGenerationReplacementAttempt`执行，且同时最多存在`1 active + 1 preparing/retiring`两代subscription集合。`attempt_identity_fingerprint`在attempt创建后永不变化，覆盖稳定identity除自身外的全部字段；每次state/resource集合变化都递增`state_revision`并重算`attempt_state_fingerprint = H("terminal-control-generation-replacement-state:v1", identity fingerprint, state revision, state, all bounded resource/receipt fields)`。Waiter、close与diagnostic只能持identity fingerprint；不得把mutable state fingerprint当作长期handle identity。
+
+1. Store在锁内冻结完整stable attempt identity与初始`PREPARING` snapshot，随即释放锁；旧五张lease和旧active view继续正常提供snapshot/live transition。每次new registration、promotion、prepared READY或release receipt形成后，都必须先在store锁内exact join attempt identity、更新bounded resource set与state snapshot，外部资源不能只存在于调用栈局部变量；
+2. 新generation完整执行install/capture/snapshot/fence/promotion，所有source-port外部调用均在store锁外；旧lease不得提前release，新sink只更新尚未公开的new-generation state。五张new live lease与prepared READY齐备后，attempt进入`READY_TO_SWAP`；
+3. Store取得锁，验证attempt identity、latest snapshot、old/new lease set与new prepared READY仍为current，回放new sink suffix，然后原子把active view/cursor/sink generation切到new generation，把old sink generation标记为`RETIRING`，并把attempt推进到`ACTIVE_SWAPPED_RETIRING_OLD`。同一source confirmed transition必须按source publication sequencer调用所有尚未release的subscription；切点后的old-sink callback返回`STALE_GENERATION`，该值是retiring subscription的成功terminal ack，不能中止fan-out或阻止matching new-sink callback同步取得`LIVE_APPLIED`，因此不会因old lease尚未drain而丢transition；
+4. Store释放锁后把attempt推进为`DRAINING_OLD`并调用`release_live_subscription(oldLease, GENERATION_REPLACEMENT)`。五张release receipt FULL后，重新入锁验证receipt集合，attempt才可`TERMINAL`，old sink/lease set才可删除；release超时不回滚已经安装的semantic active generation，而是保留`BLOCKED` retiring owner、禁止第三代replacement，并使store close同时drain active与retiring sets；
+5. 新generation在原子切换前普通失败时，attempt先进入`DRAINING_NEW_PARTIAL`：已promotion项在锁外以`BOOTSTRAP_FAILURE`释放，未promotion registration以`BOOTSTRAP_FAILURE`释放，所有receipt回到锁内exact join后attempt才`TERMINAL`；old generation保持active且identity不变。不存在先release old、再尝试new bootstrap的路径；
+6. Store close与replacement线性化由store锁内唯一裁决。Close先把store置为`CLOSING`并把非terminal replacement snapshot推进为`CANCELLING_FOR_STORE_CLOSE`或`DRAINING_ALL_FOR_STORE_CLOSE`，冻结active、retiring、new CAPTURING、new partially-promoted live以及已准入但尚未返回的source operation handle全集，然后释放锁。先cancel preparing caller waiters并drain这些已准入physical operations；若其compatible winner返回新registration/lease，必须回锁加入同一attempt snapshot，不能丢弃late success。Pre-swap attempt随后先用`STORE_CLOSE`释放全部new CAPTURING registrations，再用`STORE_CLOSE`释放全部new live leases；post-swap attempt把new generation视为active，同时drain old retiring leases。最后drain仍存在的active与retiring lease sets。每一组source-port调用和等待都在锁外执行，receipt回到锁内逐项验证；只有全集terminal后才删除sink并释放source/dependency；
+7. Close期间任何new callback只能对已冻结sink取得`STALE_BARRIER | STALE_GENERATION`或在对应release fence之前被其receipt覆盖，不能创建新的registration、promotion或replacement。Close deadline到期时attempt转`BLOCKED`并保留所有未释放registration、live lease、sink与source dependency，Foundation close返回blocked；不得丢弃attempt或声称依赖已安全释放。
+
+任何`install_capture/read_immutable_snapshot/flush_capture_fence/promote_capture_to_live/release_capture/release_live_subscription`调用都禁止在store lock内执行。Store只能在锁内冻结intent/identity、为即将执行的调用安装bounded source-operation handle，随后释放锁执行外部调用，最后重新入锁验证返回值并安装state；source callback可以同步取得store lock，因此违反该顺序会形成锁反转，属于architecture failure。Caller cancellation只detach waiter，已经准入的source operation必须由replacement/store-close owner继续drain，并把late compatible success归入同一attempt resource set。
+
+Fence receipt fingerprint使用`terminal-control-source-capture-fence:v1`，覆盖除自身外全部字段；`acknowledged_callback_accumulator`以snapshot source version fingerprint为genesis，按store已接受candidate fingerprint的source revision顺序折叠，不覆盖process scheduling或global capture ordinal。Receipt只能由source owner在publication sequencer内签发，store/Gateway/caller不得构造。
+
+Receipt invariant固定为：owner ID/generation与snapshot source version exact相等；`capture_through_revision >= snapshot_source_revision`；`acknowledged_callback_count = capture_through_revision - snapshot_source_revision`；count为0时through view fingerprint等于snapshot view fingerprint且accumulator为genesis；count大于0时buffer中必须存在该source连续`(snapshot revision, capture through revision]`的每一个candidate，最后一项view fingerprint等于receipt through view fingerprint，逐项折叠得到receipt accumulator。Source generation在snapshot/fence间变化时禁止签发compatible receipt，只能使本bootstrap generation失败。
+
+V1 bootstrap hard bounds固定为：一次bootstrap generation最多512个captured candidates、全部candidate canonical bytes最多8 MiB、单source successor proof继续受64 transitions/64 KiB约束、最多4次bootstrap generation，并共享`min(attachment startup absolute deadline, 10 seconds)`。Count/bytes在sink接受前保守计费；超界必须返回`OVERFLOW`、退役本代五个registration并bounded retry，不得丢最旧callback、coalesce未证明transition或延长deadline。
+
+Attachment admission在store `READY`之前不得开放。Exact duplicate section replacement仍是no-op；不得先推进cursor再异步填section，也不得从current subsystem fields反推历史transition。
+
+五个domain owner仍各自拥有真实状态，但只能在confirmed transition fold后通过这个typed replace port更新client projection。RuntimeSession bootstrap在attachment admission开放前，从五个已经冻结的resident owner构造generation genesis；bootstrap完成后Gateway只读取store snapshot。Control store不通过读Host私有字段、queue全表或EventLog scan“即时刷新”。
+
+Server notification固定最多16项，单项public text最多512 characters/2048 UTF-8 bytes，完整ordered text最多32768 UTF-8 bytes；达到上限时由server notification admission产生typed rejection/coalescing disposition，Gateway和client都不得截断。Notification semantic removal/expiry由server owner推进`NOTIFICATIONS` control transition；client clock不得删除或改写server-projected vector。
+
 ### TUI-FND-VIEW-003 O(1) session snapshot
 
 `TerminalUiSessionSnapshot`只能聚合已resident state：
 
 ```text
-session identity / lifecycle
+session identity
 authority_high_water
 projection_revision
 viewport snapshot
 operational activity snapshot identity / generation / cursor
-pending interaction public view
-queue head projection
-status values
-notifications
+control_projection_snapshot: TerminalControlProjectionSnapshotFact
 ```
 
 读取snapshot不得执行SQL、artifact、graph、MCP或manager调用。
 
-Foundation在每次confirmed root installation后原子更新resident viewport cache；Gateway snapshot只能读取该cache以及queue/interaction/operational resident projections。History page仍可读取immutable tree artifacts，但必须经session-owned bounded async I/O service执行：admission有硬上限，caller timeout/cancellation只结束waiter，physical executor operation继续由session owner追踪；Host close在同一个absolute deadline下等待其真实退出。Gateway event loop不得直接调用同步`ArtifactStore`/PostgreSQL page、root hydration或checkpoint API。
+Foundation在每次confirmed root installation后原子更新resident viewport cache；Gateway snapshot只能分别取得一次viewport snapshot、一次operational snapshot和一次atomic control snapshot，不得再次读取Host lifecycle/run IDs、pending interaction、queue或notification owner来覆盖control内容。Operational snapshot必须来自上述store的一次同锁immutable read，包含完整0..256项vector、count/bytes与state/contract fingerprint；Protocol wire accumulator只能从这份frozen vector确定性派生，不得只读取generation/cursor后再从live owners拼activity。Queue projection必须已经由TUI-FND-QUEUE-006A factory验证且不超过64项，并作为control view的nested immutable section安装；Gateway不能同步查询全部queue row再过滤。History page仍可读取immutable tree artifacts，但必须经session-owned bounded async I/O service执行：admission有硬上限，caller timeout/cancellation只结束waiter，physical executor operation继续由session owner追踪；Host close在同一个absolute deadline下等待其真实退出。Gateway event loop不得直接调用同步`ArtifactStore`/PostgreSQL page、root hydration或checkpoint API。
 
 ## 9. Terminal application services
 
@@ -1705,6 +2021,7 @@ PromptQueueAccountRow
   bounded_tail_first_sequence / count / bytes / accumulator
   pending_item_count / reserved_item_count / artifact_bytes
   pending_item_head_set_accumulator
+  active_client_item_count / active_client_item_accumulator
   row_set_accumulator
   reducer_contract_fingerprint
   event_registry_fingerprint
@@ -2063,6 +2380,8 @@ PromptQueueDomainCheckpointFact
   account_revision
   next_accepted_ordinal
   pending_item_head_set_accumulator
+  active_client_item_count
+  active_client_item_accumulator
   queue_row_set_accumulator
   checkpoint_fingerprint
 
@@ -2071,14 +2390,19 @@ PromptQueueHeadReceipt
   reducer_contract_fingerprint
   event_registry_fingerprint
   checkpoint_generation
+  checkpoint_through_sequence
+  checkpoint_transition_count
+  checkpoint_transition_accumulator
   checkpoint_fingerprint
-  bounded_tail_first_sequence
-  bounded_tail_last_sequence
+  bounded_tail_first_sequence_or_zero
+  bounded_tail_last_sequence_or_zero
   bounded_tail_count
   bounded_tail_accumulator
   resulting_queue_head_event_id: str | None
   resulting_queue_head_payload_fingerprint: Fingerprint | None
   resulting_account_revision
+  resulting_active_client_item_count
+  resulting_active_client_item_accumulator
   resulting_row_set_accumulator
   receipt_fingerprint
 
@@ -2091,6 +2415,8 @@ PromptQueueCheckpointCommitGuard                 # process-local
   expected_queue_head_payload_fingerprint
   expected_row_set_accumulator
   expected_pending_item_head_set_accumulator
+  expected_active_client_item_count
+  expected_active_client_item_accumulator
   guard_generation
 ```
 
@@ -2126,6 +2452,8 @@ transition_accumulator = H(
 account_revision = 0
 next_accepted_ordinal = 1
 pending_item_head_set_accumulator = canonical_empty_accumulator
+active_client_item_count = 0
+active_client_item_accumulator = canonical_empty_accumulator
 queue_row_set_accumulator = canonical_empty_accumulator
 resulting_queue_head_event_id = None
 resulting_queue_head_payload_fingerprint = None
@@ -2169,9 +2497,94 @@ V1每个RuntimeSession transaction最多包含一个queue-domain transition even
 
 Checkpoint FULL要求generation恰好`previous + 1`、through sequence等于observed queue head、transition/head/row-set accumulator recurrence连续。NONE复用same candidate。UNKNOWN必须在同一database snapshot读取checkpoint row和account pointer，结果仅允许：`FULL | NONE | SUPERSEDED_BY_COMPATIBLE_WINNER | RECONCILIATION_REQUIRED`；不能只凭generation增加接纳winner。
 
+### TUI-FND-QUEUE-006A Active client projection与capacity
+
+Queue storage可以保留完整历史row，但Terminal client snapshot只能消费一个由queue reducer直接派生的bounded active projection。V1常量与closed set固定为：
+
+```text
+MAX_ACTIVE_PROMPT_QUEUE_ITEMS = 64
+
+ClientVisibleActiveQueueState =
+    ACCEPTED_PENDING
+  | STEER_RESERVED
+  | FOLLOW_UP_RESERVED
+  | RECONCILIATION_REQUIRED
+
+PromptQueueProjectionHeadFact =
+    EmptyPromptQueueGenesisHeadFact
+  | CommittedPromptQueueHeadFact
+
+EmptyPromptQueueGenesisHeadFact
+  schema_version
+  checkpoint_generation = 0
+  checkpoint_through_sequence = 0
+  checkpoint_fingerprint
+  checkpoint_transition_count = 0
+  bounded_tail_count = 0
+  head_receipt_fingerprint
+  empty_head_fingerprint
+
+CommittedPromptQueueHeadFact
+  schema_version
+  checkpoint_generation >= 0
+  checkpoint_through_sequence >= 0
+  checkpoint_fingerprint
+  checkpoint_transition_count >= 0
+  checkpoint_transition_accumulator
+  bounded_tail_first_sequence_or_zero
+  bounded_tail_last_sequence_or_zero
+  bounded_tail_count >= 0
+  bounded_tail_accumulator
+  head_event_id
+  head_event_sequence >= 1
+  head_event_payload_fingerprint
+  head_receipt_fingerprint
+  committed_head_fingerprint
+
+PromptQueueClientProjectionFact
+  schema_version
+  runtime_session_id
+  projection_contract_id = terminal-active-prompt-queue-projection
+  projection_contract_version = 1
+  projection_contract_fingerprint
+  queue_head: PromptQueueProjectionHeadFact
+  queue_account_revision
+  ordered_active_items
+  active_item_count
+  active_item_accumulator
+  projection_fingerprint
+```
+
+Projection contract fingerprint覆盖active-state closed set、retention要求、排序、64项hard bound、head union、item public mapper与accumulator recurrence。`projection_fingerprint`覆盖除自身外的contract identity、typed head/account identity、完整ordered items、count与accumulator，不覆盖Gateway request或attachment attribution。Head branch的唯一选择公式是：
+
+```text
+total_observed_transition_count
+  = checkpoint.transition_count + head_receipt.bounded_tail_count
+
+total_observed_transition_count == 0 -> EmptyPromptQueueGenesisHeadFact
+total_observed_transition_count > 0  -> CommittedPromptQueueHeadFact
+```
+
+Empty branch进一步要求canonical generation-0 checkpoint、through sequence 0、account revision 0、next accepted ordinal 1、zero active count、全部canonical empty accumulators，以及head receipt中的zero tail/null resulting head；不得以空字符串、半空optional pair或synthetic event ID表示。它不是由`checkpoint_generation == 0`单独选择。
+
+Committed branch允许`checkpoint_generation == 0`：第一次Accepted到首次checkpoint之间，checkpoint transition count为0而bounded tail count大于0。若tail count为0，则checkpoint transition count必须大于0，head event identity来自checkpoint/account current head。`checkpoint_*`、完整bounded-tail range/count/accumulator、resulting head event ID/payload、account revision与`head_receipt_fingerprint`必须逐项等于同一次`PromptQueueHeadReceipt`及其nested checkpoint；`head_event_sequence`在non-empty tail时等于tail last sequence，在empty tail时等于checkpoint through sequence。Zero tail固定first/last为0并使用checkpoint-seeded canonical empty-tail accumulator；non-empty tail要求first > checkpoint through、last = head event sequence。任何transition count、tail receipt或head identity漂移都拒绝projection，而不是等下一次checkpoint修复。
+
+`ordered_active_items`按`accepted_ordinal ASC, queue_item_id ASC`排序，且每项`content_retention_state = ACTIVE`。Committed、cancelled与delivery-rejected row属于durable history/Inspector，不进入client projection；`RECONCILIATION_REQUIRED`仍持有未收口owner，必须显示为不可操作项，不能为了满足上限静默省略。Projection factory只能消费同一次queue reducer/account/head snapshot，并重算head branch、count、accumulator、每项head event与delivery/retention state；Gateway和Go都不得从全量row自行过滤或截断。
+
+Admission owner在queue account lock内、形成Accepted candidate前验证：
+
+```text
+current_active_client_item_count + admitted_item_count
+  <= MAX_ACTIVE_PROMPT_QUEUE_ITEMS
+```
+
+V1一次只admit一个item；超过上限返回typed `PROMPT_QUEUE_ACTIVE_CAPACITY_EXHAUSTED`，不写Accepted event、artifact hold consumption或companion row。Reservation/release/commit/cancel/reject/reconciliation transitions在同一个queue transaction中增量更新active count/accumulator：进入active set增加，离开active set删除，active-state内转换保持count但替换entry fingerprint。任何transition导致count超界、underflow、accumulator或row mismatch均rollback并latch queue reconciliation。
+
+`PromptQueueDomainCheckpointFact`、`PromptQueueHeadReceipt`、account row与`PromptQueueClientProjectionFact`四方必须逐项join active count/accumulator。Reopen读取current active row set而不是全部historical rows；若合法storage中存在超过64个active owner，production不能截断或attach，必须进入repair。Hello negotiated limit固定回显64，client只验证该server contract，不获得放宽admission的权力。
+
 ### TUI-FND-QUEUE-007 Reopen与repair
 
-Production reopen只能在一个database snapshot中读取latest trusted checkpoint、account/head receipt与current pending/reserved row set，再通过queue-event-type indexed port分页读取`(checkpoint.through_sequence, head]`的bounded typed delta。Reducer必须重算transition count/accumulator、head identity、account revision、pending head-set与row-set accumulator；全部exact match后才安装projection。Mismatch、deadline耗尽或events/bytes tail超界返回typed `queue_projection_reconciliation_required`，不得扫描session genesis。
+Production reopen只能在一个database snapshot中读取latest trusted checkpoint、account/head receipt与current active client row set，再通过queue-event-type indexed port分页读取`(checkpoint.through_sequence, head]`的bounded typed delta。Reducer必须重算transition count/accumulator、head identity、account revision、pending head-set、active client count/accumulator与row-set accumulator；全部exact match后才安装projection。Mismatch、active count超界、deadline耗尽或events/bytes tail超界返回typed `queue_projection_reconciliation_required`，不得扫描session genesis。
 
 Privileged offline doctor只能在exclusive maintenance barrier下分页fold完整queue transition chain，重建checkpoint/row/account并写typed repair receipt；它不能扫描/解码无关session events，也不能进入Host open、UI attach或普通reconnect热路径。
 
@@ -2237,11 +2650,12 @@ RuntimeSession close顺序：
 1. stop new external UI attachments/commands，并停止新的Foundation I/O admission；
 2. 完成既有RuntimeSession/run/queue terminalization，使其最后一批durable events进入tap；
 3. revoke external controller、secret与client root leases；external observation subscriber可立即detach；
-4. 保留Foundation-owned internal tap subscriber，drain stable checkpoint/catch-up/root-install delivery owner以及全部executor中的artifact/DB physical operations；
-5. internal owner全部terminal后才detach internal tap subscriber，并关闭Foundation service；
-6. releaseRuntime reducer、DB与artifact dependencies。
+4. 在control store锁内冻结`CLOSING`及完整subscription/replacement resource snapshot，禁止new bootstrap/replacement/promotion；随后锁外取消preparing replacement，依次release new CAPTURING registrations、drain new partially-promoted live leases、drain current active与retiring live leases，并在每组receipt返回时入锁exact join；
+5. 保留Foundation-owned internal tap subscriber，drain stable checkpoint/catch-up/root-install delivery owner以及全部executor中的artifact/DB physical operations；
+6. control subscriptions/replacement attempt与其他internal owner全部terminal后，才detach internal tap subscriber、释放其acceptance sinks并关闭Foundation service；
+7. release Runtime reducer、control source owners、DB与artifact dependencies。
 
-External UI subscribers本身不参与close blocker；Foundation-owned internal tap subscription只是收口工具，不是client dependency。Stable checkpoint attempt、confirmed-but-undelivered root以及已经physical-start的I/O必须参与close blocker。取消async worker不能代表底层executor operation已取消；共享deadline到期而任一physical operation或checkpoint owner仍未terminal时，Host close必须明确blocked，不能继续关闭reducer、connection pool或artifact dependency。
+External UI subscribers本身不参与close blocker；Foundation-owned internal tap subscription只是收口工具，不是client dependency。Control capture registration、partially-promoted/active/retiring live subscription、generation replacement attempt、stable checkpoint attempt、confirmed-but-undelivered root以及已经physical-start的I/O全部参与close blocker。取消async worker或只把store标记`CLOSING`不能代表source publication callback、subscription release或底层executor operation已退出；共享deadline到期而任一physical operation、checkpoint owner或control subscription receipt集合仍未terminal时，Host close必须明确blocked，并保留其sink、lease与dependency，不能继续关闭reducer、source owner、connection pool或artifact dependency。
 
 ## 14. 实施切片归属
 
@@ -2255,8 +2669,9 @@ External UI subscribers本身不参与close blocker；Foundation-owned internal 
 | INFRA-3 | unified history projection、persistent tree、checkpoint、capacity、viewport/page | IMPLEMENTED |
 | INFRA-4 | application services、durable queue、artifact hold、secret lease与bounded reopen | IMPLEMENTED |
 | INFRA-5 | versioned Python protocol server与test-only headless conformance consumer | IMPLEMENTED |
+| GO-READY-AQ | reducer-owned active queue projection、64项admission bound与snapshot/checkpoint join | SPEC FROZEN；NOT STARTED；S1 blocker |
 
-Bubble Tea S0 feasibility、全部`TUI-BT-*`、Go packaging、PTY renderer与默认TTY activation继续为`DEFERRED`；它们不参与Foundation完成判定。
+GO-READY-AQ是既有Foundation authority上的schema/projection extension，不推翻INFRA证据；其migration、Python mapper和headless 0/1/64/65 gates已随Protocol 2.0与Bubble Tea S1完成。Bubble Tea S0 feasibility与S1只读client的证据仍不参与Foundation完成判定，也不改变Foundation ownership；S2–S6、正式Go packaging与默认TTY activation继续由各自规格拥有。
 
 ## 15. 文件修改面
 
@@ -2300,6 +2715,56 @@ prompt_queue_artifact_preparation_holds
 - 在database maintenance epoch/barrier内为所有existing sessions安装queue account与canonical generation-0 checkpoint，并证明旧schema不可能含queue transitions；
 - binary activation与migration 0011不可拆分：head 10 binary不得生产queue event，head 11 binary遇到缺失genesis/account必须fail closed；不保留dual-read、lazy table creation或旧queue fallback。
 
+### 15.1A GO-READY-AQ storage subcut
+
+现有head 11代码的queue snapshot会读取全部item rows，且account/checkpoint没有`active_client_item_count/accumulator`，因此TUI-FND-QUEUE-006A不能伪装成纯Go改动。S1前必须原子落地：
+
+```text
+PostgreSQL migration: 0012_terminal_active_queue_projection.sql
+expected catalog: expected_catalog_v12.json
+queue reducer/checkpoint schema: v1 -> v2
+active queue projection contract: v1
+```
+
+Migration 0012在database maintenance barrier内按session使用indexed queue-event chain重建v2 checkpoint/account，不读取无关EventLog event。它新增active count/accumulator columns与`0 <= count <= 64` CHECK，安装projection contract fingerprint，并重算head/account/checkpoint/row-set四方join。Existing active set若超过64，migration/activation必须整体fail closed并要求privileged queue repair或显式reset；不得保留前64项、自动cancel旧item或把超额行藏到Inspector。
+
+Activation matrix固定为：
+
+- head 11 binary不知道v2 projection，不能启动Go S1；
+- head 12 binary要求v2 reducer/checkpoint/account/projection全部存在，缺一即fail closed；
+- migration期间不允许queue admission；
+- maintenance完成后新acceptance在同一account CAS中执行64项bound；
+- 不保留v1/v2 dual snapshot mapper、lazy column、read-time fallback或client truncation。
+
+Schema manifest更新到`range(13)`，并同步migration registry/checksum/postcondition、runtime grants、protected relation registry、deep verifier、reset fixture与v11 -> v12 integration dogfood。该subcut不新增AgentEvent type，因此`AGENT_EVENT_SCHEMA_VERSION`保持9；queue event historical binding不变，只有reducer/checkpoint/projection contract升级。
+
+GO-READY-AQ以及atomic control projection的完整代码修改面固定为（`control_projection.py`为新增，其余已存在）：
+
+```text
+src/pulsara_agent/primitives/prompt_queue.py
+src/pulsara_agent/ports/prompt_queue.py
+src/pulsara_agent/ports/terminal_application.py
+src/pulsara_agent/storage/prompt_queue_bootstrap.py
+src/pulsara_agent/runtime/terminal_application/control_projection.py
+src/pulsara_agent/runtime/terminal_application/prompt_queue.py
+src/pulsara_agent/runtime/terminal_application/prompt_queue_checkpoint.py
+src/pulsara_agent/runtime/terminal_application/services.py
+src/pulsara_agent/event_log/postgres_prompt_queue.py
+src/pulsara_agent/storage/migrations/manifest.py
+src/pulsara_agent/storage/migrations/registry.py
+src/pulsara_agent/storage/migrations/grants.py
+src/pulsara_agent/storage/migrations/verifier.py
+tests/test_terminal_protocol.py
+tests/test_terminal_presentation_foundation.py
+tests/test_terminal_infrastructure_postgres.py
+tests/test_terminal_infrastructure_architecture.py
+tests/test_postgres_runtime_schema.py
+tests/test_schema_migrations.py
+tests/support/postgres_database.py
+```
+
+新增物理资源恰为`0012_terminal_active_queue_projection.sql`、`expected_catalog_v12.json`和`0012_runtime_write_protected_relations_v1.json`。上述bootstrap、checkpoint和PostgreSQL restore owner不得遗漏：它们必须同时升级v2 fields、genesis head union、active-set proof与serialization。仅修改Gateway mapper不能通过本gate。
+
 ### 15.2 新增
 
 - `src/pulsara_agent/primitives/stored_event.py`
@@ -2319,12 +2784,14 @@ prompt_queue_artifact_preparation_holds
 - `src/pulsara_agent/runtime/terminal_presentation/snapshot.py`
 - `src/pulsara_agent/runtime/terminal_presentation/application.py`
 - `src/pulsara_agent/runtime/terminal_presentation/prompt_queue.py`
-- `src/pulsara_agent/runtime/terminal_presentation/prompt_queue_checkpoint.py`
 - `src/pulsara_agent/event_log/postgres_prompt_queue.py`
 - `src/pulsara_agent/event_log/historical_decoder.py`
 - `src/pulsara_agent/storage/migrations/sql/0011_terminal_presentation_queue.sql`
 - `src/pulsara_agent/storage/migrations/expected_catalog_v11.json`
 - `src/pulsara_agent/storage/migrations/resources/0011_runtime_write_protected_relations_v1.json`
+- `src/pulsara_agent/storage/migrations/sql/0012_terminal_active_queue_projection.sql`
+- `src/pulsara_agent/storage/migrations/expected_catalog_v12.json`
+- `src/pulsara_agent/storage/migrations/resources/0012_runtime_write_protected_relations_v1.json`
 
 ### 15.3 修改
 
@@ -2405,6 +2872,7 @@ src/pulsara_agent/runtime/terminal/process.py
 - generic string command dispatcher；
 - process-local-only prompt queue；
 - queue row作为semantic authority；
+- Gateway/query service直接序列化`PromptQueueProjectionStore.snapshot().items`或全量historical queue rows；client-visible queue只能来自`PromptQueueClientProjectionFact`；
 - production reopen完整session scan。
 
 ## 16. Gate与测试
@@ -2438,7 +2906,11 @@ src/pulsara_agent/runtime/terminal/process.py
 - `JoinedRawStoredEventRangeProof.__module__`必须是`pulsara_agent.ports.stored_event`，EventLog/RuntimeSession/doctor/repair直接import最终owner，不设置event_log旧路径alias或第二份overlap DTO；
 - acceptance/suppression、tool pairing和terminal-document winner只在`TranscriptProjectionStateStore`实现；
 - prompt queue relation mutation只有唯一companion/repository owner；
-- gateway只能通过application services mutation。
+- gateway只能通过application services mutation；
+- `TerminalControlProjectionStore`是五个control section、完整view、cursor与transition ring的唯一client-projection owner；Gateway不得读取Host/queue/interaction/notification字段后拼snapshot；
+- 五个control source owner均实现exact `TerminalControlSourceCapturePort`；source fence receipt只能在owner confirmed-publication sequencer flush callback并取得store ack后签发。READY handoff必须由同一registration执行`CAPTURING -> LIVE_SUBSCRIPTION`并返回store-owned lease。Generation replacement必须由store-owned stable identity/mutable snapshot attempt保持old lease live，直到new五lease与prepared READY在store lock内原子切换，随后锁外drain old lease；close必须从同一attempt snapshot枚举并drain new CAPTURING、new partially-promoted、active与retiring资源。所有source-port外部调用在store lock内的AST/runtime observation均为0。Generic async listener、caller-built receipt、无上限capture queue、无replacement/close的READY后release、未记录于attempt的临时lease或没有drain owner的live callback均为architecture failure；
+- server notification与client-local notification物理分离；Foundation只拥有最多16项server vector，client Tick不可修改它；
+- queue client projection head必须是typed empty genesis或committed head union，不允许optional ID/fingerprint half-pair。
 - growth quote/reservation与capacity decision只有Foundation owner；Gateway、Legacy与Go不得重算ordinary projected count或借用terminalization maintenance reserve。
 
 ### TUI-FND-GATE-002 Deterministic tests
@@ -2488,6 +2960,11 @@ src/pulsara_agent/runtime/terminal/process.py
 - queue V1 cancel+replacement，任何`PromptQueueEditedEvent`/in-place content mutation均不存在；
 - identical content跨不同artifact preparation/write receipt保持相同semantic fingerprint与queue identity，attribution/fact fingerprint不同；
 - queue transition、artifact hold、charge、checkpoint与safe-point CAS；
+- queue active client projection在0/1/64项时按canonical order exact输出；第65项在acceptance前typed reject，terminal row不进入snapshot，reconciliation owner仍显示但不可操作；checkpoint/head/account/snapshot四方count+accumulator exact join；
+- generation-0 zero-transition/zero-tail queue snapshot只输出typed empty genesis head；首transition到首checkpoint前必须输出引用generation-0 checkpoint + exact non-empty tail receipt的完整committed head；checkpoint后zero-tail committed仅在checkpoint transition count为正时合法，empty/committed branch与checkpoint/tail/account/view任一cross-join漂移均拒绝；
+- lifecycle/run-control/interaction/queue/notification并发变化后，atomic control store每个revision只返回一份完整view + cursor；different-section concurrent candidate在store lock内rebase而不伪CAS conflict，same-section stale/conflict/gap按source generation/revision矩阵决议；Gateway逐字段混合两个revision的对抗测试必须失败；
+- control bootstrap先安装五source capture、再读五snapshot，每个source publication sequencer必须flush并签发exact fence receipt，最后按global capture ordinal回放至barrier；五registration必须经promotion返回live leases，promotion期间suffix无损进入同一sink。Read-before-subscribe、callback仅入async queue但未ack、fence后/READY前transition、READY后错误release、partial-promotion rollback、old/new generation并行transition、atomic sink switch、锁外old-lease drain、release timeout保留retiring owner、第三代replacement拒绝、source-port锁反转、close在new promotion count 0/1/4/5及swap前后发生、CAPTURING store-close receipt、partial-live/active/retiring全集drain、close release timeout保留attempt/sink/dependency、capture count/8 MiB/deadline overflow、interaction/notification迟到旧revision和notification ordinal乱序对抗测试全部fail closed/restart bootstrap；
+- server notification 0/1/16项可安装，第17项经server admission拒绝；local tick只过期local notification，不改变server vector/control cursor；
 - close/drain与client detach isolation；
 - stored-event pair同wrapper identity、不同canonical payload bytes必须拒绝；receipt进入transcript fold/tap前再次验证owned payload与raw bytes join；
 - MCP form response错误request key、stale batch/round owner、controller/attachment generation、owner epoch或TTL均拒绝并best-effort zero mutable buffer。
@@ -2502,7 +2979,8 @@ src/pulsara_agent/runtime/terminal/process.py
 - conservative charge rollback；
 - production bounded reopen和offline doctor repair；
 - migration 0011、event generation 9、runtime grants/protected registry与expected catalog exact verification；
-- head-10/head-11 activation、existing-session genesis与reset/cutover tests。
+- head-10/head-11 activation、existing-session genesis与reset/cutover tests；
+- v11 -> v12 active-queue projection migration、bootstrap/checkpoint/PostgreSQL restore v2 round-trip、typed empty genesis、64项CHECK与full catalog/grants/protected-registry verification。
 
 ## 17. Definition of Done
 
@@ -2538,14 +3016,20 @@ src/pulsara_agent/runtime/terminal/process.py
 30. `durable_feed_kind`从Foundation cursor与Protocol request物理删除；unified root是history ordering与paging的唯一authority。
 31. Canonical transcript placement只消费reducer-owned stable spine coordinate、transition proof与anchor tombstone；replacement/retirement继承原位置，audit只能以proved `before_leaf | after_leaf | ledger_sequence` anchor合并。Placement key由唯一registered fixed-width contract编码，并在tree/root/cursor/wire/historical decoder间exact rebind。
 32. Checkpoint FULL通过`PresentationHistoryRootAdvancedFact`向client安装new latest cursor pair；old-root cursors仅作为retained pinned history继续有效。
-33. Checkpoint candidate跨retry byte-identical，physical guard可换代；FULL/NONE/UNKNOWN/CONFLICT、compatible winner与reopen reconciliation均有唯一状态出口。
-34. History persistent tree只按stable placement key寻址；continuous history ordinal被物理删除，display rank只在root/active-head ranked view中派生。
-35. Active tail以逐EventLog sequence segment tuple为可切分authority；checkpoint cut、durable source-prefix recurrence与segment suffix retention形成单一swap协议。Noop-only concurrent tail仍有独立carrier，checkpoint I/O期间新增tail既不丢失也不重复，rewrite/retirement不能伪装append suffix。
-36. Root resident transition三个branch均为完整closed DTO并与Python Protocol逐字段映射；不存在标签-only或自由payload实现。Go映射属于deferred `TUI-BT-*`验收。
-37. Tree soft rotation threshold通过central growth quote/reservation为ordinary growth建立typed session fence；ordinary projected count只计算confirmed、tail、active remaining reservations与requested quote，不重复计算terminalization maintenance reserve。Hard exhaustion只能新建session或privileged repair，不截断历史。
-38. Stored-event pair/receipt逐项证明owned event canonical payload与raw envelope bytes完全相同；mutable owned event在fold/tap前被修改会fail closed，不能与raw presentation feed分叉。
-39. Foundation checkpoint owner在NONE/UNKNOWN/CONFLICT及waiter cancellation后保留stable candidate并live retry；Host close使用共享deadline等待logical owner和executor physical operation，超时明确blocked。
-40. Tap GAP/overflow通过monotonic durable observed high-water和canonical raw range重新bootstrap；正常burst按frozen pending batch checkpoint，不存在alive worker永久失去subscriber的状态。
-41. Gateway snapshot是resident O(1)读取；history/root artifact读取只经session-owned bounded async I/O，caller cancellation不遗失physical operation owner。
-42. MCP FORM_RESPONSE sealed handle exact绑定request key、interaction batch owner/generation/round/request-set、controller/attachment generation、owner epoch与TTL；owner变化或expiry使未来consume fail closed并释放plaintext buffer。
-43. History root/tree所有durable artifact读取都消费同一调用级absolute deadline；page与checkpoint path-copy均有deadline传播回归，PostgreSQL阻塞read不依赖测试手工释放即可由statement timeout真实退出。
+33. Terminal queue snapshot只使用由queue reducer构造的bounded active projection；V1 hard max为64，admission保证上限，Gateway/client均不截断历史row或发明分页语义。
+34. Checkpoint candidate跨retry byte-identical，physical guard可换代；FULL/NONE/UNKNOWN/CONFLICT、compatible winner与reopen reconciliation均有唯一状态出口。
+35. History persistent tree只按stable placement key寻址；continuous history ordinal被物理删除，display rank只在root/active-head ranked view中派生。
+36. Active tail以逐EventLog sequence segment tuple为可切分authority；checkpoint cut、durable source-prefix recurrence与segment suffix retention形成单一swap协议。Noop-only concurrent tail仍有独立carrier，checkpoint I/O期间新增tail既不丢失也不重复，rewrite/retirement不能伪装append suffix。
+37. Root resident transition三个branch均为完整closed DTO并与Python Protocol逐字段映射；不存在标签-only或自由payload实现。Go映射属于deferred `TUI-BT-*`验收。
+38. Tree soft rotation threshold通过central growth quote/reservation为ordinary growth建立typed session fence；ordinary projected count只计算confirmed、tail、active remaining reservations与requested quote，不重复计算terminalization maintenance reserve。Hard exhaustion只能新建session或privileged repair，不截断历史。
+39. Stored-event pair/receipt逐项证明owned event canonical payload与raw envelope bytes完全相同；mutable owned event在fold/tap前被修改会fail closed，不能与raw presentation feed分叉。
+40. Foundation checkpoint owner在NONE/UNKNOWN/CONFLICT及waiter cancellation后保留stable candidate并live retry；Host close使用共享deadline等待logical owner和executor physical operation，超时明确blocked。
+41. Tap GAP/overflow通过monotonic durable observed high-water和canonical raw range重新bootstrap；正常burst按frozen pending batch checkpoint，不存在alive worker永久失去subscriber的状态。
+42. Gateway snapshot是resident O(1)读取；history/root artifact读取只经session-owned bounded async I/O，caller cancellation不遗失physical operation owner。
+43. MCP FORM_RESPONSE sealed handle exact绑定request key、interaction batch owner/generation/round/request-set、controller/attachment generation、owner epoch与TTL；owner变化或expiry使未来consume fail closed并释放plaintext buffer。
+44. History root/tree所有durable artifact读取都消费同一调用级absolute deadline；page与checkpoint path-copy均有deadline传播回归，PostgreSQL阻塞read不依赖测试手工释放即可由statement timeout真实退出。
+45. `TerminalControlProjectionStore.snapshot()`在同一锁内返回完整五section immutable view、每section source owner generation/revision与cursor；Gateway不能分项重读，server notification上限16、使用stable ordinal canonical order且与local notification owner物理分离。
+46. GO-READY-AQ migration 0012将bootstrap、checkpoint、account、PostgreSQL restore与client projection一起升级到v2；queue head使用typed empty-genesis/committed union，branch仅由checkpoint transition count + bounded tail count决定，首transition可合法引用generation-0 checkpoint；active set hard max 64，不存在read-time fallback或截断。
+47. Control section replacement不接受caller global cursor；different-section candidate在store lock内rebase，same-section按source generation/revision/fingerprint穷尽决议，迟到candidate不能覆盖新view。
+48. Control bootstrap先安装五source transition capture，再读取五个immutable snapshot，每个source owner在confirmed-publication sequencer中flush/ack并签发`TerminalControlSourceCaptureFenceReceipt`，最后按global capture ordinal回放至同一barrier。READY要求五receipt、snapshot和buffer recurrence全部exact join；每个registration随后必须promote成store-owned `TerminalControlLiveSubscriptionLease`。Generation replacement由stable attempt identity与mutable resource snapshot保持old lease active，new generation完成后在store锁内原子切换active sink，再在锁外凭typed release receipts drain old lease；source-port调用绝不持store lock。Partial promotion可回滚，replacement release超时保留retiring owner并禁止第三代。Close在同一锁内冻结CLOSING及完整attempt resource set，锁外按new CAPTURING、新partial live、active/retiring顺序drain，未取得全集receipt时保持blocked并保留sink/dependency。512 candidates/8 MiB/4 attempts/shared 10-second upper bound任一超限都restart/fail closed，attachment admission不能观察到拼接baseline。
+49. `TerminalOperationalActivityStore`固定最多256个canonical identity keys与1 MiB encoded payload；snapshot以一次同锁immutable read返回完整ordered vector、count/bytes与state/contract identity，Protocol mapper只可从该frozen vector派生wire accumulator，Gateway/client均不能只取cursor、分项拼接或截断。

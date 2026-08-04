@@ -1,0 +1,248 @@
+"""Launch the Go client while Python retains protocol and session authority."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import secrets
+import shutil
+import tempfile
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+from pulsara_agent.terminal_client.binary import (
+    TerminalClientBinary,
+    resolve_terminal_client_binary,
+)
+from pulsara_agent.terminal_client.supervision import (
+    restore_foreground,
+    transfer_foreground_to_child,
+)
+from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
+from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
+from pulsara_agent.terminal_protocol.generated.terminal_client_fingerprint import (
+    install_protobuf_fingerprint,
+)
+
+
+_BOOTSTRAP_MAXIMUM_BYTES = 16 * 1024
+_BOOTSTRAP_TTL_SECONDS = 30.0
+_PARENT_RELAUNCH_EXIT_CODE = 75
+_MAXIMUM_PARENT_RELAUNCHES = 1
+_CHILD_GRACEFUL_EXIT_SECONDS = 5.0
+_CHILD_FORCE_EXIT_SECONDS = 2.0
+
+
+class TerminalClientLaunchError(RuntimeError):
+    """The client process could not be securely launched or supervised."""
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalClientExit:
+    returncode: int
+    binary: TerminalClientBinary
+    client_instance_id: str
+
+
+async def launch_terminal_client(
+    *,
+    host_session,
+    binary_path: Path | str | None = None,
+) -> TerminalClientExit:
+    """Serve one observer client until local quit; never close the conversation."""
+
+    binary = await resolve_terminal_client_binary(binary_path)
+    runtime_root = Path(tempfile.mkdtemp(prefix="pulsara-tui-", dir="/tmp"))
+    os.chmod(runtime_root, 0o700)
+    socket_path = runtime_root / "client.sock"
+    server = TerminalProtocolServer(
+        socket_path=socket_path,
+        session_provider=lambda host_id: _exact_host_session(host_session, host_id),
+    )
+    client_instance_id = ""
+    try:
+        await server.start()
+        launch_id, launch_capability = server.launch_id, server.launch_capability
+        for relaunch_count in range(_MAXIMUM_PARENT_RELAUNCHES + 1):
+            client_instance_id = f"terminal-client:{uuid4().hex}"
+            carrier = build_terminal_client_bootstrap_carrier(
+                server=server,
+                host_session=host_session,
+                client_instance_id=client_instance_id,
+                launch_id=launch_id,
+                launch_capability=launch_capability,
+            )
+            returncode = await _launch_one_terminal_client(
+                binary=binary,
+                carrier=carrier,
+            )
+            if returncode == 0:
+                return TerminalClientExit(
+                    returncode=returncode,
+                    binary=binary,
+                    client_instance_id=client_instance_id,
+                )
+            if (
+                returncode != _PARENT_RELAUNCH_EXIT_CODE
+                or relaunch_count >= _MAXIMUM_PARENT_RELAUNCHES
+            ):
+                raise TerminalClientLaunchError(
+                    f"terminal client exited with status {returncode}"
+                )
+            launch_id, launch_capability = server.issue_launch_credential()
+        raise AssertionError("terminal relaunch loop is not exhaustive")
+    finally:
+        await server.close()
+        shutil.rmtree(runtime_root, ignore_errors=True)
+
+
+def build_terminal_client_bootstrap_carrier(
+    *,
+    server: TerminalProtocolServer,
+    host_session,
+    client_instance_id: str,
+    launch_id: str | None = None,
+    launch_capability: bytes | None = None,
+) -> wire.TerminalClientBootstrapCarrier:
+    now = datetime.now(UTC)
+    carrier = wire.TerminalClientBootstrapCarrier(
+        carrier_version=1,
+        launch_id=launch_id or server.launch_id,
+        client_instance_id=client_instance_id,
+        host_session_id=host_session.host_session_id,
+        runtime_session_id=host_session.runtime_session_id,
+        unix_socket_path=str(server.socket_path),
+        launch_capability=(
+            bytes(launch_capability)
+            if launch_capability is not None
+            else server.launch_capability
+        ),
+        requested_attachment_role=wire.ATTACHMENT_ROLE_OBSERVER,
+        parent_pid=os.getpid(),
+        issued_at_utc=now.isoformat().replace("+00:00", "Z"),
+        expires_at_utc=(now + timedelta(seconds=_BOOTSTRAP_TTL_SECONDS))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        carrier_nonce=secrets.token_bytes(32),
+    )
+    install_protobuf_fingerprint(
+        "terminal-client-bootstrap:v1",
+        carrier,
+        own_field="bootstrap_fingerprint",
+    )
+    return carrier
+
+
+async def _launch_one_terminal_client(
+    *,
+    binary: TerminalClientBinary,
+    carrier: wire.TerminalClientBootstrapCarrier,
+) -> int:
+    payload = carrier.SerializeToString(deterministic=True)
+    if not payload or len(payload) > _BOOTSTRAP_MAXIMUM_BYTES:
+        raise TerminalClientLaunchError("terminal bootstrap exceeds its hard bound")
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, True)
+    process: asyncio.subprocess.Process | None = None
+    foreground_lease = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            str(binary.path),
+            "--bootstrap-fd",
+            str(read_fd),
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            env=_sanitized_child_environment(read_fd),
+            pass_fds=(read_fd,),
+            # The child needs an isolated foreground process group, but must
+            # remain in the parent's terminal session so tcsetpgrp() is legal.
+            process_group=0,
+        )
+        os.close(read_fd)
+        read_fd = -1
+        # The bootstrap pipe is the child's startup gate. Transfer foreground
+        # ownership before releasing that gate so Bubble Tea can never race
+        # its raw-mode/input initialization while it is still a background
+        # process group.
+        foreground_lease = transfer_foreground_to_child(process.pid)
+        await asyncio.to_thread(_write_bootstrap_once, write_fd, payload)
+        os.close(write_fd)
+        write_fd = -1
+        return await process.wait()
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            await _terminate_child(process)
+        raise
+    except OSError as exc:
+        if process is not None and process.returncode is None:
+            await _terminate_child(process)
+        raise TerminalClientLaunchError(
+            "terminal client process or foreground-group setup failed"
+        ) from exc
+    finally:
+        restore_foreground(foreground_lease)
+        if read_fd >= 0:
+            os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+
+
+def _exact_host_session(host_session, host_session_id: str):
+    if host_session_id != host_session.host_session_id:
+        raise KeyError(host_session_id)
+    return host_session
+
+
+def _sanitized_child_environment(bootstrap_fd: int) -> dict[str, str]:
+    allowed_exact = {"TERM", "COLORTERM", "LANG", "NO_COLOR", "TMUX", "SSH_TTY"}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in allowed_exact or key.startswith("LC_")
+    }
+    environment["PULSARA_TUI_BOOTSTRAP_FD"] = str(bootstrap_fd)
+    return environment
+
+
+def _write_bootstrap_once(fd: int, payload: bytes) -> None:
+    framed = len(payload).to_bytes(4, "big") + payload
+    view = memoryview(framed)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise TerminalClientLaunchError("terminal bootstrap pipe stopped early")
+        view = view[written:]
+
+
+async def _terminate_child(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        await asyncio.shield(process.wait())
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(process.wait()), timeout=_CHILD_GRACEFUL_EXIT_SECONDS
+        )
+        return
+    except TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    await asyncio.wait_for(
+        asyncio.shield(process.wait()), timeout=_CHILD_FORCE_EXIT_SECONDS
+    )
+
+
+__all__ = [
+    "TerminalClientExit",
+    "TerminalClientLaunchError",
+    "build_terminal_client_bootstrap_carrier",
+    "launch_terminal_client",
+]

@@ -23,6 +23,15 @@ from pulsara_agent.primitives.storage_frozen import (
 Fingerprint = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 PROMPT_QUEUE_INLINE_MAX_UTF8_BYTES = 16 * 1024
 PROMPT_QUEUE_ARTIFACT_MAX_UTF8_BYTES = 4 * 1024 * 1024
+MAX_ACTIVE_PROMPT_QUEUE_ITEMS = 64
+CLIENT_VISIBLE_ACTIVE_QUEUE_STATES = frozenset(
+    {
+        "accepted_pending",
+        "steer_reserved",
+        "follow_up_reserved",
+        "reconciliation_required",
+    }
+)
 PROMPT_QUEUE_ARTIFACT_STORAGE_CONTRACT_FINGERPRINT = context_fingerprint(
     "prompt-queue-artifact-storage-contract:v1",
     {
@@ -69,7 +78,7 @@ PromptQueueCompanionKind = Literal[
 ]
 
 PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT = context_fingerprint(
-    "prompt-queue-reducer-contract:v1",
+    "prompt-queue-reducer-contract:v2",
     {
         "delivery_states": (
             "accepted_pending",
@@ -83,7 +92,20 @@ PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT = context_fingerprint(
         ),
         "content_retention_states": ("active", "retired"),
         "ordering": "accepted_ordinal+transition_chain",
+        "active_client_projection": {
+            "states": tuple(sorted(CLIENT_VISIBLE_ACTIVE_QUEUE_STATES)),
+            "content_retention": "active",
+            "ordering": "accepted_ordinal+queue_item_id",
+            "maximum_items": MAX_ACTIVE_PROMPT_QUEUE_ITEMS,
+            "accumulator": "terminal-active-prompt-queue-items:v1",
+        },
     },
+)
+# The v2 reducer adds a materialized client projection, but does not change the
+# semantic event fold.  Keeping this frozen input makes migration a projection
+# rebuild rather than a rewrite of every historical transition identity.
+PROMPT_QUEUE_TRANSITION_ACCUMULATOR_REDUCER_FINGERPRINT = (
+    "sha256:80426068f33b3206298194f28a9f85a46e07128a8afe63062dfbee9ba23d8e70"
 )
 PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT = context_fingerprint(
     "prompt-queue-event-registry:v1",
@@ -108,6 +130,9 @@ EMPTY_PROMPT_QUEUE_ROW_SET_ACCUMULATOR = context_fingerprint(
 EMPTY_PROMPT_QUEUE_PENDING_HEAD_SET_ACCUMULATOR = context_fingerprint(
     "prompt-queue-pending-head-set:v1", ()
 )
+EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR = context_fingerprint(
+    "terminal-active-prompt-queue-items:v1", ()
+)
 
 
 def prompt_queue_transition_genesis_accumulator(runtime_session_id: str) -> str:
@@ -115,7 +140,9 @@ def prompt_queue_transition_genesis_accumulator(runtime_session_id: str) -> str:
         "prompt-queue-transition-genesis:v1",
         {
             "runtime_session_id": runtime_session_id,
-            "reducer_contract_fingerprint": (PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT),
+            "reducer_contract_fingerprint": (
+                PROMPT_QUEUE_TRANSITION_ACCUMULATOR_REDUCER_FINGERPRINT
+            ),
             "event_registry_fingerprint": (PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT),
         },
     )
@@ -270,7 +297,7 @@ class PromptQueueReservationFact(FrozenFactBase):
 
 
 class PromptQueueReducerContractFact(FrozenFactBase):
-    schema_version: Literal["prompt_queue_reducer_contract.v1"]
+    schema_version: Literal["prompt_queue_reducer_contract.v2"]
     reducer_id: str
     reducer_version: str
     reducer_contract_fingerprint: Fingerprint
@@ -285,7 +312,7 @@ class PromptQueueEventDomainRegistryFact(FrozenFactBase):
 
 
 class PromptQueueDomainCheckpointFact(FrozenFactBase):
-    schema_version: Literal["prompt_queue_domain_checkpoint.v1"]
+    schema_version: Literal["prompt_queue_domain_checkpoint.v2"]
     runtime_session_id: str
     reducer_id: str
     reducer_version: str
@@ -300,6 +327,8 @@ class PromptQueueDomainCheckpointFact(FrozenFactBase):
     account_revision: int = Field(ge=0)
     next_accepted_ordinal: int = Field(ge=1)
     pending_item_head_set_accumulator: Fingerprint
+    active_client_item_count: int = Field(ge=0, le=MAX_ACTIVE_PROMPT_QUEUE_ITEMS)
+    active_client_item_accumulator: Fingerprint
     queue_row_set_accumulator: Fingerprint
     resulting_queue_head_event_id: str | None
     resulting_queue_head_payload_fingerprint: Fingerprint | None
@@ -315,6 +344,9 @@ class PromptQueueDomainCheckpointFact(FrozenFactBase):
                 or self.transition_count != 0
                 or self.account_revision != 0
                 or self.next_accepted_ordinal != 1
+                or self.active_client_item_count != 0
+                or self.active_client_item_accumulator
+                != EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR
                 or self.resulting_queue_head_event_id is not None
                 or self.resulting_queue_head_payload_fingerprint is not None
             ):
@@ -337,6 +369,8 @@ def build_prompt_queue_domain_checkpoint(
     account_revision: int,
     next_accepted_ordinal: int,
     pending_item_head_set_accumulator: str,
+    active_client_item_count: int,
+    active_client_item_accumulator: str,
     queue_row_set_accumulator: str,
     resulting_queue_head_event_id: str | None,
     resulting_queue_head_payload_fingerprint: str | None,
@@ -345,10 +379,10 @@ def build_prompt_queue_domain_checkpoint(
 
     return build_frozen_fact(
         PromptQueueDomainCheckpointFact,
-        schema_version="prompt_queue_domain_checkpoint.v1",
+        schema_version="prompt_queue_domain_checkpoint.v2",
         runtime_session_id=runtime_session_id,
         reducer_id="pulsara.prompt_queue.reducer",
-        reducer_version="1",
+        reducer_version="2",
         reducer_contract_fingerprint=PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT,
         event_registry_id="pulsara.prompt_queue.event_registry",
         event_registry_version="1",
@@ -360,6 +394,8 @@ def build_prompt_queue_domain_checkpoint(
         account_revision=account_revision,
         next_accepted_ordinal=next_accepted_ordinal,
         pending_item_head_set_accumulator=pending_item_head_set_accumulator,
+        active_client_item_count=active_client_item_count,
+        active_client_item_accumulator=active_client_item_accumulator,
         queue_row_set_accumulator=queue_row_set_accumulator,
         resulting_queue_head_event_id=resulting_queue_head_event_id,
         resulting_queue_head_payload_fingerprint=(
@@ -369,10 +405,13 @@ def build_prompt_queue_domain_checkpoint(
 
 
 class PromptQueueHeadReceiptFact(FrozenFactBase):
-    schema_version: Literal["prompt_queue_head_receipt.v1"]
+    schema_version: Literal["prompt_queue_head_receipt.v2"]
     reducer_contract_fingerprint: Fingerprint
     event_registry_fingerprint: Fingerprint
     checkpoint_generation: int = Field(ge=0)
+    checkpoint_through_sequence: int = Field(ge=0)
+    checkpoint_transition_count: int = Field(ge=0)
+    checkpoint_transition_accumulator: Fingerprint
     checkpoint_fingerprint: Fingerprint
     bounded_tail_first_sequence: int = Field(ge=0)
     bounded_tail_last_sequence: int = Field(ge=0)
@@ -381,8 +420,55 @@ class PromptQueueHeadReceiptFact(FrozenFactBase):
     resulting_queue_head_event_id: str | None
     resulting_queue_head_payload_fingerprint: Fingerprint | None
     resulting_account_revision: int = Field(ge=0)
+    resulting_active_client_item_count: int = Field(
+        ge=0, le=MAX_ACTIVE_PROMPT_QUEUE_ITEMS
+    )
+    resulting_active_client_item_accumulator: Fingerprint
     resulting_row_set_accumulator: Fingerprint
     receipt_fingerprint: Fingerprint
+
+
+def build_prompt_queue_head_receipt(
+    *,
+    checkpoint: PromptQueueDomainCheckpointFact,
+    bounded_tail_first_sequence: int,
+    bounded_tail_last_sequence: int,
+    bounded_tail_count: int,
+    bounded_tail_accumulator: str,
+    resulting_queue_head_event_id: str | None,
+    resulting_queue_head_payload_fingerprint: str | None,
+    resulting_account_revision: int,
+    resulting_active_client_item_count: int,
+    resulting_active_client_item_accumulator: str,
+    resulting_row_set_accumulator: str,
+) -> PromptQueueHeadReceiptFact:
+    """Build the one typed checkpoint/tail/account join used by storage and UI."""
+
+    return build_frozen_fact(
+        PromptQueueHeadReceiptFact,
+        schema_version="prompt_queue_head_receipt.v2",
+        reducer_contract_fingerprint=checkpoint.reducer_contract_fingerprint,
+        event_registry_fingerprint=checkpoint.event_registry_fingerprint,
+        checkpoint_generation=checkpoint.checkpoint_generation,
+        checkpoint_through_sequence=checkpoint.through_sequence,
+        checkpoint_transition_count=checkpoint.transition_count,
+        checkpoint_transition_accumulator=checkpoint.transition_accumulator,
+        checkpoint_fingerprint=checkpoint.checkpoint_fingerprint,
+        bounded_tail_first_sequence=bounded_tail_first_sequence,
+        bounded_tail_last_sequence=bounded_tail_last_sequence,
+        bounded_tail_count=bounded_tail_count,
+        bounded_tail_accumulator=bounded_tail_accumulator,
+        resulting_queue_head_event_id=resulting_queue_head_event_id,
+        resulting_queue_head_payload_fingerprint=(
+            resulting_queue_head_payload_fingerprint
+        ),
+        resulting_account_revision=resulting_account_revision,
+        resulting_active_client_item_count=resulting_active_client_item_count,
+        resulting_active_client_item_accumulator=(
+            resulting_active_client_item_accumulator
+        ),
+        resulting_row_set_accumulator=resulting_row_set_accumulator,
+    )
 
 
 class PromptQueueCompanionChargeFact(FrozenFactBase):
@@ -430,7 +516,7 @@ class PromptQueueCompanionChargeFact(FrozenFactBase):
 class PromptQueueAccountProjectionFact(FrozenStorageFactBase):
     """Exact typed image of the mutable queue-account projection row."""
 
-    schema_version: Literal["prompt_queue_account_projection.v1"]
+    schema_version: Literal["prompt_queue_account_projection.v2"]
     runtime_session_id: str
     next_accepted_ordinal: int = Field(ge=1)
     queue_chain_head_event_id: str | None
@@ -450,6 +536,8 @@ class PromptQueueAccountProjectionFact(FrozenStorageFactBase):
     reserved_item_count: int = Field(ge=0)
     artifact_bytes: int = Field(ge=0)
     pending_item_head_set_accumulator: Fingerprint
+    active_client_item_count: int = Field(ge=0, le=MAX_ACTIVE_PROMPT_QUEUE_ITEMS)
+    active_client_item_accumulator: Fingerprint
     row_set_accumulator: Fingerprint
     reducer_contract_fingerprint: Fingerprint
     event_registry_fingerprint: Fingerprint
@@ -478,6 +566,12 @@ class PromptQueueAccountProjectionFact(FrozenStorageFactBase):
             != PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT
         ):
             raise ValueError("prompt queue account contract binding mismatch")
+        if genesis and (
+            self.active_client_item_count != 0
+            or self.active_client_item_accumulator
+            != EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR
+        ):
+            raise ValueError("prompt queue genesis active projection is not empty")
         return self
 
 
@@ -498,6 +592,10 @@ def build_prompt_queue_genesis_checkpoint(
         next_accepted_ordinal=1,
         pending_item_head_set_accumulator=(
             EMPTY_PROMPT_QUEUE_PENDING_HEAD_SET_ACCUMULATOR
+        ),
+        active_client_item_count=0,
+        active_client_item_accumulator=(
+            EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR
         ),
         queue_row_set_accumulator=EMPTY_PROMPT_QUEUE_ROW_SET_ACCUMULATOR,
         resulting_queue_head_event_id=None,
@@ -535,6 +633,10 @@ def build_prompt_queue_genesis_account(
         pending_item_head_set_accumulator=(
             EMPTY_PROMPT_QUEUE_PENDING_HEAD_SET_ACCUMULATOR
         ),
+        active_client_item_count=0,
+        active_client_item_accumulator=(
+            EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR
+        ),
         row_set_accumulator=EMPTY_PROMPT_QUEUE_ROW_SET_ACCUMULATOR,
         reducer_contract_fingerprint=PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT,
         event_registry_fingerprint=PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT,
@@ -546,7 +648,7 @@ def build_prompt_queue_account_projection(
 ) -> PromptQueueAccountProjectionFact:
     return build_frozen_storage_fact(
         PromptQueueAccountProjectionFact,
-        schema_version="prompt_queue_account_projection.v1",
+        schema_version="prompt_queue_account_projection.v2",
         **values,
     )
 
@@ -652,9 +754,9 @@ for _schema, _field, _domain in (
         "prompt-queue-reservation:v1",
     ),
     (
-        "prompt_queue_reducer_contract.v1",
+        "prompt_queue_reducer_contract.v2",
         "reducer_contract_fingerprint",
-        "prompt-queue-reducer-contract:v1",
+        "prompt-queue-reducer-contract:v2",
     ),
     (
         "prompt_queue_event_domain_registry.v1",
@@ -662,14 +764,14 @@ for _schema, _field, _domain in (
         "prompt-queue-event-registry:v1",
     ),
     (
-        "prompt_queue_domain_checkpoint.v1",
+        "prompt_queue_domain_checkpoint.v2",
         "checkpoint_fingerprint",
-        "prompt-queue-domain-checkpoint:v1",
+        "prompt-queue-domain-checkpoint:v2",
     ),
     (
-        "prompt_queue_head_receipt.v1",
+        "prompt_queue_head_receipt.v2",
         "receipt_fingerprint",
-        "prompt-queue-head-receipt:v1",
+        "prompt-queue-head-receipt:v2",
     ),
     (
         "prompt_queue_companion_charge.v1",
@@ -689,13 +791,15 @@ register_durable_storage_fact(
     domain_separator="prompt-queue-artifact-preparation-hold-row:v1",
 )
 register_durable_storage_fact(
-    schema_version="prompt_queue_account_projection.v1",
+    schema_version="prompt_queue_account_projection.v2",
     own_fingerprint_field="account_fingerprint",
-    domain_separator="prompt-queue-account-row:v1",
+    domain_separator="prompt-queue-account-row:v2",
 )
 
 
 __all__ = [
+    "CLIENT_VISIBLE_ACTIVE_QUEUE_STATES",
+    "EMPTY_PROMPT_QUEUE_ACTIVE_CLIENT_ITEM_ACCUMULATOR",
     "EMPTY_PROMPT_QUEUE_PENDING_HEAD_SET_ACCUMULATOR",
     "EMPTY_PROMPT_QUEUE_ROW_SET_ACCUMULATOR",
     "PROMPT_QUEUE_COMPANION_CHARGE_CONTRACT_FINGERPRINT",
@@ -703,8 +807,10 @@ __all__ = [
     "PROMPT_QUEUE_ARTIFACT_STORAGE_CONTRACT_FINGERPRINT",
     "PROMPT_QUEUE_EVENT_REGISTRY_FINGERPRINT",
     "PROMPT_QUEUE_INLINE_MAX_UTF8_BYTES",
+    "MAX_ACTIVE_PROMPT_QUEUE_ITEMS",
     "PROMPT_QUEUE_EVENT_TYPE_VALUES",
     "PROMPT_QUEUE_REDUCER_CONTRACT_FINGERPRINT",
+    "PROMPT_QUEUE_TRANSITION_ACCUMULATOR_REDUCER_FINGERPRINT",
     "ConfirmedArtifactQueueContentFact",
     "InlineQueueContentFact",
     "PreparedPromptQueueContentFact",
@@ -720,6 +826,7 @@ __all__ = [
     "PromptQueueDomainCheckpointFact",
     "PromptQueueEventDomainRegistryFact",
     "PromptQueueHeadReceiptFact",
+    "build_prompt_queue_head_receipt",
     "PromptQueueReducerContractFact",
     "PromptQueueReservationFact",
     "PromptQueueTransitionHeadFact",

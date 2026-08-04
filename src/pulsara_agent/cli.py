@@ -108,6 +108,11 @@ from pulsara_agent.storage.schema_verification_service import (
     acquire_verified_postgres_access_sync,
     process_postgres_schema_verification_service,
 )
+from pulsara_agent.terminal_client import (
+    TerminalClientBinaryError,
+    TerminalClientLaunchError,
+    launch_terminal_client,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +144,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-sessions",
         action="store_true",
         help="List resumable sessions for this workspace and exit.",
+    )
+    tui = _add_host_common_args(
+        host_subcommands.add_parser(
+            "tui", help="Start the renderer-neutral Go terminal client."
+        )
+    )
+    tui_resume = tui.add_mutually_exclusive_group()
+    tui_resume.add_argument(
+        "--resume", default=None, help="Resume an existing runtime session id."
+    )
+    tui_resume.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the most recent resumable session for this workspace.",
+    )
+    tui.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List resumable sessions for this workspace and exit.",
+    )
+    tui.add_argument(
+        "--tui-binary",
+        default=None,
+        help="Explicit path to a verified pulsara-tui binary.",
     )
     inspect_cmd = _add_host_permission_args(
         _add_host_workspace_args(
@@ -822,6 +852,18 @@ def main() -> None:
                 asyncio.run(_host_repl(args))
             except McpRequiredStartupError as exc:
                 parser.error(f"{exc} ({exc.reason_code})")
+            except ValueError as exc:
+                parser.error(str(exc))
+            except KeyError as exc:
+                parser.error(_format_not_found_error(exc))
+            return
+        if args.host_command == "tui":
+            try:
+                asyncio.run(_host_tui(args))
+            except McpRequiredStartupError as exc:
+                parser.error(f"{exc} ({exc.reason_code})")
+            except (TerminalClientBinaryError, TerminalClientLaunchError) as exc:
+                parser.error(str(exc))
             except ValueError as exc:
                 parser.error(str(exc))
             except KeyError as exc:
@@ -2071,6 +2113,45 @@ async def _host_repl(args) -> None:
                             indent=2,
                         )
                     )
+    finally:
+        await core.shutdown()
+
+
+async def _host_tui(args) -> None:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise ValueError("host tui requires an interactive terminal")
+    settings = _settings_from_host_args(args)
+    permission_policy = _permission_policy_from_host_args(args, intent="run")
+    _best_effort_sync_bundled_skills()
+    core = HostCore.production(settings=settings)
+    try:
+        workspace_input = _workspace_input_from_args(args)
+        resume_workspace_input = (
+            workspace_input if _has_explicit_workspace_override(args) else None
+        )
+        if getattr(args, "list_sessions", False):
+            sessions = await core.list_resumable_sessions(
+                workspace_input=workspace_input
+            )
+            print(
+                json.dumps(
+                    [summary.to_dict() for summary in sessions],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return
+        session = await _open_initial_repl_session(
+            core,
+            args,
+            workspace_input=workspace_input,
+            resume_workspace_input=resume_workspace_input,
+            permission_policy=permission_policy,
+        )
+        await launch_terminal_client(
+            host_session=session,
+            binary_path=getattr(args, "tui_binary", None),
+        )
     finally:
         await core.shutdown()
 

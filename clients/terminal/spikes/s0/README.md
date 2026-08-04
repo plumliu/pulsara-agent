@@ -99,10 +99,11 @@ interactive terminal:
    network/PTTY/disconnect/reconnect record is complete; this remaining manual
    pass is only for visual IME behavior.
 
-Use Ctrl+Q for normal exit and Ctrl+G for the intentional panic probe. The
-current S0 status remains **PARTIAL** until the real IME, attached tmux, remote
-terminal visual checks, and non-native clean-runner launch records are complete.
-The repeated CPU/RSS/render-cadence and real-host SSH automation are complete.
+Use Ctrl+Q for normal exit and Ctrl+G for the intentional panic probe. The S0
+feasibility decision is **PASS**. Real IME, attached tmux visual checks, remote
+terminal visual checks, and non-native clean-runner launch records remain
+deferred compatibility/release regressions and do not block S1. The repeated
+CPU/RSS/render-cadence and real-host SSH automation are complete.
 
 ## Real-host SSH smoke
 

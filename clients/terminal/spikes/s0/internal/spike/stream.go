@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"google.golang.org/protobuf/proto"
 
-	"pulsara.local/terminal-s0/internal/probeproto"
+	"github.com/plumliu/pulsara-agent/clients/terminal-s0/internal/probeproto"
 )
 
 const maxProbeFrameBytes = 2 * 1024 * 1024

@@ -1,9 +1,9 @@
 # Pulsara Terminal UI/UX 调研与目标设计
 
 > 文档性质：竞品代码真值调研 + Pulsara Terminal 产品设计基线 + 规范索引
-> 状态：ACTIVE PRODUCT BASELINE；Bubble Tea v2为长期一等Terminal客户端的provisional selection，须先通过S0 feasibility gate
+> 状态：ACTIVE PRODUCT BASELINE；Bubble Tea v2已通过S0 feasibility gate，冻结为长期一等Terminal客户端
 >
-> 当前实施边界（2026-08-01）：renderer-neutral Python infrastructure hard cut已独立完成；隔离、可删除的S0 feasibility spike现为`IN PROGRESS`，但S1-S6 production接线、正式Go packaging与默认TTY activation仍为`DEFERRED`。S0自动化smoke不得计入Python Foundation完成证据，也不得冒充production client。
+> 当前实施边界（2026-08-03）：renderer-neutral Python infrastructure baseline、Go-ready Protocol 2.0原子切换、attachment-attempt handshake recovery、atomic five-section control baseline、three-plane observation wire prerequisite与typed active-queue genesis extension已完成；隔离S0 feasibility spike为`PASS`，Bubble Tea S1只读production纵切为`IMPLEMENTED`。S2–S6行为、正式四平台Go packaging与默认TTY activation仍为`NOT STARTED`。S0证据不得计入Python Foundation或S1完成证据。
 > 规范口径：本文拥有`TUI-UX-*`产品行为与跨规格总边界；其中保留的DTO、算法和伪代码用于解释设计来源，不再充当唯一implementation authority
 > 调研对象：
 >
@@ -81,7 +81,7 @@ Pulsara 当前最影响体验的并不是颜色、主题或动画，而是 REPL 
 
 1. `HostSession.stream_turn()` 只保留为一次 activation 的兼容观察入口，不充当长期 UI event bus。
 2. EventLog normal commit直接返回完整physical `StoredEventBatchCommitReceipt`；只有持有exact prepared candidate identity的FULL confirmation可重建同形receipt。Generic restart/doctor/catch-up只能构造连续`JoinedRawStoredEventRangeProof`，不得伪造transaction batch。
-3. EventLog queue transition chain是prompt queue唯一semantic authority；versioned checkpoint拥有canonical genesis与hard admission bound，production reopen只fold bounded typed delta。
+3. EventLog queue transition chain是prompt queue唯一semantic authority；versioned checkpoint拥有canonical genesis与hard admission bound，production reopen只fold bounded typed delta。Terminal snapshot只呈现Foundation定义的bounded active client projection，不携带全部历史queue rows，也不允许client截断。
 4. Enter获得`Queued` acknowledgement前，prompt queue acceptance必须已经durable FULL并通过companion固定保守physical charge；large-paste artifact由`PREPARED -> CONSUMED -> RELEASED` hold覆盖完整生命周期。
 5. Full-screen transcript从S1起使用bounded viewport与paged history，不把完整session transcript常驻内存。
 6. status/render热路径只能读取O(1) process-local projection，不得同步扫描PostgreSQL EventLog。
@@ -1138,7 +1138,7 @@ Tap不得用event ID相同代替sequence/envelope exact join，也不得跳过ac
 - authoritative `through_sequence=H`；
 - unified presentation-history root/checkpoint、bounded resident tail与latest-root cursor pair；
 - pending interaction exact view；
-- prompt queue domain checkpoint/head receipt、bounded delta disposition及current pending/reserved projection；
+- prompt queue domain checkpoint/head receipt、bounded delta disposition及Foundation-validated active client projection；
 - terminal/reconciliation state；
 - durable bootstrap fingerprint。
 
@@ -1650,7 +1650,7 @@ EventLog中的typed queue transition chain是唯一semantic/audit authority。`p
 - cancellation/rejection/reconciliation disposition；
 - schema/registry binding。
 
-account row至少保存reducer/registry contract fingerprints、`next_accepted_ordinal`、queue chain head event ID/sequence/fingerprint、account revision、checkpoint generation、checkpoint through sequence、queue-transition count/accumulator、bounded-tail start/count/accumulator和bounded capacity counters。Queue head event identity只在canonical empty genesis中允许全组为null。所有domain transition必须在单一RuntimeSession transaction中同时：
+account row至少保存reducer/registry contract fingerprints、`next_accepted_ordinal`、queue chain head event ID/sequence/fingerprint、account revision、checkpoint generation、checkpoint through sequence、queue-transition count/accumulator、bounded-tail start/count/accumulator和bounded capacity counters。Queue head event identity只在canonical empty genesis中允许全组为null。Client projection的empty/committed head由`checkpoint transition count + bounded tail count`唯一决定；首条transition到首checkpoint前必须以`generation-0 checkpoint + non-empty tail receipt`表示committed head，不能按checkpoint generation选branch。所有domain transition必须在单一RuntimeSession transaction中同时：
 
 1. append exact typed queue transition event；
 2. transaction companion对item row/account row执行expected-revision CAS；
@@ -2590,7 +2590,7 @@ Recovered an interrupted run · run:abc · no model output accepted
 
 ## 18. 技术栈判断
 
-### 18.1 Bubble Tea v2 provisional selection
+### 18.1 Bubble Tea v2 frozen selection
 
 Pulsara选择Bubble Tea v2的理由是架构，而不是star数量或流行度：
 
@@ -2600,7 +2600,7 @@ Pulsara选择Bubble Tea v2的理由是架构，而不是star数量或流行度�
 - 跨语言client会迫使Runtime/UI boundary成为真实、版本化协议；
 - Terminal UI被确认为长期一等入口后，不再值得先建设一套Python full-screen UI再迁移。
 
-该选择在S0 gate通过前仍是provisional。S0必须验证CJK/IME、宽字符光标、多行textarea、大型bracketed paste、streaming期间持续输入、resize、tmux、SSH、terminal crash restore、macOS/Linux packaging以及Python parent/Go child signal ownership。S0失败时重新评估Terminal client framework，但不会自动转向Textual，也不会建设prompt_toolkit full-screen过渡版。
+该选择已在S0 gate后冻结。S0已经验证宽字符光标、多行textarea、大型bracketed paste、streaming期间持续输入、resize、自动化tmux、真实SSH、terminal crash restore、四目标cross-build以及Python parent/Go child signal ownership。真实IME、attached tmux视觉检查与非本机clean-runner启动作为后续兼容性/release regression保留，不再阻塞S1；依赖升级仍须重跑对应矩阵。
 
 ### 18.2 不建设Textual或prompt_toolkit full-screen
 

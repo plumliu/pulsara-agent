@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -14,111 +15,447 @@ from pulsara_agent.terminal_protocol.codec import (
     PROTOCOL_SCHEMA_FINGERPRINT,
 )
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
+from pulsara_agent.terminal_protocol.generated.terminal_client_fingerprint import (
+    attachment_challenge_commitment,
+    install_protobuf_fingerprint,
+)
+
+
+_S1_REQUIRED_CAPABILITIES = (
+    wire.PRESENTATION_SNAPSHOT_V1,
+    wire.OPERATIONAL_SNAPSHOT_V1,
+    wire.BOOTSTRAP_CARRIER_V1,
+    wire.LAUNCH_AUTH_PREFACE_V1,
+    wire.ATTACH_ACK_V1,
+)
+_HEADLESS_SUPPORTED_CAPABILITIES = tuple(
+    sorted(
+        {
+            *_S1_REQUIRED_CAPABILITIES,
+            wire.HISTORY_PAGE_V1,
+            wire.OBSERVATION_STREAM_V1,
+            wire.ROOT_ADVANCE_V1,
+            wire.GAP_REBUILD_V1,
+            wire.CONTROL_PROJECTION_OBSERVATION_V1,
+            wire.CONTROLLER_COMMAND_V1,
+            wire.COMMAND_QUERY_V1,
+            wire.SESSION_SUCCESSOR_V1,
+        }
+    )
+)
 
 
 @dataclass(slots=True)
 class HeadlessTerminalConformanceClient:
     socket_path: Path
     client_instance_id: str
+    launch_id: str
     launch_capability: bytes
     reader: asyncio.StreamReader | None = None
     writer: asyncio.StreamWriter | None = None
-    hello: wire.HelloResponse | None = None
+    auth_result: wire.TerminalTransportAuthResult | None = None
+    candidate: wire.HandshakeRecoveryCandidateIdentity | None = None
+    hello: wire.ServerHello | None = None
+    attach_receipt: wire.AttachResultReceipt | None = None
     attachment: wire.AttachmentIdentity | None = None
+    control_cursor: wire.ControlProjectionCursor | None = None
+    heartbeat_generation: int = 0
 
-    async def connect(self, *, controller: bool = True) -> None:
+    async def connect(
+        self,
+        *,
+        host_session_id: str,
+        runtime_session_id: str,
+        controller: bool = True,
+    ) -> None:
         self.reader, self.writer = await asyncio.open_unix_connection(
             str(self.socket_path)
         )
+        requested_role = (
+            wire.ATTACHMENT_ROLE_CONTROLLER
+            if controller
+            else wire.ATTACHMENT_ROLE_OBSERVER
+        )
+        candidate = wire.HandshakeRecoveryCandidateIdentity(
+            candidate_version=1,
+            client_instance_id=self.client_instance_id,
+            attachment_attempt_generation=1,
+            host_session_id=host_session_id,
+            requested_runtime_session_id=runtime_session_id,
+            requested_attachment_role=requested_role,
+            minimum_protocol_major=PROTOCOL_MAJOR,
+            minimum_protocol_minor=PROTOCOL_MINOR,
+            maximum_protocol_major=PROTOCOL_MAJOR,
+            maximum_protocol_minor=PROTOCOL_MINOR,
+            client_build_identity="python-headless-conformance:v2",
+            supported_capabilities=_HEADLESS_SUPPORTED_CAPABILITIES,
+            required_capabilities=_S1_REQUIRED_CAPABILITIES,
+            schema_contract_fingerprint=PROTOCOL_SCHEMA_FINGERPRINT,
+        )
+        install_protobuf_fingerprint(
+            "terminal-handshake-recovery-candidate:v1",
+            candidate,
+            own_field="candidate_fingerprint",
+            clear_fields=("candidate_id",),
+        )
+        candidate.candidate_id = (
+            "handshake:" + candidate.candidate_fingerprint.removeprefix("sha256:")
+        )
+        auth_request_id = self._id()
+        preface = wire.TerminalTransportAuthPreface(
+            preface_version=1,
+            auth_request_id=auth_request_id,
+            client_instance_id=self.client_instance_id,
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            connection_nonce=secrets.token_bytes(32),
+            initial_launch=wire.InitialLaunchCredential(
+                launch_id=self.launch_id,
+                launch_capability=self.launch_capability,
+            ),
+        )
+        install_protobuf_fingerprint(
+            "terminal-transport-auth-preface:v1",
+            preface,
+            own_field="preface_fingerprint",
+        )
+        auth_result = await self._exchange_raw(
+            preface, wire.TerminalTransportAuthResult
+        )
+        if auth_result.disposition not in {
+            wire.TRANSPORT_AUTHENTICATED,
+            wire.TRANSPORT_COMPATIBLE_AUTH_WINNER,
+        }:
+            raise RuntimeError("terminal transport authentication failed")
         response = await self.exchange(
             wire.ClientFrame(
                 hello=wire.HelloRequest(
                     request_id=self._id(),
-                    supported_version_range=wire.ProtocolVersionRange(
-                        major=PROTOCOL_MAJOR,
-                        minimum_minor=PROTOCOL_MINOR,
-                        maximum_minor=PROTOCOL_MINOR,
-                        schema_contract_fingerprint=PROTOCOL_SCHEMA_FINGERPRINT,
-                    ),
-                    client_instance_id=self.client_instance_id,
-                    client_build_identity="python-headless-conformance:v1",
-                    supported_capabilities=(
-                        "history_page_v1",
-                        "presentation_root_advance_v1",
-                    ),
-                    requested_attachment_mode=(
-                        wire.ATTACHMENT_ROLE_CONTROLLER
-                        if controller
-                        else wire.ATTACHMENT_ROLE_OBSERVER
-                    ),
-                    launch_capability=self.launch_capability,
+                    transport_auth_attempt_id=auth_result.auth_attempt_id,
+                    transport_auth_result_fingerprint=(auth_result.result_fingerprint),
+                    handshake_candidate=candidate,
                 )
             )
         )
-        if response.WhichOneof("response") != "hello":
+        if (
+            response.WhichOneof("response") != "hello"
+            or response.hello.WhichOneof("outcome") != "accepted"
+        ):
             raise RuntimeError("terminal conformance hello failed")
-        self.hello = response.hello
+        self.auth_result = auth_result
+        self.candidate = candidate
+        self.hello = response.hello.accepted
 
     async def attach(self, host_session_id: str, *, controller: bool = True) -> None:
         hello = self.hello
-        if hello is None:
+        candidate = self.candidate
+        if hello is None or candidate is None:
             raise RuntimeError("terminal conformance client has not negotiated")
+        expected_commitment = attachment_challenge_commitment(
+            auth_attempt_id=hello.receipt.transport_auth_attempt_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            candidate_id=candidate.candidate_id,
+            connection_id=hello.receipt.current_connection_id,
+            negotiation_winner_fingerprint=(
+                hello.negotiation_winner.negotiation_winner_fingerprint
+            ),
+            request_id=hello.receipt.request_id,
+            challenge=bytes(hello.receipt.attachment_challenge),
+        )
+        if expected_commitment != hello.receipt.attachment_challenge_commitment:
+            raise RuntimeError("terminal challenge commitment mismatch")
         response = await self.exchange(
             wire.ClientFrame(
                 attach=wire.AttachRequest(
                     request_id=self._id(),
-                    hello_transcript_fingerprint=(hello.hello_transcript_fingerprint),
-                    host_session_id=host_session_id,
-                    requested_role=(
-                        wire.ATTACHMENT_ROLE_CONTROLLER
-                        if controller
-                        else wire.ATTACHMENT_ROLE_OBSERVER
+                    handshake_candidate_id=candidate.candidate_id,
+                    handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+                    negotiation_winner_fingerprint=(
+                        hello.negotiation_winner.negotiation_winner_fingerprint
                     ),
-                    attachment_challenge=hello.attachment_challenge,
+                    current_hello_receipt_fingerprint=(
+                        hello.receipt.hello_receipt_fingerprint
+                    ),
+                    attachment_challenge=hello.receipt.attachment_challenge,
+                    attachment_challenge_commitment=expected_commitment,
                 )
             )
         )
         if response.WhichOneof("response") != "attach":
             raise RuntimeError("terminal conformance attach failed")
-        self.attachment = response.attach.attachment
-
-    async def snapshot(self) -> wire.ProjectionSnapshotFrame:
-        response = await self.exchange(
-            wire.ClientFrame(
-                snapshot=wire.ProjectionSnapshotRequest(request_id=self._id())
-            )
+        receipt = response.attach
+        attachment = receipt.attach_semantic_winner.attachment
+        if attachment.runtime_session_id != candidate.requested_runtime_session_id:
+            raise RuntimeError("terminal conformance attachment is stale")
+        ack = wire.AttachReceiptAck(
+            request_id=self._id(),
+            attachment_id=attachment.attachment_id,
+            attachment_generation=attachment.attachment_generation,
+            semantic_winner_fingerprint=(
+                receipt.attach_semantic_winner.semantic_winner_fingerprint
+            ),
+            current_transport_binding=receipt.current_transport_binding,
+            attach_result_receipt_fingerprint=receipt.receipt_fingerprint,
         )
-        if response.WhichOneof("response") != "snapshot":
-            raise RuntimeError("terminal snapshot failed")
-        return response.snapshot
+        install_protobuf_fingerprint(
+            "terminal-attach-receipt-ack:v1",
+            ack,
+            own_field="ack_fingerprint",
+        )
+        ack_response = await self.exchange(wire.ClientFrame(attach_ack=ack))
+        if ack_response.WhichOneof("response") != "attach_ack":
+            raise RuntimeError("terminal conformance attach ACK failed")
+        self.attach_receipt = receipt
+        self.attachment = attachment
 
-    async def operational_snapshot(self) -> wire.OperationalSnapshotFrame:
+    async def attach_with_lost_ack_result(self) -> None:
+        """Commit Attach/ACK, then drop the physical ACK response for recovery tests."""
+
+        hello = self.hello
+        candidate = self.candidate
+        if hello is None or candidate is None:
+            raise RuntimeError("terminal conformance client has not negotiated")
+        commitment = attachment_challenge_commitment(
+            auth_attempt_id=hello.receipt.transport_auth_attempt_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            candidate_id=candidate.candidate_id,
+            connection_id=hello.receipt.current_connection_id,
+            negotiation_winner_fingerprint=(
+                hello.negotiation_winner.negotiation_winner_fingerprint
+            ),
+            request_id=hello.receipt.request_id,
+            challenge=bytes(hello.receipt.attachment_challenge),
+        )
         response = await self.exchange(
             wire.ClientFrame(
-                operational_snapshot=wire.OperationalSnapshotRequest(
-                    request_id=self._id()
+                attach=wire.AttachRequest(
+                    request_id=self._id(),
+                    handshake_candidate_id=candidate.candidate_id,
+                    handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+                    negotiation_winner_fingerprint=(
+                        hello.negotiation_winner.negotiation_winner_fingerprint
+                    ),
+                    current_hello_receipt_fingerprint=(
+                        hello.receipt.hello_receipt_fingerprint
+                    ),
+                    attachment_challenge=hello.receipt.attachment_challenge,
+                    attachment_challenge_commitment=commitment,
                 )
             )
         )
+        receipt = response.attach
+        attachment = receipt.attach_semantic_winner.attachment
+        ack = wire.AttachReceiptAck(
+            request_id=self._id(),
+            attachment_id=attachment.attachment_id,
+            attachment_generation=attachment.attachment_generation,
+            semantic_winner_fingerprint=(
+                receipt.attach_semantic_winner.semantic_winner_fingerprint
+            ),
+            current_transport_binding=receipt.current_transport_binding,
+            attach_result_receipt_fingerprint=receipt.receipt_fingerprint,
+        )
+        install_protobuf_fingerprint(
+            "terminal-attach-receipt-ack:v1",
+            ack,
+            own_field="ack_fingerprint",
+        )
+        if self.writer is None:
+            raise RuntimeError("terminal conformance client is disconnected")
+        frame = wire.ClientFrame(attach_ack=ack)
+        payload = frame.SerializeToString(deterministic=True)
+        self.writer.write(len(payload).to_bytes(4, "big") + payload)
+        await self.writer.drain()
+        self.attach_receipt = receipt
+        self.attachment = attachment
+        # Let the server commit/write the ACK before abandoning the response.
+        await asyncio.sleep(0.05)
+        self.writer.close()
+        await self.writer.wait_closed()
+        self.reader = None
+        self.writer = None
+
+    async def send_attach_and_lose_result(self) -> None:
+        """Send a valid Attach, then abandon its physical response pre-ACK."""
+
+        hello = self.hello
+        candidate = self.candidate
+        if hello is None or candidate is None or self.writer is None:
+            raise RuntimeError("terminal conformance client has not negotiated")
+        commitment = attachment_challenge_commitment(
+            auth_attempt_id=hello.receipt.transport_auth_attempt_id,
+            candidate_fingerprint=candidate.candidate_fingerprint,
+            candidate_id=candidate.candidate_id,
+            connection_id=hello.receipt.current_connection_id,
+            negotiation_winner_fingerprint=(
+                hello.negotiation_winner.negotiation_winner_fingerprint
+            ),
+            request_id=hello.receipt.request_id,
+            challenge=bytes(hello.receipt.attachment_challenge),
+        )
+        frame = wire.ClientFrame(
+            attach=wire.AttachRequest(
+                request_id=self._id(),
+                handshake_candidate_id=candidate.candidate_id,
+                handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+                negotiation_winner_fingerprint=(
+                    hello.negotiation_winner.negotiation_winner_fingerprint
+                ),
+                current_hello_receipt_fingerprint=(
+                    hello.receipt.hello_receipt_fingerprint
+                ),
+                attachment_challenge=hello.receipt.attachment_challenge,
+                attachment_challenge_commitment=commitment,
+            )
+        )
+        payload = frame.SerializeToString(deterministic=True)
+        self.writer.write(len(payload).to_bytes(4, "big") + payload)
+        await self.writer.drain()
+        await asyncio.sleep(0.05)
+        self.writer.close()
+        await self.writer.wait_closed()
+        self.reader = None
+        self.writer = None
+
+    async def recover_lost_attach_ack(self) -> wire.TerminalTransportAuthResult:
+        """Consume only the typed auth tombstone branch; never replay Hello/Attach."""
+
+        candidate = self.candidate
+        attachment = self.attachment
+        receipt = self.attach_receipt
+        if candidate is None or attachment is None or receipt is None:
+            raise RuntimeError("terminal ACK recovery predecessor is unavailable")
+        self.reader, self.writer = await asyncio.open_unix_connection(
+            str(self.socket_path)
+        )
+        preface = wire.TerminalTransportAuthPreface(
+            preface_version=1,
+            auth_request_id=self._id(),
+            client_instance_id=self.client_instance_id,
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            connection_nonce=secrets.token_bytes(32),
+            initial_launch=wire.InitialLaunchCredential(
+                launch_id=self.launch_id,
+                launch_capability=self.launch_capability,
+            ),
+        )
+        install_protobuf_fingerprint(
+            "terminal-transport-auth-preface:v1",
+            preface,
+            own_field="preface_fingerprint",
+        )
+        result = await self._exchange_raw(preface, wire.TerminalTransportAuthResult)
+        if (
+            result.disposition != wire.TRANSPORT_ACK_RESULT_RECOVERY
+            or not result.HasField("recovered_attach_ack_result")
+            or not result.HasField("recovered_transport_binding")
+        ):
+            raise RuntimeError("terminal ACK tombstone recovery was not returned")
+        recovered = result.recovered_transport_binding
+        if (
+            recovered.previous_transport_binding_fingerprint
+            != receipt.current_transport_binding.binding_fingerprint
+            or result.recovered_attach_ack_result.attachment_id
+            != attachment.attachment_id
+        ):
+            raise RuntimeError("terminal ACK recovery authority drifted")
+        receipt.current_transport_binding.CopyFrom(
+            recovered.resulting_transport_binding
+        )
+        self.auth_result = result
+        return result
+
+    async def snapshot(self) -> wire.ProjectionSnapshotFrame:
+        attachment = self._require_attachment()
+        request = wire.ProjectionSnapshotRequest(
+            request_id=self._id(), runtime_session_id=attachment.runtime_session_id
+        )
+        install_protobuf_fingerprint(
+            "terminal-projection-snapshot-request:v2",
+            request,
+            own_field="request_fingerprint",
+        )
+        response = await self.exchange(wire.ClientFrame(snapshot=request))
+        if response.WhichOneof("response") != "snapshot":
+            raise RuntimeError("terminal snapshot failed")
+        self.control_cursor = wire.ControlProjectionCursor()
+        self.control_cursor.CopyFrom(
+            response.snapshot.control_projection_snapshot.cursor
+        )
+        return response.snapshot
+
+    async def operational_snapshot(self) -> wire.OperationalSnapshotFrame:
+        attachment = self._require_attachment()
+        receipt = self.attach_receipt
+        if receipt is None:
+            raise RuntimeError("terminal conformance attach receipt is unavailable")
+        request = wire.OperationalSnapshotRequest(
+            request_id=self._id(),
+            runtime_session_id=attachment.runtime_session_id,
+            attachment_id=attachment.attachment_id,
+            attachment_generation=attachment.attachment_generation,
+            attachment_identity_fingerprint=attachment.identity_fingerprint,
+            current_transport_binding=receipt.current_transport_binding,
+            requested_after_operational_generation=0,
+            requested_after_operational_cursor=0,
+        )
+        install_protobuf_fingerprint(
+            "terminal-operational-snapshot-request:v1",
+            request,
+            own_field="request_fingerprint",
+        )
+        response = await self.exchange(wire.ClientFrame(operational_snapshot=request))
         if response.WhichOneof("response") != "operational_snapshot":
             raise RuntimeError("terminal operational snapshot failed")
         return response.operational_snapshot
 
     async def heartbeat(self) -> wire.AttachmentIdentity:
         attachment = self._require_attachment()
-        response = await self.exchange(
-            wire.ClientFrame(
-                heartbeat=wire.HeartbeatRequest(
-                    request_id=self._id(),
-                    attachment_id=attachment.attachment_id,
-                    attachment_generation=attachment.attachment_generation,
-                )
-            )
+        receipt = self.attach_receipt
+        if receipt is None:
+            raise RuntimeError("terminal conformance attach receipt is unavailable")
+        next_generation = self.heartbeat_generation + 1
+        semantic_winner = receipt.attach_semantic_winner
+        candidate_fingerprint = context_fingerprint(
+            "terminal-heartbeat-candidate:v1",
+            {
+                "runtime_session_id": attachment.runtime_session_id,
+                "attachment_identity_fingerprint": attachment.identity_fingerprint,
+                "semantic_winner_fingerprint": (
+                    semantic_winner.semantic_winner_fingerprint
+                ),
+                "heartbeat_generation": next_generation,
+                "previous_accepted_generation": self.heartbeat_generation,
+            },
         )
-        if response.WhichOneof("response") != "heartbeat":
+        request = wire.HeartbeatRequest(
+            request_id=self._id(),
+            runtime_session_id=attachment.runtime_session_id,
+            attachment_id=attachment.attachment_id,
+            attachment_generation=attachment.attachment_generation,
+            attachment_identity_fingerprint=attachment.identity_fingerprint,
+            attach_semantic_winner_fingerprint=(
+                semantic_winner.semantic_winner_fingerprint
+            ),
+            current_transport_binding=receipt.current_transport_binding,
+            heartbeat_generation=next_generation,
+            previous_accepted_heartbeat_generation=self.heartbeat_generation,
+            heartbeat_candidate_fingerprint=candidate_fingerprint,
+        )
+        install_protobuf_fingerprint(
+            "terminal-heartbeat-request:v1",
+            request,
+            own_field="request_fingerprint",
+        )
+        response = await self.exchange(wire.ClientFrame(heartbeat=request))
+        if (
+            response.WhichOneof("response") != "heartbeat"
+            or response.heartbeat.WhichOneof("outcome") != "accepted"
+        ):
             raise RuntimeError("terminal heartbeat failed")
-        self.attachment = response.heartbeat.attachment
-        return response.heartbeat.attachment
+        self.heartbeat_generation = next_generation
+        return attachment
 
     async def rebuild_after_gap(
         self,
@@ -138,6 +475,8 @@ class HeadlessTerminalConformanceClient:
         operational_cursor: int,
         maximum_wait_ms: int = 50,
     ) -> wire.ObservationResponse:
+        if self.control_cursor is None:
+            raise RuntimeError("terminal control cursor requires a projection snapshot")
         response = await self.exchange(
             wire.ClientFrame(
                 observe_next=wire.ObserveNextRequest(
@@ -146,6 +485,7 @@ class HeadlessTerminalConformanceClient:
                     after_projection_revision=projection_revision,
                     after_operational_generation=operational_generation,
                     after_operational_cursor=operational_cursor,
+                    after_control_cursor=self.control_cursor,
                     maximum_wait_ms=maximum_wait_ms,
                 )
             )
@@ -337,7 +677,22 @@ class HeadlessTerminalConformanceClient:
         self.reader = None
         self.writer = None
         self.hello = None
+        self.auth_result = None
+        self.candidate = None
+        self.attach_receipt = None
         self.attachment = None
+        self.heartbeat_generation = 0
+
+    async def _exchange_raw(self, request, response_type):
+        if self.reader is None or self.writer is None:
+            raise RuntimeError("terminal conformance client is disconnected")
+        payload = request.SerializeToString(deterministic=True)
+        self.writer.write(len(payload).to_bytes(4, "big") + payload)
+        await self.writer.drain()
+        size = int.from_bytes(await self.reader.readexactly(4), "big")
+        response = response_type()
+        response.ParseFromString(await self.reader.readexactly(size))
+        return response
 
     async def exchange(self, request: wire.ClientFrame) -> wire.ServerFrame:
         if self.reader is None or self.writer is None:

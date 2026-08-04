@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Executor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from threading import RLock
 from time import monotonic
@@ -54,12 +54,28 @@ from pulsara_agent.runtime.terminal_application.attachment import (
 from pulsara_agent.runtime.terminal_application.command_receipt import (
     TerminalCommandReceiptStorage,
 )
+from pulsara_agent.runtime.terminal_application.control_projection import (
+    ControlProjectionCursor,
+    ControlProjectionRead,
+    TerminalControlProjectionStore,
+    TerminalControlSourceCaptureOwner,
+    TerminalProjectionSnapshotBundle,
+    build_terminal_control_capture_input,
+)
 from pulsara_agent.runtime.terminal_application.prompt_queue import (
+    CLIENT_VISIBLE_ACTIVE_QUEUE_STATES,
     PromptQueueSubmitRequest,
+    prompt_queue_item_public_view_payload,
 )
 from pulsara_agent.runtime.terminal_application.secret import TerminalMcpSecretService
 from pulsara_agent.runtime.terminal_presentation.service import (
     PresentationHistoryAdmissionRejected,
+)
+from pulsara_agent.runtime.terminal_presentation.public_text import (
+    bounded_terminal_safe_public_text,
+)
+from pulsara_agent.runtime.terminal_presentation.viewport import (
+    fit_viewport_snapshot_resident_suffix,
 )
 
 
@@ -505,16 +521,55 @@ async def _sleep_owned(delay_seconds: float) -> None:
 class TerminalSessionQueryService:
     def __init__(self, *, host_session) -> None:
         self._host_session = host_session
+        self._control_capture = TerminalControlSourceCaptureOwner(
+            runtime_session_id=host_session.runtime_session_id
+        )
+        self._control_projection = TerminalControlProjectionStore(
+            runtime_session_id=host_session.runtime_session_id
+        )
 
     def snapshot(self) -> TerminalUiSessionSnapshot:
+        return self.snapshot_bundle().session_snapshot
+
+    def read_control_after(
+        self, cursor: ControlProjectionCursor
+    ) -> ControlProjectionRead:
+        # The synchronous snapshot collection runs as one event-loop slice; it
+        # refreshes the immutable five-section view before the bounded ring is
+        # evaluated.  The store, rather than Gateway, owns the cursor/history.
+        self.snapshot_bundle()
+        return self._control_projection.read_after(cursor)
+
+    def snapshot_bundle(self) -> TerminalProjectionSnapshotBundle:
+        captured = self._control_capture.capture(
+            self._read_control_capture_input,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        control_snapshot = self._control_projection.install_captured(captured)
+        return TerminalProjectionSnapshotBundle(
+            session_snapshot=captured.capture_input.session_snapshot,
+            control_snapshot=control_snapshot,
+        )
+
+    def close(self) -> None:
+        self._control_capture.close()
+
+    def _read_control_capture_input(self):
         host = self._host_session
         runtime = host.wiring.runtime_wiring.runtime_session
         viewport = runtime.terminal_presentation_foundation_service.snapshot()
         operational = runtime.ui_operational_activity_store.snapshot()
         operational_generation = operational.operational_generation
         operational_cursor = operational.operational_cursor
-        queue_snapshot = runtime.prompt_queue_projection_store.snapshot()
-        queue_items = tuple(_queue_view(item) for item in queue_snapshot.items)
+        queue_checkpoint, queue_snapshot, queue_head_receipt = (
+            runtime.prompt_queue_checkpoint_service.client_projection_authority()
+        )
+        queue_items = tuple(
+            _queue_view(item)
+            for item in queue_snapshot.items
+            if item.delivery_state in CLIENT_VISIBLE_ACTIVE_QUEUE_STATES
+            and item.content_retention_state == "active"
+        )
         interaction = _interaction_view(host.get_pending_interaction())
         payload = {
             "host_session_id": host.host_session_id,
@@ -537,7 +592,7 @@ class TerminalSessionQueryService:
             "suspended_run_id": host.suspended_run_id,
             "stopping_run_id": host.stopping_run_id,
         }
-        return TerminalUiSessionSnapshot(
+        session_snapshot = TerminalUiSessionSnapshot(
             host_session_id=host.host_session_id,
             runtime_session_id=host.runtime_session_id,
             lifecycle=str(host.lifecycle),  # type: ignore[arg-type]
@@ -557,6 +612,65 @@ class TerminalSessionQueryService:
                 "terminal-ui-session-snapshot:v1", payload
             ),
         )
+        return build_terminal_control_capture_input(
+            session_snapshot=session_snapshot,
+            queue_checkpoint=queue_checkpoint,
+            queue_head_receipt=queue_head_receipt,
+            durable_active_item_count=queue_snapshot.active_client_item_count,
+            durable_active_item_accumulator=(
+                queue_snapshot.active_client_item_accumulator
+            ),
+        )
+
+
+def fit_projection_snapshot_bundle_resident_suffix(
+    bundle: TerminalProjectionSnapshotBundle,
+    *,
+    maximum_entries: int,
+) -> TerminalProjectionSnapshotBundle:
+    """Purely shrink one frozen bundle to its newest resident suffix."""
+
+    session = bundle.session_snapshot
+    viewport = fit_viewport_snapshot_resident_suffix(
+        session.viewport,
+        maximum_entries=maximum_entries,
+    )
+    if viewport is session.viewport:
+        return bundle
+    payload = {
+        "host_session_id": session.host_session_id,
+        "runtime_session_id": session.runtime_session_id,
+        "lifecycle": session.lifecycle,
+        "authority_high_water": session.authority_high_water,
+        "projection_revision": session.projection_revision,
+        "viewport_fingerprint": viewport.viewport_fingerprint,
+        "operational_generation": session.operational_generation,
+        "operational_cursor": session.operational_cursor,
+        "pending_interaction_fingerprint": (
+            session.pending_interaction.view_fingerprint
+            if session.pending_interaction is not None
+            else None
+        ),
+        "queue_head_event_id": session.queue_head_event_id,
+        "queue_account_revision": session.queue_account_revision,
+        "queue_item_fingerprints": tuple(
+            item.view_fingerprint for item in session.queue_items
+        ),
+        "active_run_id": session.active_run_id,
+        "suspended_run_id": session.suspended_run_id,
+        "stopping_run_id": session.stopping_run_id,
+    }
+    fitted = replace(
+        session,
+        viewport=viewport,
+        snapshot_fingerprint=context_fingerprint(
+            "terminal-ui-session-snapshot:v1", payload
+        ),
+    )
+    return TerminalProjectionSnapshotBundle(
+        session_snapshot=fitted,
+        control_snapshot=bundle.control_snapshot,
+    )
 
 
 class _MutationServiceBase:
@@ -996,6 +1110,7 @@ class TerminalApplicationServices:
         for task in tuple(self._queue_delivery_tasks.values()):
             if not task.done():
                 task.cancel()
+        self.query.close()
         self.commands.close()
         self.secrets.close()
         self.attachments.close()
@@ -1303,7 +1418,11 @@ def _outcome(
             "command_id": binding.command_id,
         },
     )
-    public_text = text[:512]
+    public_text = bounded_terminal_safe_public_text(
+        text,
+        maximum_code_points=512,
+        maximum_utf8_bytes=2_048,
+    )
     return TerminalCommandOutcome(
         status=status,
         command_id=binding.command_id,
@@ -1337,7 +1456,11 @@ def _replace_outcome(
     durable_references = (
         source.durable_reference_ids if references is None else references
     )
-    public_text = text[:512]
+    public_text = bounded_terminal_safe_public_text(
+        text,
+        maximum_code_points=512,
+        maximum_utf8_bytes=2_048,
+    )
     return TerminalCommandOutcome(
         status=status,
         command_id=source.command_id,
@@ -1361,24 +1484,7 @@ def _replace_outcome(
 
 
 def _queue_view(item) -> PromptQueueItemView:
-    content = item.prepared_content
-    if content is None:
-        preview = ""
-    elif getattr(content, "content_kind", None) == "inline":
-        preview = content.canonical_utf8_text[:512]
-    else:
-        preview = "[confirmed artifact content]"
-    payload = {
-        "queue_item_id": item.queue_item_id,
-        "accepted_ordinal": item.accepted_ordinal,
-        "delivery_state": item.delivery_state,
-        "content_retention_state": item.content_retention_state,
-        "requested_delivery_mode": item.requested_delivery_mode,
-        "resolved_delivery_mode": item.resolved_delivery_mode,
-        "public_preview": preview,
-        "head_event_id": item.head_event_id,
-        "item_revision": item.item_revision,
-    }
+    payload = prompt_queue_item_public_view_payload(item)
     return PromptQueueItemView(
         **payload,
         view_fingerprint=context_fingerprint("prompt-queue-item-view:v1", payload),
@@ -1393,7 +1499,17 @@ def _interaction_view(pending):
             "interaction_kind": "approval",
             "interaction_id": pending.approval_id,
             "run_id": pending.run_id,
-            "tool_calls": tuple((item.id, item.name) for item in pending.tool_calls),
+            "tool_calls": tuple(
+                (
+                    item.id,
+                    bounded_terminal_safe_public_text(
+                        item.name,
+                        maximum_code_points=512,
+                        maximum_utf8_bytes=2_048,
+                    ),
+                )
+                for item in pending.tool_calls
+            ),
         }
         return ApprovalRequestView(
             **payload,
@@ -1407,9 +1523,25 @@ def _interaction_view(pending):
                 "interaction_kind": "plan_question",
                 "interaction_id": pending.interaction_id,
                 "run_id": pending.run_id,
-                "question": pending.question,
+                "question": bounded_terminal_safe_public_text(
+                    pending.question,
+                    maximum_code_points=8_000,
+                    maximum_utf8_bytes=32_000,
+                ),
                 "options": tuple(
-                    (item.label, item.description) for item in pending.options
+                    (
+                        bounded_terminal_safe_public_text(
+                            item.label,
+                            maximum_code_points=512,
+                            maximum_utf8_bytes=2_048,
+                        ),
+                        bounded_terminal_safe_public_text(
+                            item.description,
+                            maximum_code_points=2_000,
+                            maximum_utf8_bytes=8_000,
+                        ),
+                    )
+                    for item in pending.options
                 ),
                 "allow_free_text": pending.allow_free_text,
             }
@@ -1423,7 +1555,11 @@ def _interaction_view(pending):
             "interaction_kind": "plan_exit",
             "interaction_id": pending.interaction_id,
             "run_id": pending.run_id,
-            "summary": pending.summary,
+            "summary": bounded_terminal_safe_public_text(
+                pending.summary,
+                maximum_code_points=8_000,
+                maximum_utf8_bytes=32_000,
+            ),
             "plan_artifact_id": pending.plan_artifact_id,
         }
         return PlanExitView(
@@ -1441,7 +1577,11 @@ def _interaction_view(pending):
             McpInputRequestPublicView(
                 request_key=str(item.get("key", "")),
                 mode=mode,  # type: ignore[arg-type]
-                public_prompt=str(item.get("message") or item.get("title") or ""),
+                public_prompt=bounded_terminal_safe_public_text(
+                    str(item.get("message") or item.get("title") or ""),
+                    maximum_code_points=8_000,
+                    maximum_utf8_bytes=32_000,
+                ),
                 schema_or_url_present=(
                     bool(item.get("requestedSchema")) if mode == "form" else True
                 ),
@@ -1452,7 +1592,11 @@ def _interaction_view(pending):
         "interaction_id": pending.interaction_id,
         "run_id": pending.run_id,
         "tool_call_id": pending.tool_call_id,
-        "tool_name": pending.tool_name,
+        "tool_name": bounded_terminal_safe_public_text(
+            pending.tool_name,
+            maximum_code_points=512,
+            maximum_utf8_bytes=2_048,
+        ),
         "server_id": pending.server_id,
         "requests": tuple(asdict(item) for item in requests),
     }
@@ -1461,7 +1605,7 @@ def _interaction_view(pending):
         interaction_id=pending.interaction_id,
         run_id=pending.run_id,
         tool_call_id=pending.tool_call_id,
-        tool_name=pending.tool_name,
+        tool_name=payload["tool_name"],
         server_id=pending.server_id,
         requests=tuple(requests),
         view_fingerprint=context_fingerprint(

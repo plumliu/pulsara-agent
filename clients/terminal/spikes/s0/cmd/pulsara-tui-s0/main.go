@@ -12,7 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"pulsara.local/terminal-s0/internal/spike"
+	"github.com/plumliu/pulsara-agent/clients/terminal-s0/internal/spike"
 )
 
 var version = "dev"

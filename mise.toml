@@ -1,0 +1,6 @@
+[tools]
+go = "1.26.5"
+protoc = "34.0"
+
+[env]
+GOTOOLCHAIN = "local"

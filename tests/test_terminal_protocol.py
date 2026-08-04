@@ -14,6 +14,7 @@ from tests.support.terminal_protocol import HeadlessTerminalConformanceClient
 from tests.test_host_core import ScriptedTransport, _core, _open_project_session
 
 from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
+from pulsara_agent.terminal_protocol import gateway as terminal_gateway
 from pulsara_agent.terminal_protocol.codec import HEARTBEAT_INTERVAL_MS
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
 from pulsara_agent.event_log.in_memory import InMemoryEventLog
@@ -31,6 +32,26 @@ from pulsara_agent.runtime.terminal_application.services import (
     terminal_request_semantic_fingerprint,
 )
 from pulsara_agent.runtime.terminal_application.secret import TerminalMcpSecretService
+
+
+def test_protocol_v2_observation_is_three_plane_and_control_cursor_bound() -> None:
+    request_fields = wire.ObserveNextRequest.DESCRIPTOR.fields_by_name
+    assert request_fields["after_control_cursor"].message_type.full_name == (
+        "pulsara.terminal.v2.ControlProjectionCursor"
+    )
+    assert request_fields["maximum_wait_ms"].number == 7
+    response_outcomes = {
+        field.name
+        for field in wire.ObservationResponse.DESCRIPTOR.oneofs_by_name[
+            "outcome"
+        ].fields
+    }
+    assert response_outcomes == {"batch", "no_change"}
+    batch = wire.ObservationBatchFrame.DESCRIPTOR.fields_by_name
+    assert {"control", "durable", "operational"} <= set(batch)
+    assert "ObservationGap" not in {
+        message.name for message in wire.DESCRIPTOR.message_types_by_name.values()
+    }
 
 
 def _submit_request(*, command_id: str, text: str) -> SubmitPromptRequest:
@@ -217,11 +238,31 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
         client = HeadlessTerminalConformanceClient(
             socket_path=socket_path,
             client_instance_id="headless:test",
+            launch_id=server.launch_id,
             launch_capability=server.launch_capability,
         )
-        await client.connect(controller=True)
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=True,
+        )
         await client.attach(session.host_session_id, controller=True)
-        initial = await client.snapshot()
+
+        # The control baseline must use the active-item set carried by the same
+        # checkpoint authority read. A second projection-store read would make
+        # the queue head and visible items come from different revisions.
+        queue_store = (
+            session.wiring.runtime_wiring.runtime_session.prompt_queue_projection_store
+        )
+
+        def _forbid_second_queue_read(_self):
+            raise AssertionError("terminal snapshot performed a second queue read")
+
+        with monkeypatch.context() as atomicity:
+            atomicity.setattr(
+                type(queue_store), "active_client_items", _forbid_second_queue_read
+            )
+            initial = await client.snapshot()
         assert initial.host_session_id == session.host_session_id
         assert initial.runtime_session_id == session.runtime_session_id
         operational_initial = await client.operational_snapshot()
@@ -247,13 +288,19 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
             operational_generation=operational_initial.operational_generation,
             operational_cursor=operational_initial.operational_cursor,
         )
-        assert operational_delta.WhichOneof("outcome") == "operational_delta"
-        assert len(operational_delta.operational_delta.ordered_changes) == 1
+        assert operational_delta.WhichOneof("outcome") == "batch"
+        assert operational_delta.batch.HasField("operational")
+        assert operational_delta.batch.operational.WhichOneof("outcome") == "delta"
+        assert len(operational_delta.batch.operational.delta.ordered_changes) == 1
         assert (
-            operational_delta.operational_delta.ordered_changes[0].WhichOneof("change")
+            operational_delta.batch.operational.delta.ordered_changes[0].WhichOneof(
+                "change"
+            )
             == "upsert"
         )
-        operational_cursor = operational_delta.operational_delta.operational_cursor
+        operational_cursor = (
+            operational_delta.batch.operational.delta.operational_cursor
+        )
         assert operational_store.retire_nowait(
             coalesce_key="model:model-call:headless-test",
             owner_kind="model_call",
@@ -267,9 +314,11 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
             operational_generation=operational_initial.operational_generation,
             operational_cursor=operational_cursor,
         )
-        assert operational_remove.WhichOneof("outcome") == "operational_delta"
+        assert operational_remove.WhichOneof("outcome") == "batch"
         assert (
-            operational_remove.operational_delta.ordered_changes[0].WhichOneof("change")
+            operational_remove.batch.operational.delta.ordered_changes[0].WhichOneof(
+                "change"
+            )
             == "remove"
         )
 
@@ -277,16 +326,19 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
             target_id=session.host_session_id,
             text="hello over the formal terminal protocol",
         )
-        assert command.status == "pending_confirmation"
+        assert command.outcome_status == wire.PENDING_CONFIRMATION
         winner = None
         for _ in range(200):
             query = await client.query_command(command.command_id)
-            if query.found and query.outcome.status != "pending_confirmation":
+            if (
+                query.found
+                and query.outcome.outcome_status != wire.PENDING_CONFIRMATION
+            ):
                 winner = query.outcome
                 break
             await asyncio.sleep(0.01)
         assert winner is not None
-        assert winner.status == "succeeded"
+        assert winner.outcome_status == wire.SUCCEEDED
 
         final = None
         for _ in range(200):
@@ -315,14 +367,16 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
             projection_revision=max(0, final.projection_revision - 1),
             operational_cursor=0,
         )
-        assert delta.WhichOneof("outcome") == "root_advanced"
+        assert delta.WhichOneof("outcome") == "batch"
+        assert delta.batch.durable.WhichOneof("outcome") == "root_advanced"
 
         gap = await client.observe_next(
             authority_high_water=final.authority_high_water + 1,
             projection_revision=final.projection_revision + 1,
             operational_cursor=0,
         )
-        assert gap.WhichOneof("outcome") == "gap"
+        assert gap.WhichOneof("outcome") == "batch"
+        assert gap.batch.durable.WhichOneof("outcome") == "gap"
 
         rebuilt_projection, rebuilt_operational = await client.rebuild_after_gap()
         assert rebuilt_projection.authority_high_water >= final.authority_high_water
@@ -340,10 +394,12 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
             )
             if rebuilt_no_change.WhichOneof("outcome") == "no_change":
                 break
-            assert rebuilt_no_change.WhichOneof("outcome") in {
-                "root_advanced",
-                "operational_delta",
-            }
+            assert rebuilt_no_change.WhichOneof("outcome") == "batch"
+            assert (
+                rebuilt_no_change.batch.HasField("durable")
+                or rebuilt_no_change.batch.HasField("operational")
+                or rebuilt_no_change.batch.HasField("control")
+            )
             rebuilt_projection, rebuilt_operational = await client.rebuild_after_gap()
             await asyncio.sleep(0.01)
         else:
@@ -359,19 +415,142 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
         assert page.WhichOneof("outcome") == "page"
 
         detach = await client.detach()
-        assert detach.status == "succeeded"
+        assert detach.outcome_status == wire.SUCCEEDED
         await client.close()
         # Reconnect with the same stable client identity.  The durable command
         # receipt must remain queryable without touching HostSession internals.
-        await client.connect(controller=False)
-        await client.attach(session.host_session_id, controller=False)
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=True,
+        )
+        await client.attach(session.host_session_id, controller=True)
         reconnected_query = await client.query_command(command.command_id)
         assert reconnected_query.found
         assert reconnected_query.outcome.command_id == winner.command_id
-        assert reconnected_query.outcome.status == winner.status
+        assert reconnected_query.outcome.outcome_status == winner.outcome_status
         assert (
             reconnected_query.outcome.outcome_fingerprint == winner.outcome_fingerprint
         )
+        await client.close()
+        await server.close()
+        socket_root.cleanup()
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_attach_ack_response_loss_recovers_same_semantic_attachment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def scenario() -> None:
+        session = await _open_project_session(core, tmp_path)
+        socket_root = TemporaryDirectory(prefix="pulsara-terminal-ack-", dir="/tmp")
+        socket_path = Path(socket_root.name) / "terminal-v2.sock"
+        server = TerminalProtocolServer(
+            socket_path=socket_path,
+            session_provider=lambda host_id: (
+                session
+                if host_id == session.host_session_id
+                else (_ for _ in ()).throw(KeyError(host_id))
+            ),
+        )
+        await server.start()
+        client = HeadlessTerminalConformanceClient(
+            socket_path=socket_path,
+            client_instance_id="headless:ack-recovery",
+            launch_id=server.launch_id,
+            launch_capability=server.launch_capability,
+        )
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=False,
+        )
+        await client.attach_with_lost_ack_result()
+        original_attachment_id = client.attachment.attachment_id
+        original_generation = client.attachment.attachment_generation
+        original_binding = (
+            client.attach_receipt.current_transport_binding.binding_fingerprint
+        )
+
+        recovery = await client.recover_lost_attach_ack()
+        assert (
+            recovery.recovered_attach_ack_result.attachment_id == original_attachment_id
+        )
+        assert (
+            recovery.recovered_attach_ack_result.attachment_generation
+            == original_generation
+        )
+        assert (
+            recovery.recovered_transport_binding.previous_transport_binding_fingerprint
+            == original_binding
+        )
+        assert (
+            recovery.recovered_transport_binding.resulting_transport_binding.binding_fingerprint
+            != original_binding
+        )
+        snapshot = await client.snapshot()
+        assert snapshot.runtime_session_id == session.runtime_session_id
+
+        await client.close()
+        await server.close()
+        socket_root.cleanup()
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_attach_response_loss_rebinds_pre_ack_semantic_winner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def scenario() -> None:
+        session = await _open_project_session(core, tmp_path)
+        socket_root = TemporaryDirectory(prefix="pulsara-terminal-pre-ack-", dir="/tmp")
+        socket_path = Path(socket_root.name) / "terminal-v2.sock"
+        server = TerminalProtocolServer(
+            socket_path=socket_path,
+            session_provider=lambda host_id: (
+                session
+                if host_id == session.host_session_id
+                else (_ for _ in ()).throw(KeyError(host_id))
+            ),
+        )
+        await server.start()
+        client = HeadlessTerminalConformanceClient(
+            socket_path=socket_path,
+            client_instance_id="headless:pre-ack-recovery",
+            launch_id=server.launch_id,
+            launch_capability=server.launch_capability,
+        )
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=False,
+        )
+        winner_fingerprint = (
+            client.hello.negotiation_winner.negotiation_winner_fingerprint
+        )
+        await client.send_attach_and_lose_result()
+
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=False,
+        )
+        assert (
+            client.hello.negotiation_winner.negotiation_winner_fingerprint
+            == winner_fingerprint
+        )
+        await client.attach(session.host_session_id, controller=False)
+        assert client.attach_receipt.disposition == wire.ATTACH_REBOUND_PRE_ACK
+        assert client.attach_receipt.HasField("previous_transport_binding_fingerprint")
+        assert await client.snapshot()
+
         await client.close()
         await server.close()
         socket_root.cleanup()
@@ -388,8 +567,69 @@ def test_terminal_protocol_schema_has_no_raw_event_or_renderer_vocabulary() -> N
     assert "RawStoredEventEnvelope" not in schema
     assert "layout" not in schema.lower()
     assert "color" not in schema.lower()
-    assert not tuple(Path(".").rglob("*.go"))
-    assert not tuple(Path(".").rglob("go.mod"))
+    go_modules = set(Path(".").rglob("go.mod"))
+    assert go_modules == {
+        Path("clients/terminal/go.mod"),
+        Path("clients/terminal/spikes/s0/go.mod"),
+    }
+    production_go = tuple(Path("clients/terminal").glob("**/*.go"))
+    assert production_go
+    assert all(
+        "src/pulsara_agent" not in value.read_text(encoding="utf-8")
+        for value in production_go
+    )
+
+
+def test_snapshot_wire_budget_keeps_the_newest_contiguous_suffix(monkeypatch) -> None:
+    entries = tuple(range(100))
+    bundle = SimpleNamespace(
+        session_snapshot=SimpleNamespace(
+            viewport=SimpleNamespace(ordered_resident_entries=entries),
+            selected_entries=entries,
+        ),
+        control_snapshot=object(),
+    )
+
+    def fake_fit(candidate, *, maximum_entries):
+        selected = candidate.session_snapshot.selected_entries[-maximum_entries:]
+        if maximum_entries == 0:
+            selected = ()
+        return SimpleNamespace(
+            session_snapshot=SimpleNamespace(
+                viewport=SimpleNamespace(ordered_resident_entries=selected),
+                selected_entries=selected,
+            ),
+            control_snapshot=candidate.control_snapshot,
+        )
+
+    def fake_wire(snapshot, *, control_snapshot, request_id):
+        del control_snapshot
+        # 100 entries exceed 8 MiB.  The payload length is strictly monotonic
+        # in the selected suffix, just like the real repeated entry carrier.
+        return wire.ProjectionSnapshotFrame(
+            request_id=request_id,
+            host_session_id="h" + "x" * (len(snapshot.selected_entries) * 100_000),
+            runtime_session_id="runtime:bounded",
+        )
+
+    monkeypatch.setattr(
+        terminal_gateway, "fit_projection_snapshot_bundle_resident_suffix", fake_fit
+    )
+    monkeypatch.setattr(terminal_gateway, "snapshot_to_wire", fake_wire)
+
+    frame, fitted = terminal_gateway._bounded_snapshot_response(
+        bundle,
+        request_id="request:bounded",
+        maximum_frame_bytes=8 * 1024 * 1024,
+    )
+
+    payload = frame.SerializeToString(deterministic=True)
+    selected = fitted.session_snapshot.selected_entries
+    assert len(payload) <= 8 * 1024 * 1024
+    assert selected
+    assert selected[-1] == entries[-1]
+    assert selected == entries[-len(selected) :]
+    assert len(selected) < len(entries)
 
 
 def test_maximum_observation_wait_leaves_time_for_attachment_heartbeat(
@@ -409,14 +649,19 @@ def test_maximum_observation_wait_leaves_time_for_attachment_heartbeat(
         client = HeadlessTerminalConformanceClient(
             socket_path=socket_path,
             client_instance_id="headless:long-poll",
+            launch_id=server.launch_id,
             launch_capability=server.launch_capability,
         )
-        await client.connect(controller=False)
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=False,
+        )
         await client.attach(session.host_session_id, controller=False)
         projection = await client.snapshot()
         operational = await client.operational_snapshot()
         assert client.hello is not None
-        maximum_wait_ms = client.hello.negotiated_limits.maximum_observation_wait_ms
+        maximum_wait_ms = client.hello.negotiation_winner.negotiated_limits.maximum_observation_wait_ms
         assert 0 < maximum_wait_ms < HEARTBEAT_INTERVAL_MS
 
         no_change = await client.observe_next(
@@ -427,8 +672,24 @@ def test_maximum_observation_wait_leaves_time_for_attachment_heartbeat(
             maximum_wait_ms=maximum_wait_ms,
         )
         assert no_change.WhichOneof("outcome") == "no_change"
-        heartbeat = await client.heartbeat()
-        assert heartbeat.attachment_id
+        for _ in range(5):
+            heartbeat = await client.heartbeat()
+            assert heartbeat.attachment_id
+        assert client.candidate is not None
+        winner_key = (
+            client.candidate.client_instance_id,
+            client.candidate.attachment_attempt_generation,
+        )
+        retained = server._attach_winners[winner_key].heartbeat_results
+        assert len(retained) == 2
+        assert {
+            (
+                result.accepted.heartbeat_generation
+                if result.WhichOneof("outcome") == "accepted"
+                else result.rejected.heartbeat_generation
+            )
+            for result in retained.values()
+        } == {4, 5}
 
         await client.close()
         await server.close()
@@ -687,9 +948,14 @@ def test_headless_successor_command_uses_hostcore_lifecycle_authority(
         client = HeadlessTerminalConformanceClient(
             socket_path=socket_path,
             client_instance_id="headless:successor",
+            launch_id=server.launch_id,
             launch_capability=server.launch_capability,
         )
-        await client.connect(controller=True)
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=True,
+        )
         await client.attach(session.host_session_id, controller=True)
         snapshot = await client.snapshot()
         capacity_fingerprint = (
@@ -699,16 +965,19 @@ def test_headless_successor_command_uses_hostcore_lifecycle_authority(
             target_id=session.runtime_session_id,
             source_capacity_state_fingerprint=capacity_fingerprint,
         )
-        assert pending.status == "pending_confirmation"
+        assert pending.outcome_status == wire.PENDING_CONFIRMATION
         winner = None
         for _ in range(300):
             result = await client.query_command(pending.command_id)
-            if result.found and result.outcome.status != "pending_confirmation":
+            if (
+                result.found
+                and result.outcome.outcome_status != wire.PENDING_CONFIRMATION
+            ):
                 winner = result.outcome
                 break
             await asyncio.sleep(0.01)
         assert winner is not None
-        assert winner.status == "succeeded"
+        assert winner.outcome_status == wire.SUCCEEDED
         assert winner.public_result_code == "SUCCESSOR_SESSION_CREATED"
         assert len(winner.durable_reference_ids) == 2
         successor = await core.registry.get(winner.durable_reference_ids[0])

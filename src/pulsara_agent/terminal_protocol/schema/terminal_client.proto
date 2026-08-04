@@ -1,6 +1,8 @@
 syntax = "proto3";
 
-package pulsara.terminal.v1;
+package pulsara.terminal.v2;
+
+option go_package = "github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol;protocol";
 
 // Renderer-neutral local protocol. Durable storage rows and rendering details
 // never cross this boundary.
@@ -25,14 +27,139 @@ enum AttachmentRole {
   ATTACHMENT_ROLE_CONTROLLER = 2;
 }
 
+enum TerminalClientCapability {
+  TERMINAL_CLIENT_CAPABILITY_UNSPECIFIED = 0;
+  PRESENTATION_SNAPSHOT_V1 = 1;
+  OPERATIONAL_SNAPSHOT_V1 = 2;
+  BOOTSTRAP_CARRIER_V1 = 3;
+  LAUNCH_AUTH_PREFACE_V1 = 4;
+  ATTACH_ACK_V1 = 5;
+  HISTORY_PAGE_V1 = 6;
+  OBSERVATION_STREAM_V1 = 7;
+  ROOT_ADVANCE_V1 = 8;
+  GAP_REBUILD_V1 = 9;
+  CONTROL_PROJECTION_OBSERVATION_V1 = 10;
+  RECONNECT_AUTH_ROTATION_V1 = 11;
+  CLIPBOARD_PUBLIC_TEXT_V1 = 12;
+  CONTROLLER_COMMAND_V1 = 13;
+  COMMAND_QUERY_V1 = 14;
+  TYPED_INTERACTION_ACTIONS_V1 = 15;
+  SECRET_FORM_V1 = 16;
+  SECRET_PRIVATE_URL_V1 = 17;
+  SECRET_REVOKE_V1 = 18;
+  PROMPT_QUEUE_MUTATION_V1 = 19;
+  SESSION_SUCCESSOR_V1 = 20;
+  SERVER_CLOSING_V1 = 21;
+}
+
+message TerminalClientBootstrapCarrier {
+  uint32 carrier_version = 1;
+  string launch_id = 2;
+  string client_instance_id = 3;
+  string host_session_id = 4;
+  string unix_socket_path = 5;
+  bytes launch_capability = 6;
+  AttachmentRole requested_attachment_role = 7;
+  uint64 parent_pid = 8;
+  string issued_at_utc = 9;
+  string expires_at_utc = 10;
+  bytes carrier_nonce = 11;
+  string bootstrap_fingerprint = 12;
+  string runtime_session_id = 13;
+}
+
+message InitialLaunchCredential {
+  string launch_id = 1;
+  bytes launch_capability = 2;
+}
+
+message ReconnectCredential {
+  string reconnect_credential_id = 1;
+  bytes reconnect_capability = 2;
+  string previous_attachment_id = 3;
+  uint64 previous_attachment_generation = 4;
+}
+
+message TerminalTransportAuthPreface {
+  uint32 preface_version = 1;
+  string auth_request_id = 2;
+  string client_instance_id = 3;
+  string handshake_candidate_id = 4;
+  string handshake_candidate_fingerprint = 5;
+  bytes connection_nonce = 6;
+  oneof credential {
+    InitialLaunchCredential initial_launch = 7;
+    ReconnectCredential reconnect = 8;
+  }
+  string preface_fingerprint = 9;
+}
+
+enum TransportAuthDisposition {
+  TRANSPORT_AUTH_DISPOSITION_UNSPECIFIED = 0;
+  TRANSPORT_AUTHENTICATED = 1;
+  TRANSPORT_COMPATIBLE_AUTH_WINNER = 2;
+  TRANSPORT_ACK_RESULT_RECOVERY = 3;
+  TRANSPORT_AUTHENTICATION_REJECTED = 4;
+}
+
+enum TransportAuthRejectionCode {
+  TRANSPORT_AUTH_REJECTION_UNSPECIFIED = 0;
+  INVALID_OR_EXPIRED_CREDENTIAL = 1;
+  CANDIDATE_CONFLICT = 2;
+  AUTH_OWNER_UNAVAILABLE = 3;
+}
+
+enum AttachmentTransportRebindDisposition {
+  ATTACHMENT_TRANSPORT_REBIND_DISPOSITION_UNSPECIFIED = 0;
+  ATTACHMENT_TRANSPORT_REBOUND = 1;
+  ATTACHMENT_TRANSPORT_COMPATIBLE_ALREADY_REBOUND = 2;
+}
+
+message RecoveredAttachmentTransportBinding {
+  string previous_transport_binding_fingerprint = 1;
+  TerminalClientTransportBindingIdentity resulting_transport_binding = 2;
+  AttachmentTransportRebindDisposition disposition = 3;
+  string rebind_receipt_fingerprint = 4;
+}
+
+message TerminalTransportAuthResult {
+  string auth_request_id = 1;
+  string auth_attempt_id = 2;
+  string connection_id = 3;
+  string client_instance_id = 4;
+  string credential_id = 5;
+  TransportAuthDisposition disposition = 6;
+  optional string authenticated_candidate_fingerprint = 7;
+  optional TransportAuthRejectionCode public_rejection_code = 8;
+  string result_fingerprint = 9;
+  optional AttachAckResult recovered_attach_ack_result = 10;
+  optional RecoveredAttachmentTransportBinding recovered_transport_binding = 11;
+}
+
+message HandshakeRecoveryCandidateIdentity {
+  uint32 candidate_version = 1;
+  string candidate_id = 2;
+  string client_instance_id = 3;
+  uint64 attachment_attempt_generation = 4;
+  string host_session_id = 5;
+  string requested_runtime_session_id = 6;
+  AttachmentRole requested_attachment_role = 7;
+  uint32 minimum_protocol_major = 8;
+  uint32 minimum_protocol_minor = 9;
+  uint32 maximum_protocol_major = 10;
+  uint32 maximum_protocol_minor = 11;
+  string client_build_identity = 12;
+  repeated TerminalClientCapability supported_capabilities = 13;
+  repeated TerminalClientCapability required_capabilities = 14;
+  string candidate_fingerprint = 15;
+  string schema_contract_fingerprint = 16;
+}
+
 message HelloRequest {
   string request_id = 1;
-  ProtocolVersionRange supported_version_range = 2;
-  string client_instance_id = 3;
-  string client_build_identity = 4;
-  repeated string supported_capabilities = 5;
-  AttachmentRole requested_attachment_mode = 6;
-  bytes launch_capability = 7;
+  string transport_auth_attempt_id = 2;
+  string transport_auth_result_fingerprint = 3;
+  HandshakeRecoveryCandidateIdentity handshake_candidate = 4;
 }
 
 message NegotiatedLimits {
@@ -41,6 +168,13 @@ message NegotiatedLimits {
   uint32 maximum_history_page_decoded_bytes = 3;
   uint32 maximum_observation_wait_ms = 4;
   uint32 secret_frame_maximum_bytes = 5;
+  uint32 maximum_active_queue_items = 6;
+  uint32 maximum_server_control_notifications = 7;
+  uint32 maximum_operational_activity_cells = 8;
+  uint32 maximum_durable_observation_bytes = 9;
+  uint32 maximum_operational_observation_bytes = 10;
+  uint32 maximum_control_observation_bytes = 11;
+  uint32 maximum_observation_batch_bytes = 12;
 }
 
 message HeartbeatPolicy {
@@ -49,28 +183,115 @@ message HeartbeatPolicy {
   uint32 maximum_missed_count = 3;
 }
 
-message HelloResponse {
+message HelloNegotiationSemanticWinner {
+  string handshake_candidate_id = 1;
+  string handshake_candidate_fingerprint = 2;
+  uint64 attachment_attempt_generation = 3;
+  ProtocolVersion selected_protocol = 4;
+  string server_build_identity = 5;
+  string server_runtime_compatibility_identity = 6;
+  NegotiatedLimits negotiated_limits = 7;
+  repeated TerminalClientCapability server_supported_capabilities = 8;
+  repeated TerminalClientCapability selected_capabilities = 9;
+  string capability_contract_fingerprint = 10;
+  string negotiation_transcript_fingerprint = 11;
+  string negotiation_winner_fingerprint = 12;
+}
+
+message ServerHelloReceipt {
   string request_id = 1;
-  ProtocolVersion selected_protocol = 2;
-  string server_build_identity = 3;
-  string server_runtime_identity = 4;
-  NegotiatedLimits negotiated_limits = 5;
-  bytes attachment_challenge = 6;
-  repeated string supported_capabilities = 7;
-  string hello_transcript_fingerprint = 8;
+  string transport_auth_attempt_id = 2;
+  string handshake_candidate_id = 3;
+  string handshake_candidate_fingerprint = 4;
+  string negotiation_winner_fingerprint = 5;
+  string current_connection_id = 6;
+  bytes attachment_challenge = 7;
+  string attachment_challenge_commitment = 8;
+  string hello_receipt_fingerprint = 9;
+}
+
+message ServerHello {
+  HelloNegotiationSemanticWinner negotiation_winner = 1;
+  ServerHelloReceipt receipt = 2;
+}
+
+enum HandshakeCandidateTerminalDisposition {
+  HANDSHAKE_CANDIDATE_TERMINAL_DISPOSITION_UNSPECIFIED = 0;
+  NEGOTIATION_WINNER_UNAVAILABLE = 1;
+  HELLO_REJECTED = 2;
+}
+
+enum HelloCandidateTerminalReason {
+  HELLO_CANDIDATE_TERMINAL_REASON_UNSPECIFIED = 0;
+  FROZEN_WINNER_BINDING_MISSING = 1;
+  FROZEN_WINNER_CONTRACT_UNSUPPORTED = 2;
+  FROZEN_WINNER_RUNTIME_INCOMPATIBLE = 3;
+  PROTOCOL_RANGE_UNSUPPORTED = 4;
+  SCHEMA_CONTRACT_UNSUPPORTED = 5;
+  MISSING_REQUIRED_CAPABILITY = 6;
+  CANDIDATE_EXPIRED = 7;
+  SERVER_NEGOTIATION_POLICY_REJECTED = 8;
+}
+
+enum HelloCandidateClientDisposition {
+  HELLO_CANDIDATE_CLIENT_DISPOSITION_UNSPECIFIED = 0;
+  PARENT_RELAUNCH_NEW_CANDIDATE = 1;
+  FATAL_COMPATIBILITY = 2;
+}
+
+message HandshakeCandidateTerminalReceipt {
+  string handshake_candidate_id = 1;
+  string handshake_candidate_fingerprint = 2;
+  uint64 attachment_attempt_generation = 3;
+  HandshakeCandidateTerminalDisposition terminal_disposition = 4;
+  HelloCandidateTerminalReason terminal_reason = 5;
+  HelloCandidateClientDisposition required_client_disposition = 6;
+  optional string prior_negotiation_winner_fingerprint = 7;
+  uint64 candidate_registry_revision = 8;
+  string terminal_receipt_fingerprint = 9;
+}
+
+message HelloNegotiationWinnerUnavailable {
+  string request_id = 1;
+  string transport_auth_attempt_id = 2;
+  string current_connection_id = 3;
+  string handshake_candidate_id = 4;
+  string handshake_candidate_fingerprint = 5;
+  HandshakeCandidateTerminalReceipt candidate_terminal_receipt = 6;
+  string outcome_fingerprint = 7;
+}
+
+message HelloRejected {
+  string request_id = 1;
+  string transport_auth_attempt_id = 2;
+  string current_connection_id = 3;
+  string handshake_candidate_id = 4;
+  string handshake_candidate_fingerprint = 5;
+  HandshakeCandidateTerminalReceipt candidate_terminal_receipt = 6;
+  string outcome_fingerprint = 7;
+}
+
+message HelloOutcome {
+  oneof outcome {
+    ServerHello accepted = 1;
+    HelloNegotiationWinnerUnavailable unavailable = 2;
+    HelloRejected rejected = 3;
+  }
 }
 
 message AttachRequest {
   string request_id = 1;
-  string hello_transcript_fingerprint = 2;
-  string host_session_id = 3;
-  AttachmentRole requested_role = 4;
-  bytes attachment_challenge = 5;
+  string handshake_candidate_id = 2;
+  string handshake_candidate_fingerprint = 3;
+  string negotiation_winner_fingerprint = 4;
+  string current_hello_receipt_fingerprint = 5;
+  bytes attachment_challenge = 6;
+  string attachment_challenge_commitment = 7;
 }
 
 message AttachmentIdentity {
   string client_instance_id = 1;
-  string connection_id = 2;
+  reserved 2;
   string attachment_id = 3;
   string runtime_session_id = 4;
   uint64 attachment_generation = 5;
@@ -81,23 +302,240 @@ message AttachmentIdentity {
   string identity_fingerprint = 10;
 }
 
-message AttachResponse {
+message TerminalClientTransportBindingIdentity {
+  string attachment_id = 1;
+  uint64 attachment_generation = 2;
+  string connection_id = 3;
+  uint64 transport_binding_generation = 4;
+  string bound_at_utc = 5;
+  string binding_fingerprint = 6;
+}
+
+enum ControllerDisposition {
+  CONTROLLER_DISPOSITION_UNSPECIFIED = 0;
+  CONTROLLER_GRANTED = 1;
+  OBSERVER_ATTACHED = 2;
+  CONTROLLER_UNAVAILABLE_OBSERVER_ATTACHED = 3;
+}
+
+enum BootstrapRequirement {
+  BOOTSTRAP_REQUIREMENT_UNSPECIFIED = 0;
+  PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED = 1;
+}
+
+message AttachSemanticWinner {
+  string handshake_candidate_id = 1;
+  string handshake_candidate_fingerprint = 2;
+  uint64 attachment_attempt_generation = 3;
+  string hello_negotiation_winner_fingerprint = 4;
+  AttachmentIdentity attachment = 5;
+  ControllerDisposition controller_disposition = 6;
+  BootstrapRequirement bootstrap_requirement = 7;
+  HeartbeatPolicy heartbeat_policy = 8;
+  string semantic_winner_fingerprint = 9;
+}
+
+enum AttachResultDisposition {
+  ATTACH_RESULT_DISPOSITION_UNSPECIFIED = 0;
+  ATTACH_CREATED = 1;
+  ATTACH_REBOUND_PRE_ACK = 2;
+  ATTACH_COMPATIBLE_ALREADY_REBOUND_PRE_ACK = 3;
+}
+
+message AttachResultReceipt {
   string request_id = 1;
-  AttachmentIdentity attachment = 2;
-  string controller_disposition = 3;
-  string bootstrap_requirement = 4;
-  HeartbeatPolicy heartbeat_policy = 5;
+  string transport_auth_attempt_id = 2;
+  string handshake_candidate_id = 3;
+  string handshake_candidate_fingerprint = 4;
+  AttachSemanticWinner attach_semantic_winner = 5;
+  TerminalClientTransportBindingIdentity current_transport_binding = 6;
+  optional string previous_transport_binding_fingerprint = 7;
+  AttachResultDisposition disposition = 8;
+  string receipt_fingerprint = 9;
+}
+
+message AttachReceiptAck {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string semantic_winner_fingerprint = 4;
+  TerminalClientTransportBindingIdentity current_transport_binding = 5;
+  string attach_result_receipt_fingerprint = 6;
+  string ack_fingerprint = 7;
+}
+
+enum AttachAckDisposition {
+  ATTACH_ACK_DISPOSITION_UNSPECIFIED = 0;
+  ATTACH_ACKNOWLEDGED = 1;
+  ATTACH_COMPATIBLE_ALREADY_ACKNOWLEDGED = 2;
+}
+
+message AttachAckResult {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string semantic_winner_fingerprint = 4;
+  string acknowledged_transport_binding_fingerprint = 5;
+  AttachAckDisposition disposition = 6;
+  string retired_credential_id = 7;
+  string ack_result_fingerprint = 8;
 }
 
 message HeartbeatRequest {
   string request_id = 1;
-  string attachment_id = 2;
-  uint64 attachment_generation = 3;
+  string runtime_session_id = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  string attachment_identity_fingerprint = 5;
+  string attach_semantic_winner_fingerprint = 6;
+  TerminalClientTransportBindingIdentity current_transport_binding = 7;
+  uint64 heartbeat_generation = 8;
+  uint64 previous_accepted_heartbeat_generation = 9;
+  string heartbeat_candidate_fingerprint = 10;
+  string request_fingerprint = 11;
 }
 
-message HeartbeatResponse {
+enum HeartbeatLivenessDisposition {
+  HEARTBEAT_LIVENESS_DISPOSITION_UNSPECIFIED = 0;
+  ATTACHMENT_ACTIVE_LEASE_RENEWED = 1;
+  SESSION_CLOSING_LEASE_NOT_RENEWED = 2;
+}
+
+enum HeartbeatRejectedReason {
+  HEARTBEAT_REJECTED_REASON_UNSPECIFIED = 0;
+  STALE_ATTACHMENT = 1;
+  STALE_TRANSPORT_BINDING = 2;
+  ATTACHMENT_REVOKED = 3;
+  ATTACHMENT_EXPIRED = 4;
+  SESSION_CLOSED = 5;
+}
+
+message HeartbeatAcceptedReceipt {
   string request_id = 1;
-  AttachmentIdentity attachment = 2;
+  string runtime_session_id = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  string attachment_identity_fingerprint = 5;
+  string attach_semantic_winner_fingerprint = 6;
+  string acknowledged_transport_binding_fingerprint = 7;
+  uint64 heartbeat_generation = 8;
+  uint64 previous_accepted_heartbeat_generation = 9;
+  string heartbeat_candidate_fingerprint = 10;
+  string resulting_attachment_lease_expires_at = 11;
+  HeartbeatLivenessDisposition liveness_disposition = 12;
+  string heartbeat_semantic_result_fingerprint = 13;
+  string receipt_fingerprint = 14;
+}
+
+message HeartbeatRejectedReceipt {
+  string request_id = 1;
+  string runtime_session_id = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  string attachment_identity_fingerprint = 5;
+  string attach_semantic_winner_fingerprint = 6;
+  string submitted_transport_binding_fingerprint = 7;
+  uint64 heartbeat_generation = 8;
+  uint64 previous_accepted_heartbeat_generation = 9;
+  string heartbeat_candidate_fingerprint = 10;
+  HeartbeatRejectedReason rejection_reason = 11;
+  string heartbeat_semantic_result_fingerprint = 12;
+  string receipt_fingerprint = 13;
+}
+
+message HeartbeatResult {
+  oneof outcome {
+    HeartbeatAcceptedReceipt accepted = 1;
+    HeartbeatRejectedReceipt rejected = 2;
+  }
+}
+
+enum PresentationSemanticRole {
+  PRESENTATION_SEMANTIC_ROLE_UNSPECIFIED = 0;
+  PRESENTATION_SEMANTIC_ROLE_PRIMARY = 1;
+  PRESENTATION_SEMANTIC_ROLE_SECONDARY = 2;
+  PRESENTATION_SEMANTIC_ROLE_DIAGNOSTIC = 3;
+  PRESENTATION_SEMANTIC_ROLE_CODE = 4;
+  PRESENTATION_SEMANTIC_ROLE_TOOL_ARGUMENTS = 5;
+  PRESENTATION_SEMANTIC_ROLE_TOOL_RESULT = 6;
+}
+
+enum PresentationVisibilityPolicy {
+  PRESENTATION_VISIBILITY_POLICY_UNSPECIFIED = 0;
+  PRESENTATION_VISIBILITY_ALWAYS = 1;
+  PRESENTATION_VISIBILITY_NORMAL = 2;
+  PRESENTATION_VISIBILITY_DIAGNOSTIC_ONLY = 3;
+}
+
+enum PresentationToolResultState {
+  PRESENTATION_TOOL_RESULT_STATE_UNSPECIFIED = 0;
+  PRESENTATION_TOOL_RESULT_SUCCESS = 1;
+  PRESENTATION_TOOL_RESULT_ERROR = 2;
+  PRESENTATION_TOOL_RESULT_DENIED = 3;
+  PRESENTATION_TOOL_RESULT_INTERRUPTED = 4;
+}
+
+enum PresentationInteractionKind {
+  PRESENTATION_INTERACTION_KIND_UNSPECIFIED = 0;
+  PRESENTATION_INTERACTION_APPROVAL = 1;
+  PRESENTATION_INTERACTION_PLAN = 2;
+  PRESENTATION_INTERACTION_MCP_INPUT = 3;
+  PRESENTATION_INTERACTION_EXTERNAL_INPUT = 4;
+}
+
+enum PresentationInteractionState {
+  PRESENTATION_INTERACTION_STATE_UNSPECIFIED = 0;
+  PRESENTATION_INTERACTION_PENDING = 1;
+  PRESENTATION_INTERACTION_RESOLVED = 2;
+  PRESENTATION_INTERACTION_CANCELLED = 3;
+  PRESENTATION_INTERACTION_FAILED = 4;
+}
+
+enum PresentationAuditKind {
+  PRESENTATION_AUDIT_KIND_UNSPECIFIED = 0;
+  PRESENTATION_AUDIT_RUN_LIFECYCLE = 1;
+  PRESENTATION_AUDIT_SUPPRESSED_MODEL_OUTPUT = 2;
+  PRESENTATION_AUDIT_PERMISSION = 3;
+  PRESENTATION_AUDIT_INTERACTION_LIFECYCLE = 4;
+  PRESENTATION_AUDIT_SUBAGENT_LIFECYCLE = 5;
+  PRESENTATION_AUDIT_COMPACTION_LIFECYCLE = 6;
+  PRESENTATION_AUDIT_RECOVERY_LIFECYCLE = 7;
+}
+
+enum PresentationSeverity {
+  PRESENTATION_SEVERITY_UNSPECIFIED = 0;
+  PRESENTATION_SEVERITY_INFO = 1;
+  PRESENTATION_SEVERITY_WARNING = 2;
+  PRESENTATION_SEVERITY_ERROR = 3;
+}
+
+enum PresentationRelativePositionKind {
+  PRESENTATION_RELATIVE_POSITION_KIND_UNSPECIFIED = 0;
+  PRESENTATION_RELATIVE_POSITION_BEFORE_FIRST = 1;
+  PRESENTATION_RELATIVE_POSITION_BEFORE_LEAF = 2;
+  PRESENTATION_RELATIVE_POSITION_CANONICAL_LEAF = 3;
+  PRESENTATION_RELATIVE_POSITION_AFTER_LEAF = 4;
+  PRESENTATION_RELATIVE_POSITION_LEDGER_GAP = 5;
+  PRESENTATION_RELATIVE_POSITION_AFTER_LAST = 6;
+}
+
+enum OperationalReplacementSemantics {
+  OPERATIONAL_REPLACEMENT_SEMANTICS_UNSPECIFIED = 0;
+  OPERATIONAL_REPLACE_SAME_KEY = 1;
+  OPERATIONAL_EXPIRE_AT_TERMINAL = 2;
+}
+
+enum OperationalRemovalReason {
+  OPERATIONAL_REMOVAL_REASON_UNSPECIFIED = 0;
+  OPERATIONAL_REMOVAL_DURABLE_TERMINAL = 1;
+  OPERATIONAL_REMOVAL_OWNER_REPLACED = 2;
+  OPERATIONAL_REMOVAL_EXPLICIT_RETIRE = 3;
+}
+
+enum McpInputMode {
+  MCP_INPUT_MODE_UNSPECIFIED = 0;
+  MCP_INPUT_FORM = 1;
+  MCP_INPUT_URL = 2;
 }
 
 message EventReferenceView {
@@ -111,7 +549,7 @@ message EventReferenceView {
 message PresentationTextBlock {
   string text = 1;
   uint64 text_utf8_bytes = 2;
-  string semantic_role = 3;
+  PresentationSemanticRole semantic_role = 3;
   string block_fingerprint = 4;
 }
 
@@ -134,7 +572,7 @@ message DurableCellCommon {
   uint64 semantic_revision = 2;
   repeated EventReferenceView ordered_source_event_references = 3;
   string source_accumulator = 4;
-  string visibility_policy = 5;
+  PresentationVisibilityPolicy visibility_policy = 5;
   repeated PresentationContentBlock content_blocks = 6;
   optional string semantic_group_id = 7;
   string cell_fingerprint = 8;
@@ -146,7 +584,7 @@ message ToolTerminalCell {
   DurableCellCommon common = 1;
   string tool_call_id = 2;
   string tool_name = 3;
-  string result_state = 4;
+  PresentationToolResultState result_state = 4;
 }
 message ErrorCell {
   DurableCellCommon common = 1;
@@ -154,8 +592,8 @@ message ErrorCell {
 }
 message InteractionCell {
   DurableCellCommon common = 1;
-  string interaction_kind = 2;
-  string interaction_state = 3;
+  PresentationInteractionKind interaction_kind = 2;
+  PresentationInteractionState interaction_state = 3;
 }
 message CompactionBoundaryCell { DurableCellCommon common = 1; }
 message RecoveryCell {
@@ -164,8 +602,8 @@ message RecoveryCell {
 }
 message AuditCell {
   DurableCellCommon common = 1;
-  string audit_kind = 2;
-  string severity = 3;
+  PresentationAuditKind audit_kind = 2;
+  PresentationSeverity severity = 3;
 }
 message SystemNoticeCell {
   DurableCellCommon common = 1;
@@ -227,7 +665,7 @@ message PresentationHistoryPlacementKey {
   string placement_key_contract_fingerprint = 3;
   optional uint64 canonical_spine_left_coordinate = 4;
   optional uint64 canonical_spine_right_coordinate = 5;
-  string relative_position_kind = 6;
+  PresentationRelativePositionKind relative_position_kind = 6;
   uint64 source_ledger_sequence_or_zero = 7;
   uint32 relative_local_ordinal = 8;
   string stable_source_tiebreaker = 9;
@@ -356,17 +794,45 @@ message PresentationHistoryActiveHeadIdentity {
   string active_head_fingerprint = 13;
 }
 
+enum PromptQueueDeliveryState {
+  PROMPT_QUEUE_DELIVERY_STATE_UNSPECIFIED = 0;
+  PROMPT_QUEUE_ACCEPTED_PENDING = 1;
+  PROMPT_QUEUE_STEER_RESERVED = 2;
+  PROMPT_QUEUE_FOLLOW_UP_RESERVED = 3;
+  PROMPT_QUEUE_RECONCILIATION_REQUIRED = 4;
+}
+
+enum PromptQueueContentRetentionState {
+  PROMPT_QUEUE_CONTENT_RETENTION_STATE_UNSPECIFIED = 0;
+  PROMPT_QUEUE_CONTENT_ACTIVE = 1;
+}
+
+enum PromptQueueRequestedDeliveryMode {
+  PROMPT_QUEUE_REQUESTED_DELIVERY_MODE_UNSPECIFIED = 0;
+  PROMPT_QUEUE_REQUESTED_AUTO = 1;
+  PROMPT_QUEUE_REQUESTED_STEER = 2;
+  PROMPT_QUEUE_REQUESTED_FOLLOW_UP = 3;
+}
+
+enum PromptQueueResolvedDeliveryMode {
+  PROMPT_QUEUE_RESOLVED_DELIVERY_MODE_UNSPECIFIED = 0;
+  PROMPT_QUEUE_RESOLVED_PENDING = 1;
+  PROMPT_QUEUE_RESOLVED_STEER = 2;
+  PROMPT_QUEUE_RESOLVED_FOLLOW_UP = 3;
+}
+
 message QueueItemView {
   string queue_item_id = 1;
   uint64 accepted_ordinal = 2;
-  string delivery_state = 3;
-  string content_retention_state = 4;
-  string requested_delivery_mode = 5;
-  string resolved_delivery_mode = 6;
+  reserved 3, 4, 5, 6;
   string public_preview = 7;
   string head_event_id = 8;
   uint64 item_revision = 9;
   string view_fingerprint = 10;
+  PromptQueueDeliveryState delivery_state = 11;
+  PromptQueueContentRetentionState content_retention_state = 12;
+  PromptQueueRequestedDeliveryMode requested_delivery_mode = 13;
+  PromptQueueResolvedDeliveryMode resolved_delivery_mode = 14;
 }
 
 message ToolApproval { string tool_call_id = 1; string tool_name = 2; }
@@ -394,7 +860,7 @@ message PlanExitInteraction {
 }
 message McpInputPublicRequest {
   string request_key = 1;
-  string mode = 2;
+  McpInputMode mode = 2;
   string public_prompt = 3;
   bool schema_or_url_present = 4;
 }
@@ -416,26 +882,174 @@ message PendingInteraction {
   }
 }
 
-message ProjectionSnapshotRequest { string request_id = 1; }
+enum TerminalControlSectionKind {
+  TERMINAL_CONTROL_SECTION_KIND_UNSPECIFIED = 0;
+  CONTROL_SESSION_LIFECYCLE = 1;
+  CONTROL_RUN_CONTROL = 2;
+  CONTROL_PENDING_INTERACTION = 3;
+  CONTROL_PROMPT_QUEUE = 4;
+  CONTROL_NOTIFICATIONS = 5;
+}
+
+message TerminalControlSectionSourceVersion {
+  TerminalControlSectionKind section_kind = 1;
+  string source_owner_id = 2;
+  uint64 source_owner_generation = 3;
+  uint64 source_owner_revision = 4;
+  string source_view_fingerprint = 5;
+  string source_version_fingerprint = 6;
+}
+
+enum TerminalSessionLifecycleState {
+  TERMINAL_SESSION_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  TERMINAL_SESSION_OPEN = 1;
+  TERMINAL_SESSION_CLOSING = 2;
+  TERMINAL_SESSION_CLOSED = 3;
+}
+
+message TerminalSessionLifecycleControlView {
+  TerminalControlSectionSourceVersion source_version = 1;
+  TerminalSessionLifecycleState lifecycle = 2;
+  string view_fingerprint = 3;
+}
+
+message TerminalRunControlView {
+  TerminalControlSectionSourceVersion source_version = 1;
+  optional string active_run_id = 2;
+  optional string suspended_run_id = 3;
+  optional string stopping_run_id = 4;
+  string view_fingerprint = 5;
+}
+
+message TerminalPendingInteractionControlView {
+  TerminalControlSectionSourceVersion source_version = 1;
+  optional PendingInteraction interaction = 2;
+  string view_fingerprint = 3;
+}
+
+message EmptyPromptQueueGenesisHead {
+  uint64 checkpoint_generation = 1;
+  uint64 checkpoint_through_sequence = 2;
+  string checkpoint_fingerprint = 3;
+  uint64 checkpoint_transition_count = 4;
+  uint64 bounded_tail_count = 5;
+  string head_receipt_fingerprint = 6;
+  string empty_head_fingerprint = 7;
+}
+
+message CommittedPromptQueueHead {
+  uint64 checkpoint_generation = 1;
+  uint64 checkpoint_through_sequence = 2;
+  string checkpoint_fingerprint = 3;
+  uint64 checkpoint_transition_count = 4;
+  string checkpoint_transition_accumulator = 5;
+  uint64 bounded_tail_first_sequence_or_zero = 6;
+  uint64 bounded_tail_last_sequence_or_zero = 7;
+  uint64 bounded_tail_count = 8;
+  string bounded_tail_accumulator = 9;
+  string head_event_id = 10;
+  uint64 head_event_sequence = 11;
+  string head_event_payload_fingerprint = 12;
+  string head_receipt_fingerprint = 13;
+  string committed_head_fingerprint = 14;
+}
+
+message PromptQueueProjectionHead {
+  oneof head {
+    EmptyPromptQueueGenesisHead empty_genesis = 1;
+    CommittedPromptQueueHead committed = 2;
+  }
+}
+
+message PromptQueueClientProjection {
+  string projection_contract_id = 1;
+  uint32 projection_contract_version = 2;
+  string projection_contract_fingerprint = 3;
+  PromptQueueProjectionHead queue_head = 4;
+  uint64 queue_account_revision = 5;
+  repeated QueueItemView ordered_active_items = 6;
+  uint32 active_item_count = 7;
+  string active_item_accumulator = 8;
+  string projection_fingerprint = 9;
+}
+
+message TerminalPromptQueueControlView {
+  TerminalControlSectionSourceVersion source_version = 1;
+  PromptQueueClientProjection projection = 2;
+  string view_fingerprint = 3;
+}
+
+enum ServerNotificationKind {
+  SERVER_NOTIFICATION_KIND_UNSPECIFIED = 0;
+  SERVER_NOTIFICATION_INFORMATION = 1;
+  SERVER_NOTIFICATION_WARNING = 2;
+  SERVER_NOTIFICATION_ERROR = 3;
+}
+
+message ServerNotificationView {
+  string notification_id = 1;
+  uint64 notification_ordinal = 2;
+  ServerNotificationKind kind = 3;
+  string public_text = 4;
+  string created_at_utc = 5;
+  optional string expires_at_utc = 6;
+  string notification_fingerprint = 7;
+}
+
+message TerminalServerNotificationProjection {
+  TerminalControlSectionSourceVersion source_version = 1;
+  repeated ServerNotificationView ordered_notifications = 2;
+  uint32 notification_count = 3;
+  string notification_accumulator = 4;
+  string view_fingerprint = 5;
+}
+
+message TerminalControlProjectionView {
+  string runtime_session_id = 1;
+  TerminalSessionLifecycleControlView session_lifecycle = 2;
+  TerminalRunControlView run_control = 3;
+  TerminalPendingInteractionControlView pending_interaction = 4;
+  TerminalPromptQueueControlView prompt_queue = 5;
+  TerminalServerNotificationProjection server_notifications = 6;
+  string control_view_fingerprint = 7;
+}
+
+message ControlProjectionCursor {
+  uint64 control_generation = 1;
+  uint64 control_revision = 2;
+  string control_projection_fingerprint = 3;
+  string transition_prefix_accumulator = 4;
+  string registry_contract_fingerprint = 5;
+  string cursor_fingerprint = 6;
+}
+
+message TerminalControlProjectionSnapshot {
+  TerminalControlProjectionView view = 1;
+  ControlProjectionCursor cursor = 2;
+  string snapshot_fingerprint = 3;
+}
+
+message ProjectionSnapshotRequest {
+  string request_id = 1;
+  string runtime_session_id = 2;
+  optional ControlProjectionCursor minimum_observed_control_cursor = 3;
+  string request_fingerprint = 4;
+}
 message ProjectionSnapshotFrame {
   string request_id = 1;
   string host_session_id = 2;
   string runtime_session_id = 3;
-  string lifecycle = 4;
+  reserved 4;
   uint64 authority_high_water = 5;
   uint64 projection_revision = 6;
   string projection_contract_fingerprint = 7;
   PresentationHistoryActiveHeadIdentity active_head = 8;
   repeated PresentationHistoryRankedEntry ordered_resident_entries = 9;
   PresentationHistoryLatestRootCursorPair latest_root_cursor_pair = 10;
-  optional PendingInteraction pending_interaction = 11;
-  repeated QueueItemView queue_items = 12;
-  optional string queue_head_event_id = 13;
-  uint64 queue_account_revision = 14;
-  optional string active_run_id = 15;
-  optional string suspended_run_id = 16;
-  optional string stopping_run_id = 17;
+  reserved 11 to 17;
   string snapshot_fingerprint = 18;
+  TerminalControlProjectionSnapshot control_projection_snapshot = 19;
+  optional string validated_minimum_observed_control_cursor_fingerprint = 20;
 }
 
 message OperationalActivityCommon {
@@ -445,7 +1059,7 @@ message OperationalActivityCommon {
   uint64 operational_generation = 4;
   uint64 operational_cursor = 5;
   string coalesce_key = 6;
-  string replacement_semantics = 7;
+  OperationalReplacementSemantics replacement_semantics = 7;
   string bounded_public_text = 8;
   string activity_fingerprint = 9;
 }
@@ -469,7 +1083,7 @@ message OperationalActivityRemove {
   uint64 owner_generation = 5;
   string coalesce_key = 6;
   string expected_activity_fingerprint = 7;
-  string removal_reason = 8;
+  OperationalRemovalReason removal_reason = 8;
   string removal_fingerprint = 9;
 }
 message OperationalActivityChange {
@@ -478,13 +1092,33 @@ message OperationalActivityChange {
     OperationalActivityRemove remove = 2;
   }
 }
-message OperationalSnapshotRequest { string request_id = 1; }
+message OperationalSnapshotRequest {
+  string request_id = 1;
+  string runtime_session_id = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  string attachment_identity_fingerprint = 5;
+  TerminalClientTransportBindingIdentity current_transport_binding = 6;
+  uint64 requested_after_operational_generation = 7;
+  uint64 requested_after_operational_cursor = 8;
+  string request_fingerprint = 9;
+}
 message OperationalSnapshotFrame {
   string request_id = 1;
-  uint64 operational_generation = 2;
-  uint64 operational_cursor = 3;
-  repeated OperationalActivityCell ordered_activity_cells = 4;
-  string snapshot_fingerprint = 5;
+  string runtime_session_id = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  string attachment_identity_fingerprint = 5;
+  string acknowledged_transport_binding_fingerprint = 6;
+  uint64 operational_generation = 7;
+  uint64 operational_cursor = 8;
+  repeated OperationalActivityCell ordered_activity_cells = 9;
+  uint32 activity_count = 10;
+  uint64 encoded_activity_bytes = 11;
+  string activity_fingerprint_accumulator = 12;
+  string operational_state_fingerprint = 13;
+  string snapshot_contract_fingerprint = 14;
+  string snapshot_frame_fingerprint = 15;
 }
 
 message ObserveNextRequest {
@@ -493,7 +1127,8 @@ message ObserveNextRequest {
   uint64 after_projection_revision = 3;
   uint64 after_operational_generation = 4;
   uint64 after_operational_cursor = 5;
-  uint32 maximum_wait_ms = 6;
+  ControlProjectionCursor after_control_cursor = 6;
+  uint32 maximum_wait_ms = 7;
 }
 
 message HistoryEntryUpsert {
@@ -534,11 +1169,24 @@ message AuthorityAdvanceFrame {
 message PresentationHistoryRootCursorRelation {
   PresentationHistoryRootIdentity previous_root_identity = 1;
   PresentationHistoryRootIdentity resulting_root_identity = 2;
-  string relation_kind = 3;
-  string previous_cursor_disposition = 4;
+  reserved 3, 4;
+  reserved "relation_kind", "previous_cursor_disposition";
   uint64 shared_prefix_entry_count = 5;
   string shared_prefix_accumulator = 6;
   string relation_fingerprint = 7;
+  PresentationRootRelationKind relation = 8;
+  PresentationPreviousCursorDisposition previous_cursor = 9;
+}
+
+enum PresentationRootRelationKind {
+  PRESENTATION_ROOT_RELATION_KIND_UNSPECIFIED = 0;
+  STRICT_PREFIX_EXTENDED = 1;
+  REWRITTEN_GENERATION = 2;
+}
+
+enum PresentationPreviousCursorDisposition {
+  PRESENTATION_PREVIOUS_CURSOR_DISPOSITION_UNSPECIFIED = 0;
+  RETAINED_PINNED = 1;
 }
 message ResidentEntriesUnchanged {
   string before_resident_vector_fingerprint = 1;
@@ -618,29 +1266,119 @@ message PresentationHistoryRootAdvancedFrame {
   string checkpoint_full_confirmation_fingerprint = 23;
   string frame_fingerprint = 24;
 }
-message ObservationGap {
+message DurableObservationGapFrame {
   string request_id = 1;
   uint64 latest_authority_high_water = 2;
   uint64 latest_projection_revision = 3;
-  uint64 latest_operational_generation = 4;
-  uint64 latest_operational_cursor = 5;
-  string reason = 6;
+  ObservationGapReason gap_reason = 4;
+  string frame_fingerprint = 5;
 }
-message ObservationNoChange { string request_id = 1; }
+
+enum ObservationGapReason {
+  OBSERVATION_GAP_REASON_UNSPECIFIED = 0;
+  CLIENT_CURSOR_AHEAD = 1;
+  PROJECTION_TRANSITION_EVICTED = 2;
+  OPERATIONAL_CURSOR_GAP = 3;
+}
+
+message OperationalObservationGapFrame {
+  string request_id = 1;
+  uint64 latest_operational_generation = 2;
+  uint64 latest_operational_cursor = 3;
+  ObservationGapReason gap_reason = 4;
+  string frame_fingerprint = 5;
+}
+
+enum ControlProjectionInvalidationDisposition {
+  CONTROL_PROJECTION_INVALIDATION_DISPOSITION_UNSPECIFIED = 0;
+  CONTROL_PROJECTION_SNAPSHOT_REQUIRED = 1;
+}
+
+enum ControlProjectionGapReason {
+  CONTROL_PROJECTION_GAP_REASON_UNSPECIFIED = 0;
+  CONTROL_GENERATION_CHANGED = 1;
+  CONTROL_CURSOR_TOO_OLD = 2;
+  CONTROL_TRANSITION_NOT_CONTIGUOUS = 3;
+  CONTROL_CONTRACT_CHANGED = 4;
+}
+
+message ControlProjectionChangedFrame {
+  string request_id = 1;
+  string validated_after_control_cursor_fingerprint = 2;
+  uint64 control_generation = 3;
+  uint64 base_control_projection_revision = 4;
+  string base_control_projection_fingerprint = 5;
+  uint64 resulting_control_projection_revision = 6;
+  string resulting_control_projection_fingerprint = 7;
+  repeated TerminalControlSectionKind changed_sections = 8;
+  uint64 consumed_transition_count = 9;
+  string consumed_transition_range_accumulator = 10;
+  ControlProjectionCursor resulting_control_cursor = 11;
+  ControlProjectionInvalidationDisposition disposition = 12;
+  string frame_fingerprint = 13;
+}
+
+message ControlProjectionGapFrame {
+  string request_id = 1;
+  string requested_control_cursor_fingerprint = 2;
+  ControlProjectionCursor latest_control_cursor = 3;
+  ControlProjectionGapReason stable_reason = 4;
+  ControlProjectionInvalidationDisposition disposition = 5;
+  string frame_fingerprint = 6;
+}
+
+message ObservationNoChangeFrame {
+  string request_id = 1;
+  uint64 echoed_authority_high_water = 2;
+  uint64 echoed_projection_revision = 3;
+  uint64 echoed_operational_generation = 4;
+  uint64 echoed_operational_cursor = 5;
+  string echoed_control_cursor_fingerprint = 6;
+  string frame_fingerprint = 7;
+}
 message OperationalDeltaFrame {
   string request_id = 1;
   uint64 operational_generation = 2;
   uint64 operational_cursor = 3;
   repeated OperationalActivityChange ordered_changes = 4;
 }
-message ObservationResponse {
+
+message DurableObservationBranch {
   oneof outcome {
     ProjectionDeltaFrame projection_delta = 1;
     AuthorityAdvanceFrame authority_advance = 2;
     PresentationHistoryRootAdvancedFrame root_advanced = 3;
-    OperationalDeltaFrame operational_delta = 4;
-    ObservationGap gap = 5;
-    ObservationNoChange no_change = 6;
+    DurableObservationGapFrame gap = 4;
+  }
+}
+
+message OperationalObservationBranch {
+  oneof outcome {
+    OperationalDeltaFrame delta = 1;
+    OperationalObservationGapFrame gap = 2;
+  }
+}
+
+message ControlObservationBranch {
+  oneof outcome {
+    ControlProjectionChangedFrame changed = 1;
+    ControlProjectionGapFrame gap = 2;
+  }
+}
+
+message ObservationBatchFrame {
+  string request_id = 1;
+  optional ControlObservationBranch control = 2;
+  optional DurableObservationBranch durable = 3;
+  optional OperationalObservationBranch operational = 4;
+  uint32 included_plane_count = 5;
+  string batch_fingerprint = 6;
+}
+
+message ObservationResponse {
+  oneof outcome {
+    ObservationBatchFrame batch = 1;
+    ObservationNoChangeFrame no_change = 2;
   }
 }
 
@@ -723,7 +1461,20 @@ message StopRunCommand { CommandBinding binding = 1; }
 message ApprovalDecision { string tool_call_id = 1; bool confirmed = 2; }
 message ResolveApprovalCommand { CommandBinding binding = 1; string approval_id = 2; repeated ApprovalDecision decisions = 3; }
 message ResolvePlanQuestionCommand { CommandBinding binding = 1; string interaction_id = 2; string answer_text = 3; optional string selected_option = 4; }
-message ResolvePlanExitCommand { CommandBinding binding = 1; string interaction_id = 2; string decision = 3; string user_feedback = 4; }
+enum PlanExitDecision {
+  PLAN_EXIT_DECISION_UNSPECIFIED = 0;
+  APPROVE = 1;
+  REVISE = 2;
+  CANCEL = 3;
+}
+message ResolvePlanExitCommand {
+  CommandBinding binding = 1;
+  string interaction_id = 2;
+  reserved 3;
+  reserved "decision";
+  string user_feedback = 4;
+  PlanExitDecision plan_exit_decision = 5;
+}
 message ResolveMcpInteractionCommand { CommandBinding binding = 1; string interaction_id = 2; string sealed_response_handle_id = 3; }
 message CancelMcpInteractionCommand { CommandBinding binding = 1; string interaction_id = 2; }
 message QueueCancelCommand { CommandBinding binding = 1; string queue_item_id = 2; }
@@ -750,7 +1501,8 @@ message MutationCommand {
 }
 message CommandOutcome {
   string request_id = 1;
-  string status = 2;
+  reserved 2;
+  reserved "status";
   string command_id = 3;
   string target_id = 4;
   uint64 target_generation = 5;
@@ -759,6 +1511,15 @@ message CommandOutcome {
   repeated string durable_reference_ids = 8;
   string query_token = 9;
   string outcome_fingerprint = 10;
+  CommandOutcomeStatus outcome_status = 11;
+}
+enum CommandOutcomeStatus {
+  COMMAND_OUTCOME_STATUS_UNSPECIFIED = 0;
+  SUCCEEDED = 1;
+  REJECTED = 2;
+  PENDING_CONFIRMATION = 3;
+  RECONCILIATION_REQUIRED = 4;
+  SUPERSEDED_BY_COMPATIBLE_WINNER = 5;
 }
 message QueryCommandRequest {
   string request_id = 1;
@@ -774,11 +1535,18 @@ message TerminalSecretLeaseIdentity {
   uint64 controller_generation = 3;
   string interaction_id = 4;
   string request_key = 5;
-  string secret_kind = 6;
+  reserved 6;
+  reserved "secret_kind";
   uint64 owner_epoch = 7;
   uint64 lease_generation = 8;
   string expires_at_utc = 9;
   string identity_fingerprint = 10;
+  TerminalSecretKind terminal_secret_kind = 11;
+}
+enum TerminalSecretKind {
+  TERMINAL_SECRET_KIND_UNSPECIFIED = 0;
+  PRIVATE_URL = 1;
+  FORM_RESPONSE = 2;
 }
 message SecretRevealRequest { string request_id = 1; CommandBinding binding = 2; string interaction_id = 3; string request_key = 4; }
 message SecretRevealResult { string request_id = 1; TerminalSecretLeaseIdentity lease_identity = 2; bytes private_url = 3; }
@@ -799,14 +1567,15 @@ message ClientFrame {
     SecretRevealRequest secret_reveal = 9;
     SecretFormSubmit secret_form_submit = 10;
     OperationalSnapshotRequest operational_snapshot = 11;
+    AttachReceiptAck attach_ack = 12;
   }
 }
 message ProtocolError { string request_id = 1; string stable_code = 2; string public_message = 3; }
 message ServerFrame {
   oneof response {
-    HelloResponse hello = 1;
-    AttachResponse attach = 2;
-    HeartbeatResponse heartbeat = 3;
+    HelloOutcome hello = 1;
+    AttachResultReceipt attach = 2;
+    HeartbeatResult heartbeat = 3;
     ProjectionSnapshotFrame snapshot = 4;
     OperationalSnapshotFrame operational_snapshot = 5;
     ObservationResponse observation = 6;
@@ -817,5 +1586,6 @@ message ServerFrame {
     SecretSubmitReceipt secret_submit = 11;
     SecretLeaseRevoked secret_revoked = 12;
     ProtocolError error = 13;
+    AttachAckResult attach_ack = 14;
   }
 }

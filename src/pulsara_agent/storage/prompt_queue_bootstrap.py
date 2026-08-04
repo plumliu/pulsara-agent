@@ -26,7 +26,7 @@ from pulsara_agent.primitives.transcript_accumulators import (
 )
 
 PROMPT_QUEUE_PROJECTION_KIND = "prompt_queue.v1"
-PROMPT_QUEUE_PROJECTION_SCHEMA_VERSION = "prompt_queue_domain_checkpoint.v1"
+PROMPT_QUEUE_PROJECTION_SCHEMA_VERSION = "prompt_queue_domain_checkpoint.v2"
 
 
 def build_prompt_queue_genesis_raw_checkpoint(
@@ -63,7 +63,7 @@ def build_prompt_queue_genesis_raw_checkpoint(
         validation_base_state_payload={},
         state_payload=state_payload,
         payload_fingerprint=context_fingerprint(
-            "prompt-queue-runtime-checkpoint-row:v1", payload
+            "prompt-queue-runtime-checkpoint-row:v2", payload
         ),
     )
 
@@ -148,12 +148,14 @@ def install_prompt_queue_genesis(
             bounded_tail_first_sequence, bounded_tail_count,
             bounded_tail_payload_bytes, bounded_tail_accumulator,
             pending_item_count, reserved_item_count, artifact_bytes,
-            pending_item_head_set_accumulator, row_set_accumulator,
+            pending_item_head_set_accumulator,
+            active_client_item_count, active_client_item_accumulator,
+            row_set_accumulator,
             reducer_contract_fingerprint, event_registry_fingerprint,
             account_fingerprint, updated_at
         ) VALUES (
             %s, %s, NULL, 0, NULL, 0, 0, 0, %s, 0, %s,
-            0, 0, 0, %s, 0, 0, 0, %s, %s, %s, %s, %s, now()
+            0, 0, 0, %s, 0, 0, 0, %s, 0, %s, %s, %s, %s, %s, now()
         )
         ON CONFLICT (session_id) DO NOTHING
         """,
@@ -164,6 +166,7 @@ def install_prompt_queue_genesis(
             account.transition_accumulator,
             account.bounded_tail_accumulator,
             account.pending_item_head_set_accumulator,
+            account.active_client_item_accumulator,
             account.row_set_accumulator,
             account.reducer_contract_fingerprint,
             account.event_registry_fingerprint,
@@ -194,7 +197,9 @@ def read_prompt_queue_genesis(
                bounded_tail_first_sequence, bounded_tail_count,
                bounded_tail_payload_bytes, bounded_tail_accumulator,
                pending_item_count, reserved_item_count, artifact_bytes,
-               pending_item_head_set_accumulator, row_set_accumulator,
+               pending_item_head_set_accumulator,
+               active_client_item_count, active_client_item_accumulator,
+               row_set_accumulator,
                reducer_contract_fingerprint, event_registry_fingerprint,
                account_fingerprint
         FROM public.prompt_queue_accounts
@@ -225,11 +230,11 @@ def read_prompt_queue_genesis(
 def prompt_queue_account_from_values(
     values: tuple[object, ...],
 ) -> PromptQueueAccountProjectionFact:
-    if len(values) != 23:
+    if len(values) != 25:
         raise ValueError("prompt queue account row shape mismatch")
     return PromptQueueAccountProjectionFact.model_validate(
         {
-            "schema_version": "prompt_queue_account_projection.v1",
+            "schema_version": "prompt_queue_account_projection.v2",
             "runtime_session_id": str(values[0]),
             "next_accepted_ordinal": int(values[1]),
             "queue_chain_head_event_id": values[2],
@@ -249,10 +254,12 @@ def prompt_queue_account_from_values(
             "reserved_item_count": int(values[16]),
             "artifact_bytes": int(values[17]),
             "pending_item_head_set_accumulator": str(values[18]),
-            "row_set_accumulator": str(values[19]),
-            "reducer_contract_fingerprint": str(values[20]),
-            "event_registry_fingerprint": str(values[21]),
-            "account_fingerprint": str(values[22]),
+            "active_client_item_count": int(values[19]),
+            "active_client_item_accumulator": str(values[20]),
+            "row_set_accumulator": str(values[21]),
+            "reducer_contract_fingerprint": str(values[22]),
+            "event_registry_fingerprint": str(values[23]),
+            "account_fingerprint": str(values[24]),
         }
     )
 

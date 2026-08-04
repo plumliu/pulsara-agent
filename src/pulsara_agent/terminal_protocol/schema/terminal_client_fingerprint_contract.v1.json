@@ -1,0 +1,822 @@
+{
+  "schema_version": "terminal_client_fingerprint_contract.v1",
+  "protocol_major": 2,
+  "protocol_minor": 0,
+  "proto_sha256": "ba796c11dc0906419163cd79ef9928553cd9de8f07156ba8a3ff3c45414cddda",
+  "protobuf_encoding": "deterministic-protobuf-with-own-field-cleared",
+  "digest_encoding": "sha256:<lowercase-hex>",
+  "generated_contract_files_sha256": {
+    "clients/terminal/internal/protocolvalue/vocabulary_gen.go": "54670c5d5e2adaad6334f4bca459b9079d0f4e10d579d0fef04b2e5c66fdaea9",
+    "clients/terminal/internal/protocolvalue/carriers_gen.go": "f947b24bd1ce5e5aa4898672b541ac85323520729fa963bcaea5aee1082d969b"
+  },
+  "fingerprint_contracts": [
+    {
+      "message": "TerminalClientBootstrapCarrier",
+      "namespace": "terminal-client-bootstrap:v1",
+      "own_field": "bootstrap_fingerprint"
+    },
+    {
+      "message": "TerminalTransportAuthPreface",
+      "namespace": "terminal-transport-auth-preface:v1",
+      "own_field": "preface_fingerprint"
+    },
+    {
+      "message": "TerminalTransportAuthResult",
+      "namespace": "terminal-transport-auth-result:v1",
+      "own_field": "result_fingerprint"
+    },
+    {
+      "message": "RecoveredAttachmentTransportBinding",
+      "namespace": "terminal-attachment-transport-rebind:v1",
+      "own_field": "rebind_receipt_fingerprint"
+    },
+    {
+      "message": "HandshakeRecoveryCandidateIdentity",
+      "namespace": "terminal-handshake-recovery-candidate:v1",
+      "own_field": "candidate_fingerprint",
+      "clear_fields": [
+        "candidate_id"
+      ]
+    },
+    {
+      "message": "HelloNegotiationSemanticWinner",
+      "namespace": "terminal-hello-negotiation-winner:v1",
+      "own_field": "negotiation_winner_fingerprint"
+    },
+    {
+      "message": "ServerHelloReceipt",
+      "namespace": "terminal-server-hello-receipt:v1",
+      "own_field": "hello_receipt_fingerprint"
+    },
+    {
+      "message": "HandshakeCandidateTerminalReceipt",
+      "namespace": "terminal-handshake-candidate-terminal:v1",
+      "own_field": "terminal_receipt_fingerprint"
+    },
+    {
+      "message": "HelloNegotiationWinnerUnavailable",
+      "namespace": "terminal-hello-negotiation-unavailable:v1",
+      "own_field": "outcome_fingerprint"
+    },
+    {
+      "message": "HelloRejected",
+      "namespace": "terminal-hello-rejected:v1",
+      "own_field": "outcome_fingerprint"
+    },
+    {
+      "message": "AttachmentIdentity",
+      "namespace": "terminal-attachment-identity:v2",
+      "own_field": "identity_fingerprint"
+    },
+    {
+      "message": "TerminalClientTransportBindingIdentity",
+      "namespace": "terminal-client-transport-binding:v1",
+      "own_field": "binding_fingerprint"
+    },
+    {
+      "message": "AttachSemanticWinner",
+      "namespace": "terminal-attach-semantic-winner:v1",
+      "own_field": "semantic_winner_fingerprint"
+    },
+    {
+      "message": "AttachResultReceipt",
+      "namespace": "terminal-attach-result-receipt:v1",
+      "own_field": "receipt_fingerprint"
+    },
+    {
+      "message": "AttachReceiptAck",
+      "namespace": "terminal-attach-receipt-ack:v1",
+      "own_field": "ack_fingerprint"
+    },
+    {
+      "message": "AttachAckResult",
+      "namespace": "terminal-attach-ack-result:v1",
+      "own_field": "ack_result_fingerprint"
+    },
+    {
+      "message": "HeartbeatRequest",
+      "namespace": "terminal-heartbeat-request:v1",
+      "own_field": "request_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "namespace": "terminal-heartbeat-accepted-receipt:v1",
+      "own_field": "receipt_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "namespace": "terminal-heartbeat-rejected-receipt:v1",
+      "own_field": "receipt_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotRequest",
+      "namespace": "terminal-projection-snapshot-request:v2",
+      "own_field": "request_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotRequest",
+      "namespace": "terminal-operational-snapshot-request:v1",
+      "own_field": "request_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "namespace": "terminal-operational-snapshot-frame:v1",
+      "own_field": "snapshot_frame_fingerprint"
+    }
+  ],
+  "opaque_domain_fingerprint_fields": [
+    {
+      "message": "ActiveHeadRankBasis",
+      "field": "history_active_head_fingerprint"
+    },
+    {
+      "message": "ActiveHeadRankBasis",
+      "field": "rank_basis_fingerprint"
+    },
+    {
+      "message": "ApprovalInteraction",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "AttachAckResult",
+      "field": "acknowledged_transport_binding_fingerprint"
+    },
+    {
+      "message": "AttachAckResult",
+      "field": "semantic_winner_fingerprint"
+    },
+    {
+      "message": "AttachReceiptAck",
+      "field": "attach_result_receipt_fingerprint"
+    },
+    {
+      "message": "AttachReceiptAck",
+      "field": "semantic_winner_fingerprint"
+    },
+    {
+      "message": "AttachRequest",
+      "field": "current_hello_receipt_fingerprint"
+    },
+    {
+      "message": "AttachRequest",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "AttachRequest",
+      "field": "negotiation_winner_fingerprint"
+    },
+    {
+      "message": "AttachResultReceipt",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "AttachResultReceipt",
+      "field": "previous_transport_binding_fingerprint"
+    },
+    {
+      "message": "AttachSemanticWinner",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "AttachSemanticWinner",
+      "field": "hello_negotiation_winner_fingerprint"
+    },
+    {
+      "message": "AuthorityAdvanceFrame",
+      "field": "base_active_head_fingerprint"
+    },
+    {
+      "message": "AuthorityAdvanceFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "AvailableHistoryCapacity",
+      "field": "capacity_state_fingerprint"
+    },
+    {
+      "message": "BoundedOrderedResidentChanges",
+      "field": "after_resident_vector_fingerprint"
+    },
+    {
+      "message": "BoundedOrderedResidentChanges",
+      "field": "before_resident_vector_fingerprint"
+    },
+    {
+      "message": "BoundedOrderedResidentChanges",
+      "field": "transition_fingerprint"
+    },
+    {
+      "message": "BoundedOrderedResidentChanges",
+      "field": "transition_limits_policy_fingerprint"
+    },
+    {
+      "message": "CanonicalTranscriptSourceView",
+      "field": "source_fingerprint"
+    },
+    {
+      "message": "CanonicalTranscriptSourceView",
+      "field": "source_fold_delta_fingerprint"
+    },
+    {
+      "message": "CanonicalTranscriptSourceView",
+      "field": "transcript_anchor_fingerprint"
+    },
+    {
+      "message": "CanonicalTranscriptSourceView",
+      "field": "transcript_leaf_fingerprint"
+    },
+    {
+      "message": "CanonicalTranscriptSourceView",
+      "field": "transcript_reducer_contract_fingerprint"
+    },
+    {
+      "message": "CommandBinding",
+      "field": "request_semantic_fingerprint"
+    },
+    {
+      "message": "CommandOutcome",
+      "field": "outcome_fingerprint"
+    },
+    {
+      "message": "CommittedPromptQueueHead",
+      "field": "checkpoint_fingerprint"
+    },
+    {
+      "message": "CommittedPromptQueueHead",
+      "field": "committed_head_fingerprint"
+    },
+    {
+      "message": "CommittedPromptQueueHead",
+      "field": "head_event_payload_fingerprint"
+    },
+    {
+      "message": "CommittedPromptQueueHead",
+      "field": "head_receipt_fingerprint"
+    },
+    {
+      "message": "ConfirmedRootRankBasis",
+      "field": "history_root_identity_fingerprint"
+    },
+    {
+      "message": "ConfirmedRootRankBasis",
+      "field": "rank_basis_fingerprint"
+    },
+    {
+      "message": "ControlProjectionChangedFrame",
+      "field": "base_control_projection_fingerprint"
+    },
+    {
+      "message": "ControlProjectionChangedFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "ControlProjectionChangedFrame",
+      "field": "resulting_control_projection_fingerprint"
+    },
+    {
+      "message": "ControlProjectionChangedFrame",
+      "field": "validated_after_control_cursor_fingerprint"
+    },
+    {
+      "message": "ControlProjectionCursor",
+      "field": "control_projection_fingerprint"
+    },
+    {
+      "message": "ControlProjectionCursor",
+      "field": "cursor_fingerprint"
+    },
+    {
+      "message": "ControlProjectionCursor",
+      "field": "registry_contract_fingerprint"
+    },
+    {
+      "message": "ControlProjectionGapFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "ControlProjectionGapFrame",
+      "field": "requested_control_cursor_fingerprint"
+    },
+    {
+      "message": "DurableAuditSourceView",
+      "field": "audit_anchor_fingerprint"
+    },
+    {
+      "message": "DurableAuditSourceView",
+      "field": "audit_cell_fingerprint"
+    },
+    {
+      "message": "DurableAuditSourceView",
+      "field": "extractor_contract_fingerprint"
+    },
+    {
+      "message": "DurableAuditSourceView",
+      "field": "presentation_policy_fingerprint"
+    },
+    {
+      "message": "DurableAuditSourceView",
+      "field": "source_fingerprint"
+    },
+    {
+      "message": "DurableCellCommon",
+      "field": "cell_fingerprint"
+    },
+    {
+      "message": "DurableObservationGapFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "EmptyPromptQueueGenesisHead",
+      "field": "checkpoint_fingerprint"
+    },
+    {
+      "message": "EmptyPromptQueueGenesisHead",
+      "field": "empty_head_fingerprint"
+    },
+    {
+      "message": "EmptyPromptQueueGenesisHead",
+      "field": "head_receipt_fingerprint"
+    },
+    {
+      "message": "EventReferenceView",
+      "field": "payload_fingerprint"
+    },
+    {
+      "message": "HandshakeCandidateTerminalReceipt",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "HandshakeCandidateTerminalReceipt",
+      "field": "prior_negotiation_winner_fingerprint"
+    },
+    {
+      "message": "HandshakeRecoveryCandidateIdentity",
+      "field": "schema_contract_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "field": "acknowledged_transport_binding_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "field": "attach_semantic_winner_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "field": "attachment_identity_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "field": "heartbeat_candidate_fingerprint"
+    },
+    {
+      "message": "HeartbeatAcceptedReceipt",
+      "field": "heartbeat_semantic_result_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "field": "attach_semantic_winner_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "field": "attachment_identity_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "field": "heartbeat_candidate_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "field": "heartbeat_semantic_result_fingerprint"
+    },
+    {
+      "message": "HeartbeatRejectedReceipt",
+      "field": "submitted_transport_binding_fingerprint"
+    },
+    {
+      "message": "HeartbeatRequest",
+      "field": "attach_semantic_winner_fingerprint"
+    },
+    {
+      "message": "HeartbeatRequest",
+      "field": "attachment_identity_fingerprint"
+    },
+    {
+      "message": "HeartbeatRequest",
+      "field": "heartbeat_candidate_fingerprint"
+    },
+    {
+      "message": "HelloNegotiationSemanticWinner",
+      "field": "capability_contract_fingerprint"
+    },
+    {
+      "message": "HelloNegotiationSemanticWinner",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "HelloNegotiationSemanticWinner",
+      "field": "negotiation_transcript_fingerprint"
+    },
+    {
+      "message": "HelloNegotiationWinnerUnavailable",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "HelloRejected",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "HelloRequest",
+      "field": "transport_auth_result_fingerprint"
+    },
+    {
+      "message": "HistoryCapacityReconciliationRequired",
+      "field": "capacity_state_fingerprint"
+    },
+    {
+      "message": "HistoryCapacityReconciliationRequired",
+      "field": "trusted_active_head_fingerprint"
+    },
+    {
+      "message": "HistoryCursorStale",
+      "field": "replacement_cursor_anchor_proof_fingerprint"
+    },
+    {
+      "message": "HistoryCursorStale",
+      "field": "requested_cursor_fingerprint"
+    },
+    {
+      "message": "HistoryCursorStale",
+      "field": "response_fingerprint"
+    },
+    {
+      "message": "HistoryEntryRemove",
+      "field": "change_fingerprint"
+    },
+    {
+      "message": "HistoryEntryRemove",
+      "field": "expected_previous_entry_fingerprint"
+    },
+    {
+      "message": "HistoryEntryUpsert",
+      "field": "change_fingerprint"
+    },
+    {
+      "message": "HistoryEntryUpsert",
+      "field": "expected_previous_entry_fingerprint"
+    },
+    {
+      "message": "HistoryPageData",
+      "field": "continuity_proof_fingerprint"
+    },
+    {
+      "message": "HistoryPageData",
+      "field": "response_fingerprint"
+    },
+    {
+      "message": "HistoryPageData",
+      "field": "validated_input_cursor_fingerprint"
+    },
+    {
+      "message": "HistoryPageRequest",
+      "field": "expected_projection_contract_fingerprint"
+    },
+    {
+      "message": "HistoryRebaseRequired",
+      "field": "requested_cursor_fingerprint"
+    },
+    {
+      "message": "HistoryRebaseRequired",
+      "field": "response_fingerprint"
+    },
+    {
+      "message": "HistoryReconciliationRequired",
+      "field": "requested_cursor_fingerprint"
+    },
+    {
+      "message": "HistoryReconciliationRequired",
+      "field": "response_fingerprint"
+    },
+    {
+      "message": "HistorySessionRotationRequired",
+      "field": "capacity_state_fingerprint"
+    },
+    {
+      "message": "HistoryTreeCapacityExhausted",
+      "field": "capacity_state_fingerprint"
+    },
+    {
+      "message": "McpInteraction",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "ObservationBatchFrame",
+      "field": "batch_fingerprint"
+    },
+    {
+      "message": "ObservationNoChangeFrame",
+      "field": "echoed_control_cursor_fingerprint"
+    },
+    {
+      "message": "ObservationNoChangeFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "OperationalActivityCommon",
+      "field": "activity_fingerprint"
+    },
+    {
+      "message": "OperationalActivityRemove",
+      "field": "expected_activity_fingerprint"
+    },
+    {
+      "message": "OperationalActivityRemove",
+      "field": "removal_fingerprint"
+    },
+    {
+      "message": "OperationalObservationGapFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "field": "acknowledged_transport_binding_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "field": "activity_fingerprint_accumulator"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "field": "attachment_identity_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "field": "operational_state_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotFrame",
+      "field": "snapshot_contract_fingerprint"
+    },
+    {
+      "message": "OperationalSnapshotRequest",
+      "field": "attachment_identity_fingerprint"
+    },
+    {
+      "message": "PlanExitInteraction",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "PlanQuestionInteraction",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "PresentationDataBlock",
+      "field": "block_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryActiveHeadIdentity",
+      "field": "active_head_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryCursor",
+      "field": "cursor_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryEntry",
+      "field": "entry_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryLatestRootCursorPair",
+      "field": "cursor_pair_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryPlacementKey",
+      "field": "placement_key_contract_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryPlacementKey",
+      "field": "placement_key_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRankedEntry",
+      "field": "ranked_view_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryResidentRemove",
+      "field": "change_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryResidentRemove",
+      "field": "expected_previous_entry_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryResidentUpsert",
+      "field": "change_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryResidentUpsert",
+      "field": "expected_previous_entry_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootAdvancedFrame",
+      "field": "checkpoint_full_confirmation_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootAdvancedFrame",
+      "field": "consumed_checkpoint_candidate_cut_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootAdvancedFrame",
+      "field": "frame_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootAdvancedFrame",
+      "field": "previous_active_head_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootCursorRelation",
+      "field": "relation_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "audit_extractor_registry_contract_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "checkpoint_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "history_projection_contract_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "materialization_policy_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "placement_key_contract_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "presentation_policy_registry_contract_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "projection_root_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "root_identity_fingerprint"
+    },
+    {
+      "message": "PresentationHistoryRootIdentity",
+      "field": "tree_contract_fingerprint"
+    },
+    {
+      "message": "PresentationTextBlock",
+      "field": "block_fingerprint"
+    },
+    {
+      "message": "ProjectionDeltaFrame",
+      "field": "delta_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotFrame",
+      "field": "projection_contract_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotFrame",
+      "field": "snapshot_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotFrame",
+      "field": "validated_minimum_observed_control_cursor_fingerprint"
+    },
+    {
+      "message": "PromptQueueClientProjection",
+      "field": "projection_contract_fingerprint"
+    },
+    {
+      "message": "PromptQueueClientProjection",
+      "field": "projection_fingerprint"
+    },
+    {
+      "message": "ProtocolVersion",
+      "field": "schema_contract_fingerprint"
+    },
+    {
+      "message": "ProtocolVersionRange",
+      "field": "schema_contract_fingerprint"
+    },
+    {
+      "message": "QueueItemView",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "RecoveredAttachmentTransportBinding",
+      "field": "previous_transport_binding_fingerprint"
+    },
+    {
+      "message": "ResidentEntriesUnchanged",
+      "field": "after_resident_vector_fingerprint"
+    },
+    {
+      "message": "ResidentEntriesUnchanged",
+      "field": "before_resident_vector_fingerprint"
+    },
+    {
+      "message": "ResidentEntriesUnchanged",
+      "field": "exact_equivalence_proof_fingerprint"
+    },
+    {
+      "message": "ResidentEntriesUnchanged",
+      "field": "transition_fingerprint"
+    },
+    {
+      "message": "ResidentHistoryRebaseRequired",
+      "field": "before_resident_vector_fingerprint"
+    },
+    {
+      "message": "ResidentHistoryRebaseRequired",
+      "field": "target_active_head_fingerprint"
+    },
+    {
+      "message": "ResidentHistoryRebaseRequired",
+      "field": "transition_fingerprint"
+    },
+    {
+      "message": "SecretLeaseRevoked",
+      "field": "lease_identity_fingerprint"
+    },
+    {
+      "message": "ServerHelloReceipt",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "ServerHelloReceipt",
+      "field": "negotiation_winner_fingerprint"
+    },
+    {
+      "message": "ServerNotificationView",
+      "field": "notification_fingerprint"
+    },
+    {
+      "message": "StartSuccessorSessionCommand",
+      "field": "source_capacity_state_fingerprint"
+    },
+    {
+      "message": "TerminalControlProjectionSnapshot",
+      "field": "snapshot_fingerprint"
+    },
+    {
+      "message": "TerminalControlProjectionView",
+      "field": "control_view_fingerprint"
+    },
+    {
+      "message": "TerminalControlSectionSourceVersion",
+      "field": "source_version_fingerprint"
+    },
+    {
+      "message": "TerminalControlSectionSourceVersion",
+      "field": "source_view_fingerprint"
+    },
+    {
+      "message": "TerminalPendingInteractionControlView",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "TerminalPromptQueueControlView",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "TerminalRunControlView",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "TerminalSecretLeaseIdentity",
+      "field": "identity_fingerprint"
+    },
+    {
+      "message": "TerminalServerNotificationProjection",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "TerminalSessionLifecycleControlView",
+      "field": "view_fingerprint"
+    },
+    {
+      "message": "TerminalTransportAuthPreface",
+      "field": "handshake_candidate_fingerprint"
+    },
+    {
+      "message": "TerminalTransportAuthResult",
+      "field": "authenticated_candidate_fingerprint"
+    }
+  ],
+  "stable_id_namespaces": {
+    "handshake_candidate": "handshake:<candidate-fingerprint-hex>",
+    "operation": "terminal-operation:<kind>:<generation>",
+    "request": "terminal-request:<kind>:<generation>"
+  }
+}
