@@ -136,6 +136,83 @@ class TerminalAttachmentRegistry:
             )
             return attachment.lease
 
+    def supersede_for_reconnect(
+        self,
+        *,
+        previous_attachment_id: str,
+        previous_attachment_generation: int,
+        connection_id: str,
+        client_instance_id: str,
+        request_controller: bool,
+    ) -> TerminalAttachmentLease:
+        """Atomically replace one ACKed semantic attachment on ordinary reconnect.
+
+        This is deliberately distinct from ``rebind_connection``.  A pre-ACK
+        retry keeps the same semantic attachment, while an ordinary Ready
+        reconnect installs the client's exact next attachment generation and
+        makes the predecessor fail closed at the same linearization point.
+        """
+
+        if (
+            not previous_attachment_id
+            or previous_attachment_generation < 1
+            or not connection_id
+            or not client_instance_id
+        ):
+            raise ValueError("terminal reconnect successor identity is incomplete")
+        now = monotonic()
+        with self._lock:
+            self._retire_expired_unlocked(now)
+            if self._closed:
+                raise RuntimeError("terminal attachment admission is closed")
+            previous = self._require_unlocked(
+                previous_attachment_id, previous_attachment_generation
+            )
+            if previous.lease.client_instance_id != client_instance_id:
+                raise PermissionError("terminal reconnect predecessor client is stale")
+            if self._client_generations.get(client_instance_id) != (
+                previous_attachment_generation
+            ):
+                raise PermissionError(
+                    "terminal reconnect predecessor generation is stale"
+                )
+
+            previous_was_controller = (
+                self._controller_attachment_id == previous_attachment_id
+            )
+            self._attachments.pop(previous_attachment_id)
+            if previous_was_controller:
+                self._controller_attachment_id = None
+
+            generation = previous_attachment_generation + 1
+            self._client_generations[client_instance_id] = generation
+            attachment_id = f"terminal-attachment:{uuid4().hex}"
+            role = "observer"
+            if request_controller and self._controller_attachment_id is None:
+                self._controller_generation += 1
+                self._controller_attachment_id = attachment_id
+                role = "controller"
+            elif previous_was_controller:
+                # The predecessor controller was retired but the successor did
+                # not request control.  This is still a controller-generation
+                # transition and must invalidate every old command binding.
+                self._controller_generation += 1
+
+            lease = self._lease(
+                attachment_id=attachment_id,
+                attachment_generation=generation,
+                connection_id=connection_id,
+                client_instance_id=client_instance_id,
+                role=role,
+                controller_generation=self._controller_generation,
+                now=now,
+            )
+            self._attachments[attachment_id] = _Attachment(
+                lease=lease,
+                last_heartbeat_monotonic=now,
+            )
+            return lease
+
     def takeover(
         self, *, attachment_id: str, attachment_generation: int
     ) -> TerminalAttachmentLease:

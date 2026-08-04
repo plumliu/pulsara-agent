@@ -28,28 +28,40 @@ func TestS1SnapshotBootstrapInstallsBaselinesInOrder(t *testing.T) {
 	state = applyMessage(t, state, AttachmentChallengePromotionAcceptedMsg{Header: localHeader(acceptanceOperation, acceptance.AcceptanceReceiptFingerprint), Receipt: acceptance})
 	issued := time.Now().UTC()
 	binding := testTransportBinding(t, "attachment:one", 1, auth.ConnectionID, 1, issued)
-	attachment := protocolvalue.Attachment{ClientInstanceID: candidate.ClientInstanceID, AttachmentAttemptGeneration: 1, ConnectionID: auth.ConnectionID, BindingGeneration: 1, BindingFingerprint: binding.Fingerprint, ID: "attachment:one", Generation: 1, RuntimeSessionID: "runtime:one", Role: protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER, IssuedAt: issued, ExpiresAt: issued.Add(time.Minute), IdentityFingerprint: "identity", SemanticWinnerFingerprint: "winner:attach", CurrentReceiptFingerprint: "attach-receipt", ControllerDisposition: protocol.ControllerDisposition_OBSERVER_ATTACHED, BootstrapRequirement: protocol.BootstrapRequirement_PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED, Heartbeat: protocolvalue.HeartbeatPolicy{Interval: 10 * time.Second, Grace: 20 * time.Second, MaximumMissedCount: 2}}
-	attachReceipt := protocolvalue.AttachReceipt{RequestID: wireToken(state).RequestID, TransportAuthAttemptID: auth.AttemptID, CandidateID: candidate.ID, CandidateFingerprint: candidate.Fingerprint, SemanticWinnerFingerprint: attachment.SemanticWinnerFingerprint, CurrentBinding: binding, Disposition: protocol.AttachResultDisposition_ATTACH_CREATED, ReceiptFingerprint: "attach-receipt"}
-	state = applyMessage(t, state, AttachAcceptedMsg{Header: ioHeader(wireToken(state), attachReceipt.ReceiptFingerprint), Attachment: attachment, Receipt: attachReceipt})
+	attachment := protocolvalue.Attachment{ClientInstanceID: candidate.ClientInstanceID, AttachmentAttemptGeneration: 1, ConnectionID: auth.ConnectionID, BindingGeneration: 1, BindingFingerprint: binding.Fingerprint, ID: "attachment:one", Generation: 1, RuntimeSessionID: "runtime:one", Role: protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER, IssuedAt: issued, ExpiresAt: issued.Add(time.Minute), IdentityFingerprint: "identity", SemanticWinnerFingerprint: "winner:attach", CurrentReceiptFingerprint: "attach-receipt", ControllerDisposition: protocol.ControllerDisposition_OBSERVER_ATTACHED, BootstrapRequirement: protocol.BootstrapRequirement_PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED, Heartbeat: protocolvalue.HeartbeatPolicy{Interval: 10 * time.Second, Grace: 20 * time.Second, MaximumMissedCount: 2}, HasReconnectCredential: true, ReconnectCredential: protocolvalue.ReconnectCredentialPublicIdentity{ID: "reconnect:one", ExpectedNextAttachmentAttemptGeneration: 2}}
+	attachReceipt := protocolvalue.AttachReceipt{RequestID: wireToken(state).RequestID, TransportAuthAttemptID: auth.AttemptID, CandidateID: candidate.ID, CandidateFingerprint: candidate.Fingerprint, SemanticWinnerFingerprint: attachment.SemanticWinnerFingerprint, CurrentBinding: binding, Disposition: protocol.AttachResultDisposition_ATTACH_CREATED, ReceiptFingerprint: "attach-receipt", HasReconnectCarrier: true, ReconnectCarrierFingerprint: "reconnect-carrier"}
+	state = applyMessage(t, state, AttachAcceptedMsg{Header: ioHeader(wireToken(state), attachReceipt.ReceiptFingerprint), Attachment: attachment, Receipt: attachReceipt, ReconnectCredentialHandleID: "terminal-reconnect-credential:" + candidate.ClientInstanceID})
 	ack := protocolvalue.ValidatedAttachAckResult{RequestID: wireToken(state).RequestID, AttachmentID: attachment.ID, AttachmentGeneration: attachment.Generation, SemanticWinnerFingerprint: attachment.SemanticWinnerFingerprint, AcknowledgedBindingFingerprint: attachment.BindingFingerprint, Disposition: protocol.AttachAckDisposition_ATTACH_ACKNOWLEDGED, ResultFingerprint: "ack-result"}
 	state = applyMessage(t, state, AttachAcknowledgedMsg{Header: ioHeader(wireToken(state), ack.ResultFingerprint), Result: ack})
 	if state.snapshotLoading.Phase != SnapshotAwaitingDurableSnapshot {
 		t.Fatalf("loading state = %d", state.snapshotLoading.Phase)
 	}
-	control := protocolvalue.ControlProjection{RuntimeSessionID: "runtime:one", Generation: 1, Revision: 2, ProjectionFingerprint: "control-view", ViewFingerprint: "control-view", TransitionAccumulator: "control-acc", RegistryFingerprint: "control-registry", CursorFingerprint: "control-cursor", SnapshotFingerprint: "control-snapshot", PendingInteraction: true, PendingInteractionID: "interaction:one", PendingInteractionGeneration: 1, PendingInteractionViewFingerprint: "interaction-view", QueueHeadFingerprint: "queue-head", QueueViewFingerprint: "queue-view", QueueAccumulator: "queue-acc", QueueItems: []protocolvalue.QueueItem{{ID: "queue:one"}, {ID: "queue:two"}}}
-	durable := protocolvalue.DurableSnapshot{RequestID: wireToken(state).RequestID, HostSessionID: "host:one", RuntimeSessionID: "runtime:one", AuthorityHighWater: 7, ProjectionRevision: 3, ActiveHeadFingerprint: "head", Control: control, SnapshotFingerprint: "snapshot", Cells: []protocolvalue.HistoryCell{{ID: "entry:one", Revision: 1, Kind: "assistant", PublicText: "你好 🌍", Fingerprint: "cell"}}}
-	state = applyMessage(t, state, SnapshotAcceptedMsg{Header: ioHeader(wireToken(state), durable.SnapshotFingerprint), Snapshot: durable})
+	control := protocolvalue.ControlProjection{RuntimeSessionID: "runtime:one", Generation: 1, Revision: 2, ProjectionFingerprint: testFingerprint("control-view:one"), ViewFingerprint: testFingerprint("control-view:one"), TransitionAccumulator: testFingerprint("control-acc:one"), RegistryFingerprint: testFingerprint("control-registry:one"), CursorFingerprint: testFingerprint("control-cursor:one"), SnapshotFingerprint: testFingerprint("control-snapshot:one"), PendingInteraction: true, PendingInteractionID: "interaction:one", PendingInteractionGeneration: 1, PendingInteractionViewFingerprint: "interaction-view", QueueHeadFingerprint: "queue-head", QueueViewFingerprint: "queue-view", QueueAccumulator: "queue-acc", QueueItems: []protocolvalue.QueueItem{{ID: "queue:one"}, {ID: "queue:two"}}}
+	durable := testDurableSnapshot("runtime:one", []protocolvalue.HistoryCell{{ID: "entry:one", Revision: 1, Kind: "assistant", PublicText: "你好 🌍", Fingerprint: "cell"}})
+	durable.RequestID, durable.HostSessionID, durable.Control = wireToken(state).RequestID, "host:one", control
+	request := state.connection.Outstanding.Wire
+	state = applyMessage(t, state, SnapshotAcceptedMsg{Header: ioHeader(wireToken(state), durable.SnapshotFingerprint), Request: protocolvalue.PreparedProjectionSnapshotRequest{RequestID: request.RequestID, RuntimeSessionID: "runtime:one"}, Snapshot: durable})
 	if state.snapshotLoading.Phase != SnapshotAwaitingOperationalSnapshot || !state.interaction.Pending() || state.interaction.ActionsEnabled() || state.queue.ActiveCount() != 2 || state.queue.ActionsEnabled() {
 		t.Fatal("durable snapshot did not install read-only control state")
 	}
 	operational := protocolvalue.OperationalSnapshot{RequestID: wireToken(state).RequestID, RuntimeSessionID: "runtime:one", AttachmentID: attachment.ID, AttachmentGeneration: attachment.Generation, AttachmentIdentityFingerprint: attachment.IdentityFingerprint, AcknowledgedBindingFingerprint: attachment.BindingFingerprint, Generation: 1, Cursor: 4, FrameFingerprint: "operational"}
-	state = applyMessage(t, state, OperationalSnapshotAcceptedMsg{Header: ioHeader(wireToken(state), operational.FrameFingerprint), Snapshot: operational})
+	state, observeEffects, _ := state.update(OperationalSnapshotAcceptedMsg{Header: ioHeader(wireToken(state), operational.FrameFingerprint), Snapshot: operational})
 	if state.phase != PhaseReady || !state.durable.Ready() || !state.operational.Ready() || !state.control.Ready() || state.snapshotLoading.Phase != SnapshotBaselinesInstalled {
-		t.Fatalf("S1 did not become ready: phase=%d", state.phase)
+		t.Fatalf("S1 did not become ready: phase=%d failure=%q", state.phase, state.publicFailure.Message())
+	}
+	if len(observeEffects) != 1 {
+		t.Fatalf("S2 ready state did not start observation: %#v", observeEffects)
+	}
+	observe, ok := observeEffects[0].(ObserveNextEffect)
+	if !ok {
+		t.Fatalf("unexpected post-bootstrap effect: %#v", observeEffects[0])
 	}
 	originalSemanticExpiry := state.attachment.Identity.ExpiresAt
 	heartbeatAt := state.connection.HeartbeatSchedule.NextAt.Add(time.Millisecond)
-	state, heartbeatEffects, _ := state.update(TickMsg{Header: testLocalMessageHeaderAt(t, 2, heartbeatAt), Kind: TickHeartbeat, TickGeneration: 1})
+	noChange := protocolvalue.ObservationNoChange{RequestID: observe.Request.RequestID, AuthorityHighWater: observe.Request.AfterAuthorityHighWater, ProjectionRevision: observe.Request.AfterProjectionRevision, OperationalGeneration: observe.Request.AfterOperational.Generation, OperationalCursor: observe.Request.AfterOperational.Cursor, ControlCursorFingerprint: observe.Request.AfterControl.Fingerprint, Fingerprint: testFingerprint("observation:no-change")}
+	noChangeHeader := ioHeader(observe.Header.Operation, noChange.Fingerprint)
+	noChangeHeader.ReceivedAt = heartbeatAt
+	state, heartbeatEffects, _ := state.update(ObservationNoChangeMsg{Header: noChangeHeader, Request: observe.Request, NoChange: noChange})
 	if len(heartbeatEffects) != 1 {
 		t.Fatal("heartbeat tick did not install an exact operation")
 	}
@@ -69,7 +81,7 @@ func TestS1SnapshotBootstrapInstallsBaselinesInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, teardownEffects, _ := state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 3), Key: quitKey})
+	state, teardownEffects, _ := state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 2), Key: quitKey})
 	if len(teardownEffects) != 1 || state.phase != PhaseDetaching {
 		t.Fatal("ready S1 state did not enter its sole teardown path")
 	}
@@ -103,7 +115,9 @@ func TestStaleOperationMessageCannotAdvanceState(t *testing.T) {
 }
 
 func TestPublicCopyUsesClosedEffectAndTypedReceipt(t *testing.T) {
-	state := NewInitialAppState("terminal-client:copy")
+	state := testReadyS2State(t, []protocolvalue.HistoryCell{{
+		ID: "entry:copy", Kind: "assistant", PublicText: "current materialized history", Fingerprint: testFingerprint("entry:copy"),
+	}})
 	key, err := NewNormalizedKey(KeyText, 0, "y", false)
 	if err != nil {
 		t.Fatal(err)
@@ -113,16 +127,45 @@ func TestPublicCopyUsesClosedEffectAndTypedReceipt(t *testing.T) {
 		t.Fatalf("copy bypassed the closed effect boundary: effects=%d command=%v", len(effects), command)
 	}
 	effect, ok := effects[0].(CopyPublicTextEffect)
-	if !ok || effect.Header.Operation.Kind != OpClipboard || effect.Header.Operation != next.connection.Outstanding.Local {
+	if !ok || effect.Header.Operation.Kind != OpClipboard || effect.Header.Operation != next.clipboard.Token || !next.clipboard.Pending {
 		t.Fatalf("unexpected copy effect: %#v", effects[0])
+	}
+	if effect.PublicUTF8 != "current materialized history\n" {
+		t.Fatalf("copy did not use the current materialized viewport: %q", effect.PublicUTF8)
 	}
 	receipt := PublicTextCopiedMsg{Header: localHeader(effect.Header.Operation, "clipboard-receipt")}
 	settled, _, _ := next.update(receipt)
-	if settled.connection.Outstanding.Carrier != OutstandingNone {
-		t.Fatal("clipboard receipt did not settle the installed operation")
+	if settled.clipboard.Pending {
+		t.Fatal("clipboard receipt did not settle its independent operation owner")
 	}
 	if err := settled.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPublicCopyDoesNotReplaceOutstandingObservation(t *testing.T) {
+	state := testReadyS2State(t, []protocolvalue.HistoryCell{{
+		ID: "entry:copy-observe", Kind: "assistant", PublicText: "current", Fingerprint: testFingerprint("entry:copy-observe"),
+	}})
+	state, observe := state.nextWire(OpObserve, time.Now().Add(time.Second))
+	key, err := NewNormalizedKey(KeyText, 0, "y", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, effects, _ := state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 1), Key: key})
+	if len(effects) != 1 || next.connection.Outstanding.Wire != observe || !next.clipboard.Pending {
+		t.Fatalf("clipboard replaced the live observation owner: outstanding=%#v clipboard=%#v effects=%#v", next.connection.Outstanding, next.clipboard, effects)
+	}
+	receipt := PublicTextCopiedMsg{Header: localHeader(next.clipboard.Token, "clipboard-receipt")}
+	settled, _, _ := next.update(receipt)
+	if settled.clipboard.Pending || settled.connection.Outstanding.Wire != observe {
+		t.Fatal("clipboard settlement disturbed the live observation owner")
+	}
+}
+
+func TestPublicCopyRejectsOversizedCurrentMaterializationWithoutTruncation(t *testing.T) {
+	if _, err := boundedClipboardText([]protocolvalue.HistoryCell{{PublicText: strings.Repeat("x", MaximumPublicClipboardBytes)}}); err == nil {
+		t.Fatal("clipboard payload above the exact 4 MiB envelope was accepted")
 	}
 }
 
@@ -179,16 +222,13 @@ func TestInvalidWindowSizeUsesBoundedFatalViewWithoutHiddenClamp(t *testing.T) {
 
 func TestMouseWheelScrollsOnlyTheResidentTranscriptViewport(t *testing.T) {
 	state := NewInitialAppState("terminal-client:mouse-wheel")
-	durable, err := state.durable.Install(protocolvalue.DurableSnapshot{
-		HostSessionID: "host:mouse", RuntimeSessionID: "runtime:mouse",
-		Control:             protocolvalue.ControlProjection{RuntimeSessionID: "runtime:mouse", CursorFingerprint: "control:mouse"},
-		SnapshotFingerprint: "snapshot:mouse",
-		Cells: []protocolvalue.HistoryCell{{
-			ID: "entry:mouse", Kind: "assistant",
-			PublicText:  "一段足够长的中文 transcript，用于验证滚轮只改变应用自己的 resident viewport，而不触碰 terminal scrollback。",
-			Fingerprint: "cell:mouse",
-		}},
-	})
+	snapshot := testDurableSnapshot("runtime:mouse", []protocolvalue.HistoryCell{{
+		ID: "entry:mouse", Kind: "assistant",
+		PublicText:  "一段足够长的中文 transcript，用于验证滚轮只改变应用自己的 resident viewport，而不触碰 terminal scrollback。",
+		Fingerprint: "cell:mouse",
+	}})
+	snapshot.HostSessionID = "host:mouse"
+	durable, err := state.durable.Install(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,12 +301,56 @@ func startState(t *testing.T, candidate protocolvalue.HandshakeCandidate) AppSta
 	return next
 }
 
-func TestS1NeverRetriesPostAcknowledgementWithoutReconnectCapability(t *testing.T) {
-	state := NewInitialAppState("terminal-client:no-reconnect")
+func TestS2ReconnectsPostAcknowledgementWithRotatedCapability(t *testing.T) {
+	state := NewInitialAppState("terminal-client:reconnect")
+	now := time.Now().UTC()
 	state.connection.Phase = ConnectionAttached
+	state.connection.HandshakeCandidate = protocolvalue.HandshakeCandidate{ID: "candidate:one", ClientInstanceID: "terminal-client:reconnect", AttachmentAttemptGeneration: 1, HostSessionID: "host:one", RuntimeSessionID: "runtime:one", Fingerprint: "candidate:one"}
+	state.connection.ReconnectCredentialHandleID = "terminal-reconnect-credential:terminal-client:reconnect"
+	state.connection.ReconnectCredentialCarrierFingerprint = "reconnect:carrier"
+	state.connection.HasReconnectCredentialHandle = true
+	state.attachment.Valid = true
+	state.attachment.Identity = protocolvalue.Attachment{ID: "attachment:one", Generation: 1, RuntimeSessionID: "runtime:one", ClientInstanceID: "terminal-client:reconnect", IdentityFingerprint: "attachment:identity", ExpiresAt: now.Add(time.Minute), Heartbeat: protocolvalue.HeartbeatPolicy{Interval: 10 * time.Second, Grace: 20 * time.Second, MaximumMissedCount: 2}}
+	state.connection.HeartbeatSchedule = HeartbeatScheduleState{NextGeneration: 1, NextAt: now.Add(10 * time.Second), LeaseExpiresAt: now.Add(time.Minute)}
+	snapshot := testDurableSnapshot("runtime:one", []protocolvalue.HistoryCell{{ID: "entry:one", Kind: "assistant", PublicText: "preserved while reconnecting", Fingerprint: testFingerprint("entry:one")}})
+	var err error
+	state.durable, err = state.durable.Install(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.transcript, err = state.transcript.Install(snapshot, state.layout.Width, state.layout.TranscriptRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.control, err = state.control.Install(snapshot.Control, snapshot.RuntimeSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operational := protocolvalue.OperationalSnapshot{RequestID: "request:operational", RuntimeSessionID: "runtime:one", AttachmentID: state.attachment.Identity.ID, AttachmentGeneration: 1, AttachmentIdentityFingerprint: state.attachment.Identity.IdentityFingerprint, Generation: 1, FrameFingerprint: testFingerprint("operational")}
+	state.operational, err = state.operational.Install(operational, snapshot.RuntimeSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.pageCache, err = state.pageCache.InstallLatest(snapshot, true, state.attachment.Identity.ID, state.attachment.Identity.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewport, err := state.pageCache.MaterializeCurrent(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.transcript, err = state.transcript.Replace(viewport, state.layout.Width, state.layout.TranscriptRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.snapshotLoading = SnapshotLoadingState{Phase: SnapshotBaselinesInstalled, AttachmentID: state.attachment.Identity.ID, AttachmentGeneration: 1, DurableSnapshotFingerprint: snapshot.SnapshotFingerprint, DurableControlCursorFingerprint: snapshot.Control.CursorFingerprint, OperationalSnapshotFingerprint: operational.FrameFingerprint, OperationalGeneration: 1}
+	state.phase = PhaseReady
+	if err := state.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	token := NewOperationToken(
 		OpProjectionSnapshot,
-		"terminal-client:no-reconnect",
+		"terminal-client:reconnect",
 		1,
 		1,
 		1,
@@ -286,9 +370,12 @@ func TestS1NeverRetriesPostAcknowledgementWithoutReconnectCapability(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, effects, command := transitionFailure(state, failure, time.Now())
-	if next.phase != PhaseFatal || next.publicFailure.Code() != FailureClientInvariant || len(effects) != 0 || command != nil {
-		t.Fatalf("post-ACK S1 failure attempted an unauthenticated reconnect: phase=%d code=%d", next.phase, next.publicFailure.Code())
+	next, effects, command := transitionFailure(state, failure, now)
+	if next.phase != PhaseReconnecting || next.connection.HandshakeCandidate.AttachmentAttemptGeneration != 2 || len(effects) != 1 || command != nil {
+		t.Fatalf("post-ACK S2 failure did not start credential-bound reconnect: phase=%d effects=%#v", next.phase, effects)
+	}
+	if next.Validate() != nil || !next.durable.Stale() || !next.operational.Stale() || !next.transcript.Ready() {
+		t.Fatalf("post-ACK reconnect did not preserve a valid read-only baseline: %v", next.Validate())
 	}
 }
 
@@ -430,11 +517,12 @@ func connectMessage(state AppState) ConnectSucceededMsg {
 	if err != nil {
 		panic(err)
 	}
-	fingerprint, err := ConnectResultFingerprint(token, "connection-handle:one", peer)
+	candidate := state.connection.HandshakeCandidate
+	fingerprint, err := ConnectResultFingerprint(token, "connection-handle:one", peer, candidate)
 	if err != nil {
 		panic(err)
 	}
-	return ConnectSucceededMsg{Header: localHeader(token, fingerprint), ConnectionHandleID: "connection-handle:one", Peer: peer}
+	return ConnectSucceededMsg{Header: localHeader(token, fingerprint), ConnectionHandleID: "connection-handle:one", Peer: peer, Candidate: candidate}
 }
 func wireToken(state AppState) OperationToken       { return state.connection.Outstanding.Wire }
 func localToken(state AppState) LocalOperationToken { return state.connection.Outstanding.Local }

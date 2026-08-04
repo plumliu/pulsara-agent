@@ -311,6 +311,24 @@ message TerminalClientTransportBindingIdentity {
   string binding_fingerprint = 6;
 }
 
+message ReconnectCredentialPublicIdentity {
+  string reconnect_credential_id = 1;
+  string client_instance_id = 2;
+  string previous_attachment_id = 3;
+  uint64 previous_attachment_generation = 4;
+  uint64 expected_next_attachment_attempt_generation = 5;
+  string issued_at_utc = 6;
+  string expires_at_utc = 7;
+  string credential_commitment = 8;
+  string identity_fingerprint = 9;
+}
+
+message ReconnectCredentialCarrier {
+  ReconnectCredentialPublicIdentity public_identity = 1;
+  bytes reconnect_capability = 2;
+  string carrier_fingerprint = 3;
+}
+
 enum ControllerDisposition {
   CONTROLLER_DISPOSITION_UNSPECIFIED = 0;
   CONTROLLER_GRANTED = 1;
@@ -333,6 +351,7 @@ message AttachSemanticWinner {
   BootstrapRequirement bootstrap_requirement = 7;
   HeartbeatPolicy heartbeat_policy = 8;
   string semantic_winner_fingerprint = 9;
+  optional ReconnectCredentialPublicIdentity next_reconnect_credential_public_identity = 10;
 }
 
 enum AttachResultDisposition {
@@ -352,6 +371,7 @@ message AttachResultReceipt {
   optional string previous_transport_binding_fingerprint = 7;
   AttachResultDisposition disposition = 8;
   string receipt_fingerprint = 9;
+  optional ReconnectCredentialCarrier next_reconnect_credential_carrier = 10;
 }
 
 message AttachReceiptAck {
@@ -1046,10 +1066,31 @@ message ProjectionSnapshotFrame {
   PresentationHistoryActiveHeadIdentity active_head = 8;
   repeated PresentationHistoryRankedEntry ordered_resident_entries = 9;
   PresentationHistoryLatestRootCursorPair latest_root_cursor_pair = 10;
-  reserved 11 to 17;
+	string resident_vector_fingerprint = 11;
+	string viewport_fingerprint = 12;
+	reserved 13 to 17;
   string snapshot_fingerprint = 18;
   TerminalControlProjectionSnapshot control_projection_snapshot = 19;
   optional string validated_minimum_observed_control_cursor_fingerprint = 20;
+}
+
+message ProjectionSnapshotControlRebaseRequired {
+  string request_id = 1;
+  string requested_minimum_control_cursor_fingerprint = 2;
+  ControlProjectionCursor latest_control_cursor = 3;
+  enum StableReason {
+    STABLE_REASON_UNSPECIFIED = 0;
+    CONTROL_GENERATION_REBASED = 1;
+  }
+  StableReason stable_reason = 4;
+  string response_fingerprint = 5;
+}
+
+message ProjectionSnapshotResponse {
+  oneof outcome {
+    ProjectionSnapshotFrame snapshot = 1;
+    ProjectionSnapshotControlRebaseRequired control_rebase_required = 2;
+  }
 }
 
 message OperationalActivityCommon {
@@ -1158,6 +1199,8 @@ message ProjectionDeltaFrame {
   PresentationHistoryActiveHeadIdentity resulting_active_head = 5;
   repeated HistoryEntryChange ordered_history_changes = 6;
   string delta_fingerprint = 7;
+	string base_resident_vector_fingerprint = 8;
+	string resulting_resident_vector_fingerprint = 9;
 }
 message AuthorityAdvanceFrame {
   string request_id = 1;
@@ -1341,6 +1384,7 @@ message OperationalDeltaFrame {
   uint64 operational_generation = 2;
   uint64 operational_cursor = 3;
   repeated OperationalActivityChange ordered_changes = 4;
+  string frame_fingerprint = 5;
 }
 
 message DurableObservationBranch {
@@ -1576,7 +1620,7 @@ message ServerFrame {
     HelloOutcome hello = 1;
     AttachResultReceipt attach = 2;
     HeartbeatResult heartbeat = 3;
-    ProjectionSnapshotFrame snapshot = 4;
+    ProjectionSnapshotResponse snapshot = 4;
     OperationalSnapshotFrame operational_snapshot = 5;
     ObservationResponse observation = 6;
     HistoryPageResponse history_page = 7;

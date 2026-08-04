@@ -311,6 +311,16 @@ class PresentationHistoryViewportService:
             canonical_bytes += entry_bytes
             rendered_bytes += entry_rendered_bytes
         ranked_entries = tuple(fitted)
+        if not ranked_entries and (page.ordered_ranked_entries or page.has_more):
+            # An empty page cannot carry a usable continuation anchor.  Treat a
+            # single entry that exceeds the negotiated byte budget as a typed
+            # reconciliation condition instead of returning ``has_more`` with
+            # no cursor and permanently stranding the client at the boundary.
+            return self._reconciliation(
+                cursor,
+                fault_code="PRESENTATION_PAGE_ENTRY_EXCEEDS_BYTE_BOUND",
+                retry_after_ms=None,
+            )
         before_cursor = _cursor(identity, ranked_entries[0]) if ranked_entries else None
         after_cursor = _cursor(identity, ranked_entries[-1]) if ranked_entries else None
         first_rank = (

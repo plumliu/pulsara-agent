@@ -28,6 +28,19 @@ _S1_REQUIRED_CAPABILITIES = (
     wire.LAUNCH_AUTH_PREFACE_V1,
     wire.ATTACH_ACK_V1,
 )
+_S2_REQUIRED_CAPABILITIES = tuple(
+    sorted(
+        {
+            *_S1_REQUIRED_CAPABILITIES,
+            wire.HISTORY_PAGE_V1,
+            wire.OBSERVATION_STREAM_V1,
+            wire.ROOT_ADVANCE_V1,
+            wire.GAP_REBUILD_V1,
+            wire.CONTROL_PROJECTION_OBSERVATION_V1,
+            wire.RECONNECT_AUTH_ROTATION_V1,
+        }
+    )
+)
 _HEADLESS_SUPPORTED_CAPABILITIES = tuple(
     sorted(
         {
@@ -37,6 +50,7 @@ _HEADLESS_SUPPORTED_CAPABILITIES = tuple(
             wire.ROOT_ADVANCE_V1,
             wire.GAP_REBUILD_V1,
             wire.CONTROL_PROJECTION_OBSERVATION_V1,
+            wire.RECONNECT_AUTH_ROTATION_V1,
             wire.CONTROLLER_COMMAND_V1,
             wire.COMMAND_QUERY_V1,
             wire.SESSION_SUCCESSOR_V1,
@@ -58,6 +72,7 @@ class HeadlessTerminalConformanceClient:
     hello: wire.ServerHello | None = None
     attach_receipt: wire.AttachResultReceipt | None = None
     attachment: wire.AttachmentIdentity | None = None
+    reconnect_credential: wire.ReconnectCredentialCarrier | None = None
     control_cursor: wire.ControlProjectionCursor | None = None
     heartbeat_generation: int = 0
 
@@ -68,83 +83,64 @@ class HeadlessTerminalConformanceClient:
         runtime_session_id: str,
         controller: bool = True,
     ) -> None:
-        self.reader, self.writer = await asyncio.open_unix_connection(
-            str(self.socket_path)
-        )
         requested_role = (
             wire.ATTACHMENT_ROLE_CONTROLLER
             if controller
             else wire.ATTACHMENT_ROLE_OBSERVER
         )
-        candidate = wire.HandshakeRecoveryCandidateIdentity(
-            candidate_version=1,
-            client_instance_id=self.client_instance_id,
-            attachment_attempt_generation=1,
+        candidate = self._candidate(
             host_session_id=host_session_id,
-            requested_runtime_session_id=runtime_session_id,
-            requested_attachment_role=requested_role,
-            minimum_protocol_major=PROTOCOL_MAJOR,
-            minimum_protocol_minor=PROTOCOL_MINOR,
-            maximum_protocol_major=PROTOCOL_MAJOR,
-            maximum_protocol_minor=PROTOCOL_MINOR,
-            client_build_identity="python-headless-conformance:v2",
-            supported_capabilities=_HEADLESS_SUPPORTED_CAPABILITIES,
-            required_capabilities=_S1_REQUIRED_CAPABILITIES,
-            schema_contract_fingerprint=PROTOCOL_SCHEMA_FINGERPRINT,
+            runtime_session_id=runtime_session_id,
+            requested_role=requested_role,
+            generation=1,
         )
-        install_protobuf_fingerprint(
-            "terminal-handshake-recovery-candidate:v1",
-            candidate,
-            own_field="candidate_fingerprint",
-            clear_fields=("candidate_id",),
-        )
-        candidate.candidate_id = (
-            "handshake:" + candidate.candidate_fingerprint.removeprefix("sha256:")
-        )
-        auth_request_id = self._id()
-        preface = wire.TerminalTransportAuthPreface(
-            preface_version=1,
-            auth_request_id=auth_request_id,
-            client_instance_id=self.client_instance_id,
-            handshake_candidate_id=candidate.candidate_id,
-            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
-            connection_nonce=secrets.token_bytes(32),
-            initial_launch=wire.InitialLaunchCredential(
-                launch_id=self.launch_id,
-                launch_capability=self.launch_capability,
-            ),
-        )
-        install_protobuf_fingerprint(
-            "terminal-transport-auth-preface:v1",
-            preface,
-            own_field="preface_fingerprint",
-        )
-        auth_result = await self._exchange_raw(
-            preface, wire.TerminalTransportAuthResult
-        )
-        if auth_result.disposition not in {
-            wire.TRANSPORT_AUTHENTICATED,
-            wire.TRANSPORT_COMPATIBLE_AUTH_WINNER,
-        }:
-            raise RuntimeError("terminal transport authentication failed")
-        response = await self.exchange(
-            wire.ClientFrame(
-                hello=wire.HelloRequest(
-                    request_id=self._id(),
-                    transport_auth_attempt_id=auth_result.auth_attempt_id,
-                    transport_auth_result_fingerprint=(auth_result.result_fingerprint),
-                    handshake_candidate=candidate,
-                )
+        await self._connect_and_negotiate(candidate=candidate, reconnect=None)
+
+    async def ordinary_reconnect(self, *, controller: bool | None = None) -> None:
+        """Replace one Ready attachment through the formal rotating credential."""
+
+        previous_candidate = self.candidate
+        previous_attachment = self.attachment
+        credential = self.reconnect_credential
+        if (
+            previous_candidate is None
+            or previous_attachment is None
+            or credential is None
+        ):
+            raise RuntimeError("terminal reconnect authority is unavailable")
+        requested_role = (
+            previous_candidate.requested_attachment_role
+            if controller is None
+            else (
+                wire.ATTACHMENT_ROLE_CONTROLLER
+                if controller
+                else wire.ATTACHMENT_ROLE_OBSERVER
             )
         )
+        candidate = self._candidate(
+            host_session_id=previous_candidate.host_session_id,
+            runtime_session_id=previous_candidate.requested_runtime_session_id,
+            requested_role=requested_role,
+            generation=previous_candidate.attachment_attempt_generation + 1,
+        )
+        if self.writer is not None:
+            self.writer.close()
+            await self.writer.wait_closed()
+        self.reader = None
+        self.writer = None
+        await self._connect_and_negotiate(
+            candidate=candidate,
+            reconnect=credential,
+        )
+        await self.attach(candidate.host_session_id, controller=controller is not False)
+        successor = self._require_attachment()
         if (
-            response.WhichOneof("response") != "hello"
-            or response.hello.WhichOneof("outcome") != "accepted"
+            successor.attachment_generation
+            != previous_attachment.attachment_generation + 1
+            or successor.attachment_id == previous_attachment.attachment_id
         ):
-            raise RuntimeError("terminal conformance hello failed")
-        self.auth_result = auth_result
-        self.candidate = candidate
-        self.hello = response.hello.accepted
+            raise RuntimeError("terminal reconnect did not install a successor")
+        self.heartbeat_generation = 0
 
     async def attach(self, host_session_id: str, *, controller: bool = True) -> None:
         hello = self.hello
@@ -207,6 +203,10 @@ class HeadlessTerminalConformanceClient:
             raise RuntimeError("terminal conformance attach ACK failed")
         self.attach_receipt = receipt
         self.attachment = attachment
+        if not receipt.HasField("next_reconnect_credential_carrier"):
+            raise RuntimeError("terminal S2 reconnect credential is unavailable")
+        self.reconnect_credential = wire.ReconnectCredentialCarrier()
+        self.reconnect_credential.CopyFrom(receipt.next_reconnect_credential_carrier)
 
     async def attach_with_lost_ack_result(self) -> None:
         """Commit Attach/ACK, then drop the physical ACK response for recovery tests."""
@@ -366,11 +366,17 @@ class HeadlessTerminalConformanceClient:
         self.auth_result = result
         return result
 
-    async def snapshot(self) -> wire.ProjectionSnapshotFrame:
+    async def snapshot(
+        self,
+        *,
+        minimum_control_cursor: wire.ControlProjectionCursor | None = None,
+    ) -> wire.ProjectionSnapshotFrame:
         attachment = self._require_attachment()
         request = wire.ProjectionSnapshotRequest(
             request_id=self._id(), runtime_session_id=attachment.runtime_session_id
         )
+        if minimum_control_cursor is not None:
+            request.minimum_observed_control_cursor.CopyFrom(minimum_control_cursor)
         install_protobuf_fingerprint(
             "terminal-projection-snapshot-request:v2",
             request,
@@ -379,11 +385,13 @@ class HeadlessTerminalConformanceClient:
         response = await self.exchange(wire.ClientFrame(snapshot=request))
         if response.WhichOneof("response") != "snapshot":
             raise RuntimeError("terminal snapshot failed")
+        outcome = response.snapshot.WhichOneof("outcome")
+        if outcome != "snapshot":
+            raise RuntimeError(f"terminal snapshot requires rebase: {outcome}")
+        snapshot = response.snapshot.snapshot
         self.control_cursor = wire.ControlProjectionCursor()
-        self.control_cursor.CopyFrom(
-            response.snapshot.control_projection_snapshot.cursor
-        )
-        return response.snapshot
+        self.control_cursor.CopyFrom(snapshot.control_projection_snapshot.cursor)
+        return snapshot
 
     async def operational_snapshot(self) -> wire.OperationalSnapshotFrame:
         attachment = self._require_attachment()
@@ -600,6 +608,7 @@ class HeadlessTerminalConformanceClient:
         if response.WhichOneof("response") != "command_outcome":
             raise RuntimeError("terminal detach failed")
         self.attachment = None
+        self.reconnect_credential = None
         return response.command_outcome
 
     async def start_successor_session(
@@ -681,6 +690,7 @@ class HeadlessTerminalConformanceClient:
         self.candidate = None
         self.attach_receipt = None
         self.attachment = None
+        self.reconnect_credential = None
         self.heartbeat_generation = 0
 
     async def _exchange_raw(self, request, response_type):
@@ -693,6 +703,115 @@ class HeadlessTerminalConformanceClient:
         response = response_type()
         response.ParseFromString(await self.reader.readexactly(size))
         return response
+
+    def _candidate(
+        self,
+        *,
+        host_session_id: str,
+        runtime_session_id: str,
+        requested_role: int,
+        generation: int,
+    ) -> wire.HandshakeRecoveryCandidateIdentity:
+        candidate = wire.HandshakeRecoveryCandidateIdentity(
+            candidate_version=1,
+            client_instance_id=self.client_instance_id,
+            attachment_attempt_generation=generation,
+            host_session_id=host_session_id,
+            requested_runtime_session_id=runtime_session_id,
+            requested_attachment_role=requested_role,
+            minimum_protocol_major=PROTOCOL_MAJOR,
+            minimum_protocol_minor=PROTOCOL_MINOR,
+            maximum_protocol_major=PROTOCOL_MAJOR,
+            maximum_protocol_minor=PROTOCOL_MINOR,
+            client_build_identity="python-headless-conformance:v2",
+            supported_capabilities=_HEADLESS_SUPPORTED_CAPABILITIES,
+            required_capabilities=_S2_REQUIRED_CAPABILITIES,
+            schema_contract_fingerprint=PROTOCOL_SCHEMA_FINGERPRINT,
+        )
+        install_protobuf_fingerprint(
+            "terminal-handshake-recovery-candidate:v1",
+            candidate,
+            own_field="candidate_fingerprint",
+            clear_fields=("candidate_id",),
+        )
+        candidate.candidate_id = (
+            "handshake:" + candidate.candidate_fingerprint.removeprefix("sha256:")
+        )
+        return candidate
+
+    async def _connect_and_negotiate(
+        self,
+        *,
+        candidate: wire.HandshakeRecoveryCandidateIdentity,
+        reconnect: wire.ReconnectCredentialCarrier | None,
+    ) -> None:
+        self.reader, self.writer = await asyncio.open_unix_connection(
+            str(self.socket_path)
+        )
+        preface = wire.TerminalTransportAuthPreface(
+            preface_version=1,
+            auth_request_id=self._id(),
+            client_instance_id=self.client_instance_id,
+            handshake_candidate_id=candidate.candidate_id,
+            handshake_candidate_fingerprint=candidate.candidate_fingerprint,
+            connection_nonce=secrets.token_bytes(32),
+        )
+        if reconnect is None:
+            preface.initial_launch.CopyFrom(
+                wire.InitialLaunchCredential(
+                    launch_id=self.launch_id,
+                    launch_capability=self.launch_capability,
+                )
+            )
+        else:
+            identity = reconnect.public_identity
+            if (
+                identity.client_instance_id != self.client_instance_id
+                or identity.expected_next_attachment_attempt_generation
+                != candidate.attachment_attempt_generation
+            ):
+                raise RuntimeError("terminal reconnect credential is stale")
+            preface.reconnect.CopyFrom(
+                wire.ReconnectCredential(
+                    reconnect_credential_id=identity.reconnect_credential_id,
+                    reconnect_capability=reconnect.reconnect_capability,
+                    previous_attachment_id=identity.previous_attachment_id,
+                    previous_attachment_generation=(
+                        identity.previous_attachment_generation
+                    ),
+                )
+            )
+        install_protobuf_fingerprint(
+            "terminal-transport-auth-preface:v1",
+            preface,
+            own_field="preface_fingerprint",
+        )
+        auth_result = await self._exchange_raw(
+            preface, wire.TerminalTransportAuthResult
+        )
+        if auth_result.disposition not in {
+            wire.TRANSPORT_AUTHENTICATED,
+            wire.TRANSPORT_COMPATIBLE_AUTH_WINNER,
+        }:
+            raise RuntimeError("terminal transport authentication failed")
+        response = await self.exchange(
+            wire.ClientFrame(
+                hello=wire.HelloRequest(
+                    request_id=self._id(),
+                    transport_auth_attempt_id=auth_result.auth_attempt_id,
+                    transport_auth_result_fingerprint=(auth_result.result_fingerprint),
+                    handshake_candidate=candidate,
+                )
+            )
+        )
+        if (
+            response.WhichOneof("response") != "hello"
+            or response.hello.WhichOneof("outcome") != "accepted"
+        ):
+            raise RuntimeError("terminal conformance hello failed")
+        self.auth_result = auth_result
+        self.candidate = candidate
+        self.hello = response.hello.accepted
 
     async def exchange(self, request: wire.ClientFrame) -> wire.ServerFrame:
         if self.reader is None or self.writer is None:

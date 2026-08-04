@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -8,13 +9,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/interaction"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/presentation"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/queue"
 )
 
 const (
-	localOperationDeadline = 5 * time.Second
-	wireOperationDeadline  = 10 * time.Second
+	localOperationDeadline      = 5 * time.Second
+	wireOperationDeadline       = 10 * time.Second
+	MaximumPublicClipboardBytes = 4 * 1024 * 1024
+	MaximumPublicClipboardRunes = 1_000_000
+	maximumLocalNotifications   = 8
 )
 
 func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
@@ -35,7 +40,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.connection.Phase = ConnectionDialing
 		var token LocalOperationToken
 		s, token = s.nextLocal(OpConnect, started.Header.ProducedAt.Add(localOperationDeadline))
-		return s, []Effect{ConnectEffect{Header: newLocalHeader(token), BootstrapHandleID: started.BootstrapHandleID}}, nil
+		return s, []Effect{ConnectEffect{Header: newLocalHeader(token), BootstrapHandleID: started.BootstrapHandleID, AttachmentAttemptGeneration: started.HandshakeCandidate.AttachmentAttemptGeneration}}, nil
 	}
 	if revoked, ok := message.(AttachmentChallengeRevokedMsg); ok {
 		if revoked.Receipt.Validate() != nil {
@@ -52,7 +57,12 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			return fatalState(s, "terminal resize exceeds the bounded layout contract"), nil, nil
 		}
 		snapshot := protocolvalue.DurableSnapshot{}
-		if s.durable.Ready() {
+		if s.durable.Installed() && s.pageCache.Ready() {
+			snapshot, err = s.pageCache.MaterializeCurrent(s.durable.Durable())
+			if err != nil {
+				return fatalState(s, fmt.Sprintf("terminal viewport materialization: %v", err)), nil, nil
+			}
+		} else if s.durable.Installed() {
 			snapshot = s.durable.Durable()
 		}
 		transcriptModel, err := s.transcript.Resize(snapshot, layout.Width, layout.TranscriptRows)
@@ -64,6 +74,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		return s, nil, nil
 	}
 	if key, ok := message.(KeyInputMsg); ok {
+		s.localNotifications.Items = nil
 		observedAt := key.Header.ProducedAt
 		switch key.Key.Action {
 		case KeyInterrupt, KeyEOF, KeyEscape:
@@ -73,14 +84,58 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			s, token = s.nextLocal(OpTeardown, s.teardown.Deadline)
 			return s, []Effect{BeginTeardownEffect{Header: newLocalHeader(token), Reason: TeardownUserQuit}}, nil
 		case KeyUp:
+			if !advanceViewportIntent(&s) {
+				return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+			}
 			s.transcript = s.transcript.Scroll(1)
 		case KeyDown:
+			if !advanceViewportIntent(&s) {
+				return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+			}
 			s.transcript = s.transcript.Scroll(-1)
 		case KeyPageUp:
+			if !advanceViewportIntent(&s) {
+				return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+			}
 			s.transcript = s.transcript.Page(1)
+			if s.transcript.AtTop() {
+				if root, ok := s.pageCache.Current(); ok && root.HasMoreBefore && root.HasBeforeCursor {
+					s.transcript = s.transcript.Pin()
+					s.observation.PageIntentDirection, s.observation.HasPageIntent = protocolvalue.HistoryPageBefore, true
+				}
+			}
 		case KeyPageDown:
+			if !advanceViewportIntent(&s) {
+				return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+			}
 			s.transcript = s.transcript.Page(-1)
+			if s.transcript.FollowTail() {
+				if root, ok := s.pageCache.Current(); ok && root.HasMoreAfter && root.HasAfterCursor {
+					s.transcript = s.transcript.Pin()
+					s.observation.PageIntentDirection, s.observation.HasPageIntent = protocolvalue.HistoryPageAfter, true
+				}
+			}
 		case KeyEnd:
+			if !advanceViewportIntent(&s) {
+				return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+			}
+			if !s.pageCache.Ready() {
+				s.transcript = s.transcript.End()
+				break
+			}
+			var err error
+			s.pageCache, err = s.pageCache.SwitchToLatest()
+			if err != nil {
+				return fatalState(s, fmt.Sprintf("terminal latest viewport switch: %v", err)), nil, nil
+			}
+			materialized, materializeErr := s.pageCache.MaterializeCurrent(s.durable.Durable())
+			if materializeErr != nil {
+				return fatalState(s, fmt.Sprintf("terminal latest viewport materialization: %v", materializeErr)), nil, nil
+			}
+			s.transcript, err = s.transcript.Replace(materialized, s.layout.Width, s.layout.TranscriptRows)
+			if err != nil {
+				return fatalState(s, fmt.Sprintf("terminal latest viewport replacement: %v", err)), nil, nil
+			}
 			s.transcript = s.transcript.End()
 		case KeyText:
 			if key.Key.Modifiers == 0 && key.Key.TextUTF8 == "q" {
@@ -93,18 +148,38 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			if key.Key.Modifiers != 0 || key.Key.TextUTF8 != "y" {
 				return s, nil, nil
 			}
-			var text strings.Builder
-			for _, cell := range s.durable.Durable().Cells {
-				text.WriteString(cell.PublicText)
-				text.WriteByte('\n')
+			if !s.durable.Installed() || !s.pageCache.Ready() {
+				return s, nil, nil
+			}
+			if s.clipboard.Pending {
+				s = appendLocalNotification(s, "copy already in progress")
+				return s, nil, nil
+			}
+			materialized, materializeErr := s.pageCache.MaterializeCurrent(s.durable.Durable())
+			if materializeErr != nil {
+				return fatalState(s, fmt.Sprintf("terminal clipboard materialization: %v", materializeErr)), nil, nil
+			}
+			publicText, copyErr := boundedClipboardText(materialized.Cells)
+			if copyErr != nil {
+				s = appendLocalNotification(s, "copy unavailable: current history exceeds 4 MiB")
+				return s, nil, nil
 			}
 			var token LocalOperationToken
-			s, token = s.nextLocal(OpClipboard, observedAt.Add(localOperationDeadline))
-			return s, []Effect{CopyPublicTextEffect{Header: newLocalHeader(token), PublicUTF8: text.String()}}, nil
+			s, token = s.nextDetachedLocal(OpClipboard, observedAt.Add(localOperationDeadline))
+			s.clipboard = ClipboardOperationState{Pending: true, Token: token}
+			return s, []Effect{CopyPublicTextEffect{Header: newLocalHeader(token), PublicUTF8: publicText}}, nil
+		}
+		if s.connection.Outstanding.Carrier == OutstandingNone {
+			next, liveEffects, err := nextLiveEffect(s, observedAt)
+			if err != nil {
+				return fatalState(s, err.Error()), nil, nil
+			}
+			return next, liveEffects, nil
 		}
 		return s, nil, nil
 	}
 	if wheel, ok := message.(MouseWheelInputMsg); ok {
+		s.localNotifications.Items = nil
 		if wheel.VisualRows != mouseWheelVisualRows || wheel.Direction < MouseWheelScrollUp || wheel.Direction > MouseWheelScrollDown {
 			return fatalState(s, "terminal mouse wheel input is outside its closed contract"), nil, nil
 		}
@@ -112,8 +187,26 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		if wheel.Direction == MouseWheelScrollDown {
 			delta = -delta
 		}
+		if !advanceViewportIntent(&s) {
+			return fatalState(s, "terminal viewport intent generation exhausted"), nil, nil
+		}
 		s.transcript = s.transcript.Scroll(delta)
 		return s, nil, nil
+	}
+	if overflow, ok := message.(LocalObservationOverflowMsg); ok {
+		if overflow.Reason == 0 || !s.attachment.Valid || !s.durable.Installed() {
+			return fatalState(s, "terminal local observation overflow is invalid"), nil, nil
+		}
+		s.durable, s.operational = presentation.Rebuild(s.durable, s.operational)
+		s.pageCache = presentation.NewPageCache()
+		s.observation.PendingPage, s.observation.HasPendingPage = protocolvalue.PreparedHistoryPageRequest{}, false
+		s.observation.HasPageIntent = false
+		s.phase = PhaseReadOnly
+		next, effect, err := requestDurableSnapshot(s, overflow.Header.ProducedAt, nil, true)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		return validatedState(next), []Effect{effect}, nil
 	}
 	if due, ok := message.(ReconnectDueMsg); ok {
 		if s.phase != PhaseReconnecting || s.connection.Phase != ConnectionBackoff || due.ReconnectGeneration != s.connection.Generation || s.connection.Outstanding.Carrier != OutstandingNone {
@@ -123,7 +216,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.phase = PhaseConnecting
 		s.connection.Phase = ConnectionDialing
 		s, token = s.nextLocal(OpConnect, due.Header.ProducedAt.Add(localOperationDeadline))
-		return s, []Effect{ConnectEffect{Header: newLocalHeader(token), BootstrapHandleID: s.connection.BootstrapHandleID}}, nil
+		return s, []Effect{ConnectEffect{Header: newLocalHeader(token), BootstrapHandleID: s.connection.BootstrapHandleID, AttachmentAttemptGeneration: s.connection.HandshakeCandidate.AttachmentAttemptGeneration}}, nil
 	}
 	if tick, ok := message.(TickMsg); ok {
 		observedAt := tick.Header.ProducedAt
@@ -176,6 +269,27 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		// Composer/secret behavior is intentionally dormant in S1.
 		return s, nil, nil
 	}
+	if copied, ok := message.(PublicTextCopiedMsg); ok {
+		if !s.clipboard.Pending || copied.Header.Operation != s.clipboard.Token {
+			return validatedState(s), nil, nil
+		}
+		if err := validateMessage(copied); err != nil {
+			return fatalState(s, fmt.Sprintf("terminal clipboard result contract: %v", err)), nil, nil
+		}
+		s.clipboard = ClipboardOperationState{}
+		return validatedState(s), nil, nil
+	}
+	if failed, ok := message.(PublicTextCopyFailedMsg); ok {
+		if !s.clipboard.Pending || failed.Header.Operation != s.clipboard.Token {
+			return validatedState(s), nil, nil
+		}
+		if err := validateMessage(failed); err != nil {
+			return fatalState(s, fmt.Sprintf("terminal clipboard failure contract: %v", err)), nil, nil
+		}
+		s.clipboard = ClipboardOperationState{}
+		s = appendLocalNotification(s, "copy failed")
+		return validatedState(s), nil, nil
+	}
 
 	operation, hasOperation := messageOutstanding(message)
 	if hasOperation && operation != s.connection.Outstanding {
@@ -196,8 +310,18 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 	var effects []Effect
 	switch value := message.(type) {
 	case ConnectSucceededMsg:
+		if value.Candidate.AttachmentAttemptGeneration != s.connection.HandshakeCandidate.AttachmentAttemptGeneration || value.Candidate.ClientInstanceID != s.connection.ClientInstanceID {
+			return fatalState(s, "terminal connected handshake candidate is stale"), nil, nil
+		}
 		s.connection.Phase = ConnectionAuthPending
 		s.connection.HandleID = value.ConnectionHandleID
+		s.connection.HandshakeCandidate = value.Candidate
+		if value.Candidate.AttachmentAttemptGeneration > 1 {
+			if !s.connection.HasReconnectCredentialHandle {
+				return fatalState(s, "terminal reconnect credential handle is unavailable"), nil, nil
+			}
+			s.connection.TransportCredentialHandleID = s.connection.ReconnectCredentialHandleID
+		}
 		var token OperationToken
 		s, token = s.nextWire(OpTransportAuth, now.Add(wireOperationDeadline))
 		effects = append(effects, AuthenticateTransportEffect{Header: newWireHeader(token), ConnectionHandleID: value.ConnectionHandleID, CredentialHandleID: s.connection.TransportCredentialHandleID, Candidate: s.connection.HandshakeCandidate})
@@ -230,10 +354,13 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			s.connection.HeartbeatSchedule.LeaseExpiresAt = value.Attachment.ExpiresAt
 		}
 		s.phase = PhaseLoadingSnapshot
-		var token OperationToken
-		s, token = s.nextWire(OpProjectionSnapshot, now.Add(wireOperationDeadline))
-		s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingDurableSnapshot, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableOperationID: token.OperationID, DurableOperationGeneration: token.OperationGeneration}
-		effects = append(effects, RequestSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID})
+		var snapshotEffect RequestSnapshotEffect
+		var err error
+		s, snapshotEffect, err = requestDurableSnapshot(s, now, nil, true)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		effects = append(effects, snapshotEffect)
 	case TransportAuthenticationFailedMsg:
 		return transitionFailure(s, value.Failure, now)
 	case HelloAcceptedMsg:
@@ -312,6 +439,9 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.attachment = AttachmentState{Valid: true, Identity: value.Attachment}
 		s.connection.AttachmentChallenge.Phase = AttachmentChallengeConsumed
 		s.connection.AttachReceipt = value.Receipt
+		s.connection.ReconnectCredentialHandleID = value.ReconnectCredentialHandleID
+		s.connection.ReconnectCredentialCarrierFingerprint = value.Receipt.ReconnectCarrierFingerprint
+		s.connection.HasReconnectCredentialHandle = true
 		s.connection.Phase = ConnectionAttachAckPending
 		var token OperationToken
 		s, token = s.nextWire(OpAttachAck, now.Add(wireOperationDeadline))
@@ -326,21 +456,39 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.connection.Phase = ConnectionAttached
 		s.connection.HeartbeatSchedule = HeartbeatScheduleState{NextGeneration: 1, NextAt: now.Add(s.attachment.Identity.Heartbeat.Interval), LeaseExpiresAt: s.attachment.Identity.ExpiresAt}
 		s.phase = PhaseLoadingSnapshot
-		var token OperationToken
-		s, token = s.nextWire(OpProjectionSnapshot, now.Add(wireOperationDeadline))
-		s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingDurableSnapshot, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableOperationID: token.OperationID, DurableOperationGeneration: token.OperationGeneration}
-		effects = append(effects, RequestSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID})
+		var snapshotEffect RequestSnapshotEffect
+		var err error
+		s, snapshotEffect, err = requestDurableSnapshot(s, now, nil, true)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		effects = append(effects, snapshotEffect)
 	case AttachAckFailedMsg:
 		return transitionFailure(s, value.Failure, now)
 	case SnapshotAcceptedMsg:
 		if value.Snapshot.RuntimeSessionID != s.attachment.Identity.RuntimeSessionID || value.Snapshot.Control.RuntimeSessionID != s.attachment.Identity.RuntimeSessionID {
 			return fatalState(s, "terminal durable snapshot crosses runtime sessions"), nil, nil
 		}
+		operationalRequired := s.snapshotLoading.OperationalRequired
+		followLatest := !s.pageCache.Ready() || s.pageCache.ShouldFollowLatest(s.transcript.FollowTail())
 		durable, err := s.durable.Install(value.Snapshot)
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
-		transcriptModel, err := s.transcript.Install(value.Snapshot, s.layout.Width, s.layout.TranscriptRows)
+		pageCache, err := s.pageCache.InstallLatest(value.Snapshot, followLatest, s.attachment.Identity.ID, s.attachment.Identity.Generation)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		viewportSnapshot, err := pageCache.MaterializeCurrent(value.Snapshot)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		transcriptModel := s.transcript
+		if s.transcript.Ready() {
+			transcriptModel, err = s.transcript.Replace(viewportSnapshot, s.layout.Width, s.layout.TranscriptRows)
+		} else {
+			transcriptModel, err = s.transcript.Install(viewportSnapshot, s.layout.Width, s.layout.TranscriptRows)
+		}
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
@@ -373,27 +521,42 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		}
 		s.durable = durable
 		s.transcript = transcriptModel
+		s.pageCache = pageCache
 		s.control = control
 		s.interaction = interactionState
 		s.queue = queueState
-		var token OperationToken
-		s, token = s.nextWire(OpOperationalSnapshot, now.Add(wireOperationDeadline))
-		s.snapshotLoading.Phase = SnapshotAwaitingOperationalSnapshot
 		s.snapshotLoading.DurableSnapshotFingerprint = value.Snapshot.SnapshotFingerprint
 		s.snapshotLoading.DurableControlCursorFingerprint = value.Snapshot.Control.CursorFingerprint
-		s.snapshotLoading.OperationalOperationID = token.OperationID
-		s.snapshotLoading.OperationalOperationGeneration = token.OperationGeneration
-		request, err := protocolvalue.PrepareOperationalSnapshotRequest(
-			token.RequestID,
-			s.attachment.Identity,
-			s.connection.AttachReceipt,
-			0,
-			0,
-		)
-		if err != nil {
-			return fatalState(s, fmt.Sprintf("terminal operational snapshot preparation: %v", err)), nil, nil
+		if operationalRequired || !s.operational.Ready() {
+			s.snapshotLoading.OperationalRequired = true
+			var operationalEffect RequestOperationalSnapshotEffect
+			s, operationalEffect, err = requestOperationalSnapshot(s, now)
+			if err != nil {
+				return fatalState(s, fmt.Sprintf("terminal operational snapshot preparation: %v", err)), nil, nil
+			}
+			effects = append(effects, operationalEffect)
+			break
 		}
-		effects = append(effects, RequestOperationalSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request})
+		existingOperational := s.operational.Snapshot()
+		s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotBaselinesInstalled, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableSnapshotFingerprint: value.Snapshot.SnapshotFingerprint, DurableControlCursorFingerprint: value.Snapshot.Control.CursorFingerprint, OperationalSnapshotFingerprint: existingOperational.FrameFingerprint, OperationalGeneration: existingOperational.Generation, OperationalCursor: existingOperational.Cursor}
+		s.phase = PhaseReady
+		s.observation.SnapshotRebaseRounds = 0
+		s, liveEffects, liveErr := nextLiveEffect(s, now)
+		if liveErr != nil {
+			return fatalState(s, liveErr.Error()), nil, nil
+		}
+		return validatedState(s), liveEffects, nil
+	case SnapshotControlRebaseRequiredMsg:
+		if !s.control.SnapshotRequired() || !value.Request.HasMinimum || value.Outcome.RequestedMinimumFingerprint != value.Request.MinimumObservedControlCursor.Fingerprint || s.observation.SnapshotRebaseRounds >= 4 {
+			return fatalState(s, "terminal control snapshot rebase exceeded its closed contract"), nil, nil
+		}
+		s.observation.SnapshotRebaseRounds++
+		s.phase = PhaseReadOnly
+		next, snapshotEffect, err := requestDurableSnapshot(s, now, &value.Outcome.LatestControlCursor, false)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		return validatedState(next), []Effect{snapshotEffect}, nil
 	case SnapshotRejectedMsg:
 		return transitionFailure(s, value.Failure, now)
 	case OperationalSnapshotAcceptedMsg:
@@ -403,6 +566,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			return fatalState(s, err.Error()), nil, nil
 		}
 		s.snapshotLoading.Phase = SnapshotBaselinesInstalled
+		s.snapshotLoading.OperationalRequired = false
 		if value.Snapshot.AttachmentID != s.attachment.Identity.ID || value.Snapshot.AttachmentGeneration != s.attachment.Identity.Generation || value.Snapshot.AttachmentIdentityFingerprint != s.attachment.Identity.IdentityFingerprint || value.Snapshot.AcknowledgedBindingFingerprint != s.attachment.Identity.BindingFingerprint {
 			return fatalState(s, "terminal operational snapshot authority is stale"), nil, nil
 		}
@@ -410,9 +574,54 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.snapshotLoading.OperationalGeneration = value.Snapshot.Generation
 		s.snapshotLoading.OperationalCursor = value.Snapshot.Cursor
 		s.phase = PhaseReady
-		s, tickEffects := scheduleTickEffect(s, TickHeartbeat, s.connection.HeartbeatSchedule.NextGeneration, s.connection.HeartbeatSchedule.NextAt, now)
-		return validatedState(s), tickEffects, nil
+		s.observation.SnapshotRebaseRounds = 0
+		s, liveEffects, liveErr := nextLiveEffect(s, now)
+		if liveErr != nil {
+			return fatalState(s, liveErr.Error()), nil, nil
+		}
+		return validatedState(s), liveEffects, nil
 	case OperationalSnapshotRejectedMsg:
+		return transitionFailure(s, value.Failure, now)
+	case ObservationBatchMsg:
+		next, observationEffects, err := applyObservationBatch(s, value.Request, value.Batch, now)
+		if err != nil {
+			if errors.Is(err, errOperationalObservation) {
+				s.operational = s.operational.Invalidate()
+				s.phase = PhaseReadOnly
+				s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingOperationalSnapshot, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableSnapshotFingerprint: s.durable.SnapshotFingerprint(), DurableControlCursorFingerprint: s.control.ConfirmedCursor().Fingerprint, OperationalRequired: true}
+				rebuilt, effect, rebuildErr := requestOperationalSnapshot(s, now)
+				if rebuildErr != nil {
+					return fatalState(s, rebuildErr.Error()), nil, nil
+				}
+				return validatedState(rebuilt), []Effect{effect}, nil
+			}
+			s.durable, s.operational = presentation.Rebuild(s.durable, s.operational)
+			s.phase = PhaseReadOnly
+			rebuilt, effect, rebuildErr := requestDurableSnapshot(s, now, nil, true)
+			if rebuildErr != nil {
+				return fatalState(s, rebuildErr.Error()), nil, nil
+			}
+			return validatedState(rebuilt), []Effect{effect}, nil
+		}
+		return validatedState(next), observationEffects, nil
+	case ObservationNoChangeMsg:
+		s.observation.LastResultFingerprint = value.NoChange.Fingerprint
+		s.phase = PhaseReady
+		next, liveEffects, err := nextLiveEffect(s, now)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		return validatedState(next), liveEffects, nil
+	case ObservationRejectedMsg:
+		return transitionFailure(s, value.Failure, now)
+	case HistoryPageAcceptedMsg:
+		next, pageEffects, err := applyHistoryPageResult(s, value.Request, value.Result, now)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		return validatedState(next), pageEffects, nil
+	case HistoryPageRejectedMsg:
+		s.observation.PendingPage, s.observation.HasPendingPage = protocolvalue.PreparedHistoryPageRequest{}, false
 		return transitionFailure(s, value.Failure, now)
 	case HeartbeatAcceptedMsg:
 		if !s.attachment.Valid || value.Request.HeartbeatGeneration != s.connection.HeartbeatSchedule.NextGeneration || value.Request.PreviousAcceptedGeneration != s.connection.HeartbeatSchedule.LastAcceptedGeneration || value.Receipt.HeartbeatGeneration != value.Request.HeartbeatGeneration || value.Receipt.PreviousAcceptedGeneration != value.Request.PreviousAcceptedGeneration || value.Receipt.AcknowledgedBindingFingerprint != s.attachment.Identity.BindingFingerprint {
@@ -423,8 +632,11 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			return validatedState(s), nil, nil
 		}
 		s.connection.HeartbeatSchedule = HeartbeatScheduleState{NextGeneration: value.Receipt.HeartbeatGeneration + 1, LastAcceptedGeneration: value.Receipt.HeartbeatGeneration, LastDisposition: value.Receipt.LivenessDisposition, NextAt: value.Header.ReceivedAt.Add(s.attachment.Identity.Heartbeat.Interval), LeaseExpiresAt: value.Receipt.LeaseExpiresAt, LastReceiptFingerprint: value.Receipt.ReceiptFingerprint}
-		s, tickEffects := scheduleTickEffect(s, TickHeartbeat, s.connection.HeartbeatSchedule.NextGeneration, s.connection.HeartbeatSchedule.NextAt, value.Header.ReceivedAt)
-		return validatedState(s), tickEffects, nil
+		s, liveEffects, liveErr := nextLiveEffect(s, value.Header.ReceivedAt)
+		if liveErr != nil {
+			return fatalState(s, liveErr.Error()), nil, nil
+		}
+		return validatedState(s), liveEffects, nil
 	case HeartbeatRejectedMsg:
 		_ = value
 		return fatalState(s, "terminal heartbeat was rejected by the runtime"), nil, nil
@@ -472,12 +684,37 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		s.phase = PhaseExited
 		s, quit := quitProgramEffect(s, value.Header.ReceivedAt)
 		return validatedState(s), []Effect{quit}, nil
-	case PublicTextCopiedMsg:
-		return validatedState(s), nil, nil
-	case PublicTextCopyFailedMsg:
-		return transitionFailure(s, value.Failure, now)
 	}
 	return validatedState(s), effects, nil
+}
+
+func boundedClipboardText(cells []protocolvalue.HistoryCell) (string, error) {
+	var text strings.Builder
+	bytes, runes := 0, 0
+	for _, cell := range cells {
+		cellBytes := len(cell.PublicText) + 1
+		cellRunes := len([]rune(cell.PublicText)) + 1
+		if bytes > MaximumPublicClipboardBytes-cellBytes || runes > MaximumPublicClipboardRunes-cellRunes {
+			return "", errors.New("terminal public clipboard payload exceeds its closed bound")
+		}
+		text.WriteString(cell.PublicText)
+		text.WriteByte('\n')
+		bytes += cellBytes
+		runes += cellRunes
+	}
+	return text.String(), nil
+}
+
+func appendLocalNotification(state AppState, message string) AppState {
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	if len(state.localNotifications.Items) == maximumLocalNotifications {
+		state.localNotifications.Items = append([]string(nil), state.localNotifications.Items[1:]...)
+		state.localNotifications.Dropped++
+	}
+	state.localNotifications.Items = append(state.localNotifications.Items, message)
+	return state
 }
 
 func staleChallengeRevocationEffects(
@@ -589,12 +826,24 @@ func validateMessage(message any) error {
 		return validateWireFailure(value.Header, value.Failure, OpAttachAck)
 	case SnapshotAcceptedMsg:
 		return value.validate()
+	case SnapshotControlRebaseRequiredMsg:
+		return value.validate()
 	case SnapshotRejectedMsg:
 		return validateWireFailure(value.Header, value.Failure, OpProjectionSnapshot)
 	case OperationalSnapshotAcceptedMsg:
 		return value.validate()
 	case OperationalSnapshotRejectedMsg:
 		return validateWireFailure(value.Header, value.Failure, OpOperationalSnapshot)
+	case ObservationBatchMsg:
+		return value.validate()
+	case ObservationNoChangeMsg:
+		return value.validate()
+	case ObservationRejectedMsg:
+		return validateWireFailure(value.Header, value.Failure, OpObserve)
+	case HistoryPageAcceptedMsg:
+		return value.validate()
+	case HistoryPageRejectedMsg:
+		return validateWireFailure(value.Header, value.Failure, OpHistoryPage)
 	case HeartbeatAcceptedMsg:
 		return value.validate()
 	case HeartbeatRejectedMsg:
@@ -729,26 +978,36 @@ func failedState(s AppState, failure PublicFailure) AppState {
 func transitionFailure(s AppState, failure PublicFailure, now time.Time) (AppState, []Effect, tea.Cmd) {
 	switch failure.Disposition() {
 	case FailureReconnect, FailureRetryWithBackoff:
-		if s.connection.Phase == ConnectionAttached {
-			return fatalState(
-				s,
-				"This S1 terminal build cannot reconnect after attachment acknowledgement. Relaunch the client.",
-			), nil, nil
-		}
 		previous := s.connection
+		candidate := previous.HandshakeCandidate
+		credentialHandle := previous.TransportCredentialHandleID
+		if s.attachment.Valid && previous.Phase == ConnectionAttached {
+			if !previous.HasReconnectCredentialHandle {
+				return failedState(s, failure), nil, nil
+			}
+			candidate = protocolvalue.HandshakeCandidate{AttachmentAttemptGeneration: previous.HandshakeCandidate.AttachmentAttemptGeneration + 1}
+			credentialHandle = previous.ReconnectCredentialHandleID
+			s.durable = s.durable.MarkStale()
+			s.operational = s.operational.Invalidate()
+			s.observation.Enabled = false
+			s.observation.PendingPage, s.observation.HasPendingPage = protocolvalue.PreparedHistoryPageRequest{}, false
+		}
 		s.phase = PhaseReconnecting
 		s.connection = ConnectionState{
-			Phase:                       ConnectionBackoff,
-			ClientInstanceID:            previous.ClientInstanceID,
-			BootstrapHandleID:           previous.BootstrapHandleID,
-			TransportCredentialHandleID: previous.TransportCredentialHandleID,
-			Generation:                  previous.Generation + 1,
-			NextOperationGeneration:     previous.NextOperationGeneration,
-			HandshakeCandidate:          previous.HandshakeCandidate,
-			HelloWinner:                 previous.HelloWinner,
-			AttachReceipt:               previous.AttachReceipt,
-			HeartbeatSchedule:           previous.HeartbeatSchedule,
-			AttachmentChallenge:         NewNoAttachmentChallenge(),
+			Phase:                                 ConnectionBackoff,
+			ClientInstanceID:                      previous.ClientInstanceID,
+			BootstrapHandleID:                     previous.BootstrapHandleID,
+			TransportCredentialHandleID:           credentialHandle,
+			ReconnectCredentialHandleID:           previous.ReconnectCredentialHandleID,
+			ReconnectCredentialCarrierFingerprint: previous.ReconnectCredentialCarrierFingerprint,
+			HasReconnectCredentialHandle:          previous.HasReconnectCredentialHandle,
+			Generation:                            previous.Generation + 1,
+			NextOperationGeneration:               previous.NextOperationGeneration,
+			HandshakeCandidate:                    candidate,
+			HelloWinner:                           previous.HelloWinner,
+			AttachReceipt:                         previous.AttachReceipt,
+			HeartbeatSchedule:                     previous.HeartbeatSchedule,
+			AttachmentChallenge:                   NewNoAttachmentChallenge(),
 		}
 		s, effects := scheduleTickEffect(s, TickReconnect, s.connection.Generation, now.Add(100*time.Millisecond), now)
 		return validatedState(s), effects, nil
@@ -756,37 +1015,23 @@ func transitionFailure(s AppState, failure PublicFailure, now time.Time) (AppSta
 		if !s.attachment.Valid {
 			return failedState(s, failure), nil, nil
 		}
-		var token OperationToken
 		s.phase = PhaseLoadingSnapshot
-		s, token = s.nextWire(OpProjectionSnapshot, now.Add(wireOperationDeadline))
-		s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingDurableSnapshot, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableOperationID: token.OperationID, DurableOperationGeneration: token.OperationGeneration}
-		return validatedState(s), []Effect{RequestSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID}}, nil
+		next, effect, err := requestDurableSnapshot(s, now, nil, true)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		return validatedState(next), []Effect{effect}, nil
 	case FailureRebuildOperationalSnapshot:
 		if !s.attachment.Valid || !s.durable.Ready() || !s.control.Ready() {
 			return failedState(s, failure), nil, nil
 		}
-		var token OperationToken
 		s.phase = PhaseLoadingSnapshot
-		s, token = s.nextWire(OpOperationalSnapshot, now.Add(wireOperationDeadline))
-		s.snapshotLoading.Phase = SnapshotAwaitingOperationalSnapshot
-		s.snapshotLoading.OperationalOperationID = token.OperationID
-		s.snapshotLoading.OperationalOperationGeneration = token.OperationGeneration
-		requestedGeneration, requestedCursor := uint64(0), uint64(0)
-		if s.operational.Ready() {
-			current := s.operational.Snapshot()
-			requestedGeneration, requestedCursor = current.Generation, current.Cursor
-		}
-		request, err := protocolvalue.PrepareOperationalSnapshotRequest(
-			token.RequestID,
-			s.attachment.Identity,
-			s.connection.AttachReceipt,
-			requestedGeneration,
-			requestedCursor,
-		)
+		s.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingOperationalSnapshot, AttachmentID: s.attachment.Identity.ID, AttachmentGeneration: s.attachment.Identity.Generation, TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint, DurableSnapshotFingerprint: s.durable.SnapshotFingerprint(), DurableControlCursorFingerprint: s.control.ConfirmedCursor().Fingerprint, OperationalRequired: true}
+		next, effect, err := requestOperationalSnapshot(s, now)
 		if err != nil {
 			return fatalState(s, fmt.Sprintf("terminal operational snapshot preparation: %v", err)), nil, nil
 		}
-		return validatedState(s), []Effect{RequestOperationalSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}}, nil
+		return validatedState(next), []Effect{effect}, nil
 	default:
 		return failedState(s, failure), nil, nil
 	}
@@ -815,4 +1060,110 @@ func quitProgramEffect(s AppState, observedAt time.Time) (AppState, QuitProgramE
 	var token LocalOperationToken
 	s, token = s.nextDetachedLocal(OpTeardown, observedAt.Add(localOperationDeadline))
 	return s, QuitProgramEffect{Header: newLocalHeader(token)}
+}
+
+func advanceViewportIntent(s *AppState) bool {
+	if s.observation.ViewportIntentGeneration == ^uint64(0) {
+		return false
+	}
+	s.observation.ViewportIntentGeneration++
+	return true
+}
+
+func requestDurableSnapshot(
+	s AppState,
+	now time.Time,
+	minimum *protocolvalue.ControlCursor,
+	operationalRequired bool,
+) (AppState, RequestSnapshotEffect, error) {
+	var token OperationToken
+	s, token = s.nextWire(OpProjectionSnapshot, now.Add(wireOperationDeadline))
+	request, err := protocolvalue.PrepareProjectionSnapshotRequest(token.RequestID, s.attachment.Identity.RuntimeSessionID, minimum)
+	if err != nil {
+		return s, RequestSnapshotEffect{}, err
+	}
+	s.snapshotLoading = SnapshotLoadingState{
+		Phase:                       SnapshotAwaitingDurableSnapshot,
+		AttachmentID:                s.attachment.Identity.ID,
+		AttachmentGeneration:        s.attachment.Identity.Generation,
+		TransportBindingFingerprint: s.attachment.Identity.BindingFingerprint,
+		DurableOperationID:          token.OperationID,
+		DurableOperationGeneration:  token.OperationGeneration,
+		OperationalRequired:         operationalRequired,
+	}
+	return s, RequestSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}, nil
+}
+
+func nextLiveEffect(s AppState, now time.Time) (AppState, []Effect, error) {
+	if s.phase != PhaseReady || s.connection.Outstanding.Carrier != OutstandingNone || !s.durable.Ready() || !s.operational.Ready() || !s.control.Ready() {
+		return s, nil, nil
+	}
+	if !now.Before(s.connection.HeartbeatSchedule.NextAt) {
+		var token OperationToken
+		s, token = s.nextWire(OpHeartbeat, now.Add(wireOperationDeadline))
+		request, err := protocolvalue.PrepareHeartbeatRequest(token.RequestID, s.attachment.Identity, s.connection.AttachReceipt, s.connection.HeartbeatSchedule.NextGeneration, s.connection.HeartbeatSchedule.LastAcceptedGeneration)
+		if err != nil {
+			return s, nil, err
+		}
+		return s, []Effect{HeartbeatEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}}, nil
+	}
+	if s.observation.HasPageIntent {
+		root, ok := s.pageCache.Current()
+		if !ok {
+			return s, nil, errors.New("terminal current history page cache is unavailable")
+		}
+		cursor, hasCursor := root.BeforeCursor, root.HasBeforeCursor
+		if s.observation.PageIntentDirection == protocolvalue.HistoryPageAfter {
+			cursor, hasCursor = root.AfterCursor, root.HasAfterCursor
+		}
+		if hasCursor {
+			var token OperationToken
+			s, token = s.nextWire(OpHistoryPage, now.Add(wireOperationDeadline))
+			request, err := protocolvalue.PrepareHistoryPageRequest(token.RequestID, s.attachment.Identity.RuntimeSessionID, cursor, s.observation.PageIntentDirection, protocolvalue.MaximumHistoryPageCells, protocolvalue.MaximumHistoryPageDecodedBytes, s.durable.Durable().ProjectionContractFingerprint, s.observation.ViewportIntentGeneration)
+			if err != nil {
+				return s, nil, err
+			}
+			s.observation.PendingPage, s.observation.HasPendingPage = request, true
+			s.observation.PageIntentDirection, s.observation.HasPageIntent = 0, false
+			return s, []Effect{ReadHistoryPageEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}}, nil
+		}
+		s.observation.PageIntentDirection, s.observation.HasPageIntent = 0, false
+	}
+	wait := s.connection.HeartbeatSchedule.NextAt.Sub(now)
+	if wait <= 0 || wait > time.Second {
+		wait = time.Second
+	}
+	maximumWaitMS := uint32(wait / time.Millisecond)
+	if maximumWaitMS < 1 {
+		maximumWaitMS = 1
+	}
+	var token OperationToken
+	s, token = s.nextWire(OpObserve, now.Add(time.Duration(maximumWaitMS)*time.Millisecond+2*time.Second))
+	durable := s.durable.Durable()
+	operational := s.operational.Snapshot()
+	request, err := protocolvalue.PrepareObserveRequest(token.RequestID, durable.AuthorityHighWater, durable.ProjectionRevision, operational.Generation, operational.Cursor, s.control.ConfirmedCursor(), maximumWaitMS)
+	if err != nil {
+		return s, nil, err
+	}
+	s.observation.Enabled = true
+	return s, []Effect{ObserveNextEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}}, nil
+}
+
+func requestOperationalSnapshot(s AppState, now time.Time) (AppState, RequestOperationalSnapshotEffect, error) {
+	var token OperationToken
+	s, token = s.nextWire(OpOperationalSnapshot, now.Add(wireOperationDeadline))
+	requestedGeneration, requestedCursor := uint64(0), uint64(0)
+	if s.operational.Installed() {
+		current := s.operational.Snapshot()
+		requestedGeneration, requestedCursor = current.Generation, current.Cursor
+	}
+	request, err := protocolvalue.PrepareOperationalSnapshotRequest(token.RequestID, s.attachment.Identity, s.connection.AttachReceipt, requestedGeneration, requestedCursor)
+	if err != nil {
+		return s, RequestOperationalSnapshotEffect{}, err
+	}
+	s.snapshotLoading.Phase = SnapshotAwaitingOperationalSnapshot
+	s.snapshotLoading.OperationalRequired = true
+	s.snapshotLoading.OperationalOperationID = token.OperationID
+	s.snapshotLoading.OperationalOperationGeneration = token.OperationGeneration
+	return s, RequestOperationalSnapshotEffect{Header: newWireHeader(token), ConnectionHandleID: s.connection.HandleID, Request: request}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestDurableSnapshotSpineRequiresExactRootAndHeadJoin(t *testing.T) {
@@ -192,6 +193,72 @@ func TestOperationalSnapshotRecomputesEncodedBytes(t *testing.T) {
 	}
 	if _, err := OperationalSnapshotFromWire(value); err == nil {
 		t.Fatal("forged operational byte count was accepted")
+	}
+}
+
+func TestS2HistoryCursorDecodeEncodeIsLosslessAtNegotiatedMaximum(t *testing.T) {
+	root := &protocol.PresentationHistoryRootIdentity{
+		RuntimeSessionId: "runtime:history", HistoryProjectionContractFingerprint: sha('a'),
+		MaterializationPolicyFingerprint: sha('b'), TreeContractFingerprint: sha('c'),
+		PlacementKeyContractId: "presentation-placement-key", PlacementKeyContractVersion: "v1",
+		PlacementKeyContractFingerprint: sha('d'), CheckpointGeneration: 2, CheckpointFingerprint: sha('e'),
+		ProjectionGeneration: 3, ProjectionRootFingerprint: sha('f'), ThroughAuthoritySequence: 17,
+		PresentationSourceSegmentCount: 4, PresentationSourcePrefixAccumulator: sha('1'),
+		PresentationPolicyRegistryContractFingerprint: sha('2'), AuditExtractorRegistryContractFingerprint: sha('3'),
+		RootIdentityFingerprint: sha('4'),
+	}
+	left, right := uint64(11), uint64(12)
+	cursor := &protocol.PresentationHistoryCursor{
+		RuntimeSessionId: "runtime:history", RootIdentity: root,
+		AnchorHistoryEntryId: ptr("history:anchor"),
+		AnchorPlacementKey: &protocol.PresentationHistoryPlacementKey{
+			PlacementKeyContractId: "presentation-placement-key", PlacementKeyContractVersion: "v1",
+			PlacementKeyContractFingerprint: sha('d'), CanonicalSpineLeftCoordinate: &left,
+			CanonicalSpineRightCoordinate: &right, RelativePositionKind: protocol.PresentationRelativePositionKind_PRESENTATION_RELATIVE_POSITION_CANONICAL_LEAF,
+			SourceLedgerSequenceOrZero: 17, RelativeLocalOrdinal: 2, StableSourceTiebreaker: "history:anchor",
+			CanonicalComparableKeyBytes: []byte{0, 1, 2, 255}, PlacementKeyFingerprint: sha('5'),
+		},
+		CursorFingerprint: sha('6'),
+	}
+	decoded, err := cursorFromProto(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := PrepareHistoryPageRequest(
+		"request:history", "runtime:history", decoded, HistoryPageBefore,
+		MaximumHistoryPageCells, MaximumHistoryPageDecodedBytes, root.HistoryProjectionContractFingerprint, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireRequest, err := request.ToProto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(wireRequest.Cursor, cursor) {
+		t.Fatalf("history cursor carrier lost fields:\nwant=%v\n got=%v", cursor, wireRequest.Cursor)
+	}
+	unknownPosition := proto.Clone(cursor).(*protocol.PresentationHistoryCursor)
+	unknownPosition.AnchorPlacementKey.RelativePositionKind = protocol.PresentationRelativePositionKind(65535)
+	if _, err := cursorFromProto(unknownPosition); err == nil {
+		t.Fatal("unknown history placement vocabulary was accepted")
+	}
+	crossContract := proto.Clone(cursor).(*protocol.PresentationHistoryCursor)
+	crossContract.AnchorPlacementKey.PlacementKeyContractVersion = "v2"
+	if _, err := cursorFromProto(crossContract); err == nil {
+		t.Fatal("history cursor with placement authority foreign to its root was accepted")
+	}
+	foreignContinuation := proto.Clone(cursor).(*protocol.PresentationHistoryCursor)
+	foreignContinuation.RootIdentity.TreeContractFingerprint = sha('9')
+	page := &protocol.HistoryPageResponse{Outcome: &protocol.HistoryPageResponse_Page{Page: &protocol.HistoryPageData{
+		RequestId: "request:history", ValidatedInputCursorFingerprint: cursor.CursorFingerprint,
+		ValidatedRequestDirection: protocol.HistoryPageRequest_BEFORE,
+		ValidatedRootIdentity:     root, BeforeCursor: foreignContinuation,
+		OrderedHistoryEntryAccumulator: sha('7'), ContinuityProofFingerprint: sha('8'),
+		ResponseFingerprint: sha('0'),
+	}}}
+	if _, err := HistoryPageFromProto(page); err == nil {
+		t.Fatal("history page continuation with same root fingerprint and different root payload was accepted")
 	}
 }
 

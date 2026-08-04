@@ -174,8 +174,9 @@ func newLocalHeader(token LocalOperationToken) LocalEffectHeader {
 }
 
 type ConnectEffect struct {
-	Header            LocalEffectHeader
-	BootstrapHandleID string
+	Header                      LocalEffectHeader
+	BootstrapHandleID           string
+	AttachmentAttemptGeneration uint64
 }
 type AuthenticateTransportEffect struct {
 	Header             WireEffectHeader
@@ -239,11 +240,22 @@ type HeartbeatEffect struct {
 type RequestSnapshotEffect struct {
 	Header             WireEffectHeader
 	ConnectionHandleID string
+	Request            protocolvalue.PreparedProjectionSnapshotRequest
 }
 type RequestOperationalSnapshotEffect struct {
 	Header             WireEffectHeader
 	ConnectionHandleID string
 	Request            protocolvalue.PreparedOperationalSnapshotRequest
+}
+type ObserveNextEffect struct {
+	Header             WireEffectHeader
+	ConnectionHandleID string
+	Request            protocolvalue.PreparedObserveRequest
+}
+type ReadHistoryPageEffect struct {
+	Header             WireEffectHeader
+	ConnectionHandleID string
+	Request            protocolvalue.PreparedHistoryPageRequest
 }
 type ScheduleTickEffect struct {
 	Header         LocalEffectHeader
@@ -308,10 +320,12 @@ func (e RequestSnapshotEffect) Outstanding() OutstandingOperation   { return wir
 func (e RequestOperationalSnapshotEffect) Outstanding() OutstandingOperation {
 	return wireOutstanding(e.Header)
 }
-func (e ScheduleTickEffect) Outstanding() OutstandingOperation   { return localOutstanding(e.Header) }
-func (e CopyPublicTextEffect) Outstanding() OutstandingOperation { return localOutstanding(e.Header) }
-func (e BeginTeardownEffect) Outstanding() OutstandingOperation  { return localOutstanding(e.Header) }
-func (e QuitProgramEffect) Outstanding() OutstandingOperation    { return localOutstanding(e.Header) }
+func (e ObserveNextEffect) Outstanding() OutstandingOperation     { return wireOutstanding(e.Header) }
+func (e ReadHistoryPageEffect) Outstanding() OutstandingOperation { return wireOutstanding(e.Header) }
+func (e ScheduleTickEffect) Outstanding() OutstandingOperation    { return localOutstanding(e.Header) }
+func (e CopyPublicTextEffect) Outstanding() OutstandingOperation  { return localOutstanding(e.Header) }
+func (e BeginTeardownEffect) Outstanding() OutstandingOperation   { return localOutstanding(e.Header) }
+func (e QuitProgramEffect) Outstanding() OutstandingOperation     { return localOutstanding(e.Header) }
 func (e RequestParentRelaunchEffect) Outstanding() OutstandingOperation {
 	return localOutstanding(e.Header)
 }
@@ -328,6 +342,8 @@ func (AcknowledgeAttachEffect) effect()                   {}
 func (HeartbeatEffect) effect()                           {}
 func (RequestSnapshotEffect) effect()                     {}
 func (RequestOperationalSnapshotEffect) effect()          {}
+func (ObserveNextEffect) effect()                         {}
+func (ReadHistoryPageEffect) effect()                     {}
 func (ScheduleTickEffect) effect()                        {}
 func (CopyPublicTextEffect) effect()                      {}
 func (BeginTeardownEffect) effect()                       {}

@@ -2,12 +2,16 @@
   "schema_version": "terminal_client_fingerprint_contract.v1",
   "protocol_major": 2,
   "protocol_minor": 0,
-  "proto_sha256": "ba796c11dc0906419163cd79ef9928553cd9de8f07156ba8a3ff3c45414cddda",
+  "proto_sha256": "61c53a72b867a1f10794959e0b27244833ca5488a965550b1881f252a22004e6",
   "protobuf_encoding": "deterministic-protobuf-with-own-field-cleared",
   "digest_encoding": "sha256:<lowercase-hex>",
+	"fixed_cross_language_constants": {
+		"maximum_pinned_history_roots": 4
+	},
   "generated_contract_files_sha256": {
-    "clients/terminal/internal/protocolvalue/vocabulary_gen.go": "54670c5d5e2adaad6334f4bca459b9079d0f4e10d579d0fef04b2e5c66fdaea9",
-    "clients/terminal/internal/protocolvalue/carriers_gen.go": "f947b24bd1ce5e5aa4898672b541ac85323520729fa963bcaea5aee1082d969b"
+		"clients/terminal/internal/protocolvalue/vocabulary_gen.go": "562fb38407efa938be5e74d30e7c342a1f7034d5f8acd38d32442e4c1811b64c",
+		"clients/terminal/internal/protocolvalue/carriers_gen.go": "5e03cc24f3ba567a83f277bff1ccc4750bdd7d1f47817fd41383ef8584894aba",
+		"clients/terminal/internal/protocolvalue/s2_carriers_gen.go": "49c9e7aee45d88effb609e2451fdbb6ea507549261edf7a433e93df4680410d0"
   },
   "fingerprint_contracts": [
     {
@@ -74,6 +78,16 @@
       "own_field": "binding_fingerprint"
     },
     {
+      "message": "ReconnectCredentialPublicIdentity",
+      "namespace": "terminal-reconnect-credential-public-identity:v1",
+      "own_field": "identity_fingerprint"
+    },
+    {
+      "message": "ReconnectCredentialCarrier",
+      "namespace": "terminal-reconnect-credential-carrier:v1",
+      "own_field": "carrier_fingerprint"
+    },
+    {
       "message": "AttachSemanticWinner",
       "namespace": "terminal-attach-semantic-winner:v1",
       "own_field": "semantic_winner_fingerprint"
@@ -114,6 +128,11 @@
       "own_field": "request_fingerprint"
     },
     {
+      "message": "ProjectionSnapshotControlRebaseRequired",
+      "namespace": "terminal-projection-snapshot-control-rebase:v1",
+      "own_field": "response_fingerprint"
+    },
+    {
       "message": "OperationalSnapshotRequest",
       "namespace": "terminal-operational-snapshot-request:v1",
       "own_field": "request_fingerprint"
@@ -122,6 +141,16 @@
       "message": "OperationalSnapshotFrame",
       "namespace": "terminal-operational-snapshot-frame:v1",
       "own_field": "snapshot_frame_fingerprint"
+    },
+    {
+      "message": "ObservationBatchFrame",
+      "namespace": "terminal-observation-batch:v1",
+      "own_field": "batch_fingerprint"
+    },
+    {
+      "message": "OperationalDeltaFrame",
+      "namespace": "terminal-operational-delta-frame:v1",
+      "own_field": "frame_fingerprint"
     }
   ],
   "opaque_domain_fingerprint_fields": [
@@ -510,10 +539,6 @@
       "field": "view_fingerprint"
     },
     {
-      "message": "ObservationBatchFrame",
-      "field": "batch_fingerprint"
-    },
-    {
       "message": "ObservationNoChangeFrame",
       "field": "echoed_control_cursor_fingerprint"
     },
@@ -679,11 +704,27 @@
     },
     {
       "message": "ProjectionDeltaFrame",
+      "field": "base_resident_vector_fingerprint"
+    },
+    {
+      "message": "ProjectionDeltaFrame",
       "field": "delta_fingerprint"
+    },
+    {
+      "message": "ProjectionDeltaFrame",
+      "field": "resulting_resident_vector_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotControlRebaseRequired",
+      "field": "requested_minimum_control_cursor_fingerprint"
     },
     {
       "message": "ProjectionSnapshotFrame",
       "field": "projection_contract_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotFrame",
+      "field": "resident_vector_fingerprint"
     },
     {
       "message": "ProjectionSnapshotFrame",
@@ -692,6 +733,10 @@
     {
       "message": "ProjectionSnapshotFrame",
       "field": "validated_minimum_observed_control_cursor_fingerprint"
+    },
+    {
+      "message": "ProjectionSnapshotFrame",
+      "field": "viewport_fingerprint"
     },
     {
       "message": "PromptQueueClientProjection",

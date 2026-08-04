@@ -65,6 +65,7 @@ def _verify_contract() -> None:
     if len(namespaces) != len(set(namespaces)) or len(messages) != len(set(messages)):
         raise SystemExit("terminal fingerprint contracts are not one-to-one")
     _verify_fingerprint_field_inventory(manifest)
+    _verify_cross_language_constants(manifest)
     _require_literal(CODEC, expected)
     _require_literal(GO_VALUES, expected)
     _require_literal(GO_BUILD, expected)
@@ -95,8 +96,8 @@ def _verify_contract() -> None:
         maximum_protocol_major=2,
         maximum_protocol_minor=0,
         client_build_identity="pulsara-tui:golden",
-        supported_capabilities=(1, 2, 3, 4, 5),
-        required_capabilities=(1, 2, 3, 4, 5),
+        supported_capabilities=tuple(range(1, 12)),
+        required_capabilities=tuple(range(1, 12)),
         schema_contract_fingerprint=expected,
     )
     install_protobuf_fingerprint(
@@ -133,6 +134,33 @@ def _require_literal(path: Path, value: str) -> None:
     text = path.read_text(encoding="utf-8")
     if re.search(re.escape(value), text) is None:
         raise SystemExit(f"terminal schema identity is stale in {path}")
+
+
+def _integer_constant(path: Path, name: str) -> int:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        rf"(?m)^\s*{re.escape(name)}(?:\s+uint32)?\s*=\s*(\d+)\s*$",
+        text,
+    )
+    if match is None:
+        raise SystemExit(f"terminal fixed protocol constant is missing: {path}:{name}")
+    return int(match.group(1))
+
+
+def _verify_cross_language_constants(manifest: dict[str, object]) -> None:
+    fixed = manifest.get("fixed_cross_language_constants")
+    if not isinstance(fixed, dict):
+        raise SystemExit("terminal fixed cross-language constant manifest is missing")
+    expected = fixed.get("maximum_pinned_history_roots")
+    if not isinstance(expected, int) or expected < 1:
+        raise SystemExit("terminal pinned-root protocol constant is invalid")
+    python_value = _integer_constant(CODEC, "MAXIMUM_PINNED_HISTORY_ROOTS")
+    go_value = _integer_constant(GO_VALUES, "MaximumPinnedHistoryRoots")
+    if python_value != expected or go_value != expected:
+        raise SystemExit(
+            "terminal pinned-root protocol constant drifted: "
+            f"manifest={expected} python={python_value} go={go_value}"
+        )
 
 
 def _descriptor_fingerprint_fields() -> set[tuple[str, str]]:

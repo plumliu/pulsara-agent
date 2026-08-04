@@ -62,6 +62,7 @@ from pulsara_agent.terminal_protocol.codec import (
     MAXIMUM_DURABLE_OBSERVATION_BYTES,
     MAXIMUM_HISTORY_PAGE_BYTES,
     MAXIMUM_HISTORY_PAGE_CELLS,
+    MAXIMUM_PINNED_HISTORY_ROOTS,
     MAXIMUM_OBSERVATION_WAIT_MS,
     MAXIMUM_OBSERVATION_BATCH_BYTES,
     MAXIMUM_OPERATIONAL_ACTIVITY_CELLS,
@@ -76,6 +77,7 @@ from pulsara_agent.terminal_protocol.codec import (
     cursor_from_wire,
     cursor_to_wire,
     entry_to_wire,
+    history_ranked_entry_vector_decoded_bytes,
     outcome_to_wire,
     operational_change_to_wire,
     operational_snapshot_to_wire,
@@ -113,6 +115,7 @@ _SERVER_CAPABILITIES = tuple(
             wire.ROOT_ADVANCE_V1,
             wire.GAP_REBUILD_V1,
             wire.CONTROL_PROJECTION_OBSERVATION_V1,
+            wire.RECONNECT_AUTH_ROTATION_V1,
             wire.CONTROLLER_COMMAND_V1,
             wire.COMMAND_QUERY_V1,
             wire.TYPED_INTERACTION_ACTIONS_V1,
@@ -176,6 +179,7 @@ class _ConnectionState:
     attachment_id: str | None = None
     attachment_generation: int | None = None
     root_lease_ids: dict[str, str] = field(default_factory=dict)
+    root_lease_order: list[str] = field(default_factory=list)
     input_bytes: int = 0
     output_bytes: int = 0
 
@@ -196,6 +200,7 @@ class _AttachWinnerRecord:
     binding_generation: int
     current_binding: wire.TerminalClientTransportBindingIdentity
     credential_id: str
+    reconnect_credential_carrier: wire.ReconnectCredentialCarrier | None
     recovery_expires_at_monotonic: float
     acknowledged: bool = False
     ack_result: wire.AttachAckResult | None = None
@@ -409,6 +414,8 @@ class TerminalProtocolServer:
         services = state.host_session.terminal_application_services
         foundation = state.host_session.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
         foundation.retention_owner.release_attachment(state.attachment_id)
+        state.root_lease_ids.clear()
+        state.root_lease_order.clear()
         services.secrets.revoke_attachment(state.attachment_id)
         try:
             services.attachments.detach(
@@ -447,10 +454,43 @@ class TerminalProtocolServer:
             if request.runtime_session_id != host.runtime_session_id:
                 raise PermissionError("terminal snapshot request crosses sessions")
             bundle = services.query.snapshot_bundle()
+            validated_minimum_fingerprint: str | None = None
+            if request.HasField("minimum_observed_control_cursor"):
+                minimum = _control_cursor_from_wire(
+                    request.minimum_observed_control_cursor
+                )
+                latest = bundle.control_snapshot.cursor
+                if minimum.control_generation != latest.control_generation:
+                    rebase = wire.ProjectionSnapshotControlRebaseRequired(
+                        request_id=request.request_id,
+                        requested_minimum_control_cursor_fingerprint=(
+                            minimum.cursor_fingerprint
+                        ),
+                        latest_control_cursor=control_cursor_to_wire(latest),
+                        stable_reason=wire.ProjectionSnapshotControlRebaseRequired.CONTROL_GENERATION_REBASED,
+                    )
+                    install_protobuf_fingerprint(
+                        "terminal-projection-snapshot-control-rebase:v1",
+                        rebase,
+                        own_field="response_fingerprint",
+                    )
+                    return wire.ServerFrame(
+                        snapshot=wire.ProjectionSnapshotResponse(
+                            control_rebase_required=rebase
+                        )
+                    )
+                if latest.control_revision < minimum.control_revision:
+                    raise RuntimeError(
+                        "terminal control snapshot is older than the requested minimum"
+                    )
+                validated_minimum_fingerprint = minimum.cursor_fingerprint
             response, bundle = _bounded_snapshot_response(
                 bundle,
                 request_id=request.request_id,
                 maximum_frame_bytes=self.maximum_frame_bytes,
+                validated_minimum_control_cursor_fingerprint=(
+                    validated_minimum_fingerprint
+                ),
             )
             snapshot = bundle.session_snapshot
             self._borrow_root(
@@ -524,6 +564,7 @@ class TerminalProtocolServer:
                 state.attachment_id = None
                 state.attachment_generation = None
                 state.root_lease_ids.clear()
+                state.root_lease_order.clear()
             return wire.ServerFrame(
                 command_outcome=outcome_to_wire(
                     outcome, request_id=frame.mutation.request_id
@@ -737,7 +778,10 @@ class TerminalProtocolServer:
             candidate.candidate_version == 1
             and candidate.candidate_id == expected_candidate_id
             and candidate.client_instance_id == auth_result.client_instance_id
-            and candidate.attachment_attempt_generation == 1
+            and candidate.attachment_attempt_generation
+            == self._transport_auth.expected_candidate_generation(
+                auth_result.credential_id
+            )
             and candidate.requested_attachment_role
             in {
                 wire.ATTACHMENT_ROLE_OBSERVER,
@@ -978,6 +1022,10 @@ class TerminalProtocolServer:
                 previous_transport_binding_fingerprint=(previous.binding_fingerprint),
                 disposition=wire.ATTACH_REBOUND_PRE_ACK,
             )
+            if existing.reconnect_credential_carrier is not None:
+                receipt.next_reconnect_credential_carrier.CopyFrom(
+                    existing.reconnect_credential_carrier
+                )
             install_protobuf_fingerprint(
                 "terminal-attach-result-receipt:v1",
                 receipt,
@@ -993,13 +1041,69 @@ class TerminalProtocolServer:
             state.attach_result_receipt = receipt
             state.transport_binding = binding
             return wire.ServerFrame(attach=receipt)
-        lease = services.attachments.attach(
-            connection_id=state.connection_id,
-            client_instance_id=state.client_instance_id or "",
-            request_controller=(
-                candidate.requested_attachment_role == wire.ATTACHMENT_ROLE_CONTROLLER
-            ),
-        )
+        predecessor_key: tuple[str, int] | None = None
+        if candidate.attachment_attempt_generation == 1:
+            lease = services.attachments.attach(
+                connection_id=state.connection_id,
+                client_instance_id=state.client_instance_id or "",
+                request_controller=(
+                    candidate.requested_attachment_role
+                    == wire.ATTACHMENT_ROLE_CONTROLLER
+                ),
+            )
+        else:
+            try:
+                predecessor = self._transport_auth.reconnect_predecessor(
+                    auth_result.credential_id
+                )
+            except KeyError as exc:
+                raise PermissionError(
+                    "terminal reconnect predecessor is unavailable"
+                ) from exc
+            predecessor_key = (
+                candidate.client_instance_id,
+                candidate.attachment_attempt_generation - 1,
+            )
+            predecessor_record = self._attach_winners.get(predecessor_key)
+            if (
+                predecessor.client_instance_id != candidate.client_instance_id
+                or predecessor.expected_next_attachment_attempt_generation
+                != candidate.attachment_attempt_generation
+                or predecessor.previous_candidate_fingerprint
+                != (
+                    predecessor_record.handshake_candidate.candidate_fingerprint
+                    if predecessor_record is not None
+                    else ""
+                )
+                or predecessor_record is None
+                or predecessor_record.host_session is not host
+                or not predecessor_record.acknowledged
+                or predecessor_record.ack_result is None
+                or predecessor.previous_attachment_id
+                != predecessor_record.semantic_winner.attachment.attachment_id
+                or predecessor.previous_attachment_generation
+                != predecessor_record.semantic_winner.attachment.attachment_generation
+            ):
+                raise PermissionError("terminal reconnect predecessor proof is stale")
+            lease = services.attachments.supersede_for_reconnect(
+                previous_attachment_id=predecessor.previous_attachment_id,
+                previous_attachment_generation=(
+                    predecessor.previous_attachment_generation
+                ),
+                connection_id=state.connection_id,
+                client_instance_id=candidate.client_instance_id,
+                request_controller=(
+                    candidate.requested_attachment_role
+                    == wire.ATTACHMENT_ROLE_CONTROLLER
+                ),
+            )
+            foundation = host.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
+            foundation.retention_owner.release_attachment(
+                predecessor.previous_attachment_id
+            )
+            services.secrets.revoke_attachment(predecessor.previous_attachment_id)
+        if lease.attachment_generation != candidate.attachment_attempt_generation:
+            raise RuntimeError("terminal attachment successor generation drifted")
         foundation = host.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
         foundation.start_background_if_possible()
         attachment = attachment_to_wire(lease)
@@ -1034,6 +1138,22 @@ class TerminalProtocolServer:
                 maximum_missed_count=HEARTBEAT_MAXIMUM_MISSED_COUNT,
             ),
         )
+        reconnect_carrier: wire.ReconnectCredentialCarrier | None = None
+        if wire.RECONNECT_AUTH_ROTATION_V1 in state.selected_capabilities:
+            reconnect_identity, reconnect_carrier = (
+                self._transport_auth.issue_reconnect(
+                    client_instance_id=candidate.client_instance_id,
+                    previous_attachment_id=attachment.attachment_id,
+                    previous_attachment_generation=attachment.attachment_generation,
+                    previous_candidate_fingerprint=candidate.candidate_fingerprint,
+                    expected_next_attachment_attempt_generation=(
+                        candidate.attachment_attempt_generation + 1
+                    ),
+                )
+            )
+            semantic_winner.next_reconnect_credential_public_identity.CopyFrom(
+                reconnect_identity
+            )
         install_protobuf_fingerprint(
             "terminal-attach-semantic-winner:v1",
             semantic_winner,
@@ -1053,6 +1173,8 @@ class TerminalProtocolServer:
             current_transport_binding=binding,
             disposition=wire.ATTACH_CREATED,
         )
+        if reconnect_carrier is not None:
+            receipt.next_reconnect_credential_carrier.CopyFrom(reconnect_carrier)
         install_protobuf_fingerprint(
             "terminal-attach-result-receipt:v1",
             receipt,
@@ -1077,8 +1199,12 @@ class TerminalProtocolServer:
             binding_generation=1,
             current_binding=binding,
             credential_id=auth_result.credential_id,
+            reconnect_credential_carrier=reconnect_carrier,
             recovery_expires_at_monotonic=monotonic() + 30.0,
         )
+        if predecessor_key is not None:
+            self._attach_winners.pop(predecessor_key, None)
+            self._hello_winners.pop(predecessor_key, None)
         return wire.ServerFrame(attach=receipt)
 
     def _attach_ack(self, request, state: _ConnectionState) -> wire.ServerFrame:
@@ -1309,17 +1435,35 @@ class TerminalProtocolServer:
             ),
         )
         existing = state.root_lease_ids.get(fingerprint)
-        if existing is not None and foundation.retention_owner.renew(
-            existing, ttl_seconds=ttl_seconds
-        ):
+        if existing is not None:
+            if foundation.retention_owner.renew(existing, ttl_seconds=ttl_seconds):
+                return
+            # Re-borrowing an expired physical lease does not make the semantic
+            # root newly installed. Preserve the shared client/server FIFO
+            # position so both sides retire the same fifth root.
+            replacement = foundation.retention_owner.borrow(
+                attachment_id=state.attachment_id or "",
+                root_identity_fingerprint=fingerprint,
+                ttl_seconds=ttl_seconds,
+            )
+            state.root_lease_ids[fingerprint] = replacement.lease_id
             return
-        state.root_lease_ids.pop(fingerprint, None)
+        while len(state.root_lease_order) >= MAXIMUM_PINNED_HISTORY_ROOTS:
+            retired_fingerprint = state.root_lease_order.pop(0)
+            retired_lease_id = state.root_lease_ids.pop(retired_fingerprint, None)
+            if retired_lease_id is not None:
+                foundation.retention_owner.release(retired_lease_id)
         lease = foundation.retention_owner.borrow(
             attachment_id=state.attachment_id or "",
             root_identity_fingerprint=fingerprint,
             ttl_seconds=ttl_seconds,
         )
         state.root_lease_ids[fingerprint] = lease.lease_id
+        state.root_lease_order.append(fingerprint)
+        if len(state.root_lease_ids) > MAXIMUM_PINNED_HISTORY_ROOTS or len(
+            state.root_lease_order
+        ) != len(state.root_lease_ids):
+            raise AssertionError("terminal attachment root lease set is unbounded")
 
     def _renew_root_leases(self, state: _ConnectionState, host) -> None:
         foundation = host.wiring.runtime_wiring.runtime_session.terminal_presentation_foundation_service
@@ -1332,6 +1476,9 @@ class TerminalProtocolServer:
         for fingerprint, lease_id in tuple(state.root_lease_ids.items()):
             if not foundation.retention_owner.renew(lease_id, ttl_seconds=ttl_seconds):
                 state.root_lease_ids.pop(fingerprint, None)
+                state.root_lease_order = [
+                    item for item in state.root_lease_order if item != fingerprint
+                ]
 
     async def _observe_next(self, request, state, host) -> wire.ServerFrame:
         if wire.CONTROL_PROJECTION_OBSERVATION_V1 not in state.selected_capabilities:
@@ -1436,17 +1583,21 @@ class TerminalProtocolServer:
                 )
                 operational_branch = wire.OperationalObservationBranch(gap=gap)
             elif operational.status == "next":
-                operational_branch = wire.OperationalObservationBranch(
-                    delta=wire.OperationalDeltaFrame(
-                        request_id=request.request_id,
-                        operational_generation=operational_generation,
-                        operational_cursor=operational_cursor,
-                        ordered_changes=(
-                            operational_change_to_wire(item)
-                            for item in operational.ordered_changes
-                        ),
-                    )
+                delta = wire.OperationalDeltaFrame(
+                    request_id=request.request_id,
+                    operational_generation=operational_generation,
+                    operational_cursor=operational_cursor,
+                    ordered_changes=(
+                        operational_change_to_wire(item)
+                        for item in operational.ordered_changes
+                    ),
                 )
+                install_protobuf_fingerprint(
+                    "terminal-operational-delta-frame:v1",
+                    delta,
+                    own_field="frame_fingerprint",
+                )
+                operational_branch = wire.OperationalObservationBranch(delta=delta)
 
             if control.status == "gap":
                 reason = {
@@ -1624,12 +1775,54 @@ class TerminalProtocolServer:
             absolute_deadline=absolute_deadline,
         )
         return wire.ServerFrame(
-            history_page=_history_outcome_to_wire(outcome, request.request_id)
+            history_page=_history_outcome_to_wire(
+                outcome,
+                request.request_id,
+                maximum_decoded_bytes=min(
+                    max(request.maximum_decoded_bytes, 1),
+                    MAXIMUM_HISTORY_PAGE_BYTES,
+                ),
+            )
         )
 
 
-def _history_outcome_to_wire(outcome, request_id: str) -> wire.HistoryPageResponse:
+def _history_outcome_to_wire(
+    outcome,
+    request_id: str,
+    *,
+    maximum_decoded_bytes: int = MAXIMUM_HISTORY_PAGE_BYTES,
+) -> wire.HistoryPageResponse:
     if isinstance(outcome, PresentationHistoryPageData):
+        ordered_entries = tuple(
+            entry_to_wire(item) for item in outcome.ordered_history_entries
+        )
+        decoded_bytes = history_ranked_entry_vector_decoded_bytes(ordered_entries)
+        if decoded_bytes > maximum_decoded_bytes:
+            fault_code = "PRESENTATION_PAGE_WIRE_DECODED_BOUND_EXCEEDED"
+            return wire.HistoryPageResponse(
+                reconciliation=wire.HistoryReconciliationRequired(
+                    request_id=request_id,
+                    requested_cursor_fingerprint=(
+                        outcome.validated_input_cursor_fingerprint
+                    ),
+                    fault_code=fault_code,
+                    reconciliation_owner_identity=(
+                        "terminal-protocol:history-page-wire-accounting:v1"
+                    ),
+                    response_fingerprint=context_fingerprint(
+                        "terminal-history-page-wire-accounting-reconciliation:v1",
+                        {
+                            "request_id": request_id,
+                            "requested_cursor_fingerprint": (
+                                outcome.validated_input_cursor_fingerprint
+                            ),
+                            "decoded_bytes": decoded_bytes,
+                            "maximum_decoded_bytes": maximum_decoded_bytes,
+                            "fault_code": fault_code,
+                        },
+                    ),
+                )
+            )
         page = wire.HistoryPageData(
             request_id=request_id,
             validated_input_cursor_fingerprint=(
@@ -1641,9 +1834,7 @@ def _history_outcome_to_wire(outcome, request_id: str) -> wire.HistoryPageRespon
                 else wire.HistoryPageRequest.AFTER
             ),
             validated_root_identity=root_to_wire(outcome.validated_root_identity),
-            ordered_history_entries=(
-                entry_to_wire(item) for item in outcome.ordered_history_entries
-            ),
+            ordered_history_entries=ordered_entries,
             ordered_history_entry_accumulator=(
                 outcome.ordered_history_entry_accumulator
             ),
@@ -1967,15 +2158,24 @@ def _bounded_snapshot_response(
     *,
     request_id: str,
     maximum_frame_bytes: int,
+    validated_minimum_control_cursor_fingerprint: str | None = None,
 ):
     """Select the largest newest resident suffix that fits one wire frame."""
 
     def build(candidate_bundle):
+        snapshot_kwargs = {}
+        if validated_minimum_control_cursor_fingerprint is not None:
+            snapshot_kwargs["validated_minimum_control_cursor_fingerprint"] = (
+                validated_minimum_control_cursor_fingerprint
+            )
         return wire.ServerFrame(
-            snapshot=snapshot_to_wire(
-                candidate_bundle.session_snapshot,
-                control_snapshot=candidate_bundle.control_snapshot,
-                request_id=request_id,
+            snapshot=wire.ProjectionSnapshotResponse(
+                snapshot=snapshot_to_wire(
+                    candidate_bundle.session_snapshot,
+                    control_snapshot=candidate_bundle.control_snapshot,
+                    request_id=request_id,
+                    **snapshot_kwargs,
+                )
             )
         )
 

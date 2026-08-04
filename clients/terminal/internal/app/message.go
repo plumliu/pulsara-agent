@@ -135,18 +135,21 @@ func ConnectResultFingerprint(
 	operation LocalOperationToken,
 	connectionHandleID string,
 	peer ValidatedPeerIdentity,
+	candidate protocolvalue.HandshakeCandidate,
 ) (string, error) {
 	if operation.Kind != OpConnect || !operation.Valid() || connectionHandleID == "" ||
-		peer.Validate() != nil {
+		peer.Validate() != nil || candidate.ID == "" || candidate.Fingerprint == "" || candidate.AttachmentAttemptGeneration == 0 {
 		return "", errors.New("terminal connect result proof is invalid")
 	}
 	return protocolvalue.CanonicalClientFingerprint(
 		"terminal-connect-result:v1",
 		map[string]any{
-			"operation_id":              operation.OperationID,
-			"operation_generation":      operation.OperationGeneration,
-			"connection_handle_id":      connectionHandleID,
-			"peer_identity_fingerprint": peer.ValidationFingerprint(),
+			"operation_id":                    operation.OperationID,
+			"operation_generation":            operation.OperationGeneration,
+			"connection_handle_id":            connectionHandleID,
+			"peer_identity_fingerprint":       peer.ValidationFingerprint(),
+			"handshake_candidate_fingerprint": candidate.Fingerprint,
+			"attachment_attempt_generation":   candidate.AttachmentAttemptGeneration,
 		},
 	)
 }
@@ -155,6 +158,7 @@ type ConnectSucceededMsg struct {
 	Header             LocalResultHeader
 	ConnectionHandleID string
 	Peer               ValidatedPeerIdentity
+	Candidate          protocolvalue.HandshakeCandidate
 }
 type ConnectFailedMsg struct {
 	Header  LocalResultHeader
@@ -209,9 +213,10 @@ type AttachmentChallengeRevokedMsg struct {
 	Receipt AttachmentChallengeRevocationReceipt
 }
 type AttachAcceptedMsg struct {
-	Header     IOMessageHeader
-	Attachment protocolvalue.Attachment
-	Receipt    protocolvalue.AttachReceipt
+	Header                      IOMessageHeader
+	Attachment                  protocolvalue.Attachment
+	Receipt                     protocolvalue.AttachReceipt
+	ReconnectCredentialHandleID string
 }
 type AttachRejectedMsg struct {
 	Header  IOMessageHeader
@@ -241,7 +246,13 @@ type HeartbeatTransportFailedMsg struct {
 }
 type SnapshotAcceptedMsg struct {
 	Header   IOMessageHeader
+	Request  protocolvalue.PreparedProjectionSnapshotRequest
 	Snapshot protocolvalue.DurableSnapshot
+}
+type SnapshotControlRebaseRequiredMsg struct {
+	Header  IOMessageHeader
+	Request protocolvalue.PreparedProjectionSnapshotRequest
+	Outcome protocolvalue.ProjectionSnapshotOutcome
 }
 type SnapshotRejectedMsg struct {
 	Header  IOMessageHeader
@@ -254,6 +265,33 @@ type OperationalSnapshotAcceptedMsg struct {
 type OperationalSnapshotRejectedMsg struct {
 	Header  IOMessageHeader
 	Failure PublicFailure
+}
+type ObservationBatchMsg struct {
+	Header  IOMessageHeader
+	Request protocolvalue.PreparedObserveRequest
+	Batch   protocolvalue.ObservationBatch
+}
+type ObservationNoChangeMsg struct {
+	Header   IOMessageHeader
+	Request  protocolvalue.PreparedObserveRequest
+	NoChange protocolvalue.ObservationNoChange
+}
+type ObservationRejectedMsg struct {
+	Header  IOMessageHeader
+	Failure PublicFailure
+}
+type HistoryPageAcceptedMsg struct {
+	Header  IOMessageHeader
+	Request protocolvalue.PreparedHistoryPageRequest
+	Result  protocolvalue.HistoryPageResult
+}
+type HistoryPageRejectedMsg struct {
+	Header  IOMessageHeader
+	Failure PublicFailure
+}
+type LocalObservationOverflowMsg struct {
+	Header LocalMessageHeader
+	Reason protocolvalue.GapReason
 }
 
 type AppStartedMsg struct {
@@ -395,9 +433,16 @@ func (HeartbeatAcceptedMsg) applicationMessage()                    {}
 func (HeartbeatRejectedMsg) applicationMessage()                    {}
 func (HeartbeatTransportFailedMsg) applicationMessage()             {}
 func (SnapshotAcceptedMsg) applicationMessage()                     {}
+func (SnapshotControlRebaseRequiredMsg) applicationMessage()        {}
 func (SnapshotRejectedMsg) applicationMessage()                     {}
 func (OperationalSnapshotAcceptedMsg) applicationMessage()          {}
 func (OperationalSnapshotRejectedMsg) applicationMessage()          {}
+func (ObservationBatchMsg) applicationMessage()                     {}
+func (ObservationNoChangeMsg) applicationMessage()                  {}
+func (ObservationRejectedMsg) applicationMessage()                  {}
+func (HistoryPageAcceptedMsg) applicationMessage()                  {}
+func (HistoryPageRejectedMsg) applicationMessage()                  {}
+func (LocalObservationOverflowMsg) applicationMessage()             {}
 func (AppStartedMsg) applicationMessage()                           {}
 func (KeyInputMsg) applicationMessage()                             {}
 func (PasteInputMsg) applicationMessage()                           {}
@@ -432,7 +477,7 @@ func NewLocalResultHeader(operation LocalOperationToken, fingerprint string, rec
 }
 
 func (m ConnectSucceededMsg) validate() error {
-	expected, err := ConnectResultFingerprint(m.Header.Operation, m.ConnectionHandleID, m.Peer)
+	expected, err := ConnectResultFingerprint(m.Header.Operation, m.ConnectionHandleID, m.Peer, m.Candidate)
 	if err != nil || expected != m.Header.PayloadFingerprint {
 		return errors.New("terminal connect result is invalid")
 	}
@@ -457,7 +502,7 @@ func (m HelloAcceptedMsg) validate() error {
 	return nil
 }
 func (m AttachAcceptedMsg) validate() error {
-	if m.Header.Operation.Kind != OpAttach || m.Receipt.ReceiptFingerprint != m.Header.PayloadFingerprint || m.Receipt.RequestID != m.Header.Operation.RequestID || m.Attachment.SemanticWinnerFingerprint != m.Receipt.SemanticWinnerFingerprint || m.Attachment.BindingFingerprint != m.Receipt.CurrentBinding.Fingerprint {
+	if m.Header.Operation.Kind != OpAttach || m.Receipt.ReceiptFingerprint != m.Header.PayloadFingerprint || m.Receipt.RequestID != m.Header.Operation.RequestID || m.Attachment.SemanticWinnerFingerprint != m.Receipt.SemanticWinnerFingerprint || m.Attachment.BindingFingerprint != m.Receipt.CurrentBinding.Fingerprint || !m.Attachment.HasReconnectCredential || !m.Receipt.HasReconnectCarrier || m.Receipt.ReconnectCarrierFingerprint == "" || m.ReconnectCredentialHandleID == "" {
 		return errors.New("terminal attach result is invalid")
 	}
 	return nil
@@ -469,14 +514,66 @@ func (m AttachAcknowledgedMsg) validate() error {
 	return nil
 }
 func (m SnapshotAcceptedMsg) validate() error {
-	if m.Header.Operation.Kind != OpProjectionSnapshot || m.Snapshot.RequestID != m.Header.Operation.RequestID || m.Snapshot.SnapshotFingerprint != m.Header.PayloadFingerprint {
+	if m.Header.Operation.Kind != OpProjectionSnapshot || m.Request.RequestID != m.Header.Operation.RequestID || m.Snapshot.RequestID != m.Header.Operation.RequestID || m.Snapshot.SnapshotFingerprint != m.Header.PayloadFingerprint || m.Request.RuntimeSessionID != m.Snapshot.RuntimeSessionID || m.Request.HasMinimum != m.Snapshot.HasValidatedMinimumControlCursor || (m.Request.HasMinimum && m.Request.MinimumObservedControlCursor.Fingerprint != m.Snapshot.ValidatedMinimumControlCursorFingerprint) {
 		return errors.New("terminal durable snapshot result is invalid")
+	}
+	return nil
+}
+func (m SnapshotControlRebaseRequiredMsg) validate() error {
+	if m.Header.Operation.Kind != OpProjectionSnapshot || m.Request.RequestID != m.Header.Operation.RequestID ||
+		!m.Request.HasMinimum || !m.Outcome.RebaseRequired ||
+		m.Outcome.RequestedMinimumFingerprint != m.Request.MinimumObservedControlCursor.Fingerprint ||
+		m.Outcome.Fingerprint != m.Header.PayloadFingerprint {
+		return errors.New("terminal snapshot control-rebase result is invalid")
 	}
 	return nil
 }
 func (m OperationalSnapshotAcceptedMsg) validate() error {
 	if m.Header.Operation.Kind != OpOperationalSnapshot || m.Snapshot.RequestID != m.Header.Operation.RequestID || m.Snapshot.FrameFingerprint != m.Header.PayloadFingerprint {
 		return errors.New("terminal operational snapshot result is invalid")
+	}
+	return nil
+}
+func (m ObservationBatchMsg) validate() error {
+	if m.Header.Operation.Kind != OpObserve || m.Request.RequestID != m.Header.Operation.RequestID ||
+		m.Batch.RequestID != m.Header.Operation.RequestID || m.Batch.Fingerprint != m.Header.PayloadFingerprint ||
+		m.Batch.PlaneCount == 0 || m.Batch.PlaneCount > 3 {
+		return errors.New("terminal observation batch result is invalid")
+	}
+	return nil
+}
+func (m ObservationNoChangeMsg) validate() error {
+	if m.Header.Operation.Kind != OpObserve || m.Request.RequestID != m.Header.Operation.RequestID ||
+		m.NoChange.RequestID != m.Header.Operation.RequestID || m.NoChange.Fingerprint != m.Header.PayloadFingerprint ||
+		m.NoChange.AuthorityHighWater != m.Request.AfterAuthorityHighWater ||
+		m.NoChange.ProjectionRevision != m.Request.AfterProjectionRevision ||
+		m.NoChange.OperationalGeneration != m.Request.AfterOperational.Generation ||
+		m.NoChange.OperationalCursor != m.Request.AfterOperational.Cursor ||
+		m.NoChange.ControlCursorFingerprint != m.Request.AfterControl.Fingerprint {
+		return errors.New("terminal observation no-change echo is stale")
+	}
+	return nil
+}
+func (m HistoryPageAcceptedMsg) validate() error {
+	if m.Header.Operation.Kind != OpHistoryPage || m.Request.RequestID != m.Header.Operation.RequestID ||
+		m.Result.RequestID != m.Header.Operation.RequestID || m.Result.Fingerprint != m.Header.PayloadFingerprint ||
+		m.Result.RequestedCursorFingerprint != m.Request.Cursor.Fingerprint {
+		return errors.New("terminal history page result is invalid")
+	}
+	if m.Result.Kind == protocolvalue.HistoryPageDataKind && (m.Result.Direction != m.Request.Direction || m.Result.Root != m.Request.Cursor.Root) {
+		return errors.New("terminal history page response crosses request authority")
+	}
+	if m.Result.Kind == protocolvalue.HistoryPageDataKind &&
+		((m.Result.HasBeforeCursor && m.Result.BeforeCursor.Root != m.Request.Cursor.Root) ||
+			(m.Result.HasAfterCursor && m.Result.AfterCursor.Root != m.Request.Cursor.Root)) {
+		return errors.New("terminal history page continuation crosses request authority")
+	}
+	if m.Result.Kind == protocolvalue.HistoryPageDataKind &&
+		(uint64(len(m.Result.Entries)) > uint64(m.Request.MaximumCells) || m.Result.DecodedCarrierBytes() > uint64(m.Request.MaximumDecodedBytes)) {
+		return errors.New("terminal history page response exceeds its exact request bounds")
+	}
+	if m.Result.Kind == protocolvalue.HistoryPageDataKind && ((len(m.Result.Entries) == 0) != (m.Result.DecodedCarrierBytes() == 0)) {
+		return errors.New("terminal history page decoded byte accounting is incomplete")
 	}
 	return nil
 }
@@ -533,11 +630,23 @@ func messageOutstanding(message any) (OutstandingOperation, bool) {
 		return NewOutstandingWire(value.Header.Operation), true
 	case SnapshotAcceptedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
+	case SnapshotControlRebaseRequiredMsg:
+		return NewOutstandingWire(value.Header.Operation), true
 	case SnapshotRejectedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
 	case OperationalSnapshotAcceptedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
 	case OperationalSnapshotRejectedMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case ObservationBatchMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case ObservationNoChangeMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case ObservationRejectedMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case HistoryPageAcceptedMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case HistoryPageRejectedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
 	case TeardownCompletedMsg:
 		return NewOutstandingLocal(value.Header.Operation), true
@@ -546,10 +655,6 @@ func messageOutstanding(message any) (OutstandingOperation, bool) {
 	case ParentRelaunchPreparedMsg:
 		return NewOutstandingLocal(value.Header.Operation), true
 	case ParentRelaunchFailedMsg:
-		return NewOutstandingLocal(value.Header.Operation), true
-	case PublicTextCopiedMsg:
-		return NewOutstandingLocal(value.Header.Operation), true
-	case PublicTextCopyFailedMsg:
 		return NewOutstandingLocal(value.Header.Operation), true
 	default:
 		return OutstandingOperation{}, false
@@ -598,12 +703,26 @@ func messageObservedAt(message any) time.Time {
 		return value.Header.ReceivedAt
 	case SnapshotAcceptedMsg:
 		return value.Header.ReceivedAt
+	case SnapshotControlRebaseRequiredMsg:
+		return value.Header.ReceivedAt
 	case SnapshotRejectedMsg:
 		return value.Header.ReceivedAt
 	case OperationalSnapshotAcceptedMsg:
 		return value.Header.ReceivedAt
 	case OperationalSnapshotRejectedMsg:
 		return value.Header.ReceivedAt
+	case ObservationBatchMsg:
+		return value.Header.ReceivedAt
+	case ObservationNoChangeMsg:
+		return value.Header.ReceivedAt
+	case ObservationRejectedMsg:
+		return value.Header.ReceivedAt
+	case HistoryPageAcceptedMsg:
+		return value.Header.ReceivedAt
+	case HistoryPageRejectedMsg:
+		return value.Header.ReceivedAt
+	case LocalObservationOverflowMsg:
+		return value.Header.ProducedAt
 	case TeardownCompletedMsg:
 		return value.Header.ReceivedAt
 	case TeardownFailedMsg:
@@ -677,6 +796,8 @@ func localMessageHeader(message any) (LocalMessageHeader, bool) {
 		return value.Header, true
 	case ReconnectDueMsg:
 		return value.Header, true
+	case LocalObservationOverflowMsg:
+		return value.Header, true
 	default:
 		return LocalMessageHeader{}, false
 	}
@@ -724,6 +845,9 @@ func installLocalMessageHeader(message any, header LocalMessageHeader) (any, boo
 		value.Header = header
 		return value, true
 	case ReconnectDueMsg:
+		value.Header = header
+		return value, true
+	case LocalObservationOverflowMsg:
 		value.Header = header
 		return value, true
 	default:

@@ -179,19 +179,23 @@ type Attachment struct {
 	ControllerDisposition       protocol.ControllerDisposition
 	BootstrapRequirement        protocol.BootstrapRequirement
 	Heartbeat                   HeartbeatPolicy
+	ReconnectCredential         ReconnectCredentialPublicIdentity
+	HasReconnectCredential      bool
 }
 
 type AttachReceipt struct {
-	RequestID                  string
-	TransportAuthAttemptID     string
-	CandidateID                string
-	CandidateFingerprint       string
-	SemanticWinnerFingerprint  string
-	CurrentBinding             TransportBinding
-	PreviousBindingFingerprint string
-	HasPreviousBinding         bool
-	Disposition                protocol.AttachResultDisposition
-	ReceiptFingerprint         string
+	RequestID                   string
+	TransportAuthAttemptID      string
+	CandidateID                 string
+	CandidateFingerprint        string
+	SemanticWinnerFingerprint   string
+	CurrentBinding              TransportBinding
+	PreviousBindingFingerprint  string
+	HasPreviousBinding          bool
+	Disposition                 protocol.AttachResultDisposition
+	ReceiptFingerprint          string
+	ReconnectCarrierFingerprint string
+	HasReconnectCarrier         bool
 }
 
 type ValidatedAttachAckResult struct {
@@ -265,11 +269,15 @@ type ValidatedHeartbeatRejectedReceipt struct {
 }
 
 type HistoryCell struct {
-	ID          string
-	Revision    uint64
-	Kind        string
-	PublicText  string
-	Fingerprint string
+	ID                      string
+	Revision                uint64
+	Kind                    string
+	PublicText              string
+	Fingerprint             string
+	CellFingerprint         string
+	PlacementKeyFingerprint string
+	DisplayRank             uint64
+	RankedFingerprint       string
 }
 
 type QueueItem struct {
@@ -318,21 +326,31 @@ type ControlProjection struct {
 }
 
 type DurableSnapshot struct {
-	RequestID             string
-	HostSessionID         string
-	RuntimeSessionID      string
-	AuthorityHighWater    uint64
-	ProjectionRevision    uint64
-	ActiveHeadFingerprint string
-	Control               ControlProjection
-	Cells                 []HistoryCell
-	SnapshotFingerprint   string
+	RequestID                                string
+	HostSessionID                            string
+	RuntimeSessionID                         string
+	AuthorityHighWater                       uint64
+	ProjectionRevision                       uint64
+	ProjectionContractFingerprint            string
+	ActiveHead                               ActiveHead
+	ActiveHeadFingerprint                    string
+	LatestRootCursorPair                     RootCursorPair
+	Control                                  ControlProjection
+	Cells                                    []HistoryCell
+	ResidentVectorFingerprint                string
+	ViewportFingerprint                      string
+	SnapshotFingerprint                      string
+	ValidatedMinimumControlCursorFingerprint string
+	HasValidatedMinimumControlCursor         bool
 }
 
 type OperationalCell struct {
 	OwnerKind       string
 	OwnerID         string
 	OwnerGeneration uint64
+	Generation      uint64
+	Cursor          uint64
+	CoalesceKey     string
 	PublicText      string
 	Fingerprint     string
 }
@@ -636,6 +654,18 @@ func AttachFromProto(value *protocol.AttachResultReceipt, clientInstanceID strin
 	if semantic.ControllerDisposition == protocol.ControllerDisposition_CONTROLLER_DISPOSITION_UNSPECIFIED || semantic.BootstrapRequirement != protocol.BootstrapRequirement_PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED {
 		return Attachment{}, AttachReceipt{}, errors.New("terminal attach vocabulary is incompatible")
 	}
+	reconnect, err := ReconnectCredentialCarrierFromProto(value.NextReconnectCredentialCarrier)
+	if err != nil || semantic.NextReconnectCredentialPublicIdentity == nil {
+		return Attachment{}, AttachReceipt{}, errors.New("terminal reconnect credential authority is missing")
+	}
+	public := reconnect.PublicIdentity
+	semanticPublic := semantic.NextReconnectCredentialPublicIdentity
+	if public.ID != semanticPublic.ReconnectCredentialId || public.ClientInstanceID != semanticPublic.ClientInstanceId ||
+		public.PreviousAttachmentID != identity.AttachmentId || public.PreviousAttachmentGeneration != identity.AttachmentGeneration ||
+		public.ExpectedNextAttachmentAttemptGeneration != semantic.AttachmentAttemptGeneration+1 ||
+		public.Fingerprint != semanticPublic.IdentityFingerprint {
+		return Attachment{}, AttachReceipt{}, errors.New("terminal reconnect credential crosses attach authority")
+	}
 	previous := ""
 	if value.PreviousTransportBindingFingerprint != nil {
 		previous = *value.PreviousTransportBindingFingerprint
@@ -649,13 +679,15 @@ func AttachFromProto(value *protocol.AttachResultReceipt, clientInstanceID strin
 			IssuedAt: issued, ExpiresAt: expires, IdentityFingerprint: identity.IdentityFingerprint,
 			SemanticWinnerFingerprint: semantic.SemanticWinnerFingerprint, CurrentReceiptFingerprint: value.ReceiptFingerprint,
 			ControllerDisposition: semantic.ControllerDisposition, BootstrapRequirement: semantic.BootstrapRequirement,
-			Heartbeat: HeartbeatPolicy{Interval: time.Duration(semantic.HeartbeatPolicy.IntervalMs) * time.Millisecond, Grace: time.Duration(semantic.HeartbeatPolicy.GraceMs) * time.Millisecond, MaximumMissedCount: semantic.HeartbeatPolicy.MaximumMissedCount},
+			Heartbeat:           HeartbeatPolicy{Interval: time.Duration(semantic.HeartbeatPolicy.IntervalMs) * time.Millisecond, Grace: time.Duration(semantic.HeartbeatPolicy.GraceMs) * time.Millisecond, MaximumMissedCount: semantic.HeartbeatPolicy.MaximumMissedCount},
+			ReconnectCredential: public, HasReconnectCredential: true,
 		}, AttachReceipt{
 			RequestID: value.RequestId, TransportAuthAttemptID: value.TransportAuthAttemptId,
 			CandidateID: value.HandshakeCandidateId, CandidateFingerprint: value.HandshakeCandidateFingerprint,
 			SemanticWinnerFingerprint: semantic.SemanticWinnerFingerprint, CurrentBinding: validatedBinding,
 			PreviousBindingFingerprint: previous, HasPreviousBinding: value.PreviousTransportBindingFingerprint != nil,
 			Disposition: value.Disposition, ReceiptFingerprint: value.ReceiptFingerprint,
+			ReconnectCarrierFingerprint: reconnect.Fingerprint, HasReconnectCarrier: true,
 		}, nil
 }
 
@@ -819,7 +851,7 @@ func HeartbeatRejectedFromProto(value *protocol.HeartbeatRejectedReceipt) (Valid
 }
 
 func DurableSnapshotFromWire(frame *protocol.ProjectionSnapshotFrame) (DurableSnapshot, error) {
-	if frame == nil || frame.RequestId == "" || frame.HostSessionId == "" || frame.RuntimeSessionId == "" || frame.SnapshotFingerprint == "" {
+	if frame == nil || frame.RequestId == "" || frame.HostSessionId == "" || frame.RuntimeSessionId == "" || frame.SnapshotFingerprint == "" || frame.ResidentVectorFingerprint == "" || frame.ViewportFingerprint == "" {
 		return DurableSnapshot{}, errors.New("durable snapshot identity is incomplete")
 	}
 	if frame.ActiveHead == nil || frame.ActiveHead.ActiveHeadFingerprint == "" || frame.ControlProjectionSnapshot == nil || frame.ControlProjectionSnapshot.View == nil || frame.ControlProjectionSnapshot.Cursor == nil {
@@ -832,6 +864,14 @@ func DurableSnapshotFromWire(frame *protocol.ProjectionSnapshotFrame) (DurableSn
 	if err != nil {
 		return DurableSnapshot{}, err
 	}
+	head, err := activeHeadFromProto(frame.ActiveHead)
+	if err != nil {
+		return DurableSnapshot{}, err
+	}
+	pair, err := cursorPairFromProto(frame.LatestRootCursorPair)
+	if err != nil || pair.Root.RootFingerprint != head.ConfirmedRoot.RootFingerprint {
+		return DurableSnapshot{}, errors.New("durable snapshot cursor pair is stale")
+	}
 	cells := make([]HistoryCell, 0, len(frame.OrderedResidentEntries))
 	seen := map[string]bool{}
 	for _, ranked := range frame.OrderedResidentEntries {
@@ -839,13 +879,18 @@ func DurableSnapshotFromWire(frame *protocol.ProjectionSnapshotFrame) (DurableSn
 			return DurableSnapshot{}, errors.New("resident history entry identity is invalid")
 		}
 		seen[ranked.Entry.HistoryEntryId] = true
-		kind, revision, text, fingerprint, err := PublicText(ranked.Entry.DurableHistoryCell)
+		cell, err := historyCellFromRanked(ranked)
 		if err != nil {
 			return DurableSnapshot{}, err
 		}
-		cells = append(cells, HistoryCell{ID: ranked.Entry.HistoryEntryId, Revision: revision, Kind: kind, PublicText: text, Fingerprint: fingerprint})
+		cells = append(cells, cell)
 	}
-	return DurableSnapshot{RequestID: frame.RequestId, HostSessionID: frame.HostSessionId, RuntimeSessionID: frame.RuntimeSessionId, AuthorityHighWater: frame.AuthorityHighWater, ProjectionRevision: frame.ProjectionRevision, ActiveHeadFingerprint: frame.ActiveHead.ActiveHeadFingerprint, Control: control, Cells: cells, SnapshotFingerprint: frame.SnapshotFingerprint}, nil
+	result := DurableSnapshot{RequestID: frame.RequestId, HostSessionID: frame.HostSessionId, RuntimeSessionID: frame.RuntimeSessionId, AuthorityHighWater: frame.AuthorityHighWater, ProjectionRevision: frame.ProjectionRevision, ProjectionContractFingerprint: frame.ProjectionContractFingerprint, ActiveHead: head, ActiveHeadFingerprint: frame.ActiveHead.ActiveHeadFingerprint, LatestRootCursorPair: pair, Control: control, Cells: cells, ResidentVectorFingerprint: frame.ResidentVectorFingerprint, ViewportFingerprint: frame.ViewportFingerprint, SnapshotFingerprint: frame.SnapshotFingerprint}
+	if frame.ValidatedMinimumObservedControlCursorFingerprint != nil {
+		result.HasValidatedMinimumControlCursor = true
+		result.ValidatedMinimumControlCursorFingerprint = *frame.ValidatedMinimumObservedControlCursorFingerprint
+	}
+	return result, nil
 }
 
 func validateDurableSnapshotSpine(frame *protocol.ProjectionSnapshotFrame) error {
@@ -1090,7 +1135,7 @@ func OperationalSnapshotFromWire(frame *protocol.OperationalSnapshotFrame) (Oper
 		}
 		lastCursor, lastCoalesceKey = common.OperationalCursor, common.CoalesceKey
 		seen[common.CoalesceKey] = true
-		cells = append(cells, OperationalCell{OwnerKind: common.OwnerKind, OwnerID: common.OwnerId, OwnerGeneration: common.OwnerGeneration, PublicText: common.BoundedPublicText, Fingerprint: common.ActivityFingerprint})
+		cells = append(cells, OperationalCell{OwnerKind: common.OwnerKind, OwnerID: common.OwnerId, OwnerGeneration: common.OwnerGeneration, Generation: common.OperationalGeneration, Cursor: common.OperationalCursor, CoalesceKey: common.CoalesceKey, PublicText: common.BoundedPublicText, Fingerprint: common.ActivityFingerprint})
 	}
 	encoded, err := protocol.CanonicalProtobufJSONVectorBytes(frame.OrderedActivityCells)
 	if err != nil || uint64(len(encoded)) != frame.EncodedActivityBytes {
@@ -1119,8 +1164,8 @@ func ValidateCapabilities(selected []protocol.TerminalClientCapability) error {
 		return errors.New("selected terminal capabilities are not sorted")
 	}
 	seen := map[protocol.TerminalClientCapability]bool{}
-	supported := make(map[protocol.TerminalClientCapability]bool, len(S1SupportedCapabilities))
-	for _, capability := range S1SupportedCapabilities {
+	supported := make(map[protocol.TerminalClientCapability]bool, len(S2SupportedCapabilities))
+	for _, capability := range S2SupportedCapabilities {
 		supported[capability] = true
 	}
 	for _, capability := range selected {
@@ -1129,14 +1174,9 @@ func ValidateCapabilities(selected []protocol.TerminalClientCapability) error {
 		}
 		seen[capability] = true
 	}
-	for _, required := range S1RequiredCapabilities {
+	for _, required := range S2RequiredCapabilities {
 		if !seen[required] {
 			return fmt.Errorf("required terminal capability %s is missing", required)
-		}
-	}
-	for _, forbidden := range []protocol.TerminalClientCapability{protocol.TerminalClientCapability_HISTORY_PAGE_V1, protocol.TerminalClientCapability_OBSERVATION_STREAM_V1, protocol.TerminalClientCapability_CONTROL_PROJECTION_OBSERVATION_V1, protocol.TerminalClientCapability_RECONNECT_AUTH_ROTATION_V1} {
-		if seen[forbidden] {
-			return fmt.Errorf("S1 over-advertised capability %s", forbidden)
 		}
 	}
 	return nil

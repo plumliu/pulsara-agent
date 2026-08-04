@@ -38,6 +38,7 @@ type Service struct {
 	closeDone     chan struct{}
 	closeErr      error
 	buildIdentity buildinfo.BuildIdentity
+	bridge        observationBridge
 }
 
 type helloOperationResult struct {
@@ -65,7 +66,7 @@ func NewService(bootstrap protocolvalue.Bootstrap) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{bootstrap: bootstrap, operations: newOperationRegistry(), scheduler: newLocalScheduler(), closeDone: make(chan struct{}), buildIdentity: buildIdentity}
-	service.candidate = service.prepareHandshakeCandidate()
+	service.candidate = service.prepareHandshakeCandidate(1)
 	if service.candidate == nil {
 		_ = service.Close()
 		return nil, errors.New("terminal handshake candidate preparation failed")
@@ -81,11 +82,14 @@ func (s *Service) InitialHandshakeCandidate() protocolvalue.HandshakeCandidate {
 	return protocolvalue.HandshakeCandidate{ID: s.candidate.CandidateId, ClientInstanceID: s.candidate.ClientInstanceId, AttachmentAttemptGeneration: s.candidate.AttachmentAttemptGeneration, HostSessionID: s.candidate.HostSessionId, RuntimeSessionID: s.candidate.RequestedRuntimeSessionId, Fingerprint: s.candidate.CandidateFingerprint}
 }
 
-func (s *Service) prepareHandshakeCandidate() *protocol.HandshakeRecoveryCandidateIdentity {
+func (s *Service) prepareHandshakeCandidate(generation uint64) *protocol.HandshakeRecoveryCandidateIdentity {
+	if generation == 0 {
+		return nil
+	}
 	candidate := &protocol.HandshakeRecoveryCandidateIdentity{
 		CandidateVersion:            1,
 		ClientInstanceId:            s.bootstrap.ClientInstanceID,
-		AttachmentAttemptGeneration: 1,
+		AttachmentAttemptGeneration: generation,
 		HostSessionId:               s.bootstrap.HostSessionID,
 		RequestedRuntimeSessionId:   s.bootstrap.RuntimeSessionID,
 		RequestedAttachmentRole:     protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER,
@@ -94,8 +98,8 @@ func (s *Service) prepareHandshakeCandidate() *protocol.HandshakeRecoveryCandida
 		MaximumProtocolMajor:        protocolvalue.ProtocolMajor,
 		MaximumProtocolMinor:        protocolvalue.ProtocolMinor,
 		ClientBuildIdentity:         s.buildIdentity.Fingerprint(),
-		SupportedCapabilities:       append([]protocol.TerminalClientCapability(nil), protocolvalue.S1SupportedCapabilities...),
-		RequiredCapabilities:        append([]protocol.TerminalClientCapability(nil), protocolvalue.S1RequiredCapabilities...),
+		SupportedCapabilities:       append([]protocol.TerminalClientCapability(nil), protocolvalue.S2SupportedCapabilities...),
+		RequiredCapabilities:        append([]protocol.TerminalClientCapability(nil), protocolvalue.S2RequiredCapabilities...),
 		SchemaContractFingerprint:   protocolvalue.SchemaFingerprint,
 	}
 	fingerprint, err := protocol.InstallFingerprint("terminal-handshake-recovery-candidate:v1", candidate, "candidate_fingerprint", "candidate_id")
@@ -137,7 +141,7 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 		if err := s.operations.begin(operation); err != nil {
 			return s.admissionFailure(operation, err)
 		}
-		if err := s.validateS1Effect(effect); err != nil {
+		if err := s.validateS2Effect(effect); err != nil {
 			return s.failure(operation, err)
 		}
 		s.mu.Lock()
@@ -154,16 +158,18 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 			switch token.Kind {
 			case app.OpConnect:
 				var peer app.ValidatedPeerIdentity
-				peer, err = s.connect()
+				connectEffect := effect.(app.ConnectEffect)
+				var candidate protocolvalue.HandshakeCandidate
+				peer, candidate, err = s.connect(connectEffect.AttachmentAttemptGeneration)
 				if err == nil {
 					connectionHandleID := "terminal-connection-handle:" + s.bootstrap.ClientInstanceID
-					fingerprint, fingerprintErr := app.ConnectResultFingerprint(token, connectionHandleID, peer)
+					fingerprint, fingerprintErr := app.ConnectResultFingerprint(token, connectionHandleID, peer, candidate)
 					if fingerprintErr != nil {
 						err = fingerprintErr
 						break
 					}
 					header, _ := app.NewLocalResultHeader(token, fingerprint, time.Now())
-					message = app.ConnectSucceededMsg{Header: header, ConnectionHandleID: connectionHandleID, Peer: peer}
+					message = app.ConnectSucceededMsg{Header: header, ConnectionHandleID: connectionHandleID, Peer: peer, Candidate: candidate}
 				}
 			case app.OpChallengePromote:
 				value := effect.(app.PromotePreparedAttachmentChallengeEffect)
@@ -235,7 +241,7 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 					message = app.PublicTextCopiedMsg{Header: header}
 				}
 			default:
-				err = errors.New("unsupported S1 local terminal effect")
+				err = errors.New("unsupported S2 local terminal effect")
 			}
 		case app.OutstandingWire:
 			token := operation.Wire
@@ -272,7 +278,7 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 				attachment, receipt, err = s.attach(token, value.AttachmentChallengeAcceptance)
 				if err == nil {
 					header, _ := app.NewIOHeader(token, receipt.ReceiptFingerprint, time.Now())
-					message = app.AttachAcceptedMsg{Header: header, Attachment: attachment, Receipt: receipt}
+					message = app.AttachAcceptedMsg{Header: header, Attachment: attachment, Receipt: receipt, ReconnectCredentialHandleID: "terminal-reconnect-credential:" + s.bootstrap.ClientInstanceID}
 				}
 			case app.OpAttachAck:
 				var result protocolvalue.ValidatedAttachAckResult
@@ -282,11 +288,15 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 					message = app.AttachAcknowledgedMsg{Header: header, Result: result}
 				}
 			case app.OpProjectionSnapshot:
-				var value protocolvalue.DurableSnapshot
-				value, err = s.durableSnapshot(token)
-				if err == nil {
-					header, _ := app.NewIOHeader(token, value.SnapshotFingerprint, time.Now())
-					message = app.SnapshotAcceptedMsg{Header: header, Snapshot: value}
+				request := effect.(app.RequestSnapshotEffect).Request
+				var value protocolvalue.ProjectionSnapshotOutcome
+				value, err = s.durableSnapshot(token, request)
+				if err == nil && value.RebaseRequired {
+					header, _ := app.NewIOHeader(token, value.Fingerprint, time.Now())
+					message = app.SnapshotControlRebaseRequiredMsg{Header: header, Request: request, Outcome: value}
+				} else if err == nil {
+					header, _ := app.NewIOHeader(token, value.Snapshot.SnapshotFingerprint, time.Now())
+					message = app.SnapshotAcceptedMsg{Header: header, Request: request, Snapshot: value.Snapshot}
 				}
 			case app.OpOperationalSnapshot:
 				prepared := effect.(app.RequestOperationalSnapshotEffect).Request
@@ -308,8 +318,27 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 					header, _ := app.NewIOHeader(token, rejected.ReceiptFingerprint, time.Now())
 					message = app.HeartbeatRejectedMsg{Header: header, Request: request, Receipt: *rejected}
 				}
+			case app.OpObserve:
+				request := effect.(app.ObserveNextEffect).Request
+				var value protocolvalue.ObservationResult
+				value, err = s.observe(token, request)
+				if err == nil && value.IsBatch {
+					header, _ := app.NewIOHeader(token, value.Batch.Fingerprint, time.Now())
+					message = app.ObservationBatchMsg{Header: header, Request: request, Batch: value.Batch}
+				} else if err == nil {
+					header, _ := app.NewIOHeader(token, value.NoChange.Fingerprint, time.Now())
+					message = app.ObservationNoChangeMsg{Header: header, Request: request, NoChange: value.NoChange}
+				}
+			case app.OpHistoryPage:
+				request := effect.(app.ReadHistoryPageEffect).Request
+				var value protocolvalue.HistoryPageResult
+				value, err = s.historyPage(token, request)
+				if err == nil {
+					header, _ := app.NewIOHeader(token, value.Fingerprint, time.Now())
+					message = app.HistoryPageAcceptedMsg{Header: header, Request: request, Result: value}
+				}
 			default:
-				err = errors.New("unsupported S1 terminal effect")
+				err = errors.New("unsupported S2 terminal effect")
 			}
 		default:
 			err = errors.New("terminal effect has no operation carrier")
@@ -324,16 +353,20 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 	}
 }
 
-func (s *Service) validateS1Effect(effect app.Effect) error {
+func (s *Service) validateS2Effect(effect app.Effect) error {
 	operation := effect.Outstanding()
 	switch value := effect.(type) {
 	case app.ConnectEffect:
-		if operation.Local.Kind != app.OpConnect || value.Header.Operation != operation.Local || value.BootstrapHandleID != "terminal-bootstrap:"+s.bootstrap.ClientInstanceID {
+		if operation.Local.Kind != app.OpConnect || value.Header.Operation != operation.Local || value.BootstrapHandleID != "terminal-bootstrap:"+s.bootstrap.ClientInstanceID || value.AttachmentAttemptGeneration == 0 {
 			return errors.New("terminal connect effect is invalid")
 		}
 	case app.AuthenticateTransportEffect:
 		expected := s.InitialHandshakeCandidate()
-		if operation.Wire.Kind != app.OpTransportAuth || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || value.CredentialHandleID != "terminal-launch-credential:"+s.bootstrap.ClientInstanceID || value.Candidate != expected {
+		expectedHandle := "terminal-launch-credential:" + s.bootstrap.ClientInstanceID
+		if expected.AttachmentAttemptGeneration > 1 {
+			expectedHandle = "terminal-reconnect-credential:" + s.bootstrap.ClientInstanceID
+		}
+		if operation.Wire.Kind != app.OpTransportAuth || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || value.CredentialHandleID != expectedHandle || value.Candidate != expected {
 			return errors.New("terminal transport-auth effect is invalid")
 		}
 	case app.NegotiateHelloEffect:
@@ -374,13 +407,24 @@ func (s *Service) validateS1Effect(effect app.Effect) error {
 			return errors.New("terminal heartbeat effect is invalid")
 		}
 	case app.RequestSnapshotEffect:
-		if operation.Wire.Kind != app.OpProjectionSnapshot || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" {
+		request, requestErr := value.Request.ToProto()
+		if operation.Wire.Kind != app.OpProjectionSnapshot || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
 			return errors.New("terminal snapshot effect is invalid")
 		}
 	case app.RequestOperationalSnapshotEffect:
 		request, requestErr := value.Request.ToProto()
 		if operation.Wire.Kind != app.OpOperationalSnapshot || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
 			return errors.New("terminal operational-snapshot effect is invalid")
+		}
+	case app.ObserveNextEffect:
+		request, requestErr := value.Request.ToProto()
+		if operation.Wire.Kind != app.OpObserve || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
+			return errors.New("terminal observe effect is invalid")
+		}
+	case app.ReadHistoryPageEffect:
+		request, requestErr := value.Request.ToProto()
+		if operation.Wire.Kind != app.OpHistoryPage || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
+			return errors.New("terminal history page effect is invalid")
 		}
 	case app.BeginTeardownEffect:
 		if operation.Local.Kind != app.OpTeardown || value.Header.Operation != operation.Local || value.Reason == 0 {
@@ -391,11 +435,11 @@ func (s *Service) validateS1Effect(effect app.Effect) error {
 			return errors.New("terminal parent-relaunch effect is invalid")
 		}
 	case app.CopyPublicTextEffect:
-		if operation.Local.Kind != app.OpClipboard || value.Header.Operation != operation.Local || len([]rune(value.PublicUTF8)) > 1_000_000 || len([]byte(value.PublicUTF8)) > 4_000_000 {
+		if operation.Local.Kind != app.OpClipboard || value.Header.Operation != operation.Local || len([]rune(value.PublicUTF8)) > app.MaximumPublicClipboardRunes || len([]byte(value.PublicUTF8)) > app.MaximumPublicClipboardBytes {
 			return errors.New("terminal public clipboard effect is invalid")
 		}
 	default:
-		return errors.New("unsupported S1 terminal effect type")
+		return errors.New("unsupported S2 terminal effect type")
 	}
 	return nil
 }
@@ -464,21 +508,26 @@ func (s *Service) beginTeardown(
 	)
 }
 
-func (s *Service) connect() (app.ValidatedPeerIdentity, error) {
+func (s *Service) connect(attachmentAttemptGeneration uint64) (app.ValidatedPeerIdentity, protocolvalue.HandshakeCandidate, error) {
 	s.mu.Lock()
 	if s.connection != nil {
 		s.mu.Unlock()
-		return app.ValidatedPeerIdentity{}, errors.New("terminal connection is duplicated")
+		return app.ValidatedPeerIdentity{}, protocolvalue.HandshakeCandidate{}, errors.New("terminal connection is duplicated")
 	}
+	if s.candidate == nil || s.candidate.AttachmentAttemptGeneration != attachmentAttemptGeneration {
+		s.candidate = s.prepareHandshakeCandidate(attachmentAttemptGeneration)
+		s.authResult, s.helloReady, s.attachReceipt = nil, false, nil
+	}
+	candidate := s.InitialHandshakeCandidate()
 	s.mu.Unlock()
 	connection, err := openConnection(s.bootstrap.SocketPath)
 	if err != nil {
-		return app.ValidatedPeerIdentity{}, err
+		return app.ValidatedPeerIdentity{}, protocolvalue.HandshakeCandidate{}, err
 	}
 	peer, socketOwnerUID, runtimePathFingerprint, err := connection.peerIdentityParts()
 	if err != nil {
 		_ = connection.Close()
-		return app.ValidatedPeerIdentity{}, err
+		return app.ValidatedPeerIdentity{}, protocolvalue.HandshakeCandidate{}, err
 	}
 	identity, err := app.NewValidatedPeerIdentity(
 		uint64(currentUID()),
@@ -490,17 +539,17 @@ func (s *Service) connect() (app.ValidatedPeerIdentity, error) {
 	)
 	if err != nil {
 		_ = connection.Close()
-		return app.ValidatedPeerIdentity{}, err
+		return app.ValidatedPeerIdentity{}, protocolvalue.HandshakeCandidate{}, err
 	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		_ = connection.Close()
-		return app.ValidatedPeerIdentity{}, errors.New("terminal client closed during connection")
+		return app.ValidatedPeerIdentity{}, protocolvalue.HandshakeCandidate{}, errors.New("terminal client closed during connection")
 	}
 	s.connection = connection
 	s.mu.Unlock()
-	return identity, nil
+	return identity, candidate, nil
 }
 
 func (s *Service) authenticate(token app.OperationToken) (transportAuthOperationResult, error) {
@@ -515,9 +564,21 @@ func (s *Service) authenticate(token app.OperationToken) (transportAuthOperation
 		HandshakeCandidateId:          candidate.CandidateId,
 		HandshakeCandidateFingerprint: candidate.CandidateFingerprint,
 		ConnectionNonce:               randomBytes(32),
-		Credential:                    &protocol.TerminalTransportAuthPreface_InitialLaunch{InitialLaunch: &protocol.InitialLaunchCredential{LaunchId: s.bootstrap.LaunchID, LaunchCapability: append([]byte(nil), s.bootstrap.LaunchCapability...)}},
 	}
-	defer clear(preface.GetInitialLaunch().LaunchCapability)
+	if candidate.AttachmentAttemptGeneration == 1 {
+		if len(s.bootstrap.LaunchCapability) == 0 {
+			return transportAuthOperationResult{}, errors.New("terminal initial launch credential is unavailable")
+		}
+		preface.Credential = &protocol.TerminalTransportAuthPreface_InitialLaunch{InitialLaunch: &protocol.InitialLaunchCredential{LaunchId: s.bootstrap.LaunchID, LaunchCapability: append([]byte(nil), s.bootstrap.LaunchCapability...)}}
+		defer clear(preface.GetInitialLaunch().LaunchCapability)
+	} else {
+		identity, capability, err := s.runtime.BorrowReconnectCredential(candidate.AttachmentAttemptGeneration)
+		if err != nil {
+			return transportAuthOperationResult{}, err
+		}
+		preface.Credential = &protocol.TerminalTransportAuthPreface_Reconnect{Reconnect: &protocol.ReconnectCredential{ReconnectCredentialId: identity.ID, ReconnectCapability: capability, PreviousAttachmentId: identity.PreviousAttachmentID, PreviousAttachmentGeneration: identity.PreviousAttachmentGeneration}}
+		defer clear(preface.GetReconnect().ReconnectCapability)
+	}
 	if _, err := protocol.InstallFingerprint("terminal-transport-auth-preface:v1", preface, "preface_fingerprint"); err != nil {
 		return transportAuthOperationResult{}, err
 	}
@@ -560,6 +621,11 @@ func (s *Service) authenticate(token app.OperationToken) (transportAuthOperation
 			return transportAuthOperationResult{}, errors.New("terminal recovered binding clone failed")
 		}
 		s.attachReceipt.CurrentTransportBinding = resultingBinding
+		if carrier := s.attachReceipt.NextReconnectCredentialCarrier; carrier != nil && carrier.CarrierFingerprint != "" {
+			if promoteErr := s.runtime.PromotePendingReconnectCredential(carrier.CarrierFingerprint); promoteErr != nil {
+				return transportAuthOperationResult{}, promoteErr
+			}
+		}
 		operationResult.recovered = &recovery
 	}
 	return operationResult, nil
@@ -686,6 +752,16 @@ func (s *Service) attach(token app.OperationToken, acceptance app.AttachmentChal
 	if err != nil {
 		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, err
 	}
+	reconnectCarrier, err := protocolvalue.ReconnectCredentialCarrierFromProto(receipt.NextReconnectCredentialCarrier)
+	if err != nil {
+		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, err
+	}
+	if err := s.runtime.InstallPendingReconnectCredential(reconnectCarrier); err != nil {
+		clear(reconnectCarrier.Capability)
+		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, err
+	}
+	clear(reconnectCarrier.Capability)
+	clear(receipt.NextReconnectCredentialCarrier.ReconnectCapability)
 	s.attachReceipt = receipt
 	s.attachment = attachment
 	if err := s.connection.setTransportBinding(
@@ -724,29 +800,48 @@ func (s *Service) attachAck(token app.OperationToken) (protocolvalue.ValidatedAt
 	if err != nil {
 		return protocolvalue.ValidatedAttachAckResult{}, err
 	}
+	carrierFingerprint := ""
+	if s.attachReceipt.NextReconnectCredentialCarrier != nil {
+		carrierFingerprint = s.attachReceipt.NextReconnectCredentialCarrier.CarrierFingerprint
+	}
+	if carrierFingerprint == "" {
+		return protocolvalue.ValidatedAttachAckResult{}, errors.New("terminal reconnect credential carrier is missing at ACK")
+	}
+	if err := s.runtime.PromotePendingReconnectCredential(carrierFingerprint); err != nil {
+		return protocolvalue.ValidatedAttachAckResult{}, err
+	}
 	clear(s.bootstrap.LaunchCapability)
 	s.bootstrap.LaunchCapability = nil
 	return validated, nil
 }
 
-func (s *Service) durableSnapshot(token app.OperationToken) (protocolvalue.DurableSnapshot, error) {
-	request := &protocol.ProjectionSnapshotRequest{RequestId: token.RequestID, RuntimeSessionId: s.attachment.RuntimeSessionID}
-	if _, err := protocol.InstallFingerprint("terminal-projection-snapshot-request:v2", request, "request_fingerprint"); err != nil {
-		return protocolvalue.DurableSnapshot{}, err
+func (s *Service) durableSnapshot(token app.OperationToken, prepared protocolvalue.PreparedProjectionSnapshotRequest) (protocolvalue.ProjectionSnapshotOutcome, error) {
+	request, err := prepared.ToProto()
+	if err != nil || request.RequestId != token.RequestID || request.RuntimeSessionId != s.attachment.RuntimeSessionID {
+		return protocolvalue.ProjectionSnapshotOutcome{}, errors.New("terminal projection snapshot request is stale")
 	}
 	response, err := s.connection.RoundTrip(terminalwire.SnapshotFrame(request), 10*time.Second, token.OperationID, token.OperationGeneration)
 	if err != nil {
-		return protocolvalue.DurableSnapshot{}, err
+		return protocolvalue.ProjectionSnapshotOutcome{}, err
 	}
 	if err := terminalwire.ValidateServerFrame(response, "snapshot"); err != nil {
-		return protocolvalue.DurableSnapshot{}, err
+		return protocolvalue.ProjectionSnapshotOutcome{}, err
 	}
-	value, err := protocolvalue.DurableSnapshotFromWire(response.GetSnapshot())
+	value, err := protocolvalue.ProjectionSnapshotOutcomeFromProto(response.GetSnapshot())
 	if err != nil {
-		return protocolvalue.DurableSnapshot{}, err
+		return protocolvalue.ProjectionSnapshotOutcome{}, err
 	}
-	if value.RuntimeSessionID != s.attachment.RuntimeSessionID {
-		return protocolvalue.DurableSnapshot{}, errors.New("terminal durable snapshot crosses sessions")
+	if value.RebaseRequired {
+		if !prepared.HasMinimum || value.RequestedMinimumFingerprint != prepared.MinimumObservedControlCursor.Fingerprint {
+			return protocolvalue.ProjectionSnapshotOutcome{}, errors.New("terminal control rebase response is stale")
+		}
+		return value, nil
+	}
+	if value.Snapshot.RuntimeSessionID != s.attachment.RuntimeSessionID || value.Snapshot.RequestID != prepared.RequestID {
+		return protocolvalue.ProjectionSnapshotOutcome{}, errors.New("terminal durable snapshot crosses sessions")
+	}
+	if prepared.HasMinimum && (!value.Snapshot.HasValidatedMinimumControlCursor || value.Snapshot.ValidatedMinimumControlCursorFingerprint != prepared.MinimumObservedControlCursor.Fingerprint || value.Snapshot.Control.Generation != prepared.MinimumObservedControlCursor.Generation || value.Snapshot.Control.Revision < prepared.MinimumObservedControlCursor.Revision) {
+		return protocolvalue.ProjectionSnapshotOutcome{}, errors.New("terminal durable snapshot did not satisfy its control lower bound")
 	}
 	return value, nil
 }
@@ -772,6 +867,60 @@ func (s *Service) operationalSnapshot(token app.OperationToken, prepared protoco
 	}
 	if value.RuntimeSessionID != s.attachment.RuntimeSessionID || value.RequestID != prepared.RequestID || value.AttachmentID != prepared.AttachmentID || value.AttachmentGeneration != prepared.AttachmentGeneration || value.AttachmentIdentityFingerprint != prepared.AttachmentIdentityFingerprint || value.AcknowledgedBindingFingerprint != prepared.CurrentBinding.Fingerprint {
 		return protocolvalue.OperationalSnapshot{}, errors.New("terminal operational snapshot authority is stale")
+	}
+	return value, nil
+}
+
+func (s *Service) observe(token app.OperationToken, prepared protocolvalue.PreparedObserveRequest) (protocolvalue.ObservationResult, error) {
+	if err := validateObserveAttribution(prepared, s.attachment); err != nil {
+		return protocolvalue.ObservationResult{}, err
+	}
+	request, err := prepared.ToProto()
+	if err != nil || request.RequestId != token.RequestID || token.AttachmentID != s.attachment.ID || token.AttachmentGeneration != s.attachment.Generation || token.TransportBindingFingerprint != s.attachment.BindingFingerprint {
+		return protocolvalue.ObservationResult{}, errors.New("terminal observe request is stale")
+	}
+	response, err := s.connection.RoundTrip(terminalwire.ObserveFrame(request), time.Duration(request.MaximumWaitMs)*time.Millisecond+2*time.Second, token.OperationID, token.OperationGeneration)
+	if err != nil {
+		return protocolvalue.ObservationResult{}, err
+	}
+	if err := terminalwire.ValidateServerFrame(response, "observation"); err != nil {
+		return protocolvalue.ObservationResult{}, err
+	}
+	value, err := s.bridge.decode(response.GetObservation(), prepared)
+	if err != nil {
+		return protocolvalue.ObservationResult{}, err
+	}
+	requestID := value.NoChange.RequestID
+	if value.IsBatch {
+		requestID = value.Batch.RequestID
+	}
+	if requestID != prepared.RequestID {
+		return protocolvalue.ObservationResult{}, errors.New("terminal observation response crosses requests")
+	}
+	return value, nil
+}
+
+func (s *Service) historyPage(token app.OperationToken, prepared protocolvalue.PreparedHistoryPageRequest) (protocolvalue.HistoryPageResult, error) {
+	if err := validateHistoryPageAttribution(prepared, s.attachment); err != nil {
+		return protocolvalue.HistoryPageResult{}, err
+	}
+	request, err := prepared.ToProto()
+	if err != nil || request.RequestId != token.RequestID || request.RuntimeSessionId != s.attachment.RuntimeSessionID || token.AttachmentID != s.attachment.ID || token.TransportBindingFingerprint != s.attachment.BindingFingerprint {
+		return protocolvalue.HistoryPageResult{}, errors.New("terminal history page request is stale")
+	}
+	response, err := s.connection.RoundTrip(terminalwire.HistoryPageFrame(request), 10*time.Second, token.OperationID, token.OperationGeneration)
+	if err != nil {
+		return protocolvalue.HistoryPageResult{}, err
+	}
+	if err := terminalwire.ValidateServerFrame(response, "history_page"); err != nil {
+		return protocolvalue.HistoryPageResult{}, err
+	}
+	value, err := protocolvalue.HistoryPageFromProto(response.GetHistoryPage())
+	if err != nil {
+		return protocolvalue.HistoryPageResult{}, err
+	}
+	if value.RequestID != prepared.RequestID || value.RequestedCursorFingerprint != prepared.Cursor.Fingerprint {
+		return protocolvalue.HistoryPageResult{}, errors.New("terminal history page response is stale")
 	}
 	return value, nil
 }
@@ -929,6 +1078,10 @@ func (s *Service) failure(operation app.OutstandingOperation, err error) tea.Msg
 			return app.OperationalSnapshotRejectedMsg{Header: header, Failure: failure}
 		case app.OpHeartbeat:
 			return app.HeartbeatTransportFailedMsg{Header: header, Failure: failure}
+		case app.OpObserve:
+			return app.ObservationRejectedMsg{Header: header, Failure: failure}
+		case app.OpHistoryPage:
+			return app.HistoryPageRejectedMsg{Header: header, Failure: failure}
 		default:
 			return app.TransportAuthenticationFailedMsg{Header: header, Failure: failure}
 		}
@@ -981,6 +1134,10 @@ func failureMessageForOperation(operation app.OutstandingOperation, failure app.
 			return app.SnapshotRejectedMsg{Header: header, Failure: failure}
 		case app.OpOperationalSnapshot:
 			return app.OperationalSnapshotRejectedMsg{Header: header, Failure: failure}
+		case app.OpObserve:
+			return app.ObservationRejectedMsg{Header: header, Failure: failure}
+		case app.OpHistoryPage:
+			return app.HistoryPageRejectedMsg{Header: header, Failure: failure}
 		default:
 			return app.TransportAuthenticationFailedMsg{Header: header, Failure: failure}
 		}

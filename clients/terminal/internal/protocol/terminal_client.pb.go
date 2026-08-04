@@ -2182,6 +2182,52 @@ func (TerminalSecretKind) EnumDescriptor() ([]byte, []int) {
 	return file_terminal_client_proto_rawDescGZIP(), []int{39}
 }
 
+type ProjectionSnapshotControlRebaseRequired_StableReason int32
+
+const (
+	ProjectionSnapshotControlRebaseRequired_STABLE_REASON_UNSPECIFIED  ProjectionSnapshotControlRebaseRequired_StableReason = 0
+	ProjectionSnapshotControlRebaseRequired_CONTROL_GENERATION_REBASED ProjectionSnapshotControlRebaseRequired_StableReason = 1
+)
+
+// Enum value maps for ProjectionSnapshotControlRebaseRequired_StableReason.
+var (
+	ProjectionSnapshotControlRebaseRequired_StableReason_name = map[int32]string{
+		0: "STABLE_REASON_UNSPECIFIED",
+		1: "CONTROL_GENERATION_REBASED",
+	}
+	ProjectionSnapshotControlRebaseRequired_StableReason_value = map[string]int32{
+		"STABLE_REASON_UNSPECIFIED":  0,
+		"CONTROL_GENERATION_REBASED": 1,
+	}
+)
+
+func (x ProjectionSnapshotControlRebaseRequired_StableReason) Enum() *ProjectionSnapshotControlRebaseRequired_StableReason {
+	p := new(ProjectionSnapshotControlRebaseRequired_StableReason)
+	*p = x
+	return p
+}
+
+func (x ProjectionSnapshotControlRebaseRequired_StableReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProjectionSnapshotControlRebaseRequired_StableReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_terminal_client_proto_enumTypes[40].Descriptor()
+}
+
+func (ProjectionSnapshotControlRebaseRequired_StableReason) Type() protoreflect.EnumType {
+	return &file_terminal_client_proto_enumTypes[40]
+}
+
+func (x ProjectionSnapshotControlRebaseRequired_StableReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProjectionSnapshotControlRebaseRequired_StableReason.Descriptor instead.
+func (ProjectionSnapshotControlRebaseRequired_StableReason) EnumDescriptor() ([]byte, []int) {
+	return file_terminal_client_proto_rawDescGZIP(), []int{90, 0}
+}
+
 type HistoryPageRequest_Direction int32
 
 const (
@@ -2215,11 +2261,11 @@ func (x HistoryPageRequest_Direction) String() string {
 }
 
 func (HistoryPageRequest_Direction) Descriptor() protoreflect.EnumDescriptor {
-	return file_terminal_client_proto_enumTypes[40].Descriptor()
+	return file_terminal_client_proto_enumTypes[41].Descriptor()
 }
 
 func (HistoryPageRequest_Direction) Type() protoreflect.EnumType {
-	return &file_terminal_client_proto_enumTypes[40]
+	return &file_terminal_client_proto_enumTypes[41]
 }
 
 func (x HistoryPageRequest_Direction) Number() protoreflect.EnumNumber {
@@ -2228,7 +2274,7 @@ func (x HistoryPageRequest_Direction) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HistoryPageRequest_Direction.Descriptor instead.
 func (HistoryPageRequest_Direction) EnumDescriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{124, 0}
+	return file_terminal_client_proto_rawDescGZIP(), []int{128, 0}
 }
 
 type SubmitPromptCommand_DeliveryMode int32
@@ -2267,11 +2313,11 @@ func (x SubmitPromptCommand_DeliveryMode) String() string {
 }
 
 func (SubmitPromptCommand_DeliveryMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_terminal_client_proto_enumTypes[41].Descriptor()
+	return file_terminal_client_proto_enumTypes[42].Descriptor()
 }
 
 func (SubmitPromptCommand_DeliveryMode) Type() protoreflect.EnumType {
-	return &file_terminal_client_proto_enumTypes[41]
+	return &file_terminal_client_proto_enumTypes[42]
 }
 
 func (x SubmitPromptCommand_DeliveryMode) Number() protoreflect.EnumNumber {
@@ -2280,7 +2326,7 @@ func (x SubmitPromptCommand_DeliveryMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SubmitPromptCommand_DeliveryMode.Descriptor instead.
 func (SubmitPromptCommand_DeliveryMode) EnumDescriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{131, 0}
+	return file_terminal_client_proto_rawDescGZIP(), []int{135, 0}
 }
 
 type ProtocolVersion struct {
@@ -4399,24 +4445,193 @@ func (x *TerminalClientTransportBindingIdentity) GetBindingFingerprint() string 
 	return ""
 }
 
+type ReconnectCredentialPublicIdentity struct {
+	state                                   protoimpl.MessageState `protogen:"open.v1"`
+	ReconnectCredentialId                   string                 `protobuf:"bytes,1,opt,name=reconnect_credential_id,json=reconnectCredentialId,proto3" json:"reconnect_credential_id,omitempty"`
+	ClientInstanceId                        string                 `protobuf:"bytes,2,opt,name=client_instance_id,json=clientInstanceId,proto3" json:"client_instance_id,omitempty"`
+	PreviousAttachmentId                    string                 `protobuf:"bytes,3,opt,name=previous_attachment_id,json=previousAttachmentId,proto3" json:"previous_attachment_id,omitempty"`
+	PreviousAttachmentGeneration            uint64                 `protobuf:"varint,4,opt,name=previous_attachment_generation,json=previousAttachmentGeneration,proto3" json:"previous_attachment_generation,omitempty"`
+	ExpectedNextAttachmentAttemptGeneration uint64                 `protobuf:"varint,5,opt,name=expected_next_attachment_attempt_generation,json=expectedNextAttachmentAttemptGeneration,proto3" json:"expected_next_attachment_attempt_generation,omitempty"`
+	IssuedAtUtc                             string                 `protobuf:"bytes,6,opt,name=issued_at_utc,json=issuedAtUtc,proto3" json:"issued_at_utc,omitempty"`
+	ExpiresAtUtc                            string                 `protobuf:"bytes,7,opt,name=expires_at_utc,json=expiresAtUtc,proto3" json:"expires_at_utc,omitempty"`
+	CredentialCommitment                    string                 `protobuf:"bytes,8,opt,name=credential_commitment,json=credentialCommitment,proto3" json:"credential_commitment,omitempty"`
+	IdentityFingerprint                     string                 `protobuf:"bytes,9,opt,name=identity_fingerprint,json=identityFingerprint,proto3" json:"identity_fingerprint,omitempty"`
+	unknownFields                           protoimpl.UnknownFields
+	sizeCache                               protoimpl.SizeCache
+}
+
+func (x *ReconnectCredentialPublicIdentity) Reset() {
+	*x = ReconnectCredentialPublicIdentity{}
+	mi := &file_terminal_client_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconnectCredentialPublicIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconnectCredentialPublicIdentity) ProtoMessage() {}
+
+func (x *ReconnectCredentialPublicIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_client_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconnectCredentialPublicIdentity.ProtoReflect.Descriptor instead.
+func (*ReconnectCredentialPublicIdentity) Descriptor() ([]byte, []int) {
+	return file_terminal_client_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetReconnectCredentialId() string {
+	if x != nil {
+		return x.ReconnectCredentialId
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetClientInstanceId() string {
+	if x != nil {
+		return x.ClientInstanceId
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetPreviousAttachmentId() string {
+	if x != nil {
+		return x.PreviousAttachmentId
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetPreviousAttachmentGeneration() uint64 {
+	if x != nil {
+		return x.PreviousAttachmentGeneration
+	}
+	return 0
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetExpectedNextAttachmentAttemptGeneration() uint64 {
+	if x != nil {
+		return x.ExpectedNextAttachmentAttemptGeneration
+	}
+	return 0
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetIssuedAtUtc() string {
+	if x != nil {
+		return x.IssuedAtUtc
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetExpiresAtUtc() string {
+	if x != nil {
+		return x.ExpiresAtUtc
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetCredentialCommitment() string {
+	if x != nil {
+		return x.CredentialCommitment
+	}
+	return ""
+}
+
+func (x *ReconnectCredentialPublicIdentity) GetIdentityFingerprint() string {
+	if x != nil {
+		return x.IdentityFingerprint
+	}
+	return ""
+}
+
+type ReconnectCredentialCarrier struct {
+	state               protoimpl.MessageState             `protogen:"open.v1"`
+	PublicIdentity      *ReconnectCredentialPublicIdentity `protobuf:"bytes,1,opt,name=public_identity,json=publicIdentity,proto3" json:"public_identity,omitempty"`
+	ReconnectCapability []byte                             `protobuf:"bytes,2,opt,name=reconnect_capability,json=reconnectCapability,proto3" json:"reconnect_capability,omitempty"`
+	CarrierFingerprint  string                             `protobuf:"bytes,3,opt,name=carrier_fingerprint,json=carrierFingerprint,proto3" json:"carrier_fingerprint,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *ReconnectCredentialCarrier) Reset() {
+	*x = ReconnectCredentialCarrier{}
+	mi := &file_terminal_client_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconnectCredentialCarrier) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconnectCredentialCarrier) ProtoMessage() {}
+
+func (x *ReconnectCredentialCarrier) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_client_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconnectCredentialCarrier.ProtoReflect.Descriptor instead.
+func (*ReconnectCredentialCarrier) Descriptor() ([]byte, []int) {
+	return file_terminal_client_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ReconnectCredentialCarrier) GetPublicIdentity() *ReconnectCredentialPublicIdentity {
+	if x != nil {
+		return x.PublicIdentity
+	}
+	return nil
+}
+
+func (x *ReconnectCredentialCarrier) GetReconnectCapability() []byte {
+	if x != nil {
+		return x.ReconnectCapability
+	}
+	return nil
+}
+
+func (x *ReconnectCredentialCarrier) GetCarrierFingerprint() string {
+	if x != nil {
+		return x.CarrierFingerprint
+	}
+	return ""
+}
+
 type AttachSemanticWinner struct {
-	state                             protoimpl.MessageState `protogen:"open.v1"`
-	HandshakeCandidateId              string                 `protobuf:"bytes,1,opt,name=handshake_candidate_id,json=handshakeCandidateId,proto3" json:"handshake_candidate_id,omitempty"`
-	HandshakeCandidateFingerprint     string                 `protobuf:"bytes,2,opt,name=handshake_candidate_fingerprint,json=handshakeCandidateFingerprint,proto3" json:"handshake_candidate_fingerprint,omitempty"`
-	AttachmentAttemptGeneration       uint64                 `protobuf:"varint,3,opt,name=attachment_attempt_generation,json=attachmentAttemptGeneration,proto3" json:"attachment_attempt_generation,omitempty"`
-	HelloNegotiationWinnerFingerprint string                 `protobuf:"bytes,4,opt,name=hello_negotiation_winner_fingerprint,json=helloNegotiationWinnerFingerprint,proto3" json:"hello_negotiation_winner_fingerprint,omitempty"`
-	Attachment                        *AttachmentIdentity    `protobuf:"bytes,5,opt,name=attachment,proto3" json:"attachment,omitempty"`
-	ControllerDisposition             ControllerDisposition  `protobuf:"varint,6,opt,name=controller_disposition,json=controllerDisposition,proto3,enum=pulsara.terminal.v2.ControllerDisposition" json:"controller_disposition,omitempty"`
-	BootstrapRequirement              BootstrapRequirement   `protobuf:"varint,7,opt,name=bootstrap_requirement,json=bootstrapRequirement,proto3,enum=pulsara.terminal.v2.BootstrapRequirement" json:"bootstrap_requirement,omitempty"`
-	HeartbeatPolicy                   *HeartbeatPolicy       `protobuf:"bytes,8,opt,name=heartbeat_policy,json=heartbeatPolicy,proto3" json:"heartbeat_policy,omitempty"`
-	SemanticWinnerFingerprint         string                 `protobuf:"bytes,9,opt,name=semantic_winner_fingerprint,json=semanticWinnerFingerprint,proto3" json:"semantic_winner_fingerprint,omitempty"`
-	unknownFields                     protoimpl.UnknownFields
-	sizeCache                         protoimpl.SizeCache
+	state                                 protoimpl.MessageState             `protogen:"open.v1"`
+	HandshakeCandidateId                  string                             `protobuf:"bytes,1,opt,name=handshake_candidate_id,json=handshakeCandidateId,proto3" json:"handshake_candidate_id,omitempty"`
+	HandshakeCandidateFingerprint         string                             `protobuf:"bytes,2,opt,name=handshake_candidate_fingerprint,json=handshakeCandidateFingerprint,proto3" json:"handshake_candidate_fingerprint,omitempty"`
+	AttachmentAttemptGeneration           uint64                             `protobuf:"varint,3,opt,name=attachment_attempt_generation,json=attachmentAttemptGeneration,proto3" json:"attachment_attempt_generation,omitempty"`
+	HelloNegotiationWinnerFingerprint     string                             `protobuf:"bytes,4,opt,name=hello_negotiation_winner_fingerprint,json=helloNegotiationWinnerFingerprint,proto3" json:"hello_negotiation_winner_fingerprint,omitempty"`
+	Attachment                            *AttachmentIdentity                `protobuf:"bytes,5,opt,name=attachment,proto3" json:"attachment,omitempty"`
+	ControllerDisposition                 ControllerDisposition              `protobuf:"varint,6,opt,name=controller_disposition,json=controllerDisposition,proto3,enum=pulsara.terminal.v2.ControllerDisposition" json:"controller_disposition,omitempty"`
+	BootstrapRequirement                  BootstrapRequirement               `protobuf:"varint,7,opt,name=bootstrap_requirement,json=bootstrapRequirement,proto3,enum=pulsara.terminal.v2.BootstrapRequirement" json:"bootstrap_requirement,omitempty"`
+	HeartbeatPolicy                       *HeartbeatPolicy                   `protobuf:"bytes,8,opt,name=heartbeat_policy,json=heartbeatPolicy,proto3" json:"heartbeat_policy,omitempty"`
+	SemanticWinnerFingerprint             string                             `protobuf:"bytes,9,opt,name=semantic_winner_fingerprint,json=semanticWinnerFingerprint,proto3" json:"semantic_winner_fingerprint,omitempty"`
+	NextReconnectCredentialPublicIdentity *ReconnectCredentialPublicIdentity `protobuf:"bytes,10,opt,name=next_reconnect_credential_public_identity,json=nextReconnectCredentialPublicIdentity,proto3,oneof" json:"next_reconnect_credential_public_identity,omitempty"`
+	unknownFields                         protoimpl.UnknownFields
+	sizeCache                             protoimpl.SizeCache
 }
 
 func (x *AttachSemanticWinner) Reset() {
 	*x = AttachSemanticWinner{}
-	mi := &file_terminal_client_proto_msgTypes[22]
+	mi := &file_terminal_client_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4428,7 +4643,7 @@ func (x *AttachSemanticWinner) String() string {
 func (*AttachSemanticWinner) ProtoMessage() {}
 
 func (x *AttachSemanticWinner) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[22]
+	mi := &file_terminal_client_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4441,7 +4656,7 @@ func (x *AttachSemanticWinner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachSemanticWinner.ProtoReflect.Descriptor instead.
 func (*AttachSemanticWinner) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{22}
+	return file_terminal_client_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *AttachSemanticWinner) GetHandshakeCandidateId() string {
@@ -4507,6 +4722,13 @@ func (x *AttachSemanticWinner) GetSemanticWinnerFingerprint() string {
 	return ""
 }
 
+func (x *AttachSemanticWinner) GetNextReconnectCredentialPublicIdentity() *ReconnectCredentialPublicIdentity {
+	if x != nil {
+		return x.NextReconnectCredentialPublicIdentity
+	}
+	return nil
+}
+
 type AttachResultReceipt struct {
 	state                               protoimpl.MessageState                  `protogen:"open.v1"`
 	RequestId                           string                                  `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -4518,13 +4740,14 @@ type AttachResultReceipt struct {
 	PreviousTransportBindingFingerprint *string                                 `protobuf:"bytes,7,opt,name=previous_transport_binding_fingerprint,json=previousTransportBindingFingerprint,proto3,oneof" json:"previous_transport_binding_fingerprint,omitempty"`
 	Disposition                         AttachResultDisposition                 `protobuf:"varint,8,opt,name=disposition,proto3,enum=pulsara.terminal.v2.AttachResultDisposition" json:"disposition,omitempty"`
 	ReceiptFingerprint                  string                                  `protobuf:"bytes,9,opt,name=receipt_fingerprint,json=receiptFingerprint,proto3" json:"receipt_fingerprint,omitempty"`
+	NextReconnectCredentialCarrier      *ReconnectCredentialCarrier             `protobuf:"bytes,10,opt,name=next_reconnect_credential_carrier,json=nextReconnectCredentialCarrier,proto3,oneof" json:"next_reconnect_credential_carrier,omitempty"`
 	unknownFields                       protoimpl.UnknownFields
 	sizeCache                           protoimpl.SizeCache
 }
 
 func (x *AttachResultReceipt) Reset() {
 	*x = AttachResultReceipt{}
-	mi := &file_terminal_client_proto_msgTypes[23]
+	mi := &file_terminal_client_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4536,7 +4759,7 @@ func (x *AttachResultReceipt) String() string {
 func (*AttachResultReceipt) ProtoMessage() {}
 
 func (x *AttachResultReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[23]
+	mi := &file_terminal_client_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4549,7 +4772,7 @@ func (x *AttachResultReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachResultReceipt.ProtoReflect.Descriptor instead.
 func (*AttachResultReceipt) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{23}
+	return file_terminal_client_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AttachResultReceipt) GetRequestId() string {
@@ -4615,6 +4838,13 @@ func (x *AttachResultReceipt) GetReceiptFingerprint() string {
 	return ""
 }
 
+func (x *AttachResultReceipt) GetNextReconnectCredentialCarrier() *ReconnectCredentialCarrier {
+	if x != nil {
+		return x.NextReconnectCredentialCarrier
+	}
+	return nil
+}
+
 type AttachReceiptAck struct {
 	state                          protoimpl.MessageState                  `protogen:"open.v1"`
 	RequestId                      string                                  `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -4630,7 +4860,7 @@ type AttachReceiptAck struct {
 
 func (x *AttachReceiptAck) Reset() {
 	*x = AttachReceiptAck{}
-	mi := &file_terminal_client_proto_msgTypes[24]
+	mi := &file_terminal_client_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4642,7 +4872,7 @@ func (x *AttachReceiptAck) String() string {
 func (*AttachReceiptAck) ProtoMessage() {}
 
 func (x *AttachReceiptAck) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[24]
+	mi := &file_terminal_client_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4655,7 +4885,7 @@ func (x *AttachReceiptAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachReceiptAck.ProtoReflect.Descriptor instead.
 func (*AttachReceiptAck) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{24}
+	return file_terminal_client_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *AttachReceiptAck) GetRequestId() string {
@@ -4723,7 +4953,7 @@ type AttachAckResult struct {
 
 func (x *AttachAckResult) Reset() {
 	*x = AttachAckResult{}
-	mi := &file_terminal_client_proto_msgTypes[25]
+	mi := &file_terminal_client_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4735,7 +4965,7 @@ func (x *AttachAckResult) String() string {
 func (*AttachAckResult) ProtoMessage() {}
 
 func (x *AttachAckResult) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[25]
+	mi := &file_terminal_client_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4748,7 +4978,7 @@ func (x *AttachAckResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachAckResult.ProtoReflect.Descriptor instead.
 func (*AttachAckResult) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{25}
+	return file_terminal_client_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *AttachAckResult) GetRequestId() string {
@@ -4826,7 +5056,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_terminal_client_proto_msgTypes[26]
+	mi := &file_terminal_client_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4838,7 +5068,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[26]
+	mi := &file_terminal_client_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4851,7 +5081,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{26}
+	return file_terminal_client_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *HeartbeatRequest) GetRequestId() string {
@@ -4953,7 +5183,7 @@ type HeartbeatAcceptedReceipt struct {
 
 func (x *HeartbeatAcceptedReceipt) Reset() {
 	*x = HeartbeatAcceptedReceipt{}
-	mi := &file_terminal_client_proto_msgTypes[27]
+	mi := &file_terminal_client_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4965,7 +5195,7 @@ func (x *HeartbeatAcceptedReceipt) String() string {
 func (*HeartbeatAcceptedReceipt) ProtoMessage() {}
 
 func (x *HeartbeatAcceptedReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[27]
+	mi := &file_terminal_client_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4978,7 +5208,7 @@ func (x *HeartbeatAcceptedReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatAcceptedReceipt.ProtoReflect.Descriptor instead.
 func (*HeartbeatAcceptedReceipt) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{27}
+	return file_terminal_client_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *HeartbeatAcceptedReceipt) GetRequestId() string {
@@ -5100,7 +5330,7 @@ type HeartbeatRejectedReceipt struct {
 
 func (x *HeartbeatRejectedReceipt) Reset() {
 	*x = HeartbeatRejectedReceipt{}
-	mi := &file_terminal_client_proto_msgTypes[28]
+	mi := &file_terminal_client_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5112,7 +5342,7 @@ func (x *HeartbeatRejectedReceipt) String() string {
 func (*HeartbeatRejectedReceipt) ProtoMessage() {}
 
 func (x *HeartbeatRejectedReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[28]
+	mi := &file_terminal_client_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5125,7 +5355,7 @@ func (x *HeartbeatRejectedReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRejectedReceipt.ProtoReflect.Descriptor instead.
 func (*HeartbeatRejectedReceipt) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{28}
+	return file_terminal_client_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *HeartbeatRejectedReceipt) GetRequestId() string {
@@ -5232,7 +5462,7 @@ type HeartbeatResult struct {
 
 func (x *HeartbeatResult) Reset() {
 	*x = HeartbeatResult{}
-	mi := &file_terminal_client_proto_msgTypes[29]
+	mi := &file_terminal_client_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5244,7 +5474,7 @@ func (x *HeartbeatResult) String() string {
 func (*HeartbeatResult) ProtoMessage() {}
 
 func (x *HeartbeatResult) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[29]
+	mi := &file_terminal_client_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5257,7 +5487,7 @@ func (x *HeartbeatResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResult.ProtoReflect.Descriptor instead.
 func (*HeartbeatResult) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{29}
+	return file_terminal_client_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *HeartbeatResult) GetOutcome() isHeartbeatResult_Outcome {
@@ -5314,7 +5544,7 @@ type EventReferenceView struct {
 
 func (x *EventReferenceView) Reset() {
 	*x = EventReferenceView{}
-	mi := &file_terminal_client_proto_msgTypes[30]
+	mi := &file_terminal_client_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5326,7 +5556,7 @@ func (x *EventReferenceView) String() string {
 func (*EventReferenceView) ProtoMessage() {}
 
 func (x *EventReferenceView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[30]
+	mi := &file_terminal_client_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5339,7 +5569,7 @@ func (x *EventReferenceView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventReferenceView.ProtoReflect.Descriptor instead.
 func (*EventReferenceView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{30}
+	return file_terminal_client_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *EventReferenceView) GetRuntimeSessionId() string {
@@ -5389,7 +5619,7 @@ type PresentationTextBlock struct {
 
 func (x *PresentationTextBlock) Reset() {
 	*x = PresentationTextBlock{}
-	mi := &file_terminal_client_proto_msgTypes[31]
+	mi := &file_terminal_client_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5401,7 +5631,7 @@ func (x *PresentationTextBlock) String() string {
 func (*PresentationTextBlock) ProtoMessage() {}
 
 func (x *PresentationTextBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[31]
+	mi := &file_terminal_client_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5414,7 +5644,7 @@ func (x *PresentationTextBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationTextBlock.ProtoReflect.Descriptor instead.
 func (*PresentationTextBlock) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{31}
+	return file_terminal_client_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PresentationTextBlock) GetText() string {
@@ -5457,7 +5687,7 @@ type PresentationDataBlock struct {
 
 func (x *PresentationDataBlock) Reset() {
 	*x = PresentationDataBlock{}
-	mi := &file_terminal_client_proto_msgTypes[32]
+	mi := &file_terminal_client_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5469,7 +5699,7 @@ func (x *PresentationDataBlock) String() string {
 func (*PresentationDataBlock) ProtoMessage() {}
 
 func (x *PresentationDataBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[32]
+	mi := &file_terminal_client_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5482,7 +5712,7 @@ func (x *PresentationDataBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationDataBlock.ProtoReflect.Descriptor instead.
 func (*PresentationDataBlock) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{32}
+	return file_terminal_client_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *PresentationDataBlock) GetMediaType() string {
@@ -5526,7 +5756,7 @@ type PresentationContentBlock struct {
 
 func (x *PresentationContentBlock) Reset() {
 	*x = PresentationContentBlock{}
-	mi := &file_terminal_client_proto_msgTypes[33]
+	mi := &file_terminal_client_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5538,7 +5768,7 @@ func (x *PresentationContentBlock) String() string {
 func (*PresentationContentBlock) ProtoMessage() {}
 
 func (x *PresentationContentBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[33]
+	mi := &file_terminal_client_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5551,7 +5781,7 @@ func (x *PresentationContentBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationContentBlock.ProtoReflect.Descriptor instead.
 func (*PresentationContentBlock) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{33}
+	return file_terminal_client_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *PresentationContentBlock) GetBlock() isPresentationContentBlock_Block {
@@ -5611,7 +5841,7 @@ type DurableCellCommon struct {
 
 func (x *DurableCellCommon) Reset() {
 	*x = DurableCellCommon{}
-	mi := &file_terminal_client_proto_msgTypes[34]
+	mi := &file_terminal_client_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5623,7 +5853,7 @@ func (x *DurableCellCommon) String() string {
 func (*DurableCellCommon) ProtoMessage() {}
 
 func (x *DurableCellCommon) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[34]
+	mi := &file_terminal_client_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5636,7 +5866,7 @@ func (x *DurableCellCommon) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurableCellCommon.ProtoReflect.Descriptor instead.
 func (*DurableCellCommon) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{34}
+	return file_terminal_client_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *DurableCellCommon) GetStableCellId() string {
@@ -5704,7 +5934,7 @@ type UserPromptCell struct {
 
 func (x *UserPromptCell) Reset() {
 	*x = UserPromptCell{}
-	mi := &file_terminal_client_proto_msgTypes[35]
+	mi := &file_terminal_client_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5716,7 +5946,7 @@ func (x *UserPromptCell) String() string {
 func (*UserPromptCell) ProtoMessage() {}
 
 func (x *UserPromptCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[35]
+	mi := &file_terminal_client_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5729,7 +5959,7 @@ func (x *UserPromptCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserPromptCell.ProtoReflect.Descriptor instead.
 func (*UserPromptCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{35}
+	return file_terminal_client_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *UserPromptCell) GetCommon() *DurableCellCommon {
@@ -5748,7 +5978,7 @@ type AssistantMessageCell struct {
 
 func (x *AssistantMessageCell) Reset() {
 	*x = AssistantMessageCell{}
-	mi := &file_terminal_client_proto_msgTypes[36]
+	mi := &file_terminal_client_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5760,7 +5990,7 @@ func (x *AssistantMessageCell) String() string {
 func (*AssistantMessageCell) ProtoMessage() {}
 
 func (x *AssistantMessageCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[36]
+	mi := &file_terminal_client_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5773,7 +6003,7 @@ func (x *AssistantMessageCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssistantMessageCell.ProtoReflect.Descriptor instead.
 func (*AssistantMessageCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{36}
+	return file_terminal_client_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *AssistantMessageCell) GetCommon() *DurableCellCommon {
@@ -5795,7 +6025,7 @@ type ToolTerminalCell struct {
 
 func (x *ToolTerminalCell) Reset() {
 	*x = ToolTerminalCell{}
-	mi := &file_terminal_client_proto_msgTypes[37]
+	mi := &file_terminal_client_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5807,7 +6037,7 @@ func (x *ToolTerminalCell) String() string {
 func (*ToolTerminalCell) ProtoMessage() {}
 
 func (x *ToolTerminalCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[37]
+	mi := &file_terminal_client_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5820,7 +6050,7 @@ func (x *ToolTerminalCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolTerminalCell.ProtoReflect.Descriptor instead.
 func (*ToolTerminalCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{37}
+	return file_terminal_client_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ToolTerminalCell) GetCommon() *DurableCellCommon {
@@ -5861,7 +6091,7 @@ type ErrorCell struct {
 
 func (x *ErrorCell) Reset() {
 	*x = ErrorCell{}
-	mi := &file_terminal_client_proto_msgTypes[38]
+	mi := &file_terminal_client_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5873,7 +6103,7 @@ func (x *ErrorCell) String() string {
 func (*ErrorCell) ProtoMessage() {}
 
 func (x *ErrorCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[38]
+	mi := &file_terminal_client_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5886,7 +6116,7 @@ func (x *ErrorCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorCell.ProtoReflect.Descriptor instead.
 func (*ErrorCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{38}
+	return file_terminal_client_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ErrorCell) GetCommon() *DurableCellCommon {
@@ -5914,7 +6144,7 @@ type InteractionCell struct {
 
 func (x *InteractionCell) Reset() {
 	*x = InteractionCell{}
-	mi := &file_terminal_client_proto_msgTypes[39]
+	mi := &file_terminal_client_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5926,7 +6156,7 @@ func (x *InteractionCell) String() string {
 func (*InteractionCell) ProtoMessage() {}
 
 func (x *InteractionCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[39]
+	mi := &file_terminal_client_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5939,7 +6169,7 @@ func (x *InteractionCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InteractionCell.ProtoReflect.Descriptor instead.
 func (*InteractionCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{39}
+	return file_terminal_client_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *InteractionCell) GetCommon() *DurableCellCommon {
@@ -5972,7 +6202,7 @@ type CompactionBoundaryCell struct {
 
 func (x *CompactionBoundaryCell) Reset() {
 	*x = CompactionBoundaryCell{}
-	mi := &file_terminal_client_proto_msgTypes[40]
+	mi := &file_terminal_client_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5984,7 +6214,7 @@ func (x *CompactionBoundaryCell) String() string {
 func (*CompactionBoundaryCell) ProtoMessage() {}
 
 func (x *CompactionBoundaryCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[40]
+	mi := &file_terminal_client_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5997,7 +6227,7 @@ func (x *CompactionBoundaryCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactionBoundaryCell.ProtoReflect.Descriptor instead.
 func (*CompactionBoundaryCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{40}
+	return file_terminal_client_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *CompactionBoundaryCell) GetCommon() *DurableCellCommon {
@@ -6017,7 +6247,7 @@ type RecoveryCell struct {
 
 func (x *RecoveryCell) Reset() {
 	*x = RecoveryCell{}
-	mi := &file_terminal_client_proto_msgTypes[41]
+	mi := &file_terminal_client_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6029,7 +6259,7 @@ func (x *RecoveryCell) String() string {
 func (*RecoveryCell) ProtoMessage() {}
 
 func (x *RecoveryCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[41]
+	mi := &file_terminal_client_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6042,7 +6272,7 @@ func (x *RecoveryCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoveryCell.ProtoReflect.Descriptor instead.
 func (*RecoveryCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{41}
+	return file_terminal_client_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *RecoveryCell) GetCommon() *DurableCellCommon {
@@ -6070,7 +6300,7 @@ type AuditCell struct {
 
 func (x *AuditCell) Reset() {
 	*x = AuditCell{}
-	mi := &file_terminal_client_proto_msgTypes[42]
+	mi := &file_terminal_client_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6082,7 +6312,7 @@ func (x *AuditCell) String() string {
 func (*AuditCell) ProtoMessage() {}
 
 func (x *AuditCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[42]
+	mi := &file_terminal_client_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6095,7 +6325,7 @@ func (x *AuditCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditCell.ProtoReflect.Descriptor instead.
 func (*AuditCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{42}
+	return file_terminal_client_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *AuditCell) GetCommon() *DurableCellCommon {
@@ -6129,7 +6359,7 @@ type SystemNoticeCell struct {
 
 func (x *SystemNoticeCell) Reset() {
 	*x = SystemNoticeCell{}
-	mi := &file_terminal_client_proto_msgTypes[43]
+	mi := &file_terminal_client_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6141,7 +6371,7 @@ func (x *SystemNoticeCell) String() string {
 func (*SystemNoticeCell) ProtoMessage() {}
 
 func (x *SystemNoticeCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[43]
+	mi := &file_terminal_client_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6154,7 +6384,7 @@ func (x *SystemNoticeCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SystemNoticeCell.ProtoReflect.Descriptor instead.
 func (*SystemNoticeCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{43}
+	return file_terminal_client_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *SystemNoticeCell) GetCommon() *DurableCellCommon {
@@ -6191,7 +6421,7 @@ type DurableHistoryCell struct {
 
 func (x *DurableHistoryCell) Reset() {
 	*x = DurableHistoryCell{}
-	mi := &file_terminal_client_proto_msgTypes[44]
+	mi := &file_terminal_client_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6203,7 +6433,7 @@ func (x *DurableHistoryCell) String() string {
 func (*DurableHistoryCell) ProtoMessage() {}
 
 func (x *DurableHistoryCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[44]
+	mi := &file_terminal_client_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6216,7 +6446,7 @@ func (x *DurableHistoryCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurableHistoryCell.ProtoReflect.Descriptor instead.
 func (*DurableHistoryCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{44}
+	return file_terminal_client_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *DurableHistoryCell) GetCell() isDurableHistoryCell_Cell {
@@ -6383,7 +6613,7 @@ type CanonicalTranscriptSourceView struct {
 
 func (x *CanonicalTranscriptSourceView) Reset() {
 	*x = CanonicalTranscriptSourceView{}
-	mi := &file_terminal_client_proto_msgTypes[45]
+	mi := &file_terminal_client_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6395,7 +6625,7 @@ func (x *CanonicalTranscriptSourceView) String() string {
 func (*CanonicalTranscriptSourceView) ProtoMessage() {}
 
 func (x *CanonicalTranscriptSourceView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[45]
+	mi := &file_terminal_client_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6408,7 +6638,7 @@ func (x *CanonicalTranscriptSourceView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanonicalTranscriptSourceView.ProtoReflect.Descriptor instead.
 func (*CanonicalTranscriptSourceView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{45}
+	return file_terminal_client_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CanonicalTranscriptSourceView) GetTranscriptLeafId() string {
@@ -6501,7 +6731,7 @@ type DurableAuditSourceView struct {
 
 func (x *DurableAuditSourceView) Reset() {
 	*x = DurableAuditSourceView{}
-	mi := &file_terminal_client_proto_msgTypes[46]
+	mi := &file_terminal_client_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6513,7 +6743,7 @@ func (x *DurableAuditSourceView) String() string {
 func (*DurableAuditSourceView) ProtoMessage() {}
 
 func (x *DurableAuditSourceView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[46]
+	mi := &file_terminal_client_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6526,7 +6756,7 @@ func (x *DurableAuditSourceView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurableAuditSourceView.ProtoReflect.Descriptor instead.
 func (*DurableAuditSourceView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{46}
+	return file_terminal_client_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *DurableAuditSourceView) GetAuditCellId() string {
@@ -6626,7 +6856,7 @@ type HistorySourceView struct {
 
 func (x *HistorySourceView) Reset() {
 	*x = HistorySourceView{}
-	mi := &file_terminal_client_proto_msgTypes[47]
+	mi := &file_terminal_client_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6638,7 +6868,7 @@ func (x *HistorySourceView) String() string {
 func (*HistorySourceView) ProtoMessage() {}
 
 func (x *HistorySourceView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[47]
+	mi := &file_terminal_client_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6651,7 +6881,7 @@ func (x *HistorySourceView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistorySourceView.ProtoReflect.Descriptor instead.
 func (*HistorySourceView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{47}
+	return file_terminal_client_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *HistorySourceView) GetSource() isHistorySourceView_Source {
@@ -6714,7 +6944,7 @@ type PresentationHistoryPlacementKey struct {
 
 func (x *PresentationHistoryPlacementKey) Reset() {
 	*x = PresentationHistoryPlacementKey{}
-	mi := &file_terminal_client_proto_msgTypes[48]
+	mi := &file_terminal_client_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6726,7 +6956,7 @@ func (x *PresentationHistoryPlacementKey) String() string {
 func (*PresentationHistoryPlacementKey) ProtoMessage() {}
 
 func (x *PresentationHistoryPlacementKey) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[48]
+	mi := &file_terminal_client_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6739,7 +6969,7 @@ func (x *PresentationHistoryPlacementKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryPlacementKey.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryPlacementKey) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{48}
+	return file_terminal_client_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *PresentationHistoryPlacementKey) GetPlacementKeyContractId() string {
@@ -6833,7 +7063,7 @@ type PresentationHistoryEntry struct {
 
 func (x *PresentationHistoryEntry) Reset() {
 	*x = PresentationHistoryEntry{}
-	mi := &file_terminal_client_proto_msgTypes[49]
+	mi := &file_terminal_client_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6845,7 +7075,7 @@ func (x *PresentationHistoryEntry) String() string {
 func (*PresentationHistoryEntry) ProtoMessage() {}
 
 func (x *PresentationHistoryEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[49]
+	mi := &file_terminal_client_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6858,7 +7088,7 @@ func (x *PresentationHistoryEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryEntry.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryEntry) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{49}
+	return file_terminal_client_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *PresentationHistoryEntry) GetRuntimeSessionId() string {
@@ -6913,7 +7143,7 @@ type ConfirmedRootRankBasis struct {
 
 func (x *ConfirmedRootRankBasis) Reset() {
 	*x = ConfirmedRootRankBasis{}
-	mi := &file_terminal_client_proto_msgTypes[50]
+	mi := &file_terminal_client_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6925,7 +7155,7 @@ func (x *ConfirmedRootRankBasis) String() string {
 func (*ConfirmedRootRankBasis) ProtoMessage() {}
 
 func (x *ConfirmedRootRankBasis) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[50]
+	mi := &file_terminal_client_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6938,7 +7168,7 @@ func (x *ConfirmedRootRankBasis) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmedRootRankBasis.ProtoReflect.Descriptor instead.
 func (*ConfirmedRootRankBasis) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{50}
+	return file_terminal_client_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ConfirmedRootRankBasis) GetHistoryRootIdentityFingerprint() string {
@@ -6966,7 +7196,7 @@ type ActiveHeadRankBasis struct {
 
 func (x *ActiveHeadRankBasis) Reset() {
 	*x = ActiveHeadRankBasis{}
-	mi := &file_terminal_client_proto_msgTypes[51]
+	mi := &file_terminal_client_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6978,7 +7208,7 @@ func (x *ActiveHeadRankBasis) String() string {
 func (*ActiveHeadRankBasis) ProtoMessage() {}
 
 func (x *ActiveHeadRankBasis) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[51]
+	mi := &file_terminal_client_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6991,7 +7221,7 @@ func (x *ActiveHeadRankBasis) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActiveHeadRankBasis.ProtoReflect.Descriptor instead.
 func (*ActiveHeadRankBasis) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{51}
+	return file_terminal_client_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ActiveHeadRankBasis) GetHistoryActiveHeadFingerprint() string {
@@ -7028,7 +7258,7 @@ type HistoryRankBasis struct {
 
 func (x *HistoryRankBasis) Reset() {
 	*x = HistoryRankBasis{}
-	mi := &file_terminal_client_proto_msgTypes[52]
+	mi := &file_terminal_client_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7040,7 +7270,7 @@ func (x *HistoryRankBasis) String() string {
 func (*HistoryRankBasis) ProtoMessage() {}
 
 func (x *HistoryRankBasis) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[52]
+	mi := &file_terminal_client_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7053,7 +7283,7 @@ func (x *HistoryRankBasis) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryRankBasis.ProtoReflect.Descriptor instead.
 func (*HistoryRankBasis) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{52}
+	return file_terminal_client_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *HistoryRankBasis) GetBasis() isHistoryRankBasis_Basis {
@@ -7109,7 +7339,7 @@ type PresentationHistoryRankedEntry struct {
 
 func (x *PresentationHistoryRankedEntry) Reset() {
 	*x = PresentationHistoryRankedEntry{}
-	mi := &file_terminal_client_proto_msgTypes[53]
+	mi := &file_terminal_client_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7121,7 +7351,7 @@ func (x *PresentationHistoryRankedEntry) String() string {
 func (*PresentationHistoryRankedEntry) ProtoMessage() {}
 
 func (x *PresentationHistoryRankedEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[53]
+	mi := &file_terminal_client_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7134,7 +7364,7 @@ func (x *PresentationHistoryRankedEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryRankedEntry.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryRankedEntry) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{53}
+	return file_terminal_client_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *PresentationHistoryRankedEntry) GetEntry() *PresentationHistoryEntry {
@@ -7190,7 +7420,7 @@ type PresentationHistoryRootIdentity struct {
 
 func (x *PresentationHistoryRootIdentity) Reset() {
 	*x = PresentationHistoryRootIdentity{}
-	mi := &file_terminal_client_proto_msgTypes[54]
+	mi := &file_terminal_client_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7202,7 +7432,7 @@ func (x *PresentationHistoryRootIdentity) String() string {
 func (*PresentationHistoryRootIdentity) ProtoMessage() {}
 
 func (x *PresentationHistoryRootIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[54]
+	mi := &file_terminal_client_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7215,7 +7445,7 @@ func (x *PresentationHistoryRootIdentity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryRootIdentity.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryRootIdentity) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{54}
+	return file_terminal_client_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *PresentationHistoryRootIdentity) GetRuntimeSessionId() string {
@@ -7350,7 +7580,7 @@ type PresentationHistoryCursor struct {
 
 func (x *PresentationHistoryCursor) Reset() {
 	*x = PresentationHistoryCursor{}
-	mi := &file_terminal_client_proto_msgTypes[55]
+	mi := &file_terminal_client_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7362,7 +7592,7 @@ func (x *PresentationHistoryCursor) String() string {
 func (*PresentationHistoryCursor) ProtoMessage() {}
 
 func (x *PresentationHistoryCursor) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[55]
+	mi := &file_terminal_client_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7375,7 +7605,7 @@ func (x *PresentationHistoryCursor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryCursor.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryCursor) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{55}
+	return file_terminal_client_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *PresentationHistoryCursor) GetRuntimeSessionId() string {
@@ -7425,7 +7655,7 @@ type PresentationHistoryLatestRootCursorPair struct {
 
 func (x *PresentationHistoryLatestRootCursorPair) Reset() {
 	*x = PresentationHistoryLatestRootCursorPair{}
-	mi := &file_terminal_client_proto_msgTypes[56]
+	mi := &file_terminal_client_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7437,7 +7667,7 @@ func (x *PresentationHistoryLatestRootCursorPair) String() string {
 func (*PresentationHistoryLatestRootCursorPair) ProtoMessage() {}
 
 func (x *PresentationHistoryLatestRootCursorPair) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[56]
+	mi := &file_terminal_client_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7450,7 +7680,7 @@ func (x *PresentationHistoryLatestRootCursorPair) ProtoReflect() protoreflect.Me
 
 // Deprecated: Use PresentationHistoryLatestRootCursorPair.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryLatestRootCursorPair) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{56}
+	return file_terminal_client_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *PresentationHistoryLatestRootCursorPair) GetRootIdentity() *PresentationHistoryRootIdentity {
@@ -7496,7 +7726,7 @@ type AvailableHistoryCapacity struct {
 
 func (x *AvailableHistoryCapacity) Reset() {
 	*x = AvailableHistoryCapacity{}
-	mi := &file_terminal_client_proto_msgTypes[57]
+	mi := &file_terminal_client_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7508,7 +7738,7 @@ func (x *AvailableHistoryCapacity) String() string {
 func (*AvailableHistoryCapacity) ProtoMessage() {}
 
 func (x *AvailableHistoryCapacity) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[57]
+	mi := &file_terminal_client_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7521,7 +7751,7 @@ func (x *AvailableHistoryCapacity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AvailableHistoryCapacity.ProtoReflect.Descriptor instead.
 func (*AvailableHistoryCapacity) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{57}
+	return file_terminal_client_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *AvailableHistoryCapacity) GetConfirmedEntryCount() uint64 {
@@ -7588,7 +7818,7 @@ type HistorySessionRotationRequired struct {
 
 func (x *HistorySessionRotationRequired) Reset() {
 	*x = HistorySessionRotationRequired{}
-	mi := &file_terminal_client_proto_msgTypes[58]
+	mi := &file_terminal_client_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7600,7 +7830,7 @@ func (x *HistorySessionRotationRequired) String() string {
 func (*HistorySessionRotationRequired) ProtoMessage() {}
 
 func (x *HistorySessionRotationRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[58]
+	mi := &file_terminal_client_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7613,7 +7843,7 @@ func (x *HistorySessionRotationRequired) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistorySessionRotationRequired.ProtoReflect.Descriptor instead.
 func (*HistorySessionRotationRequired) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{58}
+	return file_terminal_client_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *HistorySessionRotationRequired) GetConfirmedEntryCount() uint64 {
@@ -7677,7 +7907,7 @@ type HistoryTreeCapacityExhausted struct {
 
 func (x *HistoryTreeCapacityExhausted) Reset() {
 	*x = HistoryTreeCapacityExhausted{}
-	mi := &file_terminal_client_proto_msgTypes[59]
+	mi := &file_terminal_client_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7689,7 +7919,7 @@ func (x *HistoryTreeCapacityExhausted) String() string {
 func (*HistoryTreeCapacityExhausted) ProtoMessage() {}
 
 func (x *HistoryTreeCapacityExhausted) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[59]
+	mi := &file_terminal_client_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7702,7 +7932,7 @@ func (x *HistoryTreeCapacityExhausted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryTreeCapacityExhausted.ProtoReflect.Descriptor instead.
 func (*HistoryTreeCapacityExhausted) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{59}
+	return file_terminal_client_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *HistoryTreeCapacityExhausted) GetObservedEntryCount() uint64 {
@@ -7744,7 +7974,7 @@ type HistoryCapacityReconciliationRequired struct {
 
 func (x *HistoryCapacityReconciliationRequired) Reset() {
 	*x = HistoryCapacityReconciliationRequired{}
-	mi := &file_terminal_client_proto_msgTypes[60]
+	mi := &file_terminal_client_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7756,7 +7986,7 @@ func (x *HistoryCapacityReconciliationRequired) String() string {
 func (*HistoryCapacityReconciliationRequired) ProtoMessage() {}
 
 func (x *HistoryCapacityReconciliationRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[60]
+	mi := &file_terminal_client_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7769,7 +7999,7 @@ func (x *HistoryCapacityReconciliationRequired) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use HistoryCapacityReconciliationRequired.ProtoReflect.Descriptor instead.
 func (*HistoryCapacityReconciliationRequired) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{60}
+	return file_terminal_client_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *HistoryCapacityReconciliationRequired) GetStableFaultCode() string {
@@ -7808,7 +8038,7 @@ type PresentationHistoryCapacityState struct {
 
 func (x *PresentationHistoryCapacityState) Reset() {
 	*x = PresentationHistoryCapacityState{}
-	mi := &file_terminal_client_proto_msgTypes[61]
+	mi := &file_terminal_client_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7820,7 +8050,7 @@ func (x *PresentationHistoryCapacityState) String() string {
 func (*PresentationHistoryCapacityState) ProtoMessage() {}
 
 func (x *PresentationHistoryCapacityState) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[61]
+	mi := &file_terminal_client_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7833,7 +8063,7 @@ func (x *PresentationHistoryCapacityState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresentationHistoryCapacityState.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryCapacityState) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{61}
+	return file_terminal_client_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *PresentationHistoryCapacityState) GetState() isPresentationHistoryCapacityState_State {
@@ -7931,7 +8161,7 @@ type PresentationHistoryActiveHeadIdentity struct {
 
 func (x *PresentationHistoryActiveHeadIdentity) Reset() {
 	*x = PresentationHistoryActiveHeadIdentity{}
-	mi := &file_terminal_client_proto_msgTypes[62]
+	mi := &file_terminal_client_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7943,7 +8173,7 @@ func (x *PresentationHistoryActiveHeadIdentity) String() string {
 func (*PresentationHistoryActiveHeadIdentity) ProtoMessage() {}
 
 func (x *PresentationHistoryActiveHeadIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[62]
+	mi := &file_terminal_client_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7956,7 +8186,7 @@ func (x *PresentationHistoryActiveHeadIdentity) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use PresentationHistoryActiveHeadIdentity.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryActiveHeadIdentity) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{62}
+	return file_terminal_client_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *PresentationHistoryActiveHeadIdentity) GetRuntimeSessionId() string {
@@ -8068,7 +8298,7 @@ type QueueItemView struct {
 
 func (x *QueueItemView) Reset() {
 	*x = QueueItemView{}
-	mi := &file_terminal_client_proto_msgTypes[63]
+	mi := &file_terminal_client_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8080,7 +8310,7 @@ func (x *QueueItemView) String() string {
 func (*QueueItemView) ProtoMessage() {}
 
 func (x *QueueItemView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[63]
+	mi := &file_terminal_client_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8093,7 +8323,7 @@ func (x *QueueItemView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueItemView.ProtoReflect.Descriptor instead.
 func (*QueueItemView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{63}
+	return file_terminal_client_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *QueueItemView) GetQueueItemId() string {
@@ -8176,7 +8406,7 @@ type ToolApproval struct {
 
 func (x *ToolApproval) Reset() {
 	*x = ToolApproval{}
-	mi := &file_terminal_client_proto_msgTypes[64]
+	mi := &file_terminal_client_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8188,7 +8418,7 @@ func (x *ToolApproval) String() string {
 func (*ToolApproval) ProtoMessage() {}
 
 func (x *ToolApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[64]
+	mi := &file_terminal_client_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8201,7 +8431,7 @@ func (x *ToolApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolApproval.ProtoReflect.Descriptor instead.
 func (*ToolApproval) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{64}
+	return file_terminal_client_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *ToolApproval) GetToolCallId() string {
@@ -8230,7 +8460,7 @@ type ApprovalInteraction struct {
 
 func (x *ApprovalInteraction) Reset() {
 	*x = ApprovalInteraction{}
-	mi := &file_terminal_client_proto_msgTypes[65]
+	mi := &file_terminal_client_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8242,7 +8472,7 @@ func (x *ApprovalInteraction) String() string {
 func (*ApprovalInteraction) ProtoMessage() {}
 
 func (x *ApprovalInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[65]
+	mi := &file_terminal_client_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8255,7 +8485,7 @@ func (x *ApprovalInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalInteraction.ProtoReflect.Descriptor instead.
 func (*ApprovalInteraction) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{65}
+	return file_terminal_client_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ApprovalInteraction) GetInteractionId() string {
@@ -8296,7 +8526,7 @@ type PlanOption struct {
 
 func (x *PlanOption) Reset() {
 	*x = PlanOption{}
-	mi := &file_terminal_client_proto_msgTypes[66]
+	mi := &file_terminal_client_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8308,7 +8538,7 @@ func (x *PlanOption) String() string {
 func (*PlanOption) ProtoMessage() {}
 
 func (x *PlanOption) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[66]
+	mi := &file_terminal_client_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8321,7 +8551,7 @@ func (x *PlanOption) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanOption.ProtoReflect.Descriptor instead.
 func (*PlanOption) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{66}
+	return file_terminal_client_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *PlanOption) GetLabel() string {
@@ -8352,7 +8582,7 @@ type PlanQuestionInteraction struct {
 
 func (x *PlanQuestionInteraction) Reset() {
 	*x = PlanQuestionInteraction{}
-	mi := &file_terminal_client_proto_msgTypes[67]
+	mi := &file_terminal_client_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8364,7 +8594,7 @@ func (x *PlanQuestionInteraction) String() string {
 func (*PlanQuestionInteraction) ProtoMessage() {}
 
 func (x *PlanQuestionInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[67]
+	mi := &file_terminal_client_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8377,7 +8607,7 @@ func (x *PlanQuestionInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanQuestionInteraction.ProtoReflect.Descriptor instead.
 func (*PlanQuestionInteraction) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{67}
+	return file_terminal_client_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *PlanQuestionInteraction) GetInteractionId() string {
@@ -8435,7 +8665,7 @@ type PlanExitInteraction struct {
 
 func (x *PlanExitInteraction) Reset() {
 	*x = PlanExitInteraction{}
-	mi := &file_terminal_client_proto_msgTypes[68]
+	mi := &file_terminal_client_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8447,7 +8677,7 @@ func (x *PlanExitInteraction) String() string {
 func (*PlanExitInteraction) ProtoMessage() {}
 
 func (x *PlanExitInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[68]
+	mi := &file_terminal_client_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8460,7 +8690,7 @@ func (x *PlanExitInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanExitInteraction.ProtoReflect.Descriptor instead.
 func (*PlanExitInteraction) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{68}
+	return file_terminal_client_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *PlanExitInteraction) GetInteractionId() string {
@@ -8510,7 +8740,7 @@ type McpInputPublicRequest struct {
 
 func (x *McpInputPublicRequest) Reset() {
 	*x = McpInputPublicRequest{}
-	mi := &file_terminal_client_proto_msgTypes[69]
+	mi := &file_terminal_client_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8522,7 +8752,7 @@ func (x *McpInputPublicRequest) String() string {
 func (*McpInputPublicRequest) ProtoMessage() {}
 
 func (x *McpInputPublicRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[69]
+	mi := &file_terminal_client_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8535,7 +8765,7 @@ func (x *McpInputPublicRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpInputPublicRequest.ProtoReflect.Descriptor instead.
 func (*McpInputPublicRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{69}
+	return file_terminal_client_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *McpInputPublicRequest) GetRequestKey() string {
@@ -8581,7 +8811,7 @@ type McpInteraction struct {
 
 func (x *McpInteraction) Reset() {
 	*x = McpInteraction{}
-	mi := &file_terminal_client_proto_msgTypes[70]
+	mi := &file_terminal_client_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8593,7 +8823,7 @@ func (x *McpInteraction) String() string {
 func (*McpInteraction) ProtoMessage() {}
 
 func (x *McpInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[70]
+	mi := &file_terminal_client_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8606,7 +8836,7 @@ func (x *McpInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpInteraction.ProtoReflect.Descriptor instead.
 func (*McpInteraction) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{70}
+	return file_terminal_client_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *McpInteraction) GetInteractionId() string {
@@ -8673,7 +8903,7 @@ type PendingInteraction struct {
 
 func (x *PendingInteraction) Reset() {
 	*x = PendingInteraction{}
-	mi := &file_terminal_client_proto_msgTypes[71]
+	mi := &file_terminal_client_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8685,7 +8915,7 @@ func (x *PendingInteraction) String() string {
 func (*PendingInteraction) ProtoMessage() {}
 
 func (x *PendingInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[71]
+	mi := &file_terminal_client_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8698,7 +8928,7 @@ func (x *PendingInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingInteraction.ProtoReflect.Descriptor instead.
 func (*PendingInteraction) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{71}
+	return file_terminal_client_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *PendingInteraction) GetInteraction() isPendingInteraction_Interaction {
@@ -8786,7 +9016,7 @@ type TerminalControlSectionSourceVersion struct {
 
 func (x *TerminalControlSectionSourceVersion) Reset() {
 	*x = TerminalControlSectionSourceVersion{}
-	mi := &file_terminal_client_proto_msgTypes[72]
+	mi := &file_terminal_client_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8798,7 +9028,7 @@ func (x *TerminalControlSectionSourceVersion) String() string {
 func (*TerminalControlSectionSourceVersion) ProtoMessage() {}
 
 func (x *TerminalControlSectionSourceVersion) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[72]
+	mi := &file_terminal_client_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8811,7 +9041,7 @@ func (x *TerminalControlSectionSourceVersion) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use TerminalControlSectionSourceVersion.ProtoReflect.Descriptor instead.
 func (*TerminalControlSectionSourceVersion) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{72}
+	return file_terminal_client_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *TerminalControlSectionSourceVersion) GetSectionKind() TerminalControlSectionKind {
@@ -8867,7 +9097,7 @@ type TerminalSessionLifecycleControlView struct {
 
 func (x *TerminalSessionLifecycleControlView) Reset() {
 	*x = TerminalSessionLifecycleControlView{}
-	mi := &file_terminal_client_proto_msgTypes[73]
+	mi := &file_terminal_client_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8879,7 +9109,7 @@ func (x *TerminalSessionLifecycleControlView) String() string {
 func (*TerminalSessionLifecycleControlView) ProtoMessage() {}
 
 func (x *TerminalSessionLifecycleControlView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[73]
+	mi := &file_terminal_client_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8892,7 +9122,7 @@ func (x *TerminalSessionLifecycleControlView) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use TerminalSessionLifecycleControlView.ProtoReflect.Descriptor instead.
 func (*TerminalSessionLifecycleControlView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{73}
+	return file_terminal_client_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *TerminalSessionLifecycleControlView) GetSourceVersion() *TerminalControlSectionSourceVersion {
@@ -8929,7 +9159,7 @@ type TerminalRunControlView struct {
 
 func (x *TerminalRunControlView) Reset() {
 	*x = TerminalRunControlView{}
-	mi := &file_terminal_client_proto_msgTypes[74]
+	mi := &file_terminal_client_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8941,7 +9171,7 @@ func (x *TerminalRunControlView) String() string {
 func (*TerminalRunControlView) ProtoMessage() {}
 
 func (x *TerminalRunControlView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[74]
+	mi := &file_terminal_client_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8954,7 +9184,7 @@ func (x *TerminalRunControlView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalRunControlView.ProtoReflect.Descriptor instead.
 func (*TerminalRunControlView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{74}
+	return file_terminal_client_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *TerminalRunControlView) GetSourceVersion() *TerminalControlSectionSourceVersion {
@@ -9003,7 +9233,7 @@ type TerminalPendingInteractionControlView struct {
 
 func (x *TerminalPendingInteractionControlView) Reset() {
 	*x = TerminalPendingInteractionControlView{}
-	mi := &file_terminal_client_proto_msgTypes[75]
+	mi := &file_terminal_client_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9015,7 +9245,7 @@ func (x *TerminalPendingInteractionControlView) String() string {
 func (*TerminalPendingInteractionControlView) ProtoMessage() {}
 
 func (x *TerminalPendingInteractionControlView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[75]
+	mi := &file_terminal_client_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9028,7 +9258,7 @@ func (x *TerminalPendingInteractionControlView) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use TerminalPendingInteractionControlView.ProtoReflect.Descriptor instead.
 func (*TerminalPendingInteractionControlView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{75}
+	return file_terminal_client_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *TerminalPendingInteractionControlView) GetSourceVersion() *TerminalControlSectionSourceVersion {
@@ -9067,7 +9297,7 @@ type EmptyPromptQueueGenesisHead struct {
 
 func (x *EmptyPromptQueueGenesisHead) Reset() {
 	*x = EmptyPromptQueueGenesisHead{}
-	mi := &file_terminal_client_proto_msgTypes[76]
+	mi := &file_terminal_client_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9079,7 +9309,7 @@ func (x *EmptyPromptQueueGenesisHead) String() string {
 func (*EmptyPromptQueueGenesisHead) ProtoMessage() {}
 
 func (x *EmptyPromptQueueGenesisHead) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[76]
+	mi := &file_terminal_client_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9092,7 +9322,7 @@ func (x *EmptyPromptQueueGenesisHead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmptyPromptQueueGenesisHead.ProtoReflect.Descriptor instead.
 func (*EmptyPromptQueueGenesisHead) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{76}
+	return file_terminal_client_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *EmptyPromptQueueGenesisHead) GetCheckpointGeneration() uint64 {
@@ -9166,7 +9396,7 @@ type CommittedPromptQueueHead struct {
 
 func (x *CommittedPromptQueueHead) Reset() {
 	*x = CommittedPromptQueueHead{}
-	mi := &file_terminal_client_proto_msgTypes[77]
+	mi := &file_terminal_client_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9178,7 +9408,7 @@ func (x *CommittedPromptQueueHead) String() string {
 func (*CommittedPromptQueueHead) ProtoMessage() {}
 
 func (x *CommittedPromptQueueHead) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[77]
+	mi := &file_terminal_client_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9191,7 +9421,7 @@ func (x *CommittedPromptQueueHead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommittedPromptQueueHead.ProtoReflect.Descriptor instead.
 func (*CommittedPromptQueueHead) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{77}
+	return file_terminal_client_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *CommittedPromptQueueHead) GetCheckpointGeneration() uint64 {
@@ -9305,7 +9535,7 @@ type PromptQueueProjectionHead struct {
 
 func (x *PromptQueueProjectionHead) Reset() {
 	*x = PromptQueueProjectionHead{}
-	mi := &file_terminal_client_proto_msgTypes[78]
+	mi := &file_terminal_client_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9317,7 +9547,7 @@ func (x *PromptQueueProjectionHead) String() string {
 func (*PromptQueueProjectionHead) ProtoMessage() {}
 
 func (x *PromptQueueProjectionHead) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[78]
+	mi := &file_terminal_client_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9330,7 +9560,7 @@ func (x *PromptQueueProjectionHead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptQueueProjectionHead.ProtoReflect.Descriptor instead.
 func (*PromptQueueProjectionHead) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{78}
+	return file_terminal_client_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *PromptQueueProjectionHead) GetHead() isPromptQueueProjectionHead_Head {
@@ -9391,7 +9621,7 @@ type PromptQueueClientProjection struct {
 
 func (x *PromptQueueClientProjection) Reset() {
 	*x = PromptQueueClientProjection{}
-	mi := &file_terminal_client_proto_msgTypes[79]
+	mi := &file_terminal_client_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9403,7 +9633,7 @@ func (x *PromptQueueClientProjection) String() string {
 func (*PromptQueueClientProjection) ProtoMessage() {}
 
 func (x *PromptQueueClientProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[79]
+	mi := &file_terminal_client_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9416,7 +9646,7 @@ func (x *PromptQueueClientProjection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptQueueClientProjection.ProtoReflect.Descriptor instead.
 func (*PromptQueueClientProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{79}
+	return file_terminal_client_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *PromptQueueClientProjection) GetProjectionContractId() string {
@@ -9493,7 +9723,7 @@ type TerminalPromptQueueControlView struct {
 
 func (x *TerminalPromptQueueControlView) Reset() {
 	*x = TerminalPromptQueueControlView{}
-	mi := &file_terminal_client_proto_msgTypes[80]
+	mi := &file_terminal_client_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9505,7 +9735,7 @@ func (x *TerminalPromptQueueControlView) String() string {
 func (*TerminalPromptQueueControlView) ProtoMessage() {}
 
 func (x *TerminalPromptQueueControlView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[80]
+	mi := &file_terminal_client_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9518,7 +9748,7 @@ func (x *TerminalPromptQueueControlView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalPromptQueueControlView.ProtoReflect.Descriptor instead.
 func (*TerminalPromptQueueControlView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{80}
+	return file_terminal_client_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *TerminalPromptQueueControlView) GetSourceVersion() *TerminalControlSectionSourceVersion {
@@ -9557,7 +9787,7 @@ type ServerNotificationView struct {
 
 func (x *ServerNotificationView) Reset() {
 	*x = ServerNotificationView{}
-	mi := &file_terminal_client_proto_msgTypes[81]
+	mi := &file_terminal_client_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9569,7 +9799,7 @@ func (x *ServerNotificationView) String() string {
 func (*ServerNotificationView) ProtoMessage() {}
 
 func (x *ServerNotificationView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[81]
+	mi := &file_terminal_client_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9582,7 +9812,7 @@ func (x *ServerNotificationView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerNotificationView.ProtoReflect.Descriptor instead.
 func (*ServerNotificationView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{81}
+	return file_terminal_client_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *ServerNotificationView) GetNotificationId() string {
@@ -9647,7 +9877,7 @@ type TerminalServerNotificationProjection struct {
 
 func (x *TerminalServerNotificationProjection) Reset() {
 	*x = TerminalServerNotificationProjection{}
-	mi := &file_terminal_client_proto_msgTypes[82]
+	mi := &file_terminal_client_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9659,7 +9889,7 @@ func (x *TerminalServerNotificationProjection) String() string {
 func (*TerminalServerNotificationProjection) ProtoMessage() {}
 
 func (x *TerminalServerNotificationProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[82]
+	mi := &file_terminal_client_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9672,7 +9902,7 @@ func (x *TerminalServerNotificationProjection) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use TerminalServerNotificationProjection.ProtoReflect.Descriptor instead.
 func (*TerminalServerNotificationProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{82}
+	return file_terminal_client_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *TerminalServerNotificationProjection) GetSourceVersion() *TerminalControlSectionSourceVersion {
@@ -9725,7 +9955,7 @@ type TerminalControlProjectionView struct {
 
 func (x *TerminalControlProjectionView) Reset() {
 	*x = TerminalControlProjectionView{}
-	mi := &file_terminal_client_proto_msgTypes[83]
+	mi := &file_terminal_client_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9737,7 +9967,7 @@ func (x *TerminalControlProjectionView) String() string {
 func (*TerminalControlProjectionView) ProtoMessage() {}
 
 func (x *TerminalControlProjectionView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[83]
+	mi := &file_terminal_client_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9750,7 +9980,7 @@ func (x *TerminalControlProjectionView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalControlProjectionView.ProtoReflect.Descriptor instead.
 func (*TerminalControlProjectionView) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{83}
+	return file_terminal_client_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *TerminalControlProjectionView) GetRuntimeSessionId() string {
@@ -9816,7 +10046,7 @@ type ControlProjectionCursor struct {
 
 func (x *ControlProjectionCursor) Reset() {
 	*x = ControlProjectionCursor{}
-	mi := &file_terminal_client_proto_msgTypes[84]
+	mi := &file_terminal_client_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9828,7 +10058,7 @@ func (x *ControlProjectionCursor) String() string {
 func (*ControlProjectionCursor) ProtoMessage() {}
 
 func (x *ControlProjectionCursor) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[84]
+	mi := &file_terminal_client_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9841,7 +10071,7 @@ func (x *ControlProjectionCursor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlProjectionCursor.ProtoReflect.Descriptor instead.
 func (*ControlProjectionCursor) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{84}
+	return file_terminal_client_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *ControlProjectionCursor) GetControlGeneration() uint64 {
@@ -9897,7 +10127,7 @@ type TerminalControlProjectionSnapshot struct {
 
 func (x *TerminalControlProjectionSnapshot) Reset() {
 	*x = TerminalControlProjectionSnapshot{}
-	mi := &file_terminal_client_proto_msgTypes[85]
+	mi := &file_terminal_client_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9909,7 +10139,7 @@ func (x *TerminalControlProjectionSnapshot) String() string {
 func (*TerminalControlProjectionSnapshot) ProtoMessage() {}
 
 func (x *TerminalControlProjectionSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[85]
+	mi := &file_terminal_client_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9922,7 +10152,7 @@ func (x *TerminalControlProjectionSnapshot) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use TerminalControlProjectionSnapshot.ProtoReflect.Descriptor instead.
 func (*TerminalControlProjectionSnapshot) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{85}
+	return file_terminal_client_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *TerminalControlProjectionSnapshot) GetView() *TerminalControlProjectionView {
@@ -9958,7 +10188,7 @@ type ProjectionSnapshotRequest struct {
 
 func (x *ProjectionSnapshotRequest) Reset() {
 	*x = ProjectionSnapshotRequest{}
-	mi := &file_terminal_client_proto_msgTypes[86]
+	mi := &file_terminal_client_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9970,7 +10200,7 @@ func (x *ProjectionSnapshotRequest) String() string {
 func (*ProjectionSnapshotRequest) ProtoMessage() {}
 
 func (x *ProjectionSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[86]
+	mi := &file_terminal_client_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9983,7 +10213,7 @@ func (x *ProjectionSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectionSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*ProjectionSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{86}
+	return file_terminal_client_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *ProjectionSnapshotRequest) GetRequestId() string {
@@ -10025,6 +10255,8 @@ type ProjectionSnapshotFrame struct {
 	ActiveHead                                       *PresentationHistoryActiveHeadIdentity   `protobuf:"bytes,8,opt,name=active_head,json=activeHead,proto3" json:"active_head,omitempty"`
 	OrderedResidentEntries                           []*PresentationHistoryRankedEntry        `protobuf:"bytes,9,rep,name=ordered_resident_entries,json=orderedResidentEntries,proto3" json:"ordered_resident_entries,omitempty"`
 	LatestRootCursorPair                             *PresentationHistoryLatestRootCursorPair `protobuf:"bytes,10,opt,name=latest_root_cursor_pair,json=latestRootCursorPair,proto3" json:"latest_root_cursor_pair,omitempty"`
+	ResidentVectorFingerprint                        string                                   `protobuf:"bytes,11,opt,name=resident_vector_fingerprint,json=residentVectorFingerprint,proto3" json:"resident_vector_fingerprint,omitempty"`
+	ViewportFingerprint                              string                                   `protobuf:"bytes,12,opt,name=viewport_fingerprint,json=viewportFingerprint,proto3" json:"viewport_fingerprint,omitempty"`
 	SnapshotFingerprint                              string                                   `protobuf:"bytes,18,opt,name=snapshot_fingerprint,json=snapshotFingerprint,proto3" json:"snapshot_fingerprint,omitempty"`
 	ControlProjectionSnapshot                        *TerminalControlProjectionSnapshot       `protobuf:"bytes,19,opt,name=control_projection_snapshot,json=controlProjectionSnapshot,proto3" json:"control_projection_snapshot,omitempty"`
 	ValidatedMinimumObservedControlCursorFingerprint *string                                  `protobuf:"bytes,20,opt,name=validated_minimum_observed_control_cursor_fingerprint,json=validatedMinimumObservedControlCursorFingerprint,proto3,oneof" json:"validated_minimum_observed_control_cursor_fingerprint,omitempty"`
@@ -10034,7 +10266,7 @@ type ProjectionSnapshotFrame struct {
 
 func (x *ProjectionSnapshotFrame) Reset() {
 	*x = ProjectionSnapshotFrame{}
-	mi := &file_terminal_client_proto_msgTypes[87]
+	mi := &file_terminal_client_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10046,7 +10278,7 @@ func (x *ProjectionSnapshotFrame) String() string {
 func (*ProjectionSnapshotFrame) ProtoMessage() {}
 
 func (x *ProjectionSnapshotFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[87]
+	mi := &file_terminal_client_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10059,7 +10291,7 @@ func (x *ProjectionSnapshotFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectionSnapshotFrame.ProtoReflect.Descriptor instead.
 func (*ProjectionSnapshotFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{87}
+	return file_terminal_client_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *ProjectionSnapshotFrame) GetRequestId() string {
@@ -10125,6 +10357,20 @@ func (x *ProjectionSnapshotFrame) GetLatestRootCursorPair() *PresentationHistory
 	return nil
 }
 
+func (x *ProjectionSnapshotFrame) GetResidentVectorFingerprint() string {
+	if x != nil {
+		return x.ResidentVectorFingerprint
+	}
+	return ""
+}
+
+func (x *ProjectionSnapshotFrame) GetViewportFingerprint() string {
+	if x != nil {
+		return x.ViewportFingerprint
+	}
+	return ""
+}
+
 func (x *ProjectionSnapshotFrame) GetSnapshotFingerprint() string {
 	if x != nil {
 		return x.SnapshotFingerprint
@@ -10146,6 +10392,164 @@ func (x *ProjectionSnapshotFrame) GetValidatedMinimumObservedControlCursorFinger
 	return ""
 }
 
+type ProjectionSnapshotControlRebaseRequired struct {
+	state                                    protoimpl.MessageState                               `protogen:"open.v1"`
+	RequestId                                string                                               `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	RequestedMinimumControlCursorFingerprint string                                               `protobuf:"bytes,2,opt,name=requested_minimum_control_cursor_fingerprint,json=requestedMinimumControlCursorFingerprint,proto3" json:"requested_minimum_control_cursor_fingerprint,omitempty"`
+	LatestControlCursor                      *ControlProjectionCursor                             `protobuf:"bytes,3,opt,name=latest_control_cursor,json=latestControlCursor,proto3" json:"latest_control_cursor,omitempty"`
+	StableReason                             ProjectionSnapshotControlRebaseRequired_StableReason `protobuf:"varint,4,opt,name=stable_reason,json=stableReason,proto3,enum=pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired_StableReason" json:"stable_reason,omitempty"`
+	ResponseFingerprint                      string                                               `protobuf:"bytes,5,opt,name=response_fingerprint,json=responseFingerprint,proto3" json:"response_fingerprint,omitempty"`
+	unknownFields                            protoimpl.UnknownFields
+	sizeCache                                protoimpl.SizeCache
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) Reset() {
+	*x = ProjectionSnapshotControlRebaseRequired{}
+	mi := &file_terminal_client_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProjectionSnapshotControlRebaseRequired) ProtoMessage() {}
+
+func (x *ProjectionSnapshotControlRebaseRequired) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_client_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProjectionSnapshotControlRebaseRequired.ProtoReflect.Descriptor instead.
+func (*ProjectionSnapshotControlRebaseRequired) Descriptor() ([]byte, []int) {
+	return file_terminal_client_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) GetRequestedMinimumControlCursorFingerprint() string {
+	if x != nil {
+		return x.RequestedMinimumControlCursorFingerprint
+	}
+	return ""
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) GetLatestControlCursor() *ControlProjectionCursor {
+	if x != nil {
+		return x.LatestControlCursor
+	}
+	return nil
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) GetStableReason() ProjectionSnapshotControlRebaseRequired_StableReason {
+	if x != nil {
+		return x.StableReason
+	}
+	return ProjectionSnapshotControlRebaseRequired_STABLE_REASON_UNSPECIFIED
+}
+
+func (x *ProjectionSnapshotControlRebaseRequired) GetResponseFingerprint() string {
+	if x != nil {
+		return x.ResponseFingerprint
+	}
+	return ""
+}
+
+type ProjectionSnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Outcome:
+	//
+	//	*ProjectionSnapshotResponse_Snapshot
+	//	*ProjectionSnapshotResponse_ControlRebaseRequired
+	Outcome       isProjectionSnapshotResponse_Outcome `protobuf_oneof:"outcome"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProjectionSnapshotResponse) Reset() {
+	*x = ProjectionSnapshotResponse{}
+	mi := &file_terminal_client_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProjectionSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProjectionSnapshotResponse) ProtoMessage() {}
+
+func (x *ProjectionSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_client_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProjectionSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*ProjectionSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_terminal_client_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *ProjectionSnapshotResponse) GetOutcome() isProjectionSnapshotResponse_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return nil
+}
+
+func (x *ProjectionSnapshotResponse) GetSnapshot() *ProjectionSnapshotFrame {
+	if x != nil {
+		if x, ok := x.Outcome.(*ProjectionSnapshotResponse_Snapshot); ok {
+			return x.Snapshot
+		}
+	}
+	return nil
+}
+
+func (x *ProjectionSnapshotResponse) GetControlRebaseRequired() *ProjectionSnapshotControlRebaseRequired {
+	if x != nil {
+		if x, ok := x.Outcome.(*ProjectionSnapshotResponse_ControlRebaseRequired); ok {
+			return x.ControlRebaseRequired
+		}
+	}
+	return nil
+}
+
+type isProjectionSnapshotResponse_Outcome interface {
+	isProjectionSnapshotResponse_Outcome()
+}
+
+type ProjectionSnapshotResponse_Snapshot struct {
+	Snapshot *ProjectionSnapshotFrame `protobuf:"bytes,1,opt,name=snapshot,proto3,oneof"`
+}
+
+type ProjectionSnapshotResponse_ControlRebaseRequired struct {
+	ControlRebaseRequired *ProjectionSnapshotControlRebaseRequired `protobuf:"bytes,2,opt,name=control_rebase_required,json=controlRebaseRequired,proto3,oneof"`
+}
+
+func (*ProjectionSnapshotResponse_Snapshot) isProjectionSnapshotResponse_Outcome() {}
+
+func (*ProjectionSnapshotResponse_ControlRebaseRequired) isProjectionSnapshotResponse_Outcome() {}
+
 type OperationalActivityCommon struct {
 	state                 protoimpl.MessageState          `protogen:"open.v1"`
 	OwnerKind             string                          `protobuf:"bytes,1,opt,name=owner_kind,json=ownerKind,proto3" json:"owner_kind,omitempty"`
@@ -10163,7 +10567,7 @@ type OperationalActivityCommon struct {
 
 func (x *OperationalActivityCommon) Reset() {
 	*x = OperationalActivityCommon{}
-	mi := &file_terminal_client_proto_msgTypes[88]
+	mi := &file_terminal_client_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10175,7 +10579,7 @@ func (x *OperationalActivityCommon) String() string {
 func (*OperationalActivityCommon) ProtoMessage() {}
 
 func (x *OperationalActivityCommon) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[88]
+	mi := &file_terminal_client_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10188,7 +10592,7 @@ func (x *OperationalActivityCommon) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalActivityCommon.ProtoReflect.Descriptor instead.
 func (*OperationalActivityCommon) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{88}
+	return file_terminal_client_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *OperationalActivityCommon) GetOwnerKind() string {
@@ -10263,7 +10667,7 @@ type ModelActivityCell struct {
 
 func (x *ModelActivityCell) Reset() {
 	*x = ModelActivityCell{}
-	mi := &file_terminal_client_proto_msgTypes[89]
+	mi := &file_terminal_client_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10275,7 +10679,7 @@ func (x *ModelActivityCell) String() string {
 func (*ModelActivityCell) ProtoMessage() {}
 
 func (x *ModelActivityCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[89]
+	mi := &file_terminal_client_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10288,7 +10692,7 @@ func (x *ModelActivityCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelActivityCell.ProtoReflect.Descriptor instead.
 func (*ModelActivityCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{89}
+	return file_terminal_client_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *ModelActivityCell) GetCommon() *OperationalActivityCommon {
@@ -10307,7 +10711,7 @@ type ToolActivityCell struct {
 
 func (x *ToolActivityCell) Reset() {
 	*x = ToolActivityCell{}
-	mi := &file_terminal_client_proto_msgTypes[90]
+	mi := &file_terminal_client_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10319,7 +10723,7 @@ func (x *ToolActivityCell) String() string {
 func (*ToolActivityCell) ProtoMessage() {}
 
 func (x *ToolActivityCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[90]
+	mi := &file_terminal_client_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10332,7 +10736,7 @@ func (x *ToolActivityCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolActivityCell.ProtoReflect.Descriptor instead.
 func (*ToolActivityCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{90}
+	return file_terminal_client_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *ToolActivityCell) GetCommon() *OperationalActivityCommon {
@@ -10351,7 +10755,7 @@ type TerminalProcessActivityCell struct {
 
 func (x *TerminalProcessActivityCell) Reset() {
 	*x = TerminalProcessActivityCell{}
-	mi := &file_terminal_client_proto_msgTypes[91]
+	mi := &file_terminal_client_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10363,7 +10767,7 @@ func (x *TerminalProcessActivityCell) String() string {
 func (*TerminalProcessActivityCell) ProtoMessage() {}
 
 func (x *TerminalProcessActivityCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[91]
+	mi := &file_terminal_client_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10376,7 +10780,7 @@ func (x *TerminalProcessActivityCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalProcessActivityCell.ProtoReflect.Descriptor instead.
 func (*TerminalProcessActivityCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{91}
+	return file_terminal_client_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *TerminalProcessActivityCell) GetCommon() *OperationalActivityCommon {
@@ -10395,7 +10799,7 @@ type SubagentActivityCell struct {
 
 func (x *SubagentActivityCell) Reset() {
 	*x = SubagentActivityCell{}
-	mi := &file_terminal_client_proto_msgTypes[92]
+	mi := &file_terminal_client_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10407,7 +10811,7 @@ func (x *SubagentActivityCell) String() string {
 func (*SubagentActivityCell) ProtoMessage() {}
 
 func (x *SubagentActivityCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[92]
+	mi := &file_terminal_client_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10420,7 +10824,7 @@ func (x *SubagentActivityCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubagentActivityCell.ProtoReflect.Descriptor instead.
 func (*SubagentActivityCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{92}
+	return file_terminal_client_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *SubagentActivityCell) GetCommon() *OperationalActivityCommon {
@@ -10445,7 +10849,7 @@ type OperationalActivityCell struct {
 
 func (x *OperationalActivityCell) Reset() {
 	*x = OperationalActivityCell{}
-	mi := &file_terminal_client_proto_msgTypes[93]
+	mi := &file_terminal_client_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10457,7 +10861,7 @@ func (x *OperationalActivityCell) String() string {
 func (*OperationalActivityCell) ProtoMessage() {}
 
 func (x *OperationalActivityCell) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[93]
+	mi := &file_terminal_client_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10470,7 +10874,7 @@ func (x *OperationalActivityCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalActivityCell.ProtoReflect.Descriptor instead.
 func (*OperationalActivityCell) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{93}
+	return file_terminal_client_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *OperationalActivityCell) GetActivity() isOperationalActivityCell_Activity {
@@ -10561,7 +10965,7 @@ type OperationalActivityRemove struct {
 
 func (x *OperationalActivityRemove) Reset() {
 	*x = OperationalActivityRemove{}
-	mi := &file_terminal_client_proto_msgTypes[94]
+	mi := &file_terminal_client_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10573,7 +10977,7 @@ func (x *OperationalActivityRemove) String() string {
 func (*OperationalActivityRemove) ProtoMessage() {}
 
 func (x *OperationalActivityRemove) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[94]
+	mi := &file_terminal_client_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10586,7 +10990,7 @@ func (x *OperationalActivityRemove) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalActivityRemove.ProtoReflect.Descriptor instead.
 func (*OperationalActivityRemove) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{94}
+	return file_terminal_client_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *OperationalActivityRemove) GetOperationalGeneration() uint64 {
@@ -10665,7 +11069,7 @@ type OperationalActivityChange struct {
 
 func (x *OperationalActivityChange) Reset() {
 	*x = OperationalActivityChange{}
-	mi := &file_terminal_client_proto_msgTypes[95]
+	mi := &file_terminal_client_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10677,7 +11081,7 @@ func (x *OperationalActivityChange) String() string {
 func (*OperationalActivityChange) ProtoMessage() {}
 
 func (x *OperationalActivityChange) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[95]
+	mi := &file_terminal_client_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10690,7 +11094,7 @@ func (x *OperationalActivityChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalActivityChange.ProtoReflect.Descriptor instead.
 func (*OperationalActivityChange) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{95}
+	return file_terminal_client_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *OperationalActivityChange) GetChange() isOperationalActivityChange_Change {
@@ -10751,7 +11155,7 @@ type OperationalSnapshotRequest struct {
 
 func (x *OperationalSnapshotRequest) Reset() {
 	*x = OperationalSnapshotRequest{}
-	mi := &file_terminal_client_proto_msgTypes[96]
+	mi := &file_terminal_client_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10763,7 +11167,7 @@ func (x *OperationalSnapshotRequest) String() string {
 func (*OperationalSnapshotRequest) ProtoMessage() {}
 
 func (x *OperationalSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[96]
+	mi := &file_terminal_client_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10776,7 +11180,7 @@ func (x *OperationalSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*OperationalSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{96}
+	return file_terminal_client_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *OperationalSnapshotRequest) GetRequestId() string {
@@ -10865,7 +11269,7 @@ type OperationalSnapshotFrame struct {
 
 func (x *OperationalSnapshotFrame) Reset() {
 	*x = OperationalSnapshotFrame{}
-	mi := &file_terminal_client_proto_msgTypes[97]
+	mi := &file_terminal_client_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10877,7 +11281,7 @@ func (x *OperationalSnapshotFrame) String() string {
 func (*OperationalSnapshotFrame) ProtoMessage() {}
 
 func (x *OperationalSnapshotFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[97]
+	mi := &file_terminal_client_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10890,7 +11294,7 @@ func (x *OperationalSnapshotFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalSnapshotFrame.ProtoReflect.Descriptor instead.
 func (*OperationalSnapshotFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{97}
+	return file_terminal_client_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *OperationalSnapshotFrame) GetRequestId() string {
@@ -11013,7 +11417,7 @@ type ObserveNextRequest struct {
 
 func (x *ObserveNextRequest) Reset() {
 	*x = ObserveNextRequest{}
-	mi := &file_terminal_client_proto_msgTypes[98]
+	mi := &file_terminal_client_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11025,7 +11429,7 @@ func (x *ObserveNextRequest) String() string {
 func (*ObserveNextRequest) ProtoMessage() {}
 
 func (x *ObserveNextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[98]
+	mi := &file_terminal_client_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11038,7 +11442,7 @@ func (x *ObserveNextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveNextRequest.ProtoReflect.Descriptor instead.
 func (*ObserveNextRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{98}
+	return file_terminal_client_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *ObserveNextRequest) GetRequestId() string {
@@ -11103,7 +11507,7 @@ type HistoryEntryUpsert struct {
 
 func (x *HistoryEntryUpsert) Reset() {
 	*x = HistoryEntryUpsert{}
-	mi := &file_terminal_client_proto_msgTypes[99]
+	mi := &file_terminal_client_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11115,7 +11519,7 @@ func (x *HistoryEntryUpsert) String() string {
 func (*HistoryEntryUpsert) ProtoMessage() {}
 
 func (x *HistoryEntryUpsert) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[99]
+	mi := &file_terminal_client_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11128,7 +11532,7 @@ func (x *HistoryEntryUpsert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryEntryUpsert.ProtoReflect.Descriptor instead.
 func (*HistoryEntryUpsert) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{99}
+	return file_terminal_client_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *HistoryEntryUpsert) GetHistoryEntryId() string {
@@ -11178,7 +11582,7 @@ type HistoryEntryRemove struct {
 
 func (x *HistoryEntryRemove) Reset() {
 	*x = HistoryEntryRemove{}
-	mi := &file_terminal_client_proto_msgTypes[100]
+	mi := &file_terminal_client_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11190,7 +11594,7 @@ func (x *HistoryEntryRemove) String() string {
 func (*HistoryEntryRemove) ProtoMessage() {}
 
 func (x *HistoryEntryRemove) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[100]
+	mi := &file_terminal_client_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11203,7 +11607,7 @@ func (x *HistoryEntryRemove) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryEntryRemove.ProtoReflect.Descriptor instead.
 func (*HistoryEntryRemove) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{100}
+	return file_terminal_client_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *HistoryEntryRemove) GetHistoryEntryId() string {
@@ -11247,7 +11651,7 @@ type HistoryEntryChange struct {
 
 func (x *HistoryEntryChange) Reset() {
 	*x = HistoryEntryChange{}
-	mi := &file_terminal_client_proto_msgTypes[101]
+	mi := &file_terminal_client_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11259,7 +11663,7 @@ func (x *HistoryEntryChange) String() string {
 func (*HistoryEntryChange) ProtoMessage() {}
 
 func (x *HistoryEntryChange) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[101]
+	mi := &file_terminal_client_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11272,7 +11676,7 @@ func (x *HistoryEntryChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryEntryChange.ProtoReflect.Descriptor instead.
 func (*HistoryEntryChange) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{101}
+	return file_terminal_client_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *HistoryEntryChange) GetChange() isHistoryEntryChange_Change {
@@ -11317,21 +11721,23 @@ func (*HistoryEntryChange_Upsert) isHistoryEntryChange_Change() {}
 func (*HistoryEntryChange_Remove) isHistoryEntryChange_Change() {}
 
 type ProjectionDeltaFrame struct {
-	state                       protoimpl.MessageState                 `protogen:"open.v1"`
-	RequestId                   string                                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	BaseProjectionRevision      uint64                                 `protobuf:"varint,2,opt,name=base_projection_revision,json=baseProjectionRevision,proto3" json:"base_projection_revision,omitempty"`
-	ResultingProjectionRevision uint64                                 `protobuf:"varint,3,opt,name=resulting_projection_revision,json=resultingProjectionRevision,proto3" json:"resulting_projection_revision,omitempty"`
-	ResultingAuthorityHighWater uint64                                 `protobuf:"varint,4,opt,name=resulting_authority_high_water,json=resultingAuthorityHighWater,proto3" json:"resulting_authority_high_water,omitempty"`
-	ResultingActiveHead         *PresentationHistoryActiveHeadIdentity `protobuf:"bytes,5,opt,name=resulting_active_head,json=resultingActiveHead,proto3" json:"resulting_active_head,omitempty"`
-	OrderedHistoryChanges       []*HistoryEntryChange                  `protobuf:"bytes,6,rep,name=ordered_history_changes,json=orderedHistoryChanges,proto3" json:"ordered_history_changes,omitempty"`
-	DeltaFingerprint            string                                 `protobuf:"bytes,7,opt,name=delta_fingerprint,json=deltaFingerprint,proto3" json:"delta_fingerprint,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	state                              protoimpl.MessageState                 `protogen:"open.v1"`
+	RequestId                          string                                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	BaseProjectionRevision             uint64                                 `protobuf:"varint,2,opt,name=base_projection_revision,json=baseProjectionRevision,proto3" json:"base_projection_revision,omitempty"`
+	ResultingProjectionRevision        uint64                                 `protobuf:"varint,3,opt,name=resulting_projection_revision,json=resultingProjectionRevision,proto3" json:"resulting_projection_revision,omitempty"`
+	ResultingAuthorityHighWater        uint64                                 `protobuf:"varint,4,opt,name=resulting_authority_high_water,json=resultingAuthorityHighWater,proto3" json:"resulting_authority_high_water,omitempty"`
+	ResultingActiveHead                *PresentationHistoryActiveHeadIdentity `protobuf:"bytes,5,opt,name=resulting_active_head,json=resultingActiveHead,proto3" json:"resulting_active_head,omitempty"`
+	OrderedHistoryChanges              []*HistoryEntryChange                  `protobuf:"bytes,6,rep,name=ordered_history_changes,json=orderedHistoryChanges,proto3" json:"ordered_history_changes,omitempty"`
+	DeltaFingerprint                   string                                 `protobuf:"bytes,7,opt,name=delta_fingerprint,json=deltaFingerprint,proto3" json:"delta_fingerprint,omitempty"`
+	BaseResidentVectorFingerprint      string                                 `protobuf:"bytes,8,opt,name=base_resident_vector_fingerprint,json=baseResidentVectorFingerprint,proto3" json:"base_resident_vector_fingerprint,omitempty"`
+	ResultingResidentVectorFingerprint string                                 `protobuf:"bytes,9,opt,name=resulting_resident_vector_fingerprint,json=resultingResidentVectorFingerprint,proto3" json:"resulting_resident_vector_fingerprint,omitempty"`
+	unknownFields                      protoimpl.UnknownFields
+	sizeCache                          protoimpl.SizeCache
 }
 
 func (x *ProjectionDeltaFrame) Reset() {
 	*x = ProjectionDeltaFrame{}
-	mi := &file_terminal_client_proto_msgTypes[102]
+	mi := &file_terminal_client_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11343,7 +11749,7 @@ func (x *ProjectionDeltaFrame) String() string {
 func (*ProjectionDeltaFrame) ProtoMessage() {}
 
 func (x *ProjectionDeltaFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[102]
+	mi := &file_terminal_client_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11356,7 +11762,7 @@ func (x *ProjectionDeltaFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectionDeltaFrame.ProtoReflect.Descriptor instead.
 func (*ProjectionDeltaFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{102}
+	return file_terminal_client_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *ProjectionDeltaFrame) GetRequestId() string {
@@ -11408,6 +11814,20 @@ func (x *ProjectionDeltaFrame) GetDeltaFingerprint() string {
 	return ""
 }
 
+func (x *ProjectionDeltaFrame) GetBaseResidentVectorFingerprint() string {
+	if x != nil {
+		return x.BaseResidentVectorFingerprint
+	}
+	return ""
+}
+
+func (x *ProjectionDeltaFrame) GetResultingResidentVectorFingerprint() string {
+	if x != nil {
+		return x.ResultingResidentVectorFingerprint
+	}
+	return ""
+}
+
 type AuthorityAdvanceFrame struct {
 	state                     protoimpl.MessageState                 `protogen:"open.v1"`
 	RequestId                 string                                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -11421,7 +11841,7 @@ type AuthorityAdvanceFrame struct {
 
 func (x *AuthorityAdvanceFrame) Reset() {
 	*x = AuthorityAdvanceFrame{}
-	mi := &file_terminal_client_proto_msgTypes[103]
+	mi := &file_terminal_client_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11433,7 +11853,7 @@ func (x *AuthorityAdvanceFrame) String() string {
 func (*AuthorityAdvanceFrame) ProtoMessage() {}
 
 func (x *AuthorityAdvanceFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[103]
+	mi := &file_terminal_client_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11446,7 +11866,7 @@ func (x *AuthorityAdvanceFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorityAdvanceFrame.ProtoReflect.Descriptor instead.
 func (*AuthorityAdvanceFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{103}
+	return file_terminal_client_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *AuthorityAdvanceFrame) GetRequestId() string {
@@ -11499,7 +11919,7 @@ type PresentationHistoryRootCursorRelation struct {
 
 func (x *PresentationHistoryRootCursorRelation) Reset() {
 	*x = PresentationHistoryRootCursorRelation{}
-	mi := &file_terminal_client_proto_msgTypes[104]
+	mi := &file_terminal_client_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11511,7 +11931,7 @@ func (x *PresentationHistoryRootCursorRelation) String() string {
 func (*PresentationHistoryRootCursorRelation) ProtoMessage() {}
 
 func (x *PresentationHistoryRootCursorRelation) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[104]
+	mi := &file_terminal_client_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11524,7 +11944,7 @@ func (x *PresentationHistoryRootCursorRelation) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use PresentationHistoryRootCursorRelation.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryRootCursorRelation) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{104}
+	return file_terminal_client_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *PresentationHistoryRootCursorRelation) GetPreviousRootIdentity() *PresentationHistoryRootIdentity {
@@ -11588,7 +12008,7 @@ type ResidentEntriesUnchanged struct {
 
 func (x *ResidentEntriesUnchanged) Reset() {
 	*x = ResidentEntriesUnchanged{}
-	mi := &file_terminal_client_proto_msgTypes[105]
+	mi := &file_terminal_client_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11600,7 +12020,7 @@ func (x *ResidentEntriesUnchanged) String() string {
 func (*ResidentEntriesUnchanged) ProtoMessage() {}
 
 func (x *ResidentEntriesUnchanged) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[105]
+	mi := &file_terminal_client_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11613,7 +12033,7 @@ func (x *ResidentEntriesUnchanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResidentEntriesUnchanged.ProtoReflect.Descriptor instead.
 func (*ResidentEntriesUnchanged) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{105}
+	return file_terminal_client_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *ResidentEntriesUnchanged) GetBeforeResidentVectorFingerprint() string {
@@ -11657,7 +12077,7 @@ type PresentationHistoryResidentUpsert struct {
 
 func (x *PresentationHistoryResidentUpsert) Reset() {
 	*x = PresentationHistoryResidentUpsert{}
-	mi := &file_terminal_client_proto_msgTypes[106]
+	mi := &file_terminal_client_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11669,7 +12089,7 @@ func (x *PresentationHistoryResidentUpsert) String() string {
 func (*PresentationHistoryResidentUpsert) ProtoMessage() {}
 
 func (x *PresentationHistoryResidentUpsert) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[106]
+	mi := &file_terminal_client_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11682,7 +12102,7 @@ func (x *PresentationHistoryResidentUpsert) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use PresentationHistoryResidentUpsert.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryResidentUpsert) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{106}
+	return file_terminal_client_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *PresentationHistoryResidentUpsert) GetHistoryEntryId() string {
@@ -11732,7 +12152,7 @@ type PresentationHistoryResidentRemove struct {
 
 func (x *PresentationHistoryResidentRemove) Reset() {
 	*x = PresentationHistoryResidentRemove{}
-	mi := &file_terminal_client_proto_msgTypes[107]
+	mi := &file_terminal_client_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11744,7 +12164,7 @@ func (x *PresentationHistoryResidentRemove) String() string {
 func (*PresentationHistoryResidentRemove) ProtoMessage() {}
 
 func (x *PresentationHistoryResidentRemove) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[107]
+	mi := &file_terminal_client_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11757,7 +12177,7 @@ func (x *PresentationHistoryResidentRemove) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use PresentationHistoryResidentRemove.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryResidentRemove) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{107}
+	return file_terminal_client_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *PresentationHistoryResidentRemove) GetHistoryEntryId() string {
@@ -11801,7 +12221,7 @@ type PresentationHistoryResidentChange struct {
 
 func (x *PresentationHistoryResidentChange) Reset() {
 	*x = PresentationHistoryResidentChange{}
-	mi := &file_terminal_client_proto_msgTypes[108]
+	mi := &file_terminal_client_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11813,7 +12233,7 @@ func (x *PresentationHistoryResidentChange) String() string {
 func (*PresentationHistoryResidentChange) ProtoMessage() {}
 
 func (x *PresentationHistoryResidentChange) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[108]
+	mi := &file_terminal_client_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11826,7 +12246,7 @@ func (x *PresentationHistoryResidentChange) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use PresentationHistoryResidentChange.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryResidentChange) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{108}
+	return file_terminal_client_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *PresentationHistoryResidentChange) GetChange() isPresentationHistoryResidentChange_Change {
@@ -11886,7 +12306,7 @@ type BoundedOrderedResidentChanges struct {
 
 func (x *BoundedOrderedResidentChanges) Reset() {
 	*x = BoundedOrderedResidentChanges{}
-	mi := &file_terminal_client_proto_msgTypes[109]
+	mi := &file_terminal_client_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11898,7 +12318,7 @@ func (x *BoundedOrderedResidentChanges) String() string {
 func (*BoundedOrderedResidentChanges) ProtoMessage() {}
 
 func (x *BoundedOrderedResidentChanges) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[109]
+	mi := &file_terminal_client_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11911,7 +12331,7 @@ func (x *BoundedOrderedResidentChanges) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoundedOrderedResidentChanges.ProtoReflect.Descriptor instead.
 func (*BoundedOrderedResidentChanges) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{109}
+	return file_terminal_client_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *BoundedOrderedResidentChanges) GetBeforeResidentVectorFingerprint() string {
@@ -11986,7 +12406,7 @@ type ResidentHistoryRebaseRequired struct {
 
 func (x *ResidentHistoryRebaseRequired) Reset() {
 	*x = ResidentHistoryRebaseRequired{}
-	mi := &file_terminal_client_proto_msgTypes[110]
+	mi := &file_terminal_client_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11998,7 +12418,7 @@ func (x *ResidentHistoryRebaseRequired) String() string {
 func (*ResidentHistoryRebaseRequired) ProtoMessage() {}
 
 func (x *ResidentHistoryRebaseRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[110]
+	mi := &file_terminal_client_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12011,7 +12431,7 @@ func (x *ResidentHistoryRebaseRequired) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResidentHistoryRebaseRequired.ProtoReflect.Descriptor instead.
 func (*ResidentHistoryRebaseRequired) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{110}
+	return file_terminal_client_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *ResidentHistoryRebaseRequired) GetBeforeResidentVectorFingerprint() string {
@@ -12084,7 +12504,7 @@ type PresentationHistoryRootResidentTransition struct {
 
 func (x *PresentationHistoryRootResidentTransition) Reset() {
 	*x = PresentationHistoryRootResidentTransition{}
-	mi := &file_terminal_client_proto_msgTypes[111]
+	mi := &file_terminal_client_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12096,7 +12516,7 @@ func (x *PresentationHistoryRootResidentTransition) String() string {
 func (*PresentationHistoryRootResidentTransition) ProtoMessage() {}
 
 func (x *PresentationHistoryRootResidentTransition) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[111]
+	mi := &file_terminal_client_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12109,7 +12529,7 @@ func (x *PresentationHistoryRootResidentTransition) ProtoReflect() protoreflect.
 
 // Deprecated: Use PresentationHistoryRootResidentTransition.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryRootResidentTransition) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{111}
+	return file_terminal_client_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *PresentationHistoryRootResidentTransition) GetTransition() isPresentationHistoryRootResidentTransition_Transition {
@@ -12203,7 +12623,7 @@ type PresentationHistoryRootAdvancedFrame struct {
 
 func (x *PresentationHistoryRootAdvancedFrame) Reset() {
 	*x = PresentationHistoryRootAdvancedFrame{}
-	mi := &file_terminal_client_proto_msgTypes[112]
+	mi := &file_terminal_client_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12215,7 +12635,7 @@ func (x *PresentationHistoryRootAdvancedFrame) String() string {
 func (*PresentationHistoryRootAdvancedFrame) ProtoMessage() {}
 
 func (x *PresentationHistoryRootAdvancedFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[112]
+	mi := &file_terminal_client_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12228,7 +12648,7 @@ func (x *PresentationHistoryRootAdvancedFrame) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use PresentationHistoryRootAdvancedFrame.ProtoReflect.Descriptor instead.
 func (*PresentationHistoryRootAdvancedFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{112}
+	return file_terminal_client_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *PresentationHistoryRootAdvancedFrame) GetRequestId() string {
@@ -12412,7 +12832,7 @@ type DurableObservationGapFrame struct {
 
 func (x *DurableObservationGapFrame) Reset() {
 	*x = DurableObservationGapFrame{}
-	mi := &file_terminal_client_proto_msgTypes[113]
+	mi := &file_terminal_client_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12424,7 +12844,7 @@ func (x *DurableObservationGapFrame) String() string {
 func (*DurableObservationGapFrame) ProtoMessage() {}
 
 func (x *DurableObservationGapFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[113]
+	mi := &file_terminal_client_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12437,7 +12857,7 @@ func (x *DurableObservationGapFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurableObservationGapFrame.ProtoReflect.Descriptor instead.
 func (*DurableObservationGapFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{113}
+	return file_terminal_client_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *DurableObservationGapFrame) GetRequestId() string {
@@ -12488,7 +12908,7 @@ type OperationalObservationGapFrame struct {
 
 func (x *OperationalObservationGapFrame) Reset() {
 	*x = OperationalObservationGapFrame{}
-	mi := &file_terminal_client_proto_msgTypes[114]
+	mi := &file_terminal_client_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12500,7 +12920,7 @@ func (x *OperationalObservationGapFrame) String() string {
 func (*OperationalObservationGapFrame) ProtoMessage() {}
 
 func (x *OperationalObservationGapFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[114]
+	mi := &file_terminal_client_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12513,7 +12933,7 @@ func (x *OperationalObservationGapFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalObservationGapFrame.ProtoReflect.Descriptor instead.
 func (*OperationalObservationGapFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{114}
+	return file_terminal_client_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *OperationalObservationGapFrame) GetRequestId() string {
@@ -12572,7 +12992,7 @@ type ControlProjectionChangedFrame struct {
 
 func (x *ControlProjectionChangedFrame) Reset() {
 	*x = ControlProjectionChangedFrame{}
-	mi := &file_terminal_client_proto_msgTypes[115]
+	mi := &file_terminal_client_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12584,7 +13004,7 @@ func (x *ControlProjectionChangedFrame) String() string {
 func (*ControlProjectionChangedFrame) ProtoMessage() {}
 
 func (x *ControlProjectionChangedFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[115]
+	mi := &file_terminal_client_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12597,7 +13017,7 @@ func (x *ControlProjectionChangedFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlProjectionChangedFrame.ProtoReflect.Descriptor instead.
 func (*ControlProjectionChangedFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{115}
+	return file_terminal_client_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *ControlProjectionChangedFrame) GetRequestId() string {
@@ -12705,7 +13125,7 @@ type ControlProjectionGapFrame struct {
 
 func (x *ControlProjectionGapFrame) Reset() {
 	*x = ControlProjectionGapFrame{}
-	mi := &file_terminal_client_proto_msgTypes[116]
+	mi := &file_terminal_client_proto_msgTypes[120]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12717,7 +13137,7 @@ func (x *ControlProjectionGapFrame) String() string {
 func (*ControlProjectionGapFrame) ProtoMessage() {}
 
 func (x *ControlProjectionGapFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[116]
+	mi := &file_terminal_client_proto_msgTypes[120]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12730,7 +13150,7 @@ func (x *ControlProjectionGapFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlProjectionGapFrame.ProtoReflect.Descriptor instead.
 func (*ControlProjectionGapFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{116}
+	return file_terminal_client_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *ControlProjectionGapFrame) GetRequestId() string {
@@ -12790,7 +13210,7 @@ type ObservationNoChangeFrame struct {
 
 func (x *ObservationNoChangeFrame) Reset() {
 	*x = ObservationNoChangeFrame{}
-	mi := &file_terminal_client_proto_msgTypes[117]
+	mi := &file_terminal_client_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12802,7 +13222,7 @@ func (x *ObservationNoChangeFrame) String() string {
 func (*ObservationNoChangeFrame) ProtoMessage() {}
 
 func (x *ObservationNoChangeFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[117]
+	mi := &file_terminal_client_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12815,7 +13235,7 @@ func (x *ObservationNoChangeFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationNoChangeFrame.ProtoReflect.Descriptor instead.
 func (*ObservationNoChangeFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{117}
+	return file_terminal_client_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *ObservationNoChangeFrame) GetRequestId() string {
@@ -12873,13 +13293,14 @@ type OperationalDeltaFrame struct {
 	OperationalGeneration uint64                       `protobuf:"varint,2,opt,name=operational_generation,json=operationalGeneration,proto3" json:"operational_generation,omitempty"`
 	OperationalCursor     uint64                       `protobuf:"varint,3,opt,name=operational_cursor,json=operationalCursor,proto3" json:"operational_cursor,omitempty"`
 	OrderedChanges        []*OperationalActivityChange `protobuf:"bytes,4,rep,name=ordered_changes,json=orderedChanges,proto3" json:"ordered_changes,omitempty"`
+	FrameFingerprint      string                       `protobuf:"bytes,5,opt,name=frame_fingerprint,json=frameFingerprint,proto3" json:"frame_fingerprint,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
 
 func (x *OperationalDeltaFrame) Reset() {
 	*x = OperationalDeltaFrame{}
-	mi := &file_terminal_client_proto_msgTypes[118]
+	mi := &file_terminal_client_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12891,7 +13312,7 @@ func (x *OperationalDeltaFrame) String() string {
 func (*OperationalDeltaFrame) ProtoMessage() {}
 
 func (x *OperationalDeltaFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[118]
+	mi := &file_terminal_client_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12904,7 +13325,7 @@ func (x *OperationalDeltaFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalDeltaFrame.ProtoReflect.Descriptor instead.
 func (*OperationalDeltaFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{118}
+	return file_terminal_client_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *OperationalDeltaFrame) GetRequestId() string {
@@ -12935,6 +13356,13 @@ func (x *OperationalDeltaFrame) GetOrderedChanges() []*OperationalActivityChange
 	return nil
 }
 
+func (x *OperationalDeltaFrame) GetFrameFingerprint() string {
+	if x != nil {
+		return x.FrameFingerprint
+	}
+	return ""
+}
+
 type DurableObservationBranch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Outcome:
@@ -12950,7 +13378,7 @@ type DurableObservationBranch struct {
 
 func (x *DurableObservationBranch) Reset() {
 	*x = DurableObservationBranch{}
-	mi := &file_terminal_client_proto_msgTypes[119]
+	mi := &file_terminal_client_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12962,7 +13390,7 @@ func (x *DurableObservationBranch) String() string {
 func (*DurableObservationBranch) ProtoMessage() {}
 
 func (x *DurableObservationBranch) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[119]
+	mi := &file_terminal_client_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12975,7 +13403,7 @@ func (x *DurableObservationBranch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DurableObservationBranch.ProtoReflect.Descriptor instead.
 func (*DurableObservationBranch) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{119}
+	return file_terminal_client_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *DurableObservationBranch) GetOutcome() isDurableObservationBranch_Outcome {
@@ -13062,7 +13490,7 @@ type OperationalObservationBranch struct {
 
 func (x *OperationalObservationBranch) Reset() {
 	*x = OperationalObservationBranch{}
-	mi := &file_terminal_client_proto_msgTypes[120]
+	mi := &file_terminal_client_proto_msgTypes[124]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13074,7 +13502,7 @@ func (x *OperationalObservationBranch) String() string {
 func (*OperationalObservationBranch) ProtoMessage() {}
 
 func (x *OperationalObservationBranch) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[120]
+	mi := &file_terminal_client_proto_msgTypes[124]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13087,7 +13515,7 @@ func (x *OperationalObservationBranch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationalObservationBranch.ProtoReflect.Descriptor instead.
 func (*OperationalObservationBranch) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{120}
+	return file_terminal_client_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *OperationalObservationBranch) GetOutcome() isOperationalObservationBranch_Outcome {
@@ -13144,7 +13572,7 @@ type ControlObservationBranch struct {
 
 func (x *ControlObservationBranch) Reset() {
 	*x = ControlObservationBranch{}
-	mi := &file_terminal_client_proto_msgTypes[121]
+	mi := &file_terminal_client_proto_msgTypes[125]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13156,7 +13584,7 @@ func (x *ControlObservationBranch) String() string {
 func (*ControlObservationBranch) ProtoMessage() {}
 
 func (x *ControlObservationBranch) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[121]
+	mi := &file_terminal_client_proto_msgTypes[125]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13169,7 +13597,7 @@ func (x *ControlObservationBranch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlObservationBranch.ProtoReflect.Descriptor instead.
 func (*ControlObservationBranch) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{121}
+	return file_terminal_client_proto_rawDescGZIP(), []int{125}
 }
 
 func (x *ControlObservationBranch) GetOutcome() isControlObservationBranch_Outcome {
@@ -13227,7 +13655,7 @@ type ObservationBatchFrame struct {
 
 func (x *ObservationBatchFrame) Reset() {
 	*x = ObservationBatchFrame{}
-	mi := &file_terminal_client_proto_msgTypes[122]
+	mi := &file_terminal_client_proto_msgTypes[126]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13239,7 +13667,7 @@ func (x *ObservationBatchFrame) String() string {
 func (*ObservationBatchFrame) ProtoMessage() {}
 
 func (x *ObservationBatchFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[122]
+	mi := &file_terminal_client_proto_msgTypes[126]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13252,7 +13680,7 @@ func (x *ObservationBatchFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationBatchFrame.ProtoReflect.Descriptor instead.
 func (*ObservationBatchFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{122}
+	return file_terminal_client_proto_rawDescGZIP(), []int{126}
 }
 
 func (x *ObservationBatchFrame) GetRequestId() string {
@@ -13310,7 +13738,7 @@ type ObservationResponse struct {
 
 func (x *ObservationResponse) Reset() {
 	*x = ObservationResponse{}
-	mi := &file_terminal_client_proto_msgTypes[123]
+	mi := &file_terminal_client_proto_msgTypes[127]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13322,7 +13750,7 @@ func (x *ObservationResponse) String() string {
 func (*ObservationResponse) ProtoMessage() {}
 
 func (x *ObservationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[123]
+	mi := &file_terminal_client_proto_msgTypes[127]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13335,7 +13763,7 @@ func (x *ObservationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationResponse.ProtoReflect.Descriptor instead.
 func (*ObservationResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{123}
+	return file_terminal_client_proto_rawDescGZIP(), []int{127}
 }
 
 func (x *ObservationResponse) GetOutcome() isObservationResponse_Outcome {
@@ -13394,7 +13822,7 @@ type HistoryPageRequest struct {
 
 func (x *HistoryPageRequest) Reset() {
 	*x = HistoryPageRequest{}
-	mi := &file_terminal_client_proto_msgTypes[124]
+	mi := &file_terminal_client_proto_msgTypes[128]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13406,7 +13834,7 @@ func (x *HistoryPageRequest) String() string {
 func (*HistoryPageRequest) ProtoMessage() {}
 
 func (x *HistoryPageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[124]
+	mi := &file_terminal_client_proto_msgTypes[128]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13419,7 +13847,7 @@ func (x *HistoryPageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPageRequest.ProtoReflect.Descriptor instead.
 func (*HistoryPageRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{124}
+	return file_terminal_client_proto_rawDescGZIP(), []int{128}
 }
 
 func (x *HistoryPageRequest) GetRequestId() string {
@@ -13491,7 +13919,7 @@ type HistoryPageData struct {
 
 func (x *HistoryPageData) Reset() {
 	*x = HistoryPageData{}
-	mi := &file_terminal_client_proto_msgTypes[125]
+	mi := &file_terminal_client_proto_msgTypes[129]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13503,7 +13931,7 @@ func (x *HistoryPageData) String() string {
 func (*HistoryPageData) ProtoMessage() {}
 
 func (x *HistoryPageData) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[125]
+	mi := &file_terminal_client_proto_msgTypes[129]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13516,7 +13944,7 @@ func (x *HistoryPageData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPageData.ProtoReflect.Descriptor instead.
 func (*HistoryPageData) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{125}
+	return file_terminal_client_proto_rawDescGZIP(), []int{129}
 }
 
 func (x *HistoryPageData) GetRequestId() string {
@@ -13617,7 +14045,7 @@ type HistoryCursorStale struct {
 
 func (x *HistoryCursorStale) Reset() {
 	*x = HistoryCursorStale{}
-	mi := &file_terminal_client_proto_msgTypes[126]
+	mi := &file_terminal_client_proto_msgTypes[130]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13629,7 +14057,7 @@ func (x *HistoryCursorStale) String() string {
 func (*HistoryCursorStale) ProtoMessage() {}
 
 func (x *HistoryCursorStale) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[126]
+	mi := &file_terminal_client_proto_msgTypes[130]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13642,7 +14070,7 @@ func (x *HistoryCursorStale) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryCursorStale.ProtoReflect.Descriptor instead.
 func (*HistoryCursorStale) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{126}
+	return file_terminal_client_proto_rawDescGZIP(), []int{130}
 }
 
 func (x *HistoryCursorStale) GetRequestId() string {
@@ -13700,7 +14128,7 @@ type HistoryRebaseRequired struct {
 
 func (x *HistoryRebaseRequired) Reset() {
 	*x = HistoryRebaseRequired{}
-	mi := &file_terminal_client_proto_msgTypes[127]
+	mi := &file_terminal_client_proto_msgTypes[131]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13712,7 +14140,7 @@ func (x *HistoryRebaseRequired) String() string {
 func (*HistoryRebaseRequired) ProtoMessage() {}
 
 func (x *HistoryRebaseRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[127]
+	mi := &file_terminal_client_proto_msgTypes[131]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13725,7 +14153,7 @@ func (x *HistoryRebaseRequired) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryRebaseRequired.ProtoReflect.Descriptor instead.
 func (*HistoryRebaseRequired) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{127}
+	return file_terminal_client_proto_rawDescGZIP(), []int{131}
 }
 
 func (x *HistoryRebaseRequired) GetRequestId() string {
@@ -13778,7 +14206,7 @@ type HistoryReconciliationRequired struct {
 
 func (x *HistoryReconciliationRequired) Reset() {
 	*x = HistoryReconciliationRequired{}
-	mi := &file_terminal_client_proto_msgTypes[128]
+	mi := &file_terminal_client_proto_msgTypes[132]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13790,7 +14218,7 @@ func (x *HistoryReconciliationRequired) String() string {
 func (*HistoryReconciliationRequired) ProtoMessage() {}
 
 func (x *HistoryReconciliationRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[128]
+	mi := &file_terminal_client_proto_msgTypes[132]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13803,7 +14231,7 @@ func (x *HistoryReconciliationRequired) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryReconciliationRequired.ProtoReflect.Descriptor instead.
 func (*HistoryReconciliationRequired) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{128}
+	return file_terminal_client_proto_rawDescGZIP(), []int{132}
 }
 
 func (x *HistoryReconciliationRequired) GetRequestId() string {
@@ -13870,7 +14298,7 @@ type HistoryPageResponse struct {
 
 func (x *HistoryPageResponse) Reset() {
 	*x = HistoryPageResponse{}
-	mi := &file_terminal_client_proto_msgTypes[129]
+	mi := &file_terminal_client_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13882,7 +14310,7 @@ func (x *HistoryPageResponse) String() string {
 func (*HistoryPageResponse) ProtoMessage() {}
 
 func (x *HistoryPageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[129]
+	mi := &file_terminal_client_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13895,7 +14323,7 @@ func (x *HistoryPageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPageResponse.ProtoReflect.Descriptor instead.
 func (*HistoryPageResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{129}
+	return file_terminal_client_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *HistoryPageResponse) GetOutcome() isHistoryPageResponse_Outcome {
@@ -13986,7 +14414,7 @@ type CommandBinding struct {
 
 func (x *CommandBinding) Reset() {
 	*x = CommandBinding{}
-	mi := &file_terminal_client_proto_msgTypes[130]
+	mi := &file_terminal_client_proto_msgTypes[134]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13998,7 +14426,7 @@ func (x *CommandBinding) String() string {
 func (*CommandBinding) ProtoMessage() {}
 
 func (x *CommandBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[130]
+	mi := &file_terminal_client_proto_msgTypes[134]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14011,7 +14439,7 @@ func (x *CommandBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandBinding.ProtoReflect.Descriptor instead.
 func (*CommandBinding) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{130}
+	return file_terminal_client_proto_rawDescGZIP(), []int{134}
 }
 
 func (x *CommandBinding) GetClientInstanceId() string {
@@ -14089,7 +14517,7 @@ type SubmitPromptCommand struct {
 
 func (x *SubmitPromptCommand) Reset() {
 	*x = SubmitPromptCommand{}
-	mi := &file_terminal_client_proto_msgTypes[131]
+	mi := &file_terminal_client_proto_msgTypes[135]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14101,7 +14529,7 @@ func (x *SubmitPromptCommand) String() string {
 func (*SubmitPromptCommand) ProtoMessage() {}
 
 func (x *SubmitPromptCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[131]
+	mi := &file_terminal_client_proto_msgTypes[135]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14114,7 +14542,7 @@ func (x *SubmitPromptCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitPromptCommand.ProtoReflect.Descriptor instead.
 func (*SubmitPromptCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{131}
+	return file_terminal_client_proto_rawDescGZIP(), []int{135}
 }
 
 func (x *SubmitPromptCommand) GetBinding() *CommandBinding {
@@ -14154,7 +14582,7 @@ type StopRunCommand struct {
 
 func (x *StopRunCommand) Reset() {
 	*x = StopRunCommand{}
-	mi := &file_terminal_client_proto_msgTypes[132]
+	mi := &file_terminal_client_proto_msgTypes[136]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14166,7 +14594,7 @@ func (x *StopRunCommand) String() string {
 func (*StopRunCommand) ProtoMessage() {}
 
 func (x *StopRunCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[132]
+	mi := &file_terminal_client_proto_msgTypes[136]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14179,7 +14607,7 @@ func (x *StopRunCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopRunCommand.ProtoReflect.Descriptor instead.
 func (*StopRunCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{132}
+	return file_terminal_client_proto_rawDescGZIP(), []int{136}
 }
 
 func (x *StopRunCommand) GetBinding() *CommandBinding {
@@ -14199,7 +14627,7 @@ type ApprovalDecision struct {
 
 func (x *ApprovalDecision) Reset() {
 	*x = ApprovalDecision{}
-	mi := &file_terminal_client_proto_msgTypes[133]
+	mi := &file_terminal_client_proto_msgTypes[137]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14211,7 +14639,7 @@ func (x *ApprovalDecision) String() string {
 func (*ApprovalDecision) ProtoMessage() {}
 
 func (x *ApprovalDecision) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[133]
+	mi := &file_terminal_client_proto_msgTypes[137]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14224,7 +14652,7 @@ func (x *ApprovalDecision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalDecision.ProtoReflect.Descriptor instead.
 func (*ApprovalDecision) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{133}
+	return file_terminal_client_proto_rawDescGZIP(), []int{137}
 }
 
 func (x *ApprovalDecision) GetToolCallId() string {
@@ -14252,7 +14680,7 @@ type ResolveApprovalCommand struct {
 
 func (x *ResolveApprovalCommand) Reset() {
 	*x = ResolveApprovalCommand{}
-	mi := &file_terminal_client_proto_msgTypes[134]
+	mi := &file_terminal_client_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14264,7 +14692,7 @@ func (x *ResolveApprovalCommand) String() string {
 func (*ResolveApprovalCommand) ProtoMessage() {}
 
 func (x *ResolveApprovalCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[134]
+	mi := &file_terminal_client_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14277,7 +14705,7 @@ func (x *ResolveApprovalCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveApprovalCommand.ProtoReflect.Descriptor instead.
 func (*ResolveApprovalCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{134}
+	return file_terminal_client_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *ResolveApprovalCommand) GetBinding() *CommandBinding {
@@ -14313,7 +14741,7 @@ type ResolvePlanQuestionCommand struct {
 
 func (x *ResolvePlanQuestionCommand) Reset() {
 	*x = ResolvePlanQuestionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[135]
+	mi := &file_terminal_client_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14325,7 +14753,7 @@ func (x *ResolvePlanQuestionCommand) String() string {
 func (*ResolvePlanQuestionCommand) ProtoMessage() {}
 
 func (x *ResolvePlanQuestionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[135]
+	mi := &file_terminal_client_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14338,7 +14766,7 @@ func (x *ResolvePlanQuestionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePlanQuestionCommand.ProtoReflect.Descriptor instead.
 func (*ResolvePlanQuestionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{135}
+	return file_terminal_client_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *ResolvePlanQuestionCommand) GetBinding() *CommandBinding {
@@ -14381,7 +14809,7 @@ type ResolvePlanExitCommand struct {
 
 func (x *ResolvePlanExitCommand) Reset() {
 	*x = ResolvePlanExitCommand{}
-	mi := &file_terminal_client_proto_msgTypes[136]
+	mi := &file_terminal_client_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14393,7 +14821,7 @@ func (x *ResolvePlanExitCommand) String() string {
 func (*ResolvePlanExitCommand) ProtoMessage() {}
 
 func (x *ResolvePlanExitCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[136]
+	mi := &file_terminal_client_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14406,7 +14834,7 @@ func (x *ResolvePlanExitCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePlanExitCommand.ProtoReflect.Descriptor instead.
 func (*ResolvePlanExitCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{136}
+	return file_terminal_client_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *ResolvePlanExitCommand) GetBinding() *CommandBinding {
@@ -14448,7 +14876,7 @@ type ResolveMcpInteractionCommand struct {
 
 func (x *ResolveMcpInteractionCommand) Reset() {
 	*x = ResolveMcpInteractionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[137]
+	mi := &file_terminal_client_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14460,7 +14888,7 @@ func (x *ResolveMcpInteractionCommand) String() string {
 func (*ResolveMcpInteractionCommand) ProtoMessage() {}
 
 func (x *ResolveMcpInteractionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[137]
+	mi := &file_terminal_client_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14473,7 +14901,7 @@ func (x *ResolveMcpInteractionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveMcpInteractionCommand.ProtoReflect.Descriptor instead.
 func (*ResolveMcpInteractionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{137}
+	return file_terminal_client_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *ResolveMcpInteractionCommand) GetBinding() *CommandBinding {
@@ -14507,7 +14935,7 @@ type CancelMcpInteractionCommand struct {
 
 func (x *CancelMcpInteractionCommand) Reset() {
 	*x = CancelMcpInteractionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[138]
+	mi := &file_terminal_client_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14519,7 +14947,7 @@ func (x *CancelMcpInteractionCommand) String() string {
 func (*CancelMcpInteractionCommand) ProtoMessage() {}
 
 func (x *CancelMcpInteractionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[138]
+	mi := &file_terminal_client_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14532,7 +14960,7 @@ func (x *CancelMcpInteractionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelMcpInteractionCommand.ProtoReflect.Descriptor instead.
 func (*CancelMcpInteractionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{138}
+	return file_terminal_client_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *CancelMcpInteractionCommand) GetBinding() *CommandBinding {
@@ -14559,7 +14987,7 @@ type QueueCancelCommand struct {
 
 func (x *QueueCancelCommand) Reset() {
 	*x = QueueCancelCommand{}
-	mi := &file_terminal_client_proto_msgTypes[139]
+	mi := &file_terminal_client_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14571,7 +14999,7 @@ func (x *QueueCancelCommand) String() string {
 func (*QueueCancelCommand) ProtoMessage() {}
 
 func (x *QueueCancelCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[139]
+	mi := &file_terminal_client_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14584,7 +15012,7 @@ func (x *QueueCancelCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueCancelCommand.ProtoReflect.Descriptor instead.
 func (*QueueCancelCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{139}
+	return file_terminal_client_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *QueueCancelCommand) GetBinding() *CommandBinding {
@@ -14611,7 +15039,7 @@ type StartSuccessorSessionCommand struct {
 
 func (x *StartSuccessorSessionCommand) Reset() {
 	*x = StartSuccessorSessionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[140]
+	mi := &file_terminal_client_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14623,7 +15051,7 @@ func (x *StartSuccessorSessionCommand) String() string {
 func (*StartSuccessorSessionCommand) ProtoMessage() {}
 
 func (x *StartSuccessorSessionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[140]
+	mi := &file_terminal_client_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14636,7 +15064,7 @@ func (x *StartSuccessorSessionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartSuccessorSessionCommand.ProtoReflect.Descriptor instead.
 func (*StartSuccessorSessionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{140}
+	return file_terminal_client_proto_rawDescGZIP(), []int{144}
 }
 
 func (x *StartSuccessorSessionCommand) GetBinding() *CommandBinding {
@@ -14662,7 +15090,7 @@ type DetachSessionCommand struct {
 
 func (x *DetachSessionCommand) Reset() {
 	*x = DetachSessionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[141]
+	mi := &file_terminal_client_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14674,7 +15102,7 @@ func (x *DetachSessionCommand) String() string {
 func (*DetachSessionCommand) ProtoMessage() {}
 
 func (x *DetachSessionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[141]
+	mi := &file_terminal_client_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14687,7 +15115,7 @@ func (x *DetachSessionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachSessionCommand.ProtoReflect.Descriptor instead.
 func (*DetachSessionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{141}
+	return file_terminal_client_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *DetachSessionCommand) GetBinding() *CommandBinding {
@@ -14707,7 +15135,7 @@ type CloseSessionCommand struct {
 
 func (x *CloseSessionCommand) Reset() {
 	*x = CloseSessionCommand{}
-	mi := &file_terminal_client_proto_msgTypes[142]
+	mi := &file_terminal_client_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14719,7 +15147,7 @@ func (x *CloseSessionCommand) String() string {
 func (*CloseSessionCommand) ProtoMessage() {}
 
 func (x *CloseSessionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[142]
+	mi := &file_terminal_client_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14732,7 +15160,7 @@ func (x *CloseSessionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseSessionCommand.ProtoReflect.Descriptor instead.
 func (*CloseSessionCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{142}
+	return file_terminal_client_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *CloseSessionCommand) GetBinding() *CommandBinding {
@@ -14759,7 +15187,7 @@ type ControllerTakeoverCommand struct {
 
 func (x *ControllerTakeoverCommand) Reset() {
 	*x = ControllerTakeoverCommand{}
-	mi := &file_terminal_client_proto_msgTypes[143]
+	mi := &file_terminal_client_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14771,7 +15199,7 @@ func (x *ControllerTakeoverCommand) String() string {
 func (*ControllerTakeoverCommand) ProtoMessage() {}
 
 func (x *ControllerTakeoverCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[143]
+	mi := &file_terminal_client_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14784,7 +15212,7 @@ func (x *ControllerTakeoverCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerTakeoverCommand.ProtoReflect.Descriptor instead.
 func (*ControllerTakeoverCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{143}
+	return file_terminal_client_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *ControllerTakeoverCommand) GetBinding() *CommandBinding {
@@ -14825,7 +15253,7 @@ type MutationCommand struct {
 
 func (x *MutationCommand) Reset() {
 	*x = MutationCommand{}
-	mi := &file_terminal_client_proto_msgTypes[144]
+	mi := &file_terminal_client_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14837,7 +15265,7 @@ func (x *MutationCommand) String() string {
 func (*MutationCommand) ProtoMessage() {}
 
 func (x *MutationCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[144]
+	mi := &file_terminal_client_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14850,7 +15278,7 @@ func (x *MutationCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MutationCommand.ProtoReflect.Descriptor instead.
 func (*MutationCommand) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{144}
+	return file_terminal_client_proto_rawDescGZIP(), []int{148}
 }
 
 func (x *MutationCommand) GetRequestId() string {
@@ -15069,7 +15497,7 @@ type CommandOutcome struct {
 
 func (x *CommandOutcome) Reset() {
 	*x = CommandOutcome{}
-	mi := &file_terminal_client_proto_msgTypes[145]
+	mi := &file_terminal_client_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15081,7 +15509,7 @@ func (x *CommandOutcome) String() string {
 func (*CommandOutcome) ProtoMessage() {}
 
 func (x *CommandOutcome) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[145]
+	mi := &file_terminal_client_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15094,7 +15522,7 @@ func (x *CommandOutcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandOutcome.ProtoReflect.Descriptor instead.
 func (*CommandOutcome) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{145}
+	return file_terminal_client_proto_rawDescGZIP(), []int{149}
 }
 
 func (x *CommandOutcome) GetRequestId() string {
@@ -15179,7 +15607,7 @@ type QueryCommandRequest struct {
 
 func (x *QueryCommandRequest) Reset() {
 	*x = QueryCommandRequest{}
-	mi := &file_terminal_client_proto_msgTypes[146]
+	mi := &file_terminal_client_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15191,7 +15619,7 @@ func (x *QueryCommandRequest) String() string {
 func (*QueryCommandRequest) ProtoMessage() {}
 
 func (x *QueryCommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[146]
+	mi := &file_terminal_client_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15204,7 +15632,7 @@ func (x *QueryCommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryCommandRequest.ProtoReflect.Descriptor instead.
 func (*QueryCommandRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{146}
+	return file_terminal_client_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *QueryCommandRequest) GetRequestId() string {
@@ -15246,7 +15674,7 @@ type QueryCommandResponse struct {
 
 func (x *QueryCommandResponse) Reset() {
 	*x = QueryCommandResponse{}
-	mi := &file_terminal_client_proto_msgTypes[147]
+	mi := &file_terminal_client_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15258,7 +15686,7 @@ func (x *QueryCommandResponse) String() string {
 func (*QueryCommandResponse) ProtoMessage() {}
 
 func (x *QueryCommandResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[147]
+	mi := &file_terminal_client_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15271,7 +15699,7 @@ func (x *QueryCommandResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryCommandResponse.ProtoReflect.Descriptor instead.
 func (*QueryCommandResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{147}
+	return file_terminal_client_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *QueryCommandResponse) GetRequestId() string {
@@ -15313,7 +15741,7 @@ type TerminalSecretLeaseIdentity struct {
 
 func (x *TerminalSecretLeaseIdentity) Reset() {
 	*x = TerminalSecretLeaseIdentity{}
-	mi := &file_terminal_client_proto_msgTypes[148]
+	mi := &file_terminal_client_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15325,7 +15753,7 @@ func (x *TerminalSecretLeaseIdentity) String() string {
 func (*TerminalSecretLeaseIdentity) ProtoMessage() {}
 
 func (x *TerminalSecretLeaseIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[148]
+	mi := &file_terminal_client_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15338,7 +15766,7 @@ func (x *TerminalSecretLeaseIdentity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalSecretLeaseIdentity.ProtoReflect.Descriptor instead.
 func (*TerminalSecretLeaseIdentity) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{148}
+	return file_terminal_client_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *TerminalSecretLeaseIdentity) GetAttachmentId() string {
@@ -15423,7 +15851,7 @@ type SecretRevealRequest struct {
 
 func (x *SecretRevealRequest) Reset() {
 	*x = SecretRevealRequest{}
-	mi := &file_terminal_client_proto_msgTypes[149]
+	mi := &file_terminal_client_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15435,7 +15863,7 @@ func (x *SecretRevealRequest) String() string {
 func (*SecretRevealRequest) ProtoMessage() {}
 
 func (x *SecretRevealRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[149]
+	mi := &file_terminal_client_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15448,7 +15876,7 @@ func (x *SecretRevealRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRevealRequest.ProtoReflect.Descriptor instead.
 func (*SecretRevealRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{149}
+	return file_terminal_client_proto_rawDescGZIP(), []int{153}
 }
 
 func (x *SecretRevealRequest) GetRequestId() string {
@@ -15490,7 +15918,7 @@ type SecretRevealResult struct {
 
 func (x *SecretRevealResult) Reset() {
 	*x = SecretRevealResult{}
-	mi := &file_terminal_client_proto_msgTypes[150]
+	mi := &file_terminal_client_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15502,7 +15930,7 @@ func (x *SecretRevealResult) String() string {
 func (*SecretRevealResult) ProtoMessage() {}
 
 func (x *SecretRevealResult) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[150]
+	mi := &file_terminal_client_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15515,7 +15943,7 @@ func (x *SecretRevealResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRevealResult.ProtoReflect.Descriptor instead.
 func (*SecretRevealResult) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{150}
+	return file_terminal_client_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *SecretRevealResult) GetRequestId() string {
@@ -15552,7 +15980,7 @@ type SecretFormSubmit struct {
 
 func (x *SecretFormSubmit) Reset() {
 	*x = SecretFormSubmit{}
-	mi := &file_terminal_client_proto_msgTypes[151]
+	mi := &file_terminal_client_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15564,7 +15992,7 @@ func (x *SecretFormSubmit) String() string {
 func (*SecretFormSubmit) ProtoMessage() {}
 
 func (x *SecretFormSubmit) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[151]
+	mi := &file_terminal_client_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15577,7 +16005,7 @@ func (x *SecretFormSubmit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretFormSubmit.ProtoReflect.Descriptor instead.
 func (*SecretFormSubmit) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{151}
+	return file_terminal_client_proto_rawDescGZIP(), []int{155}
 }
 
 func (x *SecretFormSubmit) GetRequestId() string {
@@ -15625,7 +16053,7 @@ type SecretSubmitReceipt struct {
 
 func (x *SecretSubmitReceipt) Reset() {
 	*x = SecretSubmitReceipt{}
-	mi := &file_terminal_client_proto_msgTypes[152]
+	mi := &file_terminal_client_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15637,7 +16065,7 @@ func (x *SecretSubmitReceipt) String() string {
 func (*SecretSubmitReceipt) ProtoMessage() {}
 
 func (x *SecretSubmitReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[152]
+	mi := &file_terminal_client_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15650,7 +16078,7 @@ func (x *SecretSubmitReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretSubmitReceipt.ProtoReflect.Descriptor instead.
 func (*SecretSubmitReceipt) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{152}
+	return file_terminal_client_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *SecretSubmitReceipt) GetRequestId() string {
@@ -15678,7 +16106,7 @@ type SecretLeaseRevoked struct {
 
 func (x *SecretLeaseRevoked) Reset() {
 	*x = SecretLeaseRevoked{}
-	mi := &file_terminal_client_proto_msgTypes[153]
+	mi := &file_terminal_client_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15690,7 +16118,7 @@ func (x *SecretLeaseRevoked) String() string {
 func (*SecretLeaseRevoked) ProtoMessage() {}
 
 func (x *SecretLeaseRevoked) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[153]
+	mi := &file_terminal_client_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15703,7 +16131,7 @@ func (x *SecretLeaseRevoked) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretLeaseRevoked.ProtoReflect.Descriptor instead.
 func (*SecretLeaseRevoked) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{153}
+	return file_terminal_client_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *SecretLeaseRevoked) GetRequestId() string {
@@ -15750,7 +16178,7 @@ type ClientFrame struct {
 
 func (x *ClientFrame) Reset() {
 	*x = ClientFrame{}
-	mi := &file_terminal_client_proto_msgTypes[154]
+	mi := &file_terminal_client_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15762,7 +16190,7 @@ func (x *ClientFrame) String() string {
 func (*ClientFrame) ProtoMessage() {}
 
 func (x *ClientFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[154]
+	mi := &file_terminal_client_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15775,7 +16203,7 @@ func (x *ClientFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientFrame.ProtoReflect.Descriptor instead.
 func (*ClientFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{154}
+	return file_terminal_client_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *ClientFrame) GetRequest() isClientFrame_Request {
@@ -15980,7 +16408,7 @@ type ProtocolError struct {
 
 func (x *ProtocolError) Reset() {
 	*x = ProtocolError{}
-	mi := &file_terminal_client_proto_msgTypes[155]
+	mi := &file_terminal_client_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15992,7 +16420,7 @@ func (x *ProtocolError) String() string {
 func (*ProtocolError) ProtoMessage() {}
 
 func (x *ProtocolError) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[155]
+	mi := &file_terminal_client_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16005,7 +16433,7 @@ func (x *ProtocolError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtocolError.ProtoReflect.Descriptor instead.
 func (*ProtocolError) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{155}
+	return file_terminal_client_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *ProtocolError) GetRequestId() string {
@@ -16054,7 +16482,7 @@ type ServerFrame struct {
 
 func (x *ServerFrame) Reset() {
 	*x = ServerFrame{}
-	mi := &file_terminal_client_proto_msgTypes[156]
+	mi := &file_terminal_client_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16066,7 +16494,7 @@ func (x *ServerFrame) String() string {
 func (*ServerFrame) ProtoMessage() {}
 
 func (x *ServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_client_proto_msgTypes[156]
+	mi := &file_terminal_client_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16079,7 +16507,7 @@ func (x *ServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerFrame.ProtoReflect.Descriptor instead.
 func (*ServerFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_client_proto_rawDescGZIP(), []int{156}
+	return file_terminal_client_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *ServerFrame) GetResponse() isServerFrame_Response {
@@ -16116,7 +16544,7 @@ func (x *ServerFrame) GetHeartbeat() *HeartbeatResult {
 	return nil
 }
 
-func (x *ServerFrame) GetSnapshot() *ProjectionSnapshotFrame {
+func (x *ServerFrame) GetSnapshot() *ProjectionSnapshotResponse {
 	if x != nil {
 		if x, ok := x.Response.(*ServerFrame_Snapshot); ok {
 			return x.Snapshot
@@ -16232,7 +16660,7 @@ type ServerFrame_Heartbeat struct {
 }
 
 type ServerFrame_Snapshot struct {
-	Snapshot *ProjectionSnapshotFrame `protobuf:"bytes,4,opt,name=snapshot,proto3,oneof"`
+	Snapshot *ProjectionSnapshotResponse `protobuf:"bytes,4,opt,name=snapshot,proto3,oneof"`
 }
 
 type ServerFrame_OperationalSnapshot struct {
@@ -16508,7 +16936,21 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x1ctransport_binding_generation\x18\x04 \x01(\x04R\x1atransportBindingGeneration\x12 \n" +
 	"\fbound_at_utc\x18\x05 \x01(\tR\n" +
 	"boundAtUtc\x12/\n" +
-	"\x13binding_fingerprint\x18\x06 \x01(\tR\x12bindingFingerprint\"\xc6\x05\n" +
+	"\x13binding_fingerprint\x18\x06 \x01(\tR\x12bindingFingerprint\"\x95\x04\n" +
+	"!ReconnectCredentialPublicIdentity\x126\n" +
+	"\x17reconnect_credential_id\x18\x01 \x01(\tR\x15reconnectCredentialId\x12,\n" +
+	"\x12client_instance_id\x18\x02 \x01(\tR\x10clientInstanceId\x124\n" +
+	"\x16previous_attachment_id\x18\x03 \x01(\tR\x14previousAttachmentId\x12D\n" +
+	"\x1eprevious_attachment_generation\x18\x04 \x01(\x04R\x1cpreviousAttachmentGeneration\x12\\\n" +
+	"+expected_next_attachment_attempt_generation\x18\x05 \x01(\x04R'expectedNextAttachmentAttemptGeneration\x12\"\n" +
+	"\rissued_at_utc\x18\x06 \x01(\tR\vissuedAtUtc\x12$\n" +
+	"\x0eexpires_at_utc\x18\a \x01(\tR\fexpiresAtUtc\x123\n" +
+	"\x15credential_commitment\x18\b \x01(\tR\x14credentialCommitment\x121\n" +
+	"\x14identity_fingerprint\x18\t \x01(\tR\x13identityFingerprint\"\xe1\x01\n" +
+	"\x1aReconnectCredentialCarrier\x12_\n" +
+	"\x0fpublic_identity\x18\x01 \x01(\v26.pulsara.terminal.v2.ReconnectCredentialPublicIdentityR\x0epublicIdentity\x121\n" +
+	"\x14reconnect_capability\x18\x02 \x01(\fR\x13reconnectCapability\x12/\n" +
+	"\x13carrier_fingerprint\x18\x03 \x01(\tR\x12carrierFingerprint\"\x8c\a\n" +
 	"\x14AttachSemanticWinner\x124\n" +
 	"\x16handshake_candidate_id\x18\x01 \x01(\tR\x14handshakeCandidateId\x12F\n" +
 	"\x1fhandshake_candidate_fingerprint\x18\x02 \x01(\tR\x1dhandshakeCandidateFingerprint\x12B\n" +
@@ -16520,7 +16962,10 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x16controller_disposition\x18\x06 \x01(\x0e2*.pulsara.terminal.v2.ControllerDispositionR\x15controllerDisposition\x12^\n" +
 	"\x15bootstrap_requirement\x18\a \x01(\x0e2).pulsara.terminal.v2.BootstrapRequirementR\x14bootstrapRequirement\x12O\n" +
 	"\x10heartbeat_policy\x18\b \x01(\v2$.pulsara.terminal.v2.HeartbeatPolicyR\x0fheartbeatPolicy\x12>\n" +
-	"\x1bsemantic_winner_fingerprint\x18\t \x01(\tR\x19semanticWinnerFingerprint\"\xcd\x05\n" +
+	"\x1bsemantic_winner_fingerprint\x18\t \x01(\tR\x19semanticWinnerFingerprint\x12\x95\x01\n" +
+	")next_reconnect_credential_public_identity\x18\n" +
+	" \x01(\v26.pulsara.terminal.v2.ReconnectCredentialPublicIdentityH\x00R%nextReconnectCredentialPublicIdentity\x88\x01\x01B,\n" +
+	"*_next_reconnect_credential_public_identity\"\xf4\x06\n" +
 	"\x13AttachResultReceipt\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x129\n" +
@@ -16531,8 +16976,11 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x19current_transport_binding\x18\x06 \x01(\v2;.pulsara.terminal.v2.TerminalClientTransportBindingIdentityR\x17currentTransportBinding\x12X\n" +
 	"&previous_transport_binding_fingerprint\x18\a \x01(\tH\x00R#previousTransportBindingFingerprint\x88\x01\x01\x12N\n" +
 	"\vdisposition\x18\b \x01(\x0e2,.pulsara.terminal.v2.AttachResultDispositionR\vdisposition\x12/\n" +
-	"\x13receipt_fingerprint\x18\t \x01(\tR\x12receiptFingerprintB)\n" +
-	"'_previous_transport_binding_fingerprint\"\xb8\x03\n" +
+	"\x13receipt_fingerprint\x18\t \x01(\tR\x12receiptFingerprint\x12\x7f\n" +
+	"!next_reconnect_credential_carrier\x18\n" +
+	" \x01(\v2/.pulsara.terminal.v2.ReconnectCredentialCarrierH\x01R\x1enextReconnectCredentialCarrier\x88\x01\x01B)\n" +
+	"'_previous_transport_binding_fingerprintB$\n" +
+	"\"_next_reconnect_credential_carrier\"\xb8\x03\n" +
 	"\x10AttachReceiptAck\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12#\n" +
@@ -17002,7 +17450,7 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x12runtime_session_id\x18\x02 \x01(\tR\x10runtimeSessionId\x12x\n" +
 	"\x1fminimum_observed_control_cursor\x18\x03 \x01(\v2,.pulsara.terminal.v2.ControlProjectionCursorH\x00R\x1cminimumObservedControlCursor\x88\x01\x01\x12/\n" +
 	"\x13request_fingerprint\x18\x04 \x01(\tR\x12requestFingerprintB\"\n" +
-	" _minimum_observed_control_cursor\"\xe1\a\n" +
+	" _minimum_observed_control_cursor\"\xd4\b\n" +
 	"\x17ProjectionSnapshotFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12&\n" +
@@ -17015,11 +17463,27 @@ const file_terminal_client_proto_rawDesc = "" +
 	"activeHead\x12m\n" +
 	"\x18ordered_resident_entries\x18\t \x03(\v23.pulsara.terminal.v2.PresentationHistoryRankedEntryR\x16orderedResidentEntries\x12s\n" +
 	"\x17latest_root_cursor_pair\x18\n" +
-	" \x01(\v2<.pulsara.terminal.v2.PresentationHistoryLatestRootCursorPairR\x14latestRootCursorPair\x121\n" +
+	" \x01(\v2<.pulsara.terminal.v2.PresentationHistoryLatestRootCursorPairR\x14latestRootCursorPair\x12>\n" +
+	"\x1bresident_vector_fingerprint\x18\v \x01(\tR\x19residentVectorFingerprint\x121\n" +
+	"\x14viewport_fingerprint\x18\f \x01(\tR\x13viewportFingerprint\x121\n" +
 	"\x14snapshot_fingerprint\x18\x12 \x01(\tR\x13snapshotFingerprint\x12v\n" +
 	"\x1bcontrol_projection_snapshot\x18\x13 \x01(\v26.pulsara.terminal.v2.TerminalControlProjectionSnapshotR\x19controlProjectionSnapshot\x12t\n" +
 	"5validated_minimum_observed_control_cursor_fingerprint\x18\x14 \x01(\tH\x00R0validatedMinimumObservedControlCursorFingerprint\x88\x01\x01B8\n" +
-	"6_validated_minimum_observed_control_cursor_fingerprintJ\x04\b\x04\x10\x05J\x04\b\v\x10\x12\"\xd7\x03\n" +
+	"6_validated_minimum_observed_control_cursor_fingerprintJ\x04\b\x04\x10\x05J\x04\b\r\x10\x12\"\xfc\x03\n" +
+	"'ProjectionSnapshotControlRebaseRequired\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12^\n" +
+	",requested_minimum_control_cursor_fingerprint\x18\x02 \x01(\tR(requestedMinimumControlCursorFingerprint\x12`\n" +
+	"\x15latest_control_cursor\x18\x03 \x01(\v2,.pulsara.terminal.v2.ControlProjectionCursorR\x13latestControlCursor\x12n\n" +
+	"\rstable_reason\x18\x04 \x01(\x0e2I.pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired.StableReasonR\fstableReason\x121\n" +
+	"\x14response_fingerprint\x18\x05 \x01(\tR\x13responseFingerprint\"M\n" +
+	"\fStableReason\x12\x1d\n" +
+	"\x19STABLE_REASON_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aCONTROL_GENERATION_REBASED\x10\x01\"\xeb\x01\n" +
+	"\x1aProjectionSnapshotResponse\x12J\n" +
+	"\bsnapshot\x18\x01 \x01(\v2,.pulsara.terminal.v2.ProjectionSnapshotFrameH\x00R\bsnapshot\x12v\n" +
+	"\x17control_rebase_required\x18\x02 \x01(\v2<.pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequiredH\x00R\x15controlRebaseRequiredB\t\n" +
+	"\aoutcome\"\xd7\x03\n" +
 	"\x19OperationalActivityCommon\x12\x1d\n" +
 	"\n" +
 	"owner_kind\x18\x01 \x01(\tR\townerKind\x12\x19\n" +
@@ -17114,7 +17578,7 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x12HistoryEntryChange\x12A\n" +
 	"\x06upsert\x18\x01 \x01(\v2'.pulsara.terminal.v2.HistoryEntryUpsertH\x00R\x06upsert\x12A\n" +
 	"\x06remove\x18\x02 \x01(\v2'.pulsara.terminal.v2.HistoryEntryRemoveH\x00R\x06removeB\b\n" +
-	"\x06change\"\xf6\x03\n" +
+	"\x06change\"\x92\x05\n" +
 	"\x14ProjectionDeltaFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x128\n" +
@@ -17123,7 +17587,9 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x1eresulting_authority_high_water\x18\x04 \x01(\x04R\x1bresultingAuthorityHighWater\x12n\n" +
 	"\x15resulting_active_head\x18\x05 \x01(\v2:.pulsara.terminal.v2.PresentationHistoryActiveHeadIdentityR\x13resultingActiveHead\x12_\n" +
 	"\x17ordered_history_changes\x18\x06 \x03(\v2'.pulsara.terminal.v2.HistoryEntryChangeR\x15orderedHistoryChanges\x12+\n" +
-	"\x11delta_fingerprint\x18\a \x01(\tR\x10deltaFingerprint\"\xc5\x02\n" +
+	"\x11delta_fingerprint\x18\a \x01(\tR\x10deltaFingerprint\x12G\n" +
+	" base_resident_vector_fingerprint\x18\b \x01(\tR\x1dbaseResidentVectorFingerprint\x12Q\n" +
+	"%resulting_resident_vector_fingerprint\x18\t \x01(\tR\"resultingResidentVectorFingerprint\"\xc5\x02\n" +
 	"\x15AuthorityAdvanceFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12/\n" +
@@ -17259,13 +17725,14 @@ const file_terminal_client_proto_rawDesc = "" +
 	"\x1dechoed_operational_generation\x18\x04 \x01(\x04R\x1bechoedOperationalGeneration\x12:\n" +
 	"\x19echoed_operational_cursor\x18\x05 \x01(\x04R\x17echoedOperationalCursor\x12I\n" +
 	"!echoed_control_cursor_fingerprint\x18\x06 \x01(\tR\x1eechoedControlCursorFingerprint\x12+\n" +
-	"\x11frame_fingerprint\x18\a \x01(\tR\x10frameFingerprint\"\xf5\x01\n" +
+	"\x11frame_fingerprint\x18\a \x01(\tR\x10frameFingerprint\"\xa2\x02\n" +
 	"\x15OperationalDeltaFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
 	"\x16operational_generation\x18\x02 \x01(\x04R\x15operationalGeneration\x12-\n" +
 	"\x12operational_cursor\x18\x03 \x01(\x04R\x11operationalCursor\x12W\n" +
-	"\x0fordered_changes\x18\x04 \x03(\v2..pulsara.terminal.v2.OperationalActivityChangeR\x0eorderedChanges\"\xff\x02\n" +
+	"\x0fordered_changes\x18\x04 \x03(\v2..pulsara.terminal.v2.OperationalActivityChangeR\x0eorderedChanges\x12+\n" +
+	"\x11frame_fingerprint\x18\x05 \x01(\tR\x10frameFingerprint\"\xff\x02\n" +
 	"\x18DurableObservationBranch\x12V\n" +
 	"\x10projection_delta\x18\x01 \x01(\v2).pulsara.terminal.v2.ProjectionDeltaFrameH\x00R\x0fprojectionDelta\x12Y\n" +
 	"\x11authority_advance\x18\x02 \x01(\v2*.pulsara.terminal.v2.AuthorityAdvanceFrameH\x00R\x10authorityAdvance\x12`\n" +
@@ -17539,12 +18006,12 @@ const file_terminal_client_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\vstable_code\x18\x02 \x01(\tR\n" +
 	"stableCode\x12%\n" +
-	"\x0epublic_message\x18\x03 \x01(\tR\rpublicMessage\"\xc3\b\n" +
+	"\x0epublic_message\x18\x03 \x01(\tR\rpublicMessage\"\xc6\b\n" +
 	"\vServerFrame\x129\n" +
 	"\x05hello\x18\x01 \x01(\v2!.pulsara.terminal.v2.HelloOutcomeH\x00R\x05hello\x12B\n" +
 	"\x06attach\x18\x02 \x01(\v2(.pulsara.terminal.v2.AttachResultReceiptH\x00R\x06attach\x12D\n" +
-	"\theartbeat\x18\x03 \x01(\v2$.pulsara.terminal.v2.HeartbeatResultH\x00R\theartbeat\x12J\n" +
-	"\bsnapshot\x18\x04 \x01(\v2,.pulsara.terminal.v2.ProjectionSnapshotFrameH\x00R\bsnapshot\x12b\n" +
+	"\theartbeat\x18\x03 \x01(\v2$.pulsara.terminal.v2.HeartbeatResultH\x00R\theartbeat\x12M\n" +
+	"\bsnapshot\x18\x04 \x01(\v2/.pulsara.terminal.v2.ProjectionSnapshotResponseH\x00R\bsnapshot\x12b\n" +
 	"\x14operational_snapshot\x18\x05 \x01(\v2-.pulsara.terminal.v2.OperationalSnapshotFrameH\x00R\x13operationalSnapshot\x12L\n" +
 	"\vobservation\x18\x06 \x01(\v2(.pulsara.terminal.v2.ObservationResponseH\x00R\vobservation\x12M\n" +
 	"\fhistory_page\x18\a \x01(\v2(.pulsara.terminal.v2.HistoryPageResponseH\x00R\vhistoryPage\x12N\n" +
@@ -17802,484 +18269,496 @@ func file_terminal_client_proto_rawDescGZIP() []byte {
 	return file_terminal_client_proto_rawDescData
 }
 
-var file_terminal_client_proto_enumTypes = make([]protoimpl.EnumInfo, 42)
-var file_terminal_client_proto_msgTypes = make([]protoimpl.MessageInfo, 157)
+var file_terminal_client_proto_enumTypes = make([]protoimpl.EnumInfo, 43)
+var file_terminal_client_proto_msgTypes = make([]protoimpl.MessageInfo, 161)
 var file_terminal_client_proto_goTypes = []any{
-	(AttachmentRole)(0),                               // 0: pulsara.terminal.v2.AttachmentRole
-	(TerminalClientCapability)(0),                     // 1: pulsara.terminal.v2.TerminalClientCapability
-	(TransportAuthDisposition)(0),                     // 2: pulsara.terminal.v2.TransportAuthDisposition
-	(TransportAuthRejectionCode)(0),                   // 3: pulsara.terminal.v2.TransportAuthRejectionCode
-	(AttachmentTransportRebindDisposition)(0),         // 4: pulsara.terminal.v2.AttachmentTransportRebindDisposition
-	(HandshakeCandidateTerminalDisposition)(0),        // 5: pulsara.terminal.v2.HandshakeCandidateTerminalDisposition
-	(HelloCandidateTerminalReason)(0),                 // 6: pulsara.terminal.v2.HelloCandidateTerminalReason
-	(HelloCandidateClientDisposition)(0),              // 7: pulsara.terminal.v2.HelloCandidateClientDisposition
-	(ControllerDisposition)(0),                        // 8: pulsara.terminal.v2.ControllerDisposition
-	(BootstrapRequirement)(0),                         // 9: pulsara.terminal.v2.BootstrapRequirement
-	(AttachResultDisposition)(0),                      // 10: pulsara.terminal.v2.AttachResultDisposition
-	(AttachAckDisposition)(0),                         // 11: pulsara.terminal.v2.AttachAckDisposition
-	(HeartbeatLivenessDisposition)(0),                 // 12: pulsara.terminal.v2.HeartbeatLivenessDisposition
-	(HeartbeatRejectedReason)(0),                      // 13: pulsara.terminal.v2.HeartbeatRejectedReason
-	(PresentationSemanticRole)(0),                     // 14: pulsara.terminal.v2.PresentationSemanticRole
-	(PresentationVisibilityPolicy)(0),                 // 15: pulsara.terminal.v2.PresentationVisibilityPolicy
-	(PresentationToolResultState)(0),                  // 16: pulsara.terminal.v2.PresentationToolResultState
-	(PresentationInteractionKind)(0),                  // 17: pulsara.terminal.v2.PresentationInteractionKind
-	(PresentationInteractionState)(0),                 // 18: pulsara.terminal.v2.PresentationInteractionState
-	(PresentationAuditKind)(0),                        // 19: pulsara.terminal.v2.PresentationAuditKind
-	(PresentationSeverity)(0),                         // 20: pulsara.terminal.v2.PresentationSeverity
-	(PresentationRelativePositionKind)(0),             // 21: pulsara.terminal.v2.PresentationRelativePositionKind
-	(OperationalReplacementSemantics)(0),              // 22: pulsara.terminal.v2.OperationalReplacementSemantics
-	(OperationalRemovalReason)(0),                     // 23: pulsara.terminal.v2.OperationalRemovalReason
-	(McpInputMode)(0),                                 // 24: pulsara.terminal.v2.McpInputMode
-	(PromptQueueDeliveryState)(0),                     // 25: pulsara.terminal.v2.PromptQueueDeliveryState
-	(PromptQueueContentRetentionState)(0),             // 26: pulsara.terminal.v2.PromptQueueContentRetentionState
-	(PromptQueueRequestedDeliveryMode)(0),             // 27: pulsara.terminal.v2.PromptQueueRequestedDeliveryMode
-	(PromptQueueResolvedDeliveryMode)(0),              // 28: pulsara.terminal.v2.PromptQueueResolvedDeliveryMode
-	(TerminalControlSectionKind)(0),                   // 29: pulsara.terminal.v2.TerminalControlSectionKind
-	(TerminalSessionLifecycleState)(0),                // 30: pulsara.terminal.v2.TerminalSessionLifecycleState
-	(ServerNotificationKind)(0),                       // 31: pulsara.terminal.v2.ServerNotificationKind
-	(PresentationRootRelationKind)(0),                 // 32: pulsara.terminal.v2.PresentationRootRelationKind
-	(PresentationPreviousCursorDisposition)(0),        // 33: pulsara.terminal.v2.PresentationPreviousCursorDisposition
-	(ObservationGapReason)(0),                         // 34: pulsara.terminal.v2.ObservationGapReason
-	(ControlProjectionInvalidationDisposition)(0),     // 35: pulsara.terminal.v2.ControlProjectionInvalidationDisposition
-	(ControlProjectionGapReason)(0),                   // 36: pulsara.terminal.v2.ControlProjectionGapReason
-	(PlanExitDecision)(0),                             // 37: pulsara.terminal.v2.PlanExitDecision
-	(CommandOutcomeStatus)(0),                         // 38: pulsara.terminal.v2.CommandOutcomeStatus
-	(TerminalSecretKind)(0),                           // 39: pulsara.terminal.v2.TerminalSecretKind
-	(HistoryPageRequest_Direction)(0),                 // 40: pulsara.terminal.v2.HistoryPageRequest.Direction
-	(SubmitPromptCommand_DeliveryMode)(0),             // 41: pulsara.terminal.v2.SubmitPromptCommand.DeliveryMode
-	(*ProtocolVersion)(nil),                           // 42: pulsara.terminal.v2.ProtocolVersion
-	(*ProtocolVersionRange)(nil),                      // 43: pulsara.terminal.v2.ProtocolVersionRange
-	(*TerminalClientBootstrapCarrier)(nil),            // 44: pulsara.terminal.v2.TerminalClientBootstrapCarrier
-	(*InitialLaunchCredential)(nil),                   // 45: pulsara.terminal.v2.InitialLaunchCredential
-	(*ReconnectCredential)(nil),                       // 46: pulsara.terminal.v2.ReconnectCredential
-	(*TerminalTransportAuthPreface)(nil),              // 47: pulsara.terminal.v2.TerminalTransportAuthPreface
-	(*RecoveredAttachmentTransportBinding)(nil),       // 48: pulsara.terminal.v2.RecoveredAttachmentTransportBinding
-	(*TerminalTransportAuthResult)(nil),               // 49: pulsara.terminal.v2.TerminalTransportAuthResult
-	(*HandshakeRecoveryCandidateIdentity)(nil),        // 50: pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity
-	(*HelloRequest)(nil),                              // 51: pulsara.terminal.v2.HelloRequest
-	(*NegotiatedLimits)(nil),                          // 52: pulsara.terminal.v2.NegotiatedLimits
-	(*HeartbeatPolicy)(nil),                           // 53: pulsara.terminal.v2.HeartbeatPolicy
-	(*HelloNegotiationSemanticWinner)(nil),            // 54: pulsara.terminal.v2.HelloNegotiationSemanticWinner
-	(*ServerHelloReceipt)(nil),                        // 55: pulsara.terminal.v2.ServerHelloReceipt
-	(*ServerHello)(nil),                               // 56: pulsara.terminal.v2.ServerHello
-	(*HandshakeCandidateTerminalReceipt)(nil),         // 57: pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
-	(*HelloNegotiationWinnerUnavailable)(nil),         // 58: pulsara.terminal.v2.HelloNegotiationWinnerUnavailable
-	(*HelloRejected)(nil),                             // 59: pulsara.terminal.v2.HelloRejected
-	(*HelloOutcome)(nil),                              // 60: pulsara.terminal.v2.HelloOutcome
-	(*AttachRequest)(nil),                             // 61: pulsara.terminal.v2.AttachRequest
-	(*AttachmentIdentity)(nil),                        // 62: pulsara.terminal.v2.AttachmentIdentity
-	(*TerminalClientTransportBindingIdentity)(nil),    // 63: pulsara.terminal.v2.TerminalClientTransportBindingIdentity
-	(*AttachSemanticWinner)(nil),                      // 64: pulsara.terminal.v2.AttachSemanticWinner
-	(*AttachResultReceipt)(nil),                       // 65: pulsara.terminal.v2.AttachResultReceipt
-	(*AttachReceiptAck)(nil),                          // 66: pulsara.terminal.v2.AttachReceiptAck
-	(*AttachAckResult)(nil),                           // 67: pulsara.terminal.v2.AttachAckResult
-	(*HeartbeatRequest)(nil),                          // 68: pulsara.terminal.v2.HeartbeatRequest
-	(*HeartbeatAcceptedReceipt)(nil),                  // 69: pulsara.terminal.v2.HeartbeatAcceptedReceipt
-	(*HeartbeatRejectedReceipt)(nil),                  // 70: pulsara.terminal.v2.HeartbeatRejectedReceipt
-	(*HeartbeatResult)(nil),                           // 71: pulsara.terminal.v2.HeartbeatResult
-	(*EventReferenceView)(nil),                        // 72: pulsara.terminal.v2.EventReferenceView
-	(*PresentationTextBlock)(nil),                     // 73: pulsara.terminal.v2.PresentationTextBlock
-	(*PresentationDataBlock)(nil),                     // 74: pulsara.terminal.v2.PresentationDataBlock
-	(*PresentationContentBlock)(nil),                  // 75: pulsara.terminal.v2.PresentationContentBlock
-	(*DurableCellCommon)(nil),                         // 76: pulsara.terminal.v2.DurableCellCommon
-	(*UserPromptCell)(nil),                            // 77: pulsara.terminal.v2.UserPromptCell
-	(*AssistantMessageCell)(nil),                      // 78: pulsara.terminal.v2.AssistantMessageCell
-	(*ToolTerminalCell)(nil),                          // 79: pulsara.terminal.v2.ToolTerminalCell
-	(*ErrorCell)(nil),                                 // 80: pulsara.terminal.v2.ErrorCell
-	(*InteractionCell)(nil),                           // 81: pulsara.terminal.v2.InteractionCell
-	(*CompactionBoundaryCell)(nil),                    // 82: pulsara.terminal.v2.CompactionBoundaryCell
-	(*RecoveryCell)(nil),                              // 83: pulsara.terminal.v2.RecoveryCell
-	(*AuditCell)(nil),                                 // 84: pulsara.terminal.v2.AuditCell
-	(*SystemNoticeCell)(nil),                          // 85: pulsara.terminal.v2.SystemNoticeCell
-	(*DurableHistoryCell)(nil),                        // 86: pulsara.terminal.v2.DurableHistoryCell
-	(*CanonicalTranscriptSourceView)(nil),             // 87: pulsara.terminal.v2.CanonicalTranscriptSourceView
-	(*DurableAuditSourceView)(nil),                    // 88: pulsara.terminal.v2.DurableAuditSourceView
-	(*HistorySourceView)(nil),                         // 89: pulsara.terminal.v2.HistorySourceView
-	(*PresentationHistoryPlacementKey)(nil),           // 90: pulsara.terminal.v2.PresentationHistoryPlacementKey
-	(*PresentationHistoryEntry)(nil),                  // 91: pulsara.terminal.v2.PresentationHistoryEntry
-	(*ConfirmedRootRankBasis)(nil),                    // 92: pulsara.terminal.v2.ConfirmedRootRankBasis
-	(*ActiveHeadRankBasis)(nil),                       // 93: pulsara.terminal.v2.ActiveHeadRankBasis
-	(*HistoryRankBasis)(nil),                          // 94: pulsara.terminal.v2.HistoryRankBasis
-	(*PresentationHistoryRankedEntry)(nil),            // 95: pulsara.terminal.v2.PresentationHistoryRankedEntry
-	(*PresentationHistoryRootIdentity)(nil),           // 96: pulsara.terminal.v2.PresentationHistoryRootIdentity
-	(*PresentationHistoryCursor)(nil),                 // 97: pulsara.terminal.v2.PresentationHistoryCursor
-	(*PresentationHistoryLatestRootCursorPair)(nil),   // 98: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
-	(*AvailableHistoryCapacity)(nil),                  // 99: pulsara.terminal.v2.AvailableHistoryCapacity
-	(*HistorySessionRotationRequired)(nil),            // 100: pulsara.terminal.v2.HistorySessionRotationRequired
-	(*HistoryTreeCapacityExhausted)(nil),              // 101: pulsara.terminal.v2.HistoryTreeCapacityExhausted
-	(*HistoryCapacityReconciliationRequired)(nil),     // 102: pulsara.terminal.v2.HistoryCapacityReconciliationRequired
-	(*PresentationHistoryCapacityState)(nil),          // 103: pulsara.terminal.v2.PresentationHistoryCapacityState
-	(*PresentationHistoryActiveHeadIdentity)(nil),     // 104: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
-	(*QueueItemView)(nil),                             // 105: pulsara.terminal.v2.QueueItemView
-	(*ToolApproval)(nil),                              // 106: pulsara.terminal.v2.ToolApproval
-	(*ApprovalInteraction)(nil),                       // 107: pulsara.terminal.v2.ApprovalInteraction
-	(*PlanOption)(nil),                                // 108: pulsara.terminal.v2.PlanOption
-	(*PlanQuestionInteraction)(nil),                   // 109: pulsara.terminal.v2.PlanQuestionInteraction
-	(*PlanExitInteraction)(nil),                       // 110: pulsara.terminal.v2.PlanExitInteraction
-	(*McpInputPublicRequest)(nil),                     // 111: pulsara.terminal.v2.McpInputPublicRequest
-	(*McpInteraction)(nil),                            // 112: pulsara.terminal.v2.McpInteraction
-	(*PendingInteraction)(nil),                        // 113: pulsara.terminal.v2.PendingInteraction
-	(*TerminalControlSectionSourceVersion)(nil),       // 114: pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	(*TerminalSessionLifecycleControlView)(nil),       // 115: pulsara.terminal.v2.TerminalSessionLifecycleControlView
-	(*TerminalRunControlView)(nil),                    // 116: pulsara.terminal.v2.TerminalRunControlView
-	(*TerminalPendingInteractionControlView)(nil),     // 117: pulsara.terminal.v2.TerminalPendingInteractionControlView
-	(*EmptyPromptQueueGenesisHead)(nil),               // 118: pulsara.terminal.v2.EmptyPromptQueueGenesisHead
-	(*CommittedPromptQueueHead)(nil),                  // 119: pulsara.terminal.v2.CommittedPromptQueueHead
-	(*PromptQueueProjectionHead)(nil),                 // 120: pulsara.terminal.v2.PromptQueueProjectionHead
-	(*PromptQueueClientProjection)(nil),               // 121: pulsara.terminal.v2.PromptQueueClientProjection
-	(*TerminalPromptQueueControlView)(nil),            // 122: pulsara.terminal.v2.TerminalPromptQueueControlView
-	(*ServerNotificationView)(nil),                    // 123: pulsara.terminal.v2.ServerNotificationView
-	(*TerminalServerNotificationProjection)(nil),      // 124: pulsara.terminal.v2.TerminalServerNotificationProjection
-	(*TerminalControlProjectionView)(nil),             // 125: pulsara.terminal.v2.TerminalControlProjectionView
-	(*ControlProjectionCursor)(nil),                   // 126: pulsara.terminal.v2.ControlProjectionCursor
-	(*TerminalControlProjectionSnapshot)(nil),         // 127: pulsara.terminal.v2.TerminalControlProjectionSnapshot
-	(*ProjectionSnapshotRequest)(nil),                 // 128: pulsara.terminal.v2.ProjectionSnapshotRequest
-	(*ProjectionSnapshotFrame)(nil),                   // 129: pulsara.terminal.v2.ProjectionSnapshotFrame
-	(*OperationalActivityCommon)(nil),                 // 130: pulsara.terminal.v2.OperationalActivityCommon
-	(*ModelActivityCell)(nil),                         // 131: pulsara.terminal.v2.ModelActivityCell
-	(*ToolActivityCell)(nil),                          // 132: pulsara.terminal.v2.ToolActivityCell
-	(*TerminalProcessActivityCell)(nil),               // 133: pulsara.terminal.v2.TerminalProcessActivityCell
-	(*SubagentActivityCell)(nil),                      // 134: pulsara.terminal.v2.SubagentActivityCell
-	(*OperationalActivityCell)(nil),                   // 135: pulsara.terminal.v2.OperationalActivityCell
-	(*OperationalActivityRemove)(nil),                 // 136: pulsara.terminal.v2.OperationalActivityRemove
-	(*OperationalActivityChange)(nil),                 // 137: pulsara.terminal.v2.OperationalActivityChange
-	(*OperationalSnapshotRequest)(nil),                // 138: pulsara.terminal.v2.OperationalSnapshotRequest
-	(*OperationalSnapshotFrame)(nil),                  // 139: pulsara.terminal.v2.OperationalSnapshotFrame
-	(*ObserveNextRequest)(nil),                        // 140: pulsara.terminal.v2.ObserveNextRequest
-	(*HistoryEntryUpsert)(nil),                        // 141: pulsara.terminal.v2.HistoryEntryUpsert
-	(*HistoryEntryRemove)(nil),                        // 142: pulsara.terminal.v2.HistoryEntryRemove
-	(*HistoryEntryChange)(nil),                        // 143: pulsara.terminal.v2.HistoryEntryChange
-	(*ProjectionDeltaFrame)(nil),                      // 144: pulsara.terminal.v2.ProjectionDeltaFrame
-	(*AuthorityAdvanceFrame)(nil),                     // 145: pulsara.terminal.v2.AuthorityAdvanceFrame
-	(*PresentationHistoryRootCursorRelation)(nil),     // 146: pulsara.terminal.v2.PresentationHistoryRootCursorRelation
-	(*ResidentEntriesUnchanged)(nil),                  // 147: pulsara.terminal.v2.ResidentEntriesUnchanged
-	(*PresentationHistoryResidentUpsert)(nil),         // 148: pulsara.terminal.v2.PresentationHistoryResidentUpsert
-	(*PresentationHistoryResidentRemove)(nil),         // 149: pulsara.terminal.v2.PresentationHistoryResidentRemove
-	(*PresentationHistoryResidentChange)(nil),         // 150: pulsara.terminal.v2.PresentationHistoryResidentChange
-	(*BoundedOrderedResidentChanges)(nil),             // 151: pulsara.terminal.v2.BoundedOrderedResidentChanges
-	(*ResidentHistoryRebaseRequired)(nil),             // 152: pulsara.terminal.v2.ResidentHistoryRebaseRequired
-	(*PresentationHistoryRootResidentTransition)(nil), // 153: pulsara.terminal.v2.PresentationHistoryRootResidentTransition
-	(*PresentationHistoryRootAdvancedFrame)(nil),      // 154: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame
-	(*DurableObservationGapFrame)(nil),                // 155: pulsara.terminal.v2.DurableObservationGapFrame
-	(*OperationalObservationGapFrame)(nil),            // 156: pulsara.terminal.v2.OperationalObservationGapFrame
-	(*ControlProjectionChangedFrame)(nil),             // 157: pulsara.terminal.v2.ControlProjectionChangedFrame
-	(*ControlProjectionGapFrame)(nil),                 // 158: pulsara.terminal.v2.ControlProjectionGapFrame
-	(*ObservationNoChangeFrame)(nil),                  // 159: pulsara.terminal.v2.ObservationNoChangeFrame
-	(*OperationalDeltaFrame)(nil),                     // 160: pulsara.terminal.v2.OperationalDeltaFrame
-	(*DurableObservationBranch)(nil),                  // 161: pulsara.terminal.v2.DurableObservationBranch
-	(*OperationalObservationBranch)(nil),              // 162: pulsara.terminal.v2.OperationalObservationBranch
-	(*ControlObservationBranch)(nil),                  // 163: pulsara.terminal.v2.ControlObservationBranch
-	(*ObservationBatchFrame)(nil),                     // 164: pulsara.terminal.v2.ObservationBatchFrame
-	(*ObservationResponse)(nil),                       // 165: pulsara.terminal.v2.ObservationResponse
-	(*HistoryPageRequest)(nil),                        // 166: pulsara.terminal.v2.HistoryPageRequest
-	(*HistoryPageData)(nil),                           // 167: pulsara.terminal.v2.HistoryPageData
-	(*HistoryCursorStale)(nil),                        // 168: pulsara.terminal.v2.HistoryCursorStale
-	(*HistoryRebaseRequired)(nil),                     // 169: pulsara.terminal.v2.HistoryRebaseRequired
-	(*HistoryReconciliationRequired)(nil),             // 170: pulsara.terminal.v2.HistoryReconciliationRequired
-	(*HistoryPageResponse)(nil),                       // 171: pulsara.terminal.v2.HistoryPageResponse
-	(*CommandBinding)(nil),                            // 172: pulsara.terminal.v2.CommandBinding
-	(*SubmitPromptCommand)(nil),                       // 173: pulsara.terminal.v2.SubmitPromptCommand
-	(*StopRunCommand)(nil),                            // 174: pulsara.terminal.v2.StopRunCommand
-	(*ApprovalDecision)(nil),                          // 175: pulsara.terminal.v2.ApprovalDecision
-	(*ResolveApprovalCommand)(nil),                    // 176: pulsara.terminal.v2.ResolveApprovalCommand
-	(*ResolvePlanQuestionCommand)(nil),                // 177: pulsara.terminal.v2.ResolvePlanQuestionCommand
-	(*ResolvePlanExitCommand)(nil),                    // 178: pulsara.terminal.v2.ResolvePlanExitCommand
-	(*ResolveMcpInteractionCommand)(nil),              // 179: pulsara.terminal.v2.ResolveMcpInteractionCommand
-	(*CancelMcpInteractionCommand)(nil),               // 180: pulsara.terminal.v2.CancelMcpInteractionCommand
-	(*QueueCancelCommand)(nil),                        // 181: pulsara.terminal.v2.QueueCancelCommand
-	(*StartSuccessorSessionCommand)(nil),              // 182: pulsara.terminal.v2.StartSuccessorSessionCommand
-	(*DetachSessionCommand)(nil),                      // 183: pulsara.terminal.v2.DetachSessionCommand
-	(*CloseSessionCommand)(nil),                       // 184: pulsara.terminal.v2.CloseSessionCommand
-	(*ControllerTakeoverCommand)(nil),                 // 185: pulsara.terminal.v2.ControllerTakeoverCommand
-	(*MutationCommand)(nil),                           // 186: pulsara.terminal.v2.MutationCommand
-	(*CommandOutcome)(nil),                            // 187: pulsara.terminal.v2.CommandOutcome
-	(*QueryCommandRequest)(nil),                       // 188: pulsara.terminal.v2.QueryCommandRequest
-	(*QueryCommandResponse)(nil),                      // 189: pulsara.terminal.v2.QueryCommandResponse
-	(*TerminalSecretLeaseIdentity)(nil),               // 190: pulsara.terminal.v2.TerminalSecretLeaseIdentity
-	(*SecretRevealRequest)(nil),                       // 191: pulsara.terminal.v2.SecretRevealRequest
-	(*SecretRevealResult)(nil),                        // 192: pulsara.terminal.v2.SecretRevealResult
-	(*SecretFormSubmit)(nil),                          // 193: pulsara.terminal.v2.SecretFormSubmit
-	(*SecretSubmitReceipt)(nil),                       // 194: pulsara.terminal.v2.SecretSubmitReceipt
-	(*SecretLeaseRevoked)(nil),                        // 195: pulsara.terminal.v2.SecretLeaseRevoked
-	(*ClientFrame)(nil),                               // 196: pulsara.terminal.v2.ClientFrame
-	(*ProtocolError)(nil),                             // 197: pulsara.terminal.v2.ProtocolError
-	(*ServerFrame)(nil),                               // 198: pulsara.terminal.v2.ServerFrame
+	(AttachmentRole)(0),                                       // 0: pulsara.terminal.v2.AttachmentRole
+	(TerminalClientCapability)(0),                             // 1: pulsara.terminal.v2.TerminalClientCapability
+	(TransportAuthDisposition)(0),                             // 2: pulsara.terminal.v2.TransportAuthDisposition
+	(TransportAuthRejectionCode)(0),                           // 3: pulsara.terminal.v2.TransportAuthRejectionCode
+	(AttachmentTransportRebindDisposition)(0),                 // 4: pulsara.terminal.v2.AttachmentTransportRebindDisposition
+	(HandshakeCandidateTerminalDisposition)(0),                // 5: pulsara.terminal.v2.HandshakeCandidateTerminalDisposition
+	(HelloCandidateTerminalReason)(0),                         // 6: pulsara.terminal.v2.HelloCandidateTerminalReason
+	(HelloCandidateClientDisposition)(0),                      // 7: pulsara.terminal.v2.HelloCandidateClientDisposition
+	(ControllerDisposition)(0),                                // 8: pulsara.terminal.v2.ControllerDisposition
+	(BootstrapRequirement)(0),                                 // 9: pulsara.terminal.v2.BootstrapRequirement
+	(AttachResultDisposition)(0),                              // 10: pulsara.terminal.v2.AttachResultDisposition
+	(AttachAckDisposition)(0),                                 // 11: pulsara.terminal.v2.AttachAckDisposition
+	(HeartbeatLivenessDisposition)(0),                         // 12: pulsara.terminal.v2.HeartbeatLivenessDisposition
+	(HeartbeatRejectedReason)(0),                              // 13: pulsara.terminal.v2.HeartbeatRejectedReason
+	(PresentationSemanticRole)(0),                             // 14: pulsara.terminal.v2.PresentationSemanticRole
+	(PresentationVisibilityPolicy)(0),                         // 15: pulsara.terminal.v2.PresentationVisibilityPolicy
+	(PresentationToolResultState)(0),                          // 16: pulsara.terminal.v2.PresentationToolResultState
+	(PresentationInteractionKind)(0),                          // 17: pulsara.terminal.v2.PresentationInteractionKind
+	(PresentationInteractionState)(0),                         // 18: pulsara.terminal.v2.PresentationInteractionState
+	(PresentationAuditKind)(0),                                // 19: pulsara.terminal.v2.PresentationAuditKind
+	(PresentationSeverity)(0),                                 // 20: pulsara.terminal.v2.PresentationSeverity
+	(PresentationRelativePositionKind)(0),                     // 21: pulsara.terminal.v2.PresentationRelativePositionKind
+	(OperationalReplacementSemantics)(0),                      // 22: pulsara.terminal.v2.OperationalReplacementSemantics
+	(OperationalRemovalReason)(0),                             // 23: pulsara.terminal.v2.OperationalRemovalReason
+	(McpInputMode)(0),                                         // 24: pulsara.terminal.v2.McpInputMode
+	(PromptQueueDeliveryState)(0),                             // 25: pulsara.terminal.v2.PromptQueueDeliveryState
+	(PromptQueueContentRetentionState)(0),                     // 26: pulsara.terminal.v2.PromptQueueContentRetentionState
+	(PromptQueueRequestedDeliveryMode)(0),                     // 27: pulsara.terminal.v2.PromptQueueRequestedDeliveryMode
+	(PromptQueueResolvedDeliveryMode)(0),                      // 28: pulsara.terminal.v2.PromptQueueResolvedDeliveryMode
+	(TerminalControlSectionKind)(0),                           // 29: pulsara.terminal.v2.TerminalControlSectionKind
+	(TerminalSessionLifecycleState)(0),                        // 30: pulsara.terminal.v2.TerminalSessionLifecycleState
+	(ServerNotificationKind)(0),                               // 31: pulsara.terminal.v2.ServerNotificationKind
+	(PresentationRootRelationKind)(0),                         // 32: pulsara.terminal.v2.PresentationRootRelationKind
+	(PresentationPreviousCursorDisposition)(0),                // 33: pulsara.terminal.v2.PresentationPreviousCursorDisposition
+	(ObservationGapReason)(0),                                 // 34: pulsara.terminal.v2.ObservationGapReason
+	(ControlProjectionInvalidationDisposition)(0),             // 35: pulsara.terminal.v2.ControlProjectionInvalidationDisposition
+	(ControlProjectionGapReason)(0),                           // 36: pulsara.terminal.v2.ControlProjectionGapReason
+	(PlanExitDecision)(0),                                     // 37: pulsara.terminal.v2.PlanExitDecision
+	(CommandOutcomeStatus)(0),                                 // 38: pulsara.terminal.v2.CommandOutcomeStatus
+	(TerminalSecretKind)(0),                                   // 39: pulsara.terminal.v2.TerminalSecretKind
+	(ProjectionSnapshotControlRebaseRequired_StableReason)(0), // 40: pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired.StableReason
+	(HistoryPageRequest_Direction)(0),                         // 41: pulsara.terminal.v2.HistoryPageRequest.Direction
+	(SubmitPromptCommand_DeliveryMode)(0),                     // 42: pulsara.terminal.v2.SubmitPromptCommand.DeliveryMode
+	(*ProtocolVersion)(nil),                                   // 43: pulsara.terminal.v2.ProtocolVersion
+	(*ProtocolVersionRange)(nil),                              // 44: pulsara.terminal.v2.ProtocolVersionRange
+	(*TerminalClientBootstrapCarrier)(nil),                    // 45: pulsara.terminal.v2.TerminalClientBootstrapCarrier
+	(*InitialLaunchCredential)(nil),                           // 46: pulsara.terminal.v2.InitialLaunchCredential
+	(*ReconnectCredential)(nil),                               // 47: pulsara.terminal.v2.ReconnectCredential
+	(*TerminalTransportAuthPreface)(nil),                      // 48: pulsara.terminal.v2.TerminalTransportAuthPreface
+	(*RecoveredAttachmentTransportBinding)(nil),               // 49: pulsara.terminal.v2.RecoveredAttachmentTransportBinding
+	(*TerminalTransportAuthResult)(nil),                       // 50: pulsara.terminal.v2.TerminalTransportAuthResult
+	(*HandshakeRecoveryCandidateIdentity)(nil),                // 51: pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity
+	(*HelloRequest)(nil),                                      // 52: pulsara.terminal.v2.HelloRequest
+	(*NegotiatedLimits)(nil),                                  // 53: pulsara.terminal.v2.NegotiatedLimits
+	(*HeartbeatPolicy)(nil),                                   // 54: pulsara.terminal.v2.HeartbeatPolicy
+	(*HelloNegotiationSemanticWinner)(nil),                    // 55: pulsara.terminal.v2.HelloNegotiationSemanticWinner
+	(*ServerHelloReceipt)(nil),                                // 56: pulsara.terminal.v2.ServerHelloReceipt
+	(*ServerHello)(nil),                                       // 57: pulsara.terminal.v2.ServerHello
+	(*HandshakeCandidateTerminalReceipt)(nil),                 // 58: pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
+	(*HelloNegotiationWinnerUnavailable)(nil),                 // 59: pulsara.terminal.v2.HelloNegotiationWinnerUnavailable
+	(*HelloRejected)(nil),                                     // 60: pulsara.terminal.v2.HelloRejected
+	(*HelloOutcome)(nil),                                      // 61: pulsara.terminal.v2.HelloOutcome
+	(*AttachRequest)(nil),                                     // 62: pulsara.terminal.v2.AttachRequest
+	(*AttachmentIdentity)(nil),                                // 63: pulsara.terminal.v2.AttachmentIdentity
+	(*TerminalClientTransportBindingIdentity)(nil),            // 64: pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	(*ReconnectCredentialPublicIdentity)(nil),                 // 65: pulsara.terminal.v2.ReconnectCredentialPublicIdentity
+	(*ReconnectCredentialCarrier)(nil),                        // 66: pulsara.terminal.v2.ReconnectCredentialCarrier
+	(*AttachSemanticWinner)(nil),                              // 67: pulsara.terminal.v2.AttachSemanticWinner
+	(*AttachResultReceipt)(nil),                               // 68: pulsara.terminal.v2.AttachResultReceipt
+	(*AttachReceiptAck)(nil),                                  // 69: pulsara.terminal.v2.AttachReceiptAck
+	(*AttachAckResult)(nil),                                   // 70: pulsara.terminal.v2.AttachAckResult
+	(*HeartbeatRequest)(nil),                                  // 71: pulsara.terminal.v2.HeartbeatRequest
+	(*HeartbeatAcceptedReceipt)(nil),                          // 72: pulsara.terminal.v2.HeartbeatAcceptedReceipt
+	(*HeartbeatRejectedReceipt)(nil),                          // 73: pulsara.terminal.v2.HeartbeatRejectedReceipt
+	(*HeartbeatResult)(nil),                                   // 74: pulsara.terminal.v2.HeartbeatResult
+	(*EventReferenceView)(nil),                                // 75: pulsara.terminal.v2.EventReferenceView
+	(*PresentationTextBlock)(nil),                             // 76: pulsara.terminal.v2.PresentationTextBlock
+	(*PresentationDataBlock)(nil),                             // 77: pulsara.terminal.v2.PresentationDataBlock
+	(*PresentationContentBlock)(nil),                          // 78: pulsara.terminal.v2.PresentationContentBlock
+	(*DurableCellCommon)(nil),                                 // 79: pulsara.terminal.v2.DurableCellCommon
+	(*UserPromptCell)(nil),                                    // 80: pulsara.terminal.v2.UserPromptCell
+	(*AssistantMessageCell)(nil),                              // 81: pulsara.terminal.v2.AssistantMessageCell
+	(*ToolTerminalCell)(nil),                                  // 82: pulsara.terminal.v2.ToolTerminalCell
+	(*ErrorCell)(nil),                                         // 83: pulsara.terminal.v2.ErrorCell
+	(*InteractionCell)(nil),                                   // 84: pulsara.terminal.v2.InteractionCell
+	(*CompactionBoundaryCell)(nil),                            // 85: pulsara.terminal.v2.CompactionBoundaryCell
+	(*RecoveryCell)(nil),                                      // 86: pulsara.terminal.v2.RecoveryCell
+	(*AuditCell)(nil),                                         // 87: pulsara.terminal.v2.AuditCell
+	(*SystemNoticeCell)(nil),                                  // 88: pulsara.terminal.v2.SystemNoticeCell
+	(*DurableHistoryCell)(nil),                                // 89: pulsara.terminal.v2.DurableHistoryCell
+	(*CanonicalTranscriptSourceView)(nil),                     // 90: pulsara.terminal.v2.CanonicalTranscriptSourceView
+	(*DurableAuditSourceView)(nil),                            // 91: pulsara.terminal.v2.DurableAuditSourceView
+	(*HistorySourceView)(nil),                                 // 92: pulsara.terminal.v2.HistorySourceView
+	(*PresentationHistoryPlacementKey)(nil),                   // 93: pulsara.terminal.v2.PresentationHistoryPlacementKey
+	(*PresentationHistoryEntry)(nil),                          // 94: pulsara.terminal.v2.PresentationHistoryEntry
+	(*ConfirmedRootRankBasis)(nil),                            // 95: pulsara.terminal.v2.ConfirmedRootRankBasis
+	(*ActiveHeadRankBasis)(nil),                               // 96: pulsara.terminal.v2.ActiveHeadRankBasis
+	(*HistoryRankBasis)(nil),                                  // 97: pulsara.terminal.v2.HistoryRankBasis
+	(*PresentationHistoryRankedEntry)(nil),                    // 98: pulsara.terminal.v2.PresentationHistoryRankedEntry
+	(*PresentationHistoryRootIdentity)(nil),                   // 99: pulsara.terminal.v2.PresentationHistoryRootIdentity
+	(*PresentationHistoryCursor)(nil),                         // 100: pulsara.terminal.v2.PresentationHistoryCursor
+	(*PresentationHistoryLatestRootCursorPair)(nil),           // 101: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
+	(*AvailableHistoryCapacity)(nil),                          // 102: pulsara.terminal.v2.AvailableHistoryCapacity
+	(*HistorySessionRotationRequired)(nil),                    // 103: pulsara.terminal.v2.HistorySessionRotationRequired
+	(*HistoryTreeCapacityExhausted)(nil),                      // 104: pulsara.terminal.v2.HistoryTreeCapacityExhausted
+	(*HistoryCapacityReconciliationRequired)(nil),             // 105: pulsara.terminal.v2.HistoryCapacityReconciliationRequired
+	(*PresentationHistoryCapacityState)(nil),                  // 106: pulsara.terminal.v2.PresentationHistoryCapacityState
+	(*PresentationHistoryActiveHeadIdentity)(nil),             // 107: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
+	(*QueueItemView)(nil),                                     // 108: pulsara.terminal.v2.QueueItemView
+	(*ToolApproval)(nil),                                      // 109: pulsara.terminal.v2.ToolApproval
+	(*ApprovalInteraction)(nil),                               // 110: pulsara.terminal.v2.ApprovalInteraction
+	(*PlanOption)(nil),                                        // 111: pulsara.terminal.v2.PlanOption
+	(*PlanQuestionInteraction)(nil),                           // 112: pulsara.terminal.v2.PlanQuestionInteraction
+	(*PlanExitInteraction)(nil),                               // 113: pulsara.terminal.v2.PlanExitInteraction
+	(*McpInputPublicRequest)(nil),                             // 114: pulsara.terminal.v2.McpInputPublicRequest
+	(*McpInteraction)(nil),                                    // 115: pulsara.terminal.v2.McpInteraction
+	(*PendingInteraction)(nil),                                // 116: pulsara.terminal.v2.PendingInteraction
+	(*TerminalControlSectionSourceVersion)(nil),               // 117: pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	(*TerminalSessionLifecycleControlView)(nil),               // 118: pulsara.terminal.v2.TerminalSessionLifecycleControlView
+	(*TerminalRunControlView)(nil),                            // 119: pulsara.terminal.v2.TerminalRunControlView
+	(*TerminalPendingInteractionControlView)(nil),             // 120: pulsara.terminal.v2.TerminalPendingInteractionControlView
+	(*EmptyPromptQueueGenesisHead)(nil),                       // 121: pulsara.terminal.v2.EmptyPromptQueueGenesisHead
+	(*CommittedPromptQueueHead)(nil),                          // 122: pulsara.terminal.v2.CommittedPromptQueueHead
+	(*PromptQueueProjectionHead)(nil),                         // 123: pulsara.terminal.v2.PromptQueueProjectionHead
+	(*PromptQueueClientProjection)(nil),                       // 124: pulsara.terminal.v2.PromptQueueClientProjection
+	(*TerminalPromptQueueControlView)(nil),                    // 125: pulsara.terminal.v2.TerminalPromptQueueControlView
+	(*ServerNotificationView)(nil),                            // 126: pulsara.terminal.v2.ServerNotificationView
+	(*TerminalServerNotificationProjection)(nil),              // 127: pulsara.terminal.v2.TerminalServerNotificationProjection
+	(*TerminalControlProjectionView)(nil),                     // 128: pulsara.terminal.v2.TerminalControlProjectionView
+	(*ControlProjectionCursor)(nil),                           // 129: pulsara.terminal.v2.ControlProjectionCursor
+	(*TerminalControlProjectionSnapshot)(nil),                 // 130: pulsara.terminal.v2.TerminalControlProjectionSnapshot
+	(*ProjectionSnapshotRequest)(nil),                         // 131: pulsara.terminal.v2.ProjectionSnapshotRequest
+	(*ProjectionSnapshotFrame)(nil),                           // 132: pulsara.terminal.v2.ProjectionSnapshotFrame
+	(*ProjectionSnapshotControlRebaseRequired)(nil),           // 133: pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired
+	(*ProjectionSnapshotResponse)(nil),                        // 134: pulsara.terminal.v2.ProjectionSnapshotResponse
+	(*OperationalActivityCommon)(nil),                         // 135: pulsara.terminal.v2.OperationalActivityCommon
+	(*ModelActivityCell)(nil),                                 // 136: pulsara.terminal.v2.ModelActivityCell
+	(*ToolActivityCell)(nil),                                  // 137: pulsara.terminal.v2.ToolActivityCell
+	(*TerminalProcessActivityCell)(nil),                       // 138: pulsara.terminal.v2.TerminalProcessActivityCell
+	(*SubagentActivityCell)(nil),                              // 139: pulsara.terminal.v2.SubagentActivityCell
+	(*OperationalActivityCell)(nil),                           // 140: pulsara.terminal.v2.OperationalActivityCell
+	(*OperationalActivityRemove)(nil),                         // 141: pulsara.terminal.v2.OperationalActivityRemove
+	(*OperationalActivityChange)(nil),                         // 142: pulsara.terminal.v2.OperationalActivityChange
+	(*OperationalSnapshotRequest)(nil),                        // 143: pulsara.terminal.v2.OperationalSnapshotRequest
+	(*OperationalSnapshotFrame)(nil),                          // 144: pulsara.terminal.v2.OperationalSnapshotFrame
+	(*ObserveNextRequest)(nil),                                // 145: pulsara.terminal.v2.ObserveNextRequest
+	(*HistoryEntryUpsert)(nil),                                // 146: pulsara.terminal.v2.HistoryEntryUpsert
+	(*HistoryEntryRemove)(nil),                                // 147: pulsara.terminal.v2.HistoryEntryRemove
+	(*HistoryEntryChange)(nil),                                // 148: pulsara.terminal.v2.HistoryEntryChange
+	(*ProjectionDeltaFrame)(nil),                              // 149: pulsara.terminal.v2.ProjectionDeltaFrame
+	(*AuthorityAdvanceFrame)(nil),                             // 150: pulsara.terminal.v2.AuthorityAdvanceFrame
+	(*PresentationHistoryRootCursorRelation)(nil),             // 151: pulsara.terminal.v2.PresentationHistoryRootCursorRelation
+	(*ResidentEntriesUnchanged)(nil),                          // 152: pulsara.terminal.v2.ResidentEntriesUnchanged
+	(*PresentationHistoryResidentUpsert)(nil),                 // 153: pulsara.terminal.v2.PresentationHistoryResidentUpsert
+	(*PresentationHistoryResidentRemove)(nil),                 // 154: pulsara.terminal.v2.PresentationHistoryResidentRemove
+	(*PresentationHistoryResidentChange)(nil),                 // 155: pulsara.terminal.v2.PresentationHistoryResidentChange
+	(*BoundedOrderedResidentChanges)(nil),                     // 156: pulsara.terminal.v2.BoundedOrderedResidentChanges
+	(*ResidentHistoryRebaseRequired)(nil),                     // 157: pulsara.terminal.v2.ResidentHistoryRebaseRequired
+	(*PresentationHistoryRootResidentTransition)(nil),         // 158: pulsara.terminal.v2.PresentationHistoryRootResidentTransition
+	(*PresentationHistoryRootAdvancedFrame)(nil),              // 159: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame
+	(*DurableObservationGapFrame)(nil),                        // 160: pulsara.terminal.v2.DurableObservationGapFrame
+	(*OperationalObservationGapFrame)(nil),                    // 161: pulsara.terminal.v2.OperationalObservationGapFrame
+	(*ControlProjectionChangedFrame)(nil),                     // 162: pulsara.terminal.v2.ControlProjectionChangedFrame
+	(*ControlProjectionGapFrame)(nil),                         // 163: pulsara.terminal.v2.ControlProjectionGapFrame
+	(*ObservationNoChangeFrame)(nil),                          // 164: pulsara.terminal.v2.ObservationNoChangeFrame
+	(*OperationalDeltaFrame)(nil),                             // 165: pulsara.terminal.v2.OperationalDeltaFrame
+	(*DurableObservationBranch)(nil),                          // 166: pulsara.terminal.v2.DurableObservationBranch
+	(*OperationalObservationBranch)(nil),                      // 167: pulsara.terminal.v2.OperationalObservationBranch
+	(*ControlObservationBranch)(nil),                          // 168: pulsara.terminal.v2.ControlObservationBranch
+	(*ObservationBatchFrame)(nil),                             // 169: pulsara.terminal.v2.ObservationBatchFrame
+	(*ObservationResponse)(nil),                               // 170: pulsara.terminal.v2.ObservationResponse
+	(*HistoryPageRequest)(nil),                                // 171: pulsara.terminal.v2.HistoryPageRequest
+	(*HistoryPageData)(nil),                                   // 172: pulsara.terminal.v2.HistoryPageData
+	(*HistoryCursorStale)(nil),                                // 173: pulsara.terminal.v2.HistoryCursorStale
+	(*HistoryRebaseRequired)(nil),                             // 174: pulsara.terminal.v2.HistoryRebaseRequired
+	(*HistoryReconciliationRequired)(nil),                     // 175: pulsara.terminal.v2.HistoryReconciliationRequired
+	(*HistoryPageResponse)(nil),                               // 176: pulsara.terminal.v2.HistoryPageResponse
+	(*CommandBinding)(nil),                                    // 177: pulsara.terminal.v2.CommandBinding
+	(*SubmitPromptCommand)(nil),                               // 178: pulsara.terminal.v2.SubmitPromptCommand
+	(*StopRunCommand)(nil),                                    // 179: pulsara.terminal.v2.StopRunCommand
+	(*ApprovalDecision)(nil),                                  // 180: pulsara.terminal.v2.ApprovalDecision
+	(*ResolveApprovalCommand)(nil),                            // 181: pulsara.terminal.v2.ResolveApprovalCommand
+	(*ResolvePlanQuestionCommand)(nil),                        // 182: pulsara.terminal.v2.ResolvePlanQuestionCommand
+	(*ResolvePlanExitCommand)(nil),                            // 183: pulsara.terminal.v2.ResolvePlanExitCommand
+	(*ResolveMcpInteractionCommand)(nil),                      // 184: pulsara.terminal.v2.ResolveMcpInteractionCommand
+	(*CancelMcpInteractionCommand)(nil),                       // 185: pulsara.terminal.v2.CancelMcpInteractionCommand
+	(*QueueCancelCommand)(nil),                                // 186: pulsara.terminal.v2.QueueCancelCommand
+	(*StartSuccessorSessionCommand)(nil),                      // 187: pulsara.terminal.v2.StartSuccessorSessionCommand
+	(*DetachSessionCommand)(nil),                              // 188: pulsara.terminal.v2.DetachSessionCommand
+	(*CloseSessionCommand)(nil),                               // 189: pulsara.terminal.v2.CloseSessionCommand
+	(*ControllerTakeoverCommand)(nil),                         // 190: pulsara.terminal.v2.ControllerTakeoverCommand
+	(*MutationCommand)(nil),                                   // 191: pulsara.terminal.v2.MutationCommand
+	(*CommandOutcome)(nil),                                    // 192: pulsara.terminal.v2.CommandOutcome
+	(*QueryCommandRequest)(nil),                               // 193: pulsara.terminal.v2.QueryCommandRequest
+	(*QueryCommandResponse)(nil),                              // 194: pulsara.terminal.v2.QueryCommandResponse
+	(*TerminalSecretLeaseIdentity)(nil),                       // 195: pulsara.terminal.v2.TerminalSecretLeaseIdentity
+	(*SecretRevealRequest)(nil),                               // 196: pulsara.terminal.v2.SecretRevealRequest
+	(*SecretRevealResult)(nil),                                // 197: pulsara.terminal.v2.SecretRevealResult
+	(*SecretFormSubmit)(nil),                                  // 198: pulsara.terminal.v2.SecretFormSubmit
+	(*SecretSubmitReceipt)(nil),                               // 199: pulsara.terminal.v2.SecretSubmitReceipt
+	(*SecretLeaseRevoked)(nil),                                // 200: pulsara.terminal.v2.SecretLeaseRevoked
+	(*ClientFrame)(nil),                                       // 201: pulsara.terminal.v2.ClientFrame
+	(*ProtocolError)(nil),                                     // 202: pulsara.terminal.v2.ProtocolError
+	(*ServerFrame)(nil),                                       // 203: pulsara.terminal.v2.ServerFrame
 }
 var file_terminal_client_proto_depIdxs = []int32{
 	0,   // 0: pulsara.terminal.v2.TerminalClientBootstrapCarrier.requested_attachment_role:type_name -> pulsara.terminal.v2.AttachmentRole
-	45,  // 1: pulsara.terminal.v2.TerminalTransportAuthPreface.initial_launch:type_name -> pulsara.terminal.v2.InitialLaunchCredential
-	46,  // 2: pulsara.terminal.v2.TerminalTransportAuthPreface.reconnect:type_name -> pulsara.terminal.v2.ReconnectCredential
-	63,  // 3: pulsara.terminal.v2.RecoveredAttachmentTransportBinding.resulting_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	46,  // 1: pulsara.terminal.v2.TerminalTransportAuthPreface.initial_launch:type_name -> pulsara.terminal.v2.InitialLaunchCredential
+	47,  // 2: pulsara.terminal.v2.TerminalTransportAuthPreface.reconnect:type_name -> pulsara.terminal.v2.ReconnectCredential
+	64,  // 3: pulsara.terminal.v2.RecoveredAttachmentTransportBinding.resulting_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
 	4,   // 4: pulsara.terminal.v2.RecoveredAttachmentTransportBinding.disposition:type_name -> pulsara.terminal.v2.AttachmentTransportRebindDisposition
 	2,   // 5: pulsara.terminal.v2.TerminalTransportAuthResult.disposition:type_name -> pulsara.terminal.v2.TransportAuthDisposition
 	3,   // 6: pulsara.terminal.v2.TerminalTransportAuthResult.public_rejection_code:type_name -> pulsara.terminal.v2.TransportAuthRejectionCode
-	67,  // 7: pulsara.terminal.v2.TerminalTransportAuthResult.recovered_attach_ack_result:type_name -> pulsara.terminal.v2.AttachAckResult
-	48,  // 8: pulsara.terminal.v2.TerminalTransportAuthResult.recovered_transport_binding:type_name -> pulsara.terminal.v2.RecoveredAttachmentTransportBinding
+	70,  // 7: pulsara.terminal.v2.TerminalTransportAuthResult.recovered_attach_ack_result:type_name -> pulsara.terminal.v2.AttachAckResult
+	49,  // 8: pulsara.terminal.v2.TerminalTransportAuthResult.recovered_transport_binding:type_name -> pulsara.terminal.v2.RecoveredAttachmentTransportBinding
 	0,   // 9: pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity.requested_attachment_role:type_name -> pulsara.terminal.v2.AttachmentRole
 	1,   // 10: pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity.supported_capabilities:type_name -> pulsara.terminal.v2.TerminalClientCapability
 	1,   // 11: pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity.required_capabilities:type_name -> pulsara.terminal.v2.TerminalClientCapability
-	50,  // 12: pulsara.terminal.v2.HelloRequest.handshake_candidate:type_name -> pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity
-	42,  // 13: pulsara.terminal.v2.HelloNegotiationSemanticWinner.selected_protocol:type_name -> pulsara.terminal.v2.ProtocolVersion
-	52,  // 14: pulsara.terminal.v2.HelloNegotiationSemanticWinner.negotiated_limits:type_name -> pulsara.terminal.v2.NegotiatedLimits
+	51,  // 12: pulsara.terminal.v2.HelloRequest.handshake_candidate:type_name -> pulsara.terminal.v2.HandshakeRecoveryCandidateIdentity
+	43,  // 13: pulsara.terminal.v2.HelloNegotiationSemanticWinner.selected_protocol:type_name -> pulsara.terminal.v2.ProtocolVersion
+	53,  // 14: pulsara.terminal.v2.HelloNegotiationSemanticWinner.negotiated_limits:type_name -> pulsara.terminal.v2.NegotiatedLimits
 	1,   // 15: pulsara.terminal.v2.HelloNegotiationSemanticWinner.server_supported_capabilities:type_name -> pulsara.terminal.v2.TerminalClientCapability
 	1,   // 16: pulsara.terminal.v2.HelloNegotiationSemanticWinner.selected_capabilities:type_name -> pulsara.terminal.v2.TerminalClientCapability
-	54,  // 17: pulsara.terminal.v2.ServerHello.negotiation_winner:type_name -> pulsara.terminal.v2.HelloNegotiationSemanticWinner
-	55,  // 18: pulsara.terminal.v2.ServerHello.receipt:type_name -> pulsara.terminal.v2.ServerHelloReceipt
+	55,  // 17: pulsara.terminal.v2.ServerHello.negotiation_winner:type_name -> pulsara.terminal.v2.HelloNegotiationSemanticWinner
+	56,  // 18: pulsara.terminal.v2.ServerHello.receipt:type_name -> pulsara.terminal.v2.ServerHelloReceipt
 	5,   // 19: pulsara.terminal.v2.HandshakeCandidateTerminalReceipt.terminal_disposition:type_name -> pulsara.terminal.v2.HandshakeCandidateTerminalDisposition
 	6,   // 20: pulsara.terminal.v2.HandshakeCandidateTerminalReceipt.terminal_reason:type_name -> pulsara.terminal.v2.HelloCandidateTerminalReason
 	7,   // 21: pulsara.terminal.v2.HandshakeCandidateTerminalReceipt.required_client_disposition:type_name -> pulsara.terminal.v2.HelloCandidateClientDisposition
-	57,  // 22: pulsara.terminal.v2.HelloNegotiationWinnerUnavailable.candidate_terminal_receipt:type_name -> pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
-	57,  // 23: pulsara.terminal.v2.HelloRejected.candidate_terminal_receipt:type_name -> pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
-	56,  // 24: pulsara.terminal.v2.HelloOutcome.accepted:type_name -> pulsara.terminal.v2.ServerHello
-	58,  // 25: pulsara.terminal.v2.HelloOutcome.unavailable:type_name -> pulsara.terminal.v2.HelloNegotiationWinnerUnavailable
-	59,  // 26: pulsara.terminal.v2.HelloOutcome.rejected:type_name -> pulsara.terminal.v2.HelloRejected
+	58,  // 22: pulsara.terminal.v2.HelloNegotiationWinnerUnavailable.candidate_terminal_receipt:type_name -> pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
+	58,  // 23: pulsara.terminal.v2.HelloRejected.candidate_terminal_receipt:type_name -> pulsara.terminal.v2.HandshakeCandidateTerminalReceipt
+	57,  // 24: pulsara.terminal.v2.HelloOutcome.accepted:type_name -> pulsara.terminal.v2.ServerHello
+	59,  // 25: pulsara.terminal.v2.HelloOutcome.unavailable:type_name -> pulsara.terminal.v2.HelloNegotiationWinnerUnavailable
+	60,  // 26: pulsara.terminal.v2.HelloOutcome.rejected:type_name -> pulsara.terminal.v2.HelloRejected
 	0,   // 27: pulsara.terminal.v2.AttachmentIdentity.role:type_name -> pulsara.terminal.v2.AttachmentRole
-	62,  // 28: pulsara.terminal.v2.AttachSemanticWinner.attachment:type_name -> pulsara.terminal.v2.AttachmentIdentity
-	8,   // 29: pulsara.terminal.v2.AttachSemanticWinner.controller_disposition:type_name -> pulsara.terminal.v2.ControllerDisposition
-	9,   // 30: pulsara.terminal.v2.AttachSemanticWinner.bootstrap_requirement:type_name -> pulsara.terminal.v2.BootstrapRequirement
-	53,  // 31: pulsara.terminal.v2.AttachSemanticWinner.heartbeat_policy:type_name -> pulsara.terminal.v2.HeartbeatPolicy
-	64,  // 32: pulsara.terminal.v2.AttachResultReceipt.attach_semantic_winner:type_name -> pulsara.terminal.v2.AttachSemanticWinner
-	63,  // 33: pulsara.terminal.v2.AttachResultReceipt.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
-	10,  // 34: pulsara.terminal.v2.AttachResultReceipt.disposition:type_name -> pulsara.terminal.v2.AttachResultDisposition
-	63,  // 35: pulsara.terminal.v2.AttachReceiptAck.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
-	11,  // 36: pulsara.terminal.v2.AttachAckResult.disposition:type_name -> pulsara.terminal.v2.AttachAckDisposition
-	63,  // 37: pulsara.terminal.v2.HeartbeatRequest.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
-	12,  // 38: pulsara.terminal.v2.HeartbeatAcceptedReceipt.liveness_disposition:type_name -> pulsara.terminal.v2.HeartbeatLivenessDisposition
-	13,  // 39: pulsara.terminal.v2.HeartbeatRejectedReceipt.rejection_reason:type_name -> pulsara.terminal.v2.HeartbeatRejectedReason
-	69,  // 40: pulsara.terminal.v2.HeartbeatResult.accepted:type_name -> pulsara.terminal.v2.HeartbeatAcceptedReceipt
-	70,  // 41: pulsara.terminal.v2.HeartbeatResult.rejected:type_name -> pulsara.terminal.v2.HeartbeatRejectedReceipt
-	14,  // 42: pulsara.terminal.v2.PresentationTextBlock.semantic_role:type_name -> pulsara.terminal.v2.PresentationSemanticRole
-	73,  // 43: pulsara.terminal.v2.PresentationContentBlock.text:type_name -> pulsara.terminal.v2.PresentationTextBlock
-	74,  // 44: pulsara.terminal.v2.PresentationContentBlock.data:type_name -> pulsara.terminal.v2.PresentationDataBlock
-	72,  // 45: pulsara.terminal.v2.DurableCellCommon.ordered_source_event_references:type_name -> pulsara.terminal.v2.EventReferenceView
-	15,  // 46: pulsara.terminal.v2.DurableCellCommon.visibility_policy:type_name -> pulsara.terminal.v2.PresentationVisibilityPolicy
-	75,  // 47: pulsara.terminal.v2.DurableCellCommon.content_blocks:type_name -> pulsara.terminal.v2.PresentationContentBlock
-	76,  // 48: pulsara.terminal.v2.UserPromptCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	76,  // 49: pulsara.terminal.v2.AssistantMessageCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	76,  // 50: pulsara.terminal.v2.ToolTerminalCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	16,  // 51: pulsara.terminal.v2.ToolTerminalCell.result_state:type_name -> pulsara.terminal.v2.PresentationToolResultState
-	76,  // 52: pulsara.terminal.v2.ErrorCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	76,  // 53: pulsara.terminal.v2.InteractionCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	17,  // 54: pulsara.terminal.v2.InteractionCell.interaction_kind:type_name -> pulsara.terminal.v2.PresentationInteractionKind
-	18,  // 55: pulsara.terminal.v2.InteractionCell.interaction_state:type_name -> pulsara.terminal.v2.PresentationInteractionState
-	76,  // 56: pulsara.terminal.v2.CompactionBoundaryCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	76,  // 57: pulsara.terminal.v2.RecoveryCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	76,  // 58: pulsara.terminal.v2.AuditCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	19,  // 59: pulsara.terminal.v2.AuditCell.audit_kind:type_name -> pulsara.terminal.v2.PresentationAuditKind
-	20,  // 60: pulsara.terminal.v2.AuditCell.severity:type_name -> pulsara.terminal.v2.PresentationSeverity
-	76,  // 61: pulsara.terminal.v2.SystemNoticeCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
-	77,  // 62: pulsara.terminal.v2.DurableHistoryCell.user_prompt:type_name -> pulsara.terminal.v2.UserPromptCell
-	78,  // 63: pulsara.terminal.v2.DurableHistoryCell.assistant_message:type_name -> pulsara.terminal.v2.AssistantMessageCell
-	79,  // 64: pulsara.terminal.v2.DurableHistoryCell.tool_terminal:type_name -> pulsara.terminal.v2.ToolTerminalCell
-	80,  // 65: pulsara.terminal.v2.DurableHistoryCell.error:type_name -> pulsara.terminal.v2.ErrorCell
-	81,  // 66: pulsara.terminal.v2.DurableHistoryCell.interaction:type_name -> pulsara.terminal.v2.InteractionCell
-	82,  // 67: pulsara.terminal.v2.DurableHistoryCell.compaction_boundary:type_name -> pulsara.terminal.v2.CompactionBoundaryCell
-	83,  // 68: pulsara.terminal.v2.DurableHistoryCell.recovery:type_name -> pulsara.terminal.v2.RecoveryCell
-	84,  // 69: pulsara.terminal.v2.DurableHistoryCell.audit:type_name -> pulsara.terminal.v2.AuditCell
-	85,  // 70: pulsara.terminal.v2.DurableHistoryCell.system_notice:type_name -> pulsara.terminal.v2.SystemNoticeCell
-	72,  // 71: pulsara.terminal.v2.DurableAuditSourceView.ordered_source_event_references:type_name -> pulsara.terminal.v2.EventReferenceView
-	87,  // 72: pulsara.terminal.v2.HistorySourceView.canonical_transcript:type_name -> pulsara.terminal.v2.CanonicalTranscriptSourceView
-	88,  // 73: pulsara.terminal.v2.HistorySourceView.durable_audit:type_name -> pulsara.terminal.v2.DurableAuditSourceView
-	21,  // 74: pulsara.terminal.v2.PresentationHistoryPlacementKey.relative_position_kind:type_name -> pulsara.terminal.v2.PresentationRelativePositionKind
-	90,  // 75: pulsara.terminal.v2.PresentationHistoryEntry.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	89,  // 76: pulsara.terminal.v2.PresentationHistoryEntry.source:type_name -> pulsara.terminal.v2.HistorySourceView
-	86,  // 77: pulsara.terminal.v2.PresentationHistoryEntry.durable_history_cell:type_name -> pulsara.terminal.v2.DurableHistoryCell
-	92,  // 78: pulsara.terminal.v2.HistoryRankBasis.confirmed_root:type_name -> pulsara.terminal.v2.ConfirmedRootRankBasis
-	93,  // 79: pulsara.terminal.v2.HistoryRankBasis.active_head:type_name -> pulsara.terminal.v2.ActiveHeadRankBasis
-	91,  // 80: pulsara.terminal.v2.PresentationHistoryRankedEntry.entry:type_name -> pulsara.terminal.v2.PresentationHistoryEntry
-	94,  // 81: pulsara.terminal.v2.PresentationHistoryRankedEntry.rank_basis:type_name -> pulsara.terminal.v2.HistoryRankBasis
-	96,  // 82: pulsara.terminal.v2.PresentationHistoryCursor.root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	90,  // 83: pulsara.terminal.v2.PresentationHistoryCursor.anchor_placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	96,  // 84: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	97,  // 85: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.before_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	97,  // 86: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.after_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	99,  // 87: pulsara.terminal.v2.PresentationHistoryCapacityState.available:type_name -> pulsara.terminal.v2.AvailableHistoryCapacity
-	100, // 88: pulsara.terminal.v2.PresentationHistoryCapacityState.session_rotation_required:type_name -> pulsara.terminal.v2.HistorySessionRotationRequired
-	101, // 89: pulsara.terminal.v2.PresentationHistoryCapacityState.tree_capacity_exhausted:type_name -> pulsara.terminal.v2.HistoryTreeCapacityExhausted
-	102, // 90: pulsara.terminal.v2.PresentationHistoryCapacityState.reconciliation_required:type_name -> pulsara.terminal.v2.HistoryCapacityReconciliationRequired
-	96,  // 91: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity.confirmed_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	103, // 92: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity.capacity_state:type_name -> pulsara.terminal.v2.PresentationHistoryCapacityState
-	25,  // 93: pulsara.terminal.v2.QueueItemView.delivery_state:type_name -> pulsara.terminal.v2.PromptQueueDeliveryState
-	26,  // 94: pulsara.terminal.v2.QueueItemView.content_retention_state:type_name -> pulsara.terminal.v2.PromptQueueContentRetentionState
-	27,  // 95: pulsara.terminal.v2.QueueItemView.requested_delivery_mode:type_name -> pulsara.terminal.v2.PromptQueueRequestedDeliveryMode
-	28,  // 96: pulsara.terminal.v2.QueueItemView.resolved_delivery_mode:type_name -> pulsara.terminal.v2.PromptQueueResolvedDeliveryMode
-	106, // 97: pulsara.terminal.v2.ApprovalInteraction.tool_calls:type_name -> pulsara.terminal.v2.ToolApproval
-	108, // 98: pulsara.terminal.v2.PlanQuestionInteraction.options:type_name -> pulsara.terminal.v2.PlanOption
-	24,  // 99: pulsara.terminal.v2.McpInputPublicRequest.mode:type_name -> pulsara.terminal.v2.McpInputMode
-	111, // 100: pulsara.terminal.v2.McpInteraction.requests:type_name -> pulsara.terminal.v2.McpInputPublicRequest
-	107, // 101: pulsara.terminal.v2.PendingInteraction.approval:type_name -> pulsara.terminal.v2.ApprovalInteraction
-	109, // 102: pulsara.terminal.v2.PendingInteraction.plan_question:type_name -> pulsara.terminal.v2.PlanQuestionInteraction
-	110, // 103: pulsara.terminal.v2.PendingInteraction.plan_exit:type_name -> pulsara.terminal.v2.PlanExitInteraction
-	112, // 104: pulsara.terminal.v2.PendingInteraction.mcp_input:type_name -> pulsara.terminal.v2.McpInteraction
-	29,  // 105: pulsara.terminal.v2.TerminalControlSectionSourceVersion.section_kind:type_name -> pulsara.terminal.v2.TerminalControlSectionKind
-	114, // 106: pulsara.terminal.v2.TerminalSessionLifecycleControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	30,  // 107: pulsara.terminal.v2.TerminalSessionLifecycleControlView.lifecycle:type_name -> pulsara.terminal.v2.TerminalSessionLifecycleState
-	114, // 108: pulsara.terminal.v2.TerminalRunControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	114, // 109: pulsara.terminal.v2.TerminalPendingInteractionControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	113, // 110: pulsara.terminal.v2.TerminalPendingInteractionControlView.interaction:type_name -> pulsara.terminal.v2.PendingInteraction
-	118, // 111: pulsara.terminal.v2.PromptQueueProjectionHead.empty_genesis:type_name -> pulsara.terminal.v2.EmptyPromptQueueGenesisHead
-	119, // 112: pulsara.terminal.v2.PromptQueueProjectionHead.committed:type_name -> pulsara.terminal.v2.CommittedPromptQueueHead
-	120, // 113: pulsara.terminal.v2.PromptQueueClientProjection.queue_head:type_name -> pulsara.terminal.v2.PromptQueueProjectionHead
-	105, // 114: pulsara.terminal.v2.PromptQueueClientProjection.ordered_active_items:type_name -> pulsara.terminal.v2.QueueItemView
-	114, // 115: pulsara.terminal.v2.TerminalPromptQueueControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	121, // 116: pulsara.terminal.v2.TerminalPromptQueueControlView.projection:type_name -> pulsara.terminal.v2.PromptQueueClientProjection
-	31,  // 117: pulsara.terminal.v2.ServerNotificationView.kind:type_name -> pulsara.terminal.v2.ServerNotificationKind
-	114, // 118: pulsara.terminal.v2.TerminalServerNotificationProjection.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
-	123, // 119: pulsara.terminal.v2.TerminalServerNotificationProjection.ordered_notifications:type_name -> pulsara.terminal.v2.ServerNotificationView
-	115, // 120: pulsara.terminal.v2.TerminalControlProjectionView.session_lifecycle:type_name -> pulsara.terminal.v2.TerminalSessionLifecycleControlView
-	116, // 121: pulsara.terminal.v2.TerminalControlProjectionView.run_control:type_name -> pulsara.terminal.v2.TerminalRunControlView
-	117, // 122: pulsara.terminal.v2.TerminalControlProjectionView.pending_interaction:type_name -> pulsara.terminal.v2.TerminalPendingInteractionControlView
-	122, // 123: pulsara.terminal.v2.TerminalControlProjectionView.prompt_queue:type_name -> pulsara.terminal.v2.TerminalPromptQueueControlView
-	124, // 124: pulsara.terminal.v2.TerminalControlProjectionView.server_notifications:type_name -> pulsara.terminal.v2.TerminalServerNotificationProjection
-	125, // 125: pulsara.terminal.v2.TerminalControlProjectionSnapshot.view:type_name -> pulsara.terminal.v2.TerminalControlProjectionView
-	126, // 126: pulsara.terminal.v2.TerminalControlProjectionSnapshot.cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
-	126, // 127: pulsara.terminal.v2.ProjectionSnapshotRequest.minimum_observed_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
-	104, // 128: pulsara.terminal.v2.ProjectionSnapshotFrame.active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
-	95,  // 129: pulsara.terminal.v2.ProjectionSnapshotFrame.ordered_resident_entries:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
-	98,  // 130: pulsara.terminal.v2.ProjectionSnapshotFrame.latest_root_cursor_pair:type_name -> pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
-	127, // 131: pulsara.terminal.v2.ProjectionSnapshotFrame.control_projection_snapshot:type_name -> pulsara.terminal.v2.TerminalControlProjectionSnapshot
-	22,  // 132: pulsara.terminal.v2.OperationalActivityCommon.replacement_semantics:type_name -> pulsara.terminal.v2.OperationalReplacementSemantics
-	130, // 133: pulsara.terminal.v2.ModelActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
-	130, // 134: pulsara.terminal.v2.ToolActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
-	130, // 135: pulsara.terminal.v2.TerminalProcessActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
-	130, // 136: pulsara.terminal.v2.SubagentActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
-	131, // 137: pulsara.terminal.v2.OperationalActivityCell.model_activity:type_name -> pulsara.terminal.v2.ModelActivityCell
-	132, // 138: pulsara.terminal.v2.OperationalActivityCell.tool_activity:type_name -> pulsara.terminal.v2.ToolActivityCell
-	133, // 139: pulsara.terminal.v2.OperationalActivityCell.terminal_process_activity:type_name -> pulsara.terminal.v2.TerminalProcessActivityCell
-	134, // 140: pulsara.terminal.v2.OperationalActivityCell.subagent_activity:type_name -> pulsara.terminal.v2.SubagentActivityCell
-	23,  // 141: pulsara.terminal.v2.OperationalActivityRemove.removal_reason:type_name -> pulsara.terminal.v2.OperationalRemovalReason
-	135, // 142: pulsara.terminal.v2.OperationalActivityChange.upsert:type_name -> pulsara.terminal.v2.OperationalActivityCell
-	136, // 143: pulsara.terminal.v2.OperationalActivityChange.remove:type_name -> pulsara.terminal.v2.OperationalActivityRemove
-	63,  // 144: pulsara.terminal.v2.OperationalSnapshotRequest.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
-	135, // 145: pulsara.terminal.v2.OperationalSnapshotFrame.ordered_activity_cells:type_name -> pulsara.terminal.v2.OperationalActivityCell
-	126, // 146: pulsara.terminal.v2.ObserveNextRequest.after_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
-	90,  // 147: pulsara.terminal.v2.HistoryEntryUpsert.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	95,  // 148: pulsara.terminal.v2.HistoryEntryUpsert.resulting_ranked_entry:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
-	90,  // 149: pulsara.terminal.v2.HistoryEntryRemove.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	141, // 150: pulsara.terminal.v2.HistoryEntryChange.upsert:type_name -> pulsara.terminal.v2.HistoryEntryUpsert
-	142, // 151: pulsara.terminal.v2.HistoryEntryChange.remove:type_name -> pulsara.terminal.v2.HistoryEntryRemove
-	104, // 152: pulsara.terminal.v2.ProjectionDeltaFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
-	143, // 153: pulsara.terminal.v2.ProjectionDeltaFrame.ordered_history_changes:type_name -> pulsara.terminal.v2.HistoryEntryChange
-	104, // 154: pulsara.terminal.v2.AuthorityAdvanceFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
-	96,  // 155: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.previous_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	96,  // 156: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.resulting_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	32,  // 157: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.relation:type_name -> pulsara.terminal.v2.PresentationRootRelationKind
-	33,  // 158: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.previous_cursor:type_name -> pulsara.terminal.v2.PresentationPreviousCursorDisposition
-	90,  // 159: pulsara.terminal.v2.PresentationHistoryResidentUpsert.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	95,  // 160: pulsara.terminal.v2.PresentationHistoryResidentUpsert.resulting_ranked_entry:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
-	90,  // 161: pulsara.terminal.v2.PresentationHistoryResidentRemove.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
-	148, // 162: pulsara.terminal.v2.PresentationHistoryResidentChange.upsert:type_name -> pulsara.terminal.v2.PresentationHistoryResidentUpsert
-	149, // 163: pulsara.terminal.v2.PresentationHistoryResidentChange.remove:type_name -> pulsara.terminal.v2.PresentationHistoryResidentRemove
-	150, // 164: pulsara.terminal.v2.BoundedOrderedResidentChanges.ordered_changes:type_name -> pulsara.terminal.v2.PresentationHistoryResidentChange
-	96,  // 165: pulsara.terminal.v2.ResidentHistoryRebaseRequired.target_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	147, // 166: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.unchanged:type_name -> pulsara.terminal.v2.ResidentEntriesUnchanged
-	151, // 167: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.bounded_changes:type_name -> pulsara.terminal.v2.BoundedOrderedResidentChanges
-	152, // 168: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.rebase_required:type_name -> pulsara.terminal.v2.ResidentHistoryRebaseRequired
-	104, // 169: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
-	98,  // 170: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.latest_root_cursor_pair:type_name -> pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
-	146, // 171: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.previous_root_relation:type_name -> pulsara.terminal.v2.PresentationHistoryRootCursorRelation
-	153, // 172: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.resident_transition:type_name -> pulsara.terminal.v2.PresentationHistoryRootResidentTransition
-	34,  // 173: pulsara.terminal.v2.DurableObservationGapFrame.gap_reason:type_name -> pulsara.terminal.v2.ObservationGapReason
-	34,  // 174: pulsara.terminal.v2.OperationalObservationGapFrame.gap_reason:type_name -> pulsara.terminal.v2.ObservationGapReason
-	29,  // 175: pulsara.terminal.v2.ControlProjectionChangedFrame.changed_sections:type_name -> pulsara.terminal.v2.TerminalControlSectionKind
-	126, // 176: pulsara.terminal.v2.ControlProjectionChangedFrame.resulting_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
-	35,  // 177: pulsara.terminal.v2.ControlProjectionChangedFrame.disposition:type_name -> pulsara.terminal.v2.ControlProjectionInvalidationDisposition
-	126, // 178: pulsara.terminal.v2.ControlProjectionGapFrame.latest_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
-	36,  // 179: pulsara.terminal.v2.ControlProjectionGapFrame.stable_reason:type_name -> pulsara.terminal.v2.ControlProjectionGapReason
-	35,  // 180: pulsara.terminal.v2.ControlProjectionGapFrame.disposition:type_name -> pulsara.terminal.v2.ControlProjectionInvalidationDisposition
-	137, // 181: pulsara.terminal.v2.OperationalDeltaFrame.ordered_changes:type_name -> pulsara.terminal.v2.OperationalActivityChange
-	144, // 182: pulsara.terminal.v2.DurableObservationBranch.projection_delta:type_name -> pulsara.terminal.v2.ProjectionDeltaFrame
-	145, // 183: pulsara.terminal.v2.DurableObservationBranch.authority_advance:type_name -> pulsara.terminal.v2.AuthorityAdvanceFrame
-	154, // 184: pulsara.terminal.v2.DurableObservationBranch.root_advanced:type_name -> pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame
-	155, // 185: pulsara.terminal.v2.DurableObservationBranch.gap:type_name -> pulsara.terminal.v2.DurableObservationGapFrame
-	160, // 186: pulsara.terminal.v2.OperationalObservationBranch.delta:type_name -> pulsara.terminal.v2.OperationalDeltaFrame
-	156, // 187: pulsara.terminal.v2.OperationalObservationBranch.gap:type_name -> pulsara.terminal.v2.OperationalObservationGapFrame
-	157, // 188: pulsara.terminal.v2.ControlObservationBranch.changed:type_name -> pulsara.terminal.v2.ControlProjectionChangedFrame
-	158, // 189: pulsara.terminal.v2.ControlObservationBranch.gap:type_name -> pulsara.terminal.v2.ControlProjectionGapFrame
-	163, // 190: pulsara.terminal.v2.ObservationBatchFrame.control:type_name -> pulsara.terminal.v2.ControlObservationBranch
-	161, // 191: pulsara.terminal.v2.ObservationBatchFrame.durable:type_name -> pulsara.terminal.v2.DurableObservationBranch
-	162, // 192: pulsara.terminal.v2.ObservationBatchFrame.operational:type_name -> pulsara.terminal.v2.OperationalObservationBranch
-	164, // 193: pulsara.terminal.v2.ObservationResponse.batch:type_name -> pulsara.terminal.v2.ObservationBatchFrame
-	159, // 194: pulsara.terminal.v2.ObservationResponse.no_change:type_name -> pulsara.terminal.v2.ObservationNoChangeFrame
-	97,  // 195: pulsara.terminal.v2.HistoryPageRequest.cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	40,  // 196: pulsara.terminal.v2.HistoryPageRequest.direction:type_name -> pulsara.terminal.v2.HistoryPageRequest.Direction
-	40,  // 197: pulsara.terminal.v2.HistoryPageData.validated_request_direction:type_name -> pulsara.terminal.v2.HistoryPageRequest.Direction
-	96,  // 198: pulsara.terminal.v2.HistoryPageData.validated_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	95,  // 199: pulsara.terminal.v2.HistoryPageData.ordered_history_entries:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
-	97,  // 200: pulsara.terminal.v2.HistoryPageData.before_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	97,  // 201: pulsara.terminal.v2.HistoryPageData.after_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	96,  // 202: pulsara.terminal.v2.HistoryCursorStale.latest_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	97,  // 203: pulsara.terminal.v2.HistoryCursorStale.replacement_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
-	96,  // 204: pulsara.terminal.v2.HistoryRebaseRequired.latest_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	96,  // 205: pulsara.terminal.v2.HistoryReconciliationRequired.trusted_latest_root_identity_hint:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
-	167, // 206: pulsara.terminal.v2.HistoryPageResponse.page:type_name -> pulsara.terminal.v2.HistoryPageData
-	168, // 207: pulsara.terminal.v2.HistoryPageResponse.stale:type_name -> pulsara.terminal.v2.HistoryCursorStale
-	169, // 208: pulsara.terminal.v2.HistoryPageResponse.rebase:type_name -> pulsara.terminal.v2.HistoryRebaseRequired
-	170, // 209: pulsara.terminal.v2.HistoryPageResponse.reconciliation:type_name -> pulsara.terminal.v2.HistoryReconciliationRequired
-	172, // 210: pulsara.terminal.v2.SubmitPromptCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	41,  // 211: pulsara.terminal.v2.SubmitPromptCommand.requested_delivery_mode:type_name -> pulsara.terminal.v2.SubmitPromptCommand.DeliveryMode
-	172, // 212: pulsara.terminal.v2.StopRunCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 213: pulsara.terminal.v2.ResolveApprovalCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	175, // 214: pulsara.terminal.v2.ResolveApprovalCommand.decisions:type_name -> pulsara.terminal.v2.ApprovalDecision
-	172, // 215: pulsara.terminal.v2.ResolvePlanQuestionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 216: pulsara.terminal.v2.ResolvePlanExitCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	37,  // 217: pulsara.terminal.v2.ResolvePlanExitCommand.plan_exit_decision:type_name -> pulsara.terminal.v2.PlanExitDecision
-	172, // 218: pulsara.terminal.v2.ResolveMcpInteractionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 219: pulsara.terminal.v2.CancelMcpInteractionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 220: pulsara.terminal.v2.QueueCancelCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 221: pulsara.terminal.v2.StartSuccessorSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 222: pulsara.terminal.v2.DetachSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 223: pulsara.terminal.v2.CloseSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	172, // 224: pulsara.terminal.v2.ControllerTakeoverCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	173, // 225: pulsara.terminal.v2.MutationCommand.submit_prompt:type_name -> pulsara.terminal.v2.SubmitPromptCommand
-	174, // 226: pulsara.terminal.v2.MutationCommand.stop_run:type_name -> pulsara.terminal.v2.StopRunCommand
-	176, // 227: pulsara.terminal.v2.MutationCommand.resolve_approval:type_name -> pulsara.terminal.v2.ResolveApprovalCommand
-	177, // 228: pulsara.terminal.v2.MutationCommand.resolve_plan_question:type_name -> pulsara.terminal.v2.ResolvePlanQuestionCommand
-	178, // 229: pulsara.terminal.v2.MutationCommand.resolve_plan_exit:type_name -> pulsara.terminal.v2.ResolvePlanExitCommand
-	179, // 230: pulsara.terminal.v2.MutationCommand.resolve_mcp_interaction:type_name -> pulsara.terminal.v2.ResolveMcpInteractionCommand
-	180, // 231: pulsara.terminal.v2.MutationCommand.cancel_mcp_interaction:type_name -> pulsara.terminal.v2.CancelMcpInteractionCommand
-	181, // 232: pulsara.terminal.v2.MutationCommand.queue_cancel:type_name -> pulsara.terminal.v2.QueueCancelCommand
-	182, // 233: pulsara.terminal.v2.MutationCommand.start_successor_session:type_name -> pulsara.terminal.v2.StartSuccessorSessionCommand
-	183, // 234: pulsara.terminal.v2.MutationCommand.detach_session:type_name -> pulsara.terminal.v2.DetachSessionCommand
-	184, // 235: pulsara.terminal.v2.MutationCommand.close_session:type_name -> pulsara.terminal.v2.CloseSessionCommand
-	185, // 236: pulsara.terminal.v2.MutationCommand.controller_takeover:type_name -> pulsara.terminal.v2.ControllerTakeoverCommand
-	38,  // 237: pulsara.terminal.v2.CommandOutcome.outcome_status:type_name -> pulsara.terminal.v2.CommandOutcomeStatus
-	187, // 238: pulsara.terminal.v2.QueryCommandResponse.outcome:type_name -> pulsara.terminal.v2.CommandOutcome
-	39,  // 239: pulsara.terminal.v2.TerminalSecretLeaseIdentity.terminal_secret_kind:type_name -> pulsara.terminal.v2.TerminalSecretKind
-	172, // 240: pulsara.terminal.v2.SecretRevealRequest.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	190, // 241: pulsara.terminal.v2.SecretRevealResult.lease_identity:type_name -> pulsara.terminal.v2.TerminalSecretLeaseIdentity
-	172, // 242: pulsara.terminal.v2.SecretFormSubmit.binding:type_name -> pulsara.terminal.v2.CommandBinding
-	51,  // 243: pulsara.terminal.v2.ClientFrame.hello:type_name -> pulsara.terminal.v2.HelloRequest
-	61,  // 244: pulsara.terminal.v2.ClientFrame.attach:type_name -> pulsara.terminal.v2.AttachRequest
-	68,  // 245: pulsara.terminal.v2.ClientFrame.heartbeat:type_name -> pulsara.terminal.v2.HeartbeatRequest
-	128, // 246: pulsara.terminal.v2.ClientFrame.snapshot:type_name -> pulsara.terminal.v2.ProjectionSnapshotRequest
-	140, // 247: pulsara.terminal.v2.ClientFrame.observe_next:type_name -> pulsara.terminal.v2.ObserveNextRequest
-	166, // 248: pulsara.terminal.v2.ClientFrame.history_page:type_name -> pulsara.terminal.v2.HistoryPageRequest
-	186, // 249: pulsara.terminal.v2.ClientFrame.mutation:type_name -> pulsara.terminal.v2.MutationCommand
-	188, // 250: pulsara.terminal.v2.ClientFrame.query_command:type_name -> pulsara.terminal.v2.QueryCommandRequest
-	191, // 251: pulsara.terminal.v2.ClientFrame.secret_reveal:type_name -> pulsara.terminal.v2.SecretRevealRequest
-	193, // 252: pulsara.terminal.v2.ClientFrame.secret_form_submit:type_name -> pulsara.terminal.v2.SecretFormSubmit
-	138, // 253: pulsara.terminal.v2.ClientFrame.operational_snapshot:type_name -> pulsara.terminal.v2.OperationalSnapshotRequest
-	66,  // 254: pulsara.terminal.v2.ClientFrame.attach_ack:type_name -> pulsara.terminal.v2.AttachReceiptAck
-	60,  // 255: pulsara.terminal.v2.ServerFrame.hello:type_name -> pulsara.terminal.v2.HelloOutcome
-	65,  // 256: pulsara.terminal.v2.ServerFrame.attach:type_name -> pulsara.terminal.v2.AttachResultReceipt
-	71,  // 257: pulsara.terminal.v2.ServerFrame.heartbeat:type_name -> pulsara.terminal.v2.HeartbeatResult
-	129, // 258: pulsara.terminal.v2.ServerFrame.snapshot:type_name -> pulsara.terminal.v2.ProjectionSnapshotFrame
-	139, // 259: pulsara.terminal.v2.ServerFrame.operational_snapshot:type_name -> pulsara.terminal.v2.OperationalSnapshotFrame
-	165, // 260: pulsara.terminal.v2.ServerFrame.observation:type_name -> pulsara.terminal.v2.ObservationResponse
-	171, // 261: pulsara.terminal.v2.ServerFrame.history_page:type_name -> pulsara.terminal.v2.HistoryPageResponse
-	187, // 262: pulsara.terminal.v2.ServerFrame.command_outcome:type_name -> pulsara.terminal.v2.CommandOutcome
-	189, // 263: pulsara.terminal.v2.ServerFrame.query_command:type_name -> pulsara.terminal.v2.QueryCommandResponse
-	192, // 264: pulsara.terminal.v2.ServerFrame.secret_reveal:type_name -> pulsara.terminal.v2.SecretRevealResult
-	194, // 265: pulsara.terminal.v2.ServerFrame.secret_submit:type_name -> pulsara.terminal.v2.SecretSubmitReceipt
-	195, // 266: pulsara.terminal.v2.ServerFrame.secret_revoked:type_name -> pulsara.terminal.v2.SecretLeaseRevoked
-	197, // 267: pulsara.terminal.v2.ServerFrame.error:type_name -> pulsara.terminal.v2.ProtocolError
-	67,  // 268: pulsara.terminal.v2.ServerFrame.attach_ack:type_name -> pulsara.terminal.v2.AttachAckResult
-	269, // [269:269] is the sub-list for method output_type
-	269, // [269:269] is the sub-list for method input_type
-	269, // [269:269] is the sub-list for extension type_name
-	269, // [269:269] is the sub-list for extension extendee
-	0,   // [0:269] is the sub-list for field type_name
+	65,  // 28: pulsara.terminal.v2.ReconnectCredentialCarrier.public_identity:type_name -> pulsara.terminal.v2.ReconnectCredentialPublicIdentity
+	63,  // 29: pulsara.terminal.v2.AttachSemanticWinner.attachment:type_name -> pulsara.terminal.v2.AttachmentIdentity
+	8,   // 30: pulsara.terminal.v2.AttachSemanticWinner.controller_disposition:type_name -> pulsara.terminal.v2.ControllerDisposition
+	9,   // 31: pulsara.terminal.v2.AttachSemanticWinner.bootstrap_requirement:type_name -> pulsara.terminal.v2.BootstrapRequirement
+	54,  // 32: pulsara.terminal.v2.AttachSemanticWinner.heartbeat_policy:type_name -> pulsara.terminal.v2.HeartbeatPolicy
+	65,  // 33: pulsara.terminal.v2.AttachSemanticWinner.next_reconnect_credential_public_identity:type_name -> pulsara.terminal.v2.ReconnectCredentialPublicIdentity
+	67,  // 34: pulsara.terminal.v2.AttachResultReceipt.attach_semantic_winner:type_name -> pulsara.terminal.v2.AttachSemanticWinner
+	64,  // 35: pulsara.terminal.v2.AttachResultReceipt.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	10,  // 36: pulsara.terminal.v2.AttachResultReceipt.disposition:type_name -> pulsara.terminal.v2.AttachResultDisposition
+	66,  // 37: pulsara.terminal.v2.AttachResultReceipt.next_reconnect_credential_carrier:type_name -> pulsara.terminal.v2.ReconnectCredentialCarrier
+	64,  // 38: pulsara.terminal.v2.AttachReceiptAck.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	11,  // 39: pulsara.terminal.v2.AttachAckResult.disposition:type_name -> pulsara.terminal.v2.AttachAckDisposition
+	64,  // 40: pulsara.terminal.v2.HeartbeatRequest.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	12,  // 41: pulsara.terminal.v2.HeartbeatAcceptedReceipt.liveness_disposition:type_name -> pulsara.terminal.v2.HeartbeatLivenessDisposition
+	13,  // 42: pulsara.terminal.v2.HeartbeatRejectedReceipt.rejection_reason:type_name -> pulsara.terminal.v2.HeartbeatRejectedReason
+	72,  // 43: pulsara.terminal.v2.HeartbeatResult.accepted:type_name -> pulsara.terminal.v2.HeartbeatAcceptedReceipt
+	73,  // 44: pulsara.terminal.v2.HeartbeatResult.rejected:type_name -> pulsara.terminal.v2.HeartbeatRejectedReceipt
+	14,  // 45: pulsara.terminal.v2.PresentationTextBlock.semantic_role:type_name -> pulsara.terminal.v2.PresentationSemanticRole
+	76,  // 46: pulsara.terminal.v2.PresentationContentBlock.text:type_name -> pulsara.terminal.v2.PresentationTextBlock
+	77,  // 47: pulsara.terminal.v2.PresentationContentBlock.data:type_name -> pulsara.terminal.v2.PresentationDataBlock
+	75,  // 48: pulsara.terminal.v2.DurableCellCommon.ordered_source_event_references:type_name -> pulsara.terminal.v2.EventReferenceView
+	15,  // 49: pulsara.terminal.v2.DurableCellCommon.visibility_policy:type_name -> pulsara.terminal.v2.PresentationVisibilityPolicy
+	78,  // 50: pulsara.terminal.v2.DurableCellCommon.content_blocks:type_name -> pulsara.terminal.v2.PresentationContentBlock
+	79,  // 51: pulsara.terminal.v2.UserPromptCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	79,  // 52: pulsara.terminal.v2.AssistantMessageCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	79,  // 53: pulsara.terminal.v2.ToolTerminalCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	16,  // 54: pulsara.terminal.v2.ToolTerminalCell.result_state:type_name -> pulsara.terminal.v2.PresentationToolResultState
+	79,  // 55: pulsara.terminal.v2.ErrorCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	79,  // 56: pulsara.terminal.v2.InteractionCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	17,  // 57: pulsara.terminal.v2.InteractionCell.interaction_kind:type_name -> pulsara.terminal.v2.PresentationInteractionKind
+	18,  // 58: pulsara.terminal.v2.InteractionCell.interaction_state:type_name -> pulsara.terminal.v2.PresentationInteractionState
+	79,  // 59: pulsara.terminal.v2.CompactionBoundaryCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	79,  // 60: pulsara.terminal.v2.RecoveryCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	79,  // 61: pulsara.terminal.v2.AuditCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	19,  // 62: pulsara.terminal.v2.AuditCell.audit_kind:type_name -> pulsara.terminal.v2.PresentationAuditKind
+	20,  // 63: pulsara.terminal.v2.AuditCell.severity:type_name -> pulsara.terminal.v2.PresentationSeverity
+	79,  // 64: pulsara.terminal.v2.SystemNoticeCell.common:type_name -> pulsara.terminal.v2.DurableCellCommon
+	80,  // 65: pulsara.terminal.v2.DurableHistoryCell.user_prompt:type_name -> pulsara.terminal.v2.UserPromptCell
+	81,  // 66: pulsara.terminal.v2.DurableHistoryCell.assistant_message:type_name -> pulsara.terminal.v2.AssistantMessageCell
+	82,  // 67: pulsara.terminal.v2.DurableHistoryCell.tool_terminal:type_name -> pulsara.terminal.v2.ToolTerminalCell
+	83,  // 68: pulsara.terminal.v2.DurableHistoryCell.error:type_name -> pulsara.terminal.v2.ErrorCell
+	84,  // 69: pulsara.terminal.v2.DurableHistoryCell.interaction:type_name -> pulsara.terminal.v2.InteractionCell
+	85,  // 70: pulsara.terminal.v2.DurableHistoryCell.compaction_boundary:type_name -> pulsara.terminal.v2.CompactionBoundaryCell
+	86,  // 71: pulsara.terminal.v2.DurableHistoryCell.recovery:type_name -> pulsara.terminal.v2.RecoveryCell
+	87,  // 72: pulsara.terminal.v2.DurableHistoryCell.audit:type_name -> pulsara.terminal.v2.AuditCell
+	88,  // 73: pulsara.terminal.v2.DurableHistoryCell.system_notice:type_name -> pulsara.terminal.v2.SystemNoticeCell
+	75,  // 74: pulsara.terminal.v2.DurableAuditSourceView.ordered_source_event_references:type_name -> pulsara.terminal.v2.EventReferenceView
+	90,  // 75: pulsara.terminal.v2.HistorySourceView.canonical_transcript:type_name -> pulsara.terminal.v2.CanonicalTranscriptSourceView
+	91,  // 76: pulsara.terminal.v2.HistorySourceView.durable_audit:type_name -> pulsara.terminal.v2.DurableAuditSourceView
+	21,  // 77: pulsara.terminal.v2.PresentationHistoryPlacementKey.relative_position_kind:type_name -> pulsara.terminal.v2.PresentationRelativePositionKind
+	93,  // 78: pulsara.terminal.v2.PresentationHistoryEntry.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	92,  // 79: pulsara.terminal.v2.PresentationHistoryEntry.source:type_name -> pulsara.terminal.v2.HistorySourceView
+	89,  // 80: pulsara.terminal.v2.PresentationHistoryEntry.durable_history_cell:type_name -> pulsara.terminal.v2.DurableHistoryCell
+	95,  // 81: pulsara.terminal.v2.HistoryRankBasis.confirmed_root:type_name -> pulsara.terminal.v2.ConfirmedRootRankBasis
+	96,  // 82: pulsara.terminal.v2.HistoryRankBasis.active_head:type_name -> pulsara.terminal.v2.ActiveHeadRankBasis
+	94,  // 83: pulsara.terminal.v2.PresentationHistoryRankedEntry.entry:type_name -> pulsara.terminal.v2.PresentationHistoryEntry
+	97,  // 84: pulsara.terminal.v2.PresentationHistoryRankedEntry.rank_basis:type_name -> pulsara.terminal.v2.HistoryRankBasis
+	99,  // 85: pulsara.terminal.v2.PresentationHistoryCursor.root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	93,  // 86: pulsara.terminal.v2.PresentationHistoryCursor.anchor_placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	99,  // 87: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	100, // 88: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.before_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	100, // 89: pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair.after_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	102, // 90: pulsara.terminal.v2.PresentationHistoryCapacityState.available:type_name -> pulsara.terminal.v2.AvailableHistoryCapacity
+	103, // 91: pulsara.terminal.v2.PresentationHistoryCapacityState.session_rotation_required:type_name -> pulsara.terminal.v2.HistorySessionRotationRequired
+	104, // 92: pulsara.terminal.v2.PresentationHistoryCapacityState.tree_capacity_exhausted:type_name -> pulsara.terminal.v2.HistoryTreeCapacityExhausted
+	105, // 93: pulsara.terminal.v2.PresentationHistoryCapacityState.reconciliation_required:type_name -> pulsara.terminal.v2.HistoryCapacityReconciliationRequired
+	99,  // 94: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity.confirmed_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	106, // 95: pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity.capacity_state:type_name -> pulsara.terminal.v2.PresentationHistoryCapacityState
+	25,  // 96: pulsara.terminal.v2.QueueItemView.delivery_state:type_name -> pulsara.terminal.v2.PromptQueueDeliveryState
+	26,  // 97: pulsara.terminal.v2.QueueItemView.content_retention_state:type_name -> pulsara.terminal.v2.PromptQueueContentRetentionState
+	27,  // 98: pulsara.terminal.v2.QueueItemView.requested_delivery_mode:type_name -> pulsara.terminal.v2.PromptQueueRequestedDeliveryMode
+	28,  // 99: pulsara.terminal.v2.QueueItemView.resolved_delivery_mode:type_name -> pulsara.terminal.v2.PromptQueueResolvedDeliveryMode
+	109, // 100: pulsara.terminal.v2.ApprovalInteraction.tool_calls:type_name -> pulsara.terminal.v2.ToolApproval
+	111, // 101: pulsara.terminal.v2.PlanQuestionInteraction.options:type_name -> pulsara.terminal.v2.PlanOption
+	24,  // 102: pulsara.terminal.v2.McpInputPublicRequest.mode:type_name -> pulsara.terminal.v2.McpInputMode
+	114, // 103: pulsara.terminal.v2.McpInteraction.requests:type_name -> pulsara.terminal.v2.McpInputPublicRequest
+	110, // 104: pulsara.terminal.v2.PendingInteraction.approval:type_name -> pulsara.terminal.v2.ApprovalInteraction
+	112, // 105: pulsara.terminal.v2.PendingInteraction.plan_question:type_name -> pulsara.terminal.v2.PlanQuestionInteraction
+	113, // 106: pulsara.terminal.v2.PendingInteraction.plan_exit:type_name -> pulsara.terminal.v2.PlanExitInteraction
+	115, // 107: pulsara.terminal.v2.PendingInteraction.mcp_input:type_name -> pulsara.terminal.v2.McpInteraction
+	29,  // 108: pulsara.terminal.v2.TerminalControlSectionSourceVersion.section_kind:type_name -> pulsara.terminal.v2.TerminalControlSectionKind
+	117, // 109: pulsara.terminal.v2.TerminalSessionLifecycleControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	30,  // 110: pulsara.terminal.v2.TerminalSessionLifecycleControlView.lifecycle:type_name -> pulsara.terminal.v2.TerminalSessionLifecycleState
+	117, // 111: pulsara.terminal.v2.TerminalRunControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	117, // 112: pulsara.terminal.v2.TerminalPendingInteractionControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	116, // 113: pulsara.terminal.v2.TerminalPendingInteractionControlView.interaction:type_name -> pulsara.terminal.v2.PendingInteraction
+	121, // 114: pulsara.terminal.v2.PromptQueueProjectionHead.empty_genesis:type_name -> pulsara.terminal.v2.EmptyPromptQueueGenesisHead
+	122, // 115: pulsara.terminal.v2.PromptQueueProjectionHead.committed:type_name -> pulsara.terminal.v2.CommittedPromptQueueHead
+	123, // 116: pulsara.terminal.v2.PromptQueueClientProjection.queue_head:type_name -> pulsara.terminal.v2.PromptQueueProjectionHead
+	108, // 117: pulsara.terminal.v2.PromptQueueClientProjection.ordered_active_items:type_name -> pulsara.terminal.v2.QueueItemView
+	117, // 118: pulsara.terminal.v2.TerminalPromptQueueControlView.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	124, // 119: pulsara.terminal.v2.TerminalPromptQueueControlView.projection:type_name -> pulsara.terminal.v2.PromptQueueClientProjection
+	31,  // 120: pulsara.terminal.v2.ServerNotificationView.kind:type_name -> pulsara.terminal.v2.ServerNotificationKind
+	117, // 121: pulsara.terminal.v2.TerminalServerNotificationProjection.source_version:type_name -> pulsara.terminal.v2.TerminalControlSectionSourceVersion
+	126, // 122: pulsara.terminal.v2.TerminalServerNotificationProjection.ordered_notifications:type_name -> pulsara.terminal.v2.ServerNotificationView
+	118, // 123: pulsara.terminal.v2.TerminalControlProjectionView.session_lifecycle:type_name -> pulsara.terminal.v2.TerminalSessionLifecycleControlView
+	119, // 124: pulsara.terminal.v2.TerminalControlProjectionView.run_control:type_name -> pulsara.terminal.v2.TerminalRunControlView
+	120, // 125: pulsara.terminal.v2.TerminalControlProjectionView.pending_interaction:type_name -> pulsara.terminal.v2.TerminalPendingInteractionControlView
+	125, // 126: pulsara.terminal.v2.TerminalControlProjectionView.prompt_queue:type_name -> pulsara.terminal.v2.TerminalPromptQueueControlView
+	127, // 127: pulsara.terminal.v2.TerminalControlProjectionView.server_notifications:type_name -> pulsara.terminal.v2.TerminalServerNotificationProjection
+	128, // 128: pulsara.terminal.v2.TerminalControlProjectionSnapshot.view:type_name -> pulsara.terminal.v2.TerminalControlProjectionView
+	129, // 129: pulsara.terminal.v2.TerminalControlProjectionSnapshot.cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	129, // 130: pulsara.terminal.v2.ProjectionSnapshotRequest.minimum_observed_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	107, // 131: pulsara.terminal.v2.ProjectionSnapshotFrame.active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
+	98,  // 132: pulsara.terminal.v2.ProjectionSnapshotFrame.ordered_resident_entries:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
+	101, // 133: pulsara.terminal.v2.ProjectionSnapshotFrame.latest_root_cursor_pair:type_name -> pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
+	130, // 134: pulsara.terminal.v2.ProjectionSnapshotFrame.control_projection_snapshot:type_name -> pulsara.terminal.v2.TerminalControlProjectionSnapshot
+	129, // 135: pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired.latest_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	40,  // 136: pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired.stable_reason:type_name -> pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired.StableReason
+	132, // 137: pulsara.terminal.v2.ProjectionSnapshotResponse.snapshot:type_name -> pulsara.terminal.v2.ProjectionSnapshotFrame
+	133, // 138: pulsara.terminal.v2.ProjectionSnapshotResponse.control_rebase_required:type_name -> pulsara.terminal.v2.ProjectionSnapshotControlRebaseRequired
+	22,  // 139: pulsara.terminal.v2.OperationalActivityCommon.replacement_semantics:type_name -> pulsara.terminal.v2.OperationalReplacementSemantics
+	135, // 140: pulsara.terminal.v2.ModelActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
+	135, // 141: pulsara.terminal.v2.ToolActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
+	135, // 142: pulsara.terminal.v2.TerminalProcessActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
+	135, // 143: pulsara.terminal.v2.SubagentActivityCell.common:type_name -> pulsara.terminal.v2.OperationalActivityCommon
+	136, // 144: pulsara.terminal.v2.OperationalActivityCell.model_activity:type_name -> pulsara.terminal.v2.ModelActivityCell
+	137, // 145: pulsara.terminal.v2.OperationalActivityCell.tool_activity:type_name -> pulsara.terminal.v2.ToolActivityCell
+	138, // 146: pulsara.terminal.v2.OperationalActivityCell.terminal_process_activity:type_name -> pulsara.terminal.v2.TerminalProcessActivityCell
+	139, // 147: pulsara.terminal.v2.OperationalActivityCell.subagent_activity:type_name -> pulsara.terminal.v2.SubagentActivityCell
+	23,  // 148: pulsara.terminal.v2.OperationalActivityRemove.removal_reason:type_name -> pulsara.terminal.v2.OperationalRemovalReason
+	140, // 149: pulsara.terminal.v2.OperationalActivityChange.upsert:type_name -> pulsara.terminal.v2.OperationalActivityCell
+	141, // 150: pulsara.terminal.v2.OperationalActivityChange.remove:type_name -> pulsara.terminal.v2.OperationalActivityRemove
+	64,  // 151: pulsara.terminal.v2.OperationalSnapshotRequest.current_transport_binding:type_name -> pulsara.terminal.v2.TerminalClientTransportBindingIdentity
+	140, // 152: pulsara.terminal.v2.OperationalSnapshotFrame.ordered_activity_cells:type_name -> pulsara.terminal.v2.OperationalActivityCell
+	129, // 153: pulsara.terminal.v2.ObserveNextRequest.after_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	93,  // 154: pulsara.terminal.v2.HistoryEntryUpsert.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	98,  // 155: pulsara.terminal.v2.HistoryEntryUpsert.resulting_ranked_entry:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
+	93,  // 156: pulsara.terminal.v2.HistoryEntryRemove.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	146, // 157: pulsara.terminal.v2.HistoryEntryChange.upsert:type_name -> pulsara.terminal.v2.HistoryEntryUpsert
+	147, // 158: pulsara.terminal.v2.HistoryEntryChange.remove:type_name -> pulsara.terminal.v2.HistoryEntryRemove
+	107, // 159: pulsara.terminal.v2.ProjectionDeltaFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
+	148, // 160: pulsara.terminal.v2.ProjectionDeltaFrame.ordered_history_changes:type_name -> pulsara.terminal.v2.HistoryEntryChange
+	107, // 161: pulsara.terminal.v2.AuthorityAdvanceFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
+	99,  // 162: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.previous_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	99,  // 163: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.resulting_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	32,  // 164: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.relation:type_name -> pulsara.terminal.v2.PresentationRootRelationKind
+	33,  // 165: pulsara.terminal.v2.PresentationHistoryRootCursorRelation.previous_cursor:type_name -> pulsara.terminal.v2.PresentationPreviousCursorDisposition
+	93,  // 166: pulsara.terminal.v2.PresentationHistoryResidentUpsert.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	98,  // 167: pulsara.terminal.v2.PresentationHistoryResidentUpsert.resulting_ranked_entry:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
+	93,  // 168: pulsara.terminal.v2.PresentationHistoryResidentRemove.placement_key:type_name -> pulsara.terminal.v2.PresentationHistoryPlacementKey
+	153, // 169: pulsara.terminal.v2.PresentationHistoryResidentChange.upsert:type_name -> pulsara.terminal.v2.PresentationHistoryResidentUpsert
+	154, // 170: pulsara.terminal.v2.PresentationHistoryResidentChange.remove:type_name -> pulsara.terminal.v2.PresentationHistoryResidentRemove
+	155, // 171: pulsara.terminal.v2.BoundedOrderedResidentChanges.ordered_changes:type_name -> pulsara.terminal.v2.PresentationHistoryResidentChange
+	99,  // 172: pulsara.terminal.v2.ResidentHistoryRebaseRequired.target_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	152, // 173: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.unchanged:type_name -> pulsara.terminal.v2.ResidentEntriesUnchanged
+	156, // 174: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.bounded_changes:type_name -> pulsara.terminal.v2.BoundedOrderedResidentChanges
+	157, // 175: pulsara.terminal.v2.PresentationHistoryRootResidentTransition.rebase_required:type_name -> pulsara.terminal.v2.ResidentHistoryRebaseRequired
+	107, // 176: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.resulting_active_head:type_name -> pulsara.terminal.v2.PresentationHistoryActiveHeadIdentity
+	101, // 177: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.latest_root_cursor_pair:type_name -> pulsara.terminal.v2.PresentationHistoryLatestRootCursorPair
+	151, // 178: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.previous_root_relation:type_name -> pulsara.terminal.v2.PresentationHistoryRootCursorRelation
+	158, // 179: pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame.resident_transition:type_name -> pulsara.terminal.v2.PresentationHistoryRootResidentTransition
+	34,  // 180: pulsara.terminal.v2.DurableObservationGapFrame.gap_reason:type_name -> pulsara.terminal.v2.ObservationGapReason
+	34,  // 181: pulsara.terminal.v2.OperationalObservationGapFrame.gap_reason:type_name -> pulsara.terminal.v2.ObservationGapReason
+	29,  // 182: pulsara.terminal.v2.ControlProjectionChangedFrame.changed_sections:type_name -> pulsara.terminal.v2.TerminalControlSectionKind
+	129, // 183: pulsara.terminal.v2.ControlProjectionChangedFrame.resulting_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	35,  // 184: pulsara.terminal.v2.ControlProjectionChangedFrame.disposition:type_name -> pulsara.terminal.v2.ControlProjectionInvalidationDisposition
+	129, // 185: pulsara.terminal.v2.ControlProjectionGapFrame.latest_control_cursor:type_name -> pulsara.terminal.v2.ControlProjectionCursor
+	36,  // 186: pulsara.terminal.v2.ControlProjectionGapFrame.stable_reason:type_name -> pulsara.terminal.v2.ControlProjectionGapReason
+	35,  // 187: pulsara.terminal.v2.ControlProjectionGapFrame.disposition:type_name -> pulsara.terminal.v2.ControlProjectionInvalidationDisposition
+	142, // 188: pulsara.terminal.v2.OperationalDeltaFrame.ordered_changes:type_name -> pulsara.terminal.v2.OperationalActivityChange
+	149, // 189: pulsara.terminal.v2.DurableObservationBranch.projection_delta:type_name -> pulsara.terminal.v2.ProjectionDeltaFrame
+	150, // 190: pulsara.terminal.v2.DurableObservationBranch.authority_advance:type_name -> pulsara.terminal.v2.AuthorityAdvanceFrame
+	159, // 191: pulsara.terminal.v2.DurableObservationBranch.root_advanced:type_name -> pulsara.terminal.v2.PresentationHistoryRootAdvancedFrame
+	160, // 192: pulsara.terminal.v2.DurableObservationBranch.gap:type_name -> pulsara.terminal.v2.DurableObservationGapFrame
+	165, // 193: pulsara.terminal.v2.OperationalObservationBranch.delta:type_name -> pulsara.terminal.v2.OperationalDeltaFrame
+	161, // 194: pulsara.terminal.v2.OperationalObservationBranch.gap:type_name -> pulsara.terminal.v2.OperationalObservationGapFrame
+	162, // 195: pulsara.terminal.v2.ControlObservationBranch.changed:type_name -> pulsara.terminal.v2.ControlProjectionChangedFrame
+	163, // 196: pulsara.terminal.v2.ControlObservationBranch.gap:type_name -> pulsara.terminal.v2.ControlProjectionGapFrame
+	168, // 197: pulsara.terminal.v2.ObservationBatchFrame.control:type_name -> pulsara.terminal.v2.ControlObservationBranch
+	166, // 198: pulsara.terminal.v2.ObservationBatchFrame.durable:type_name -> pulsara.terminal.v2.DurableObservationBranch
+	167, // 199: pulsara.terminal.v2.ObservationBatchFrame.operational:type_name -> pulsara.terminal.v2.OperationalObservationBranch
+	169, // 200: pulsara.terminal.v2.ObservationResponse.batch:type_name -> pulsara.terminal.v2.ObservationBatchFrame
+	164, // 201: pulsara.terminal.v2.ObservationResponse.no_change:type_name -> pulsara.terminal.v2.ObservationNoChangeFrame
+	100, // 202: pulsara.terminal.v2.HistoryPageRequest.cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	41,  // 203: pulsara.terminal.v2.HistoryPageRequest.direction:type_name -> pulsara.terminal.v2.HistoryPageRequest.Direction
+	41,  // 204: pulsara.terminal.v2.HistoryPageData.validated_request_direction:type_name -> pulsara.terminal.v2.HistoryPageRequest.Direction
+	99,  // 205: pulsara.terminal.v2.HistoryPageData.validated_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	98,  // 206: pulsara.terminal.v2.HistoryPageData.ordered_history_entries:type_name -> pulsara.terminal.v2.PresentationHistoryRankedEntry
+	100, // 207: pulsara.terminal.v2.HistoryPageData.before_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	100, // 208: pulsara.terminal.v2.HistoryPageData.after_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	99,  // 209: pulsara.terminal.v2.HistoryCursorStale.latest_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	100, // 210: pulsara.terminal.v2.HistoryCursorStale.replacement_cursor:type_name -> pulsara.terminal.v2.PresentationHistoryCursor
+	99,  // 211: pulsara.terminal.v2.HistoryRebaseRequired.latest_root_identity:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	99,  // 212: pulsara.terminal.v2.HistoryReconciliationRequired.trusted_latest_root_identity_hint:type_name -> pulsara.terminal.v2.PresentationHistoryRootIdentity
+	172, // 213: pulsara.terminal.v2.HistoryPageResponse.page:type_name -> pulsara.terminal.v2.HistoryPageData
+	173, // 214: pulsara.terminal.v2.HistoryPageResponse.stale:type_name -> pulsara.terminal.v2.HistoryCursorStale
+	174, // 215: pulsara.terminal.v2.HistoryPageResponse.rebase:type_name -> pulsara.terminal.v2.HistoryRebaseRequired
+	175, // 216: pulsara.terminal.v2.HistoryPageResponse.reconciliation:type_name -> pulsara.terminal.v2.HistoryReconciliationRequired
+	177, // 217: pulsara.terminal.v2.SubmitPromptCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	42,  // 218: pulsara.terminal.v2.SubmitPromptCommand.requested_delivery_mode:type_name -> pulsara.terminal.v2.SubmitPromptCommand.DeliveryMode
+	177, // 219: pulsara.terminal.v2.StopRunCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 220: pulsara.terminal.v2.ResolveApprovalCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	180, // 221: pulsara.terminal.v2.ResolveApprovalCommand.decisions:type_name -> pulsara.terminal.v2.ApprovalDecision
+	177, // 222: pulsara.terminal.v2.ResolvePlanQuestionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 223: pulsara.terminal.v2.ResolvePlanExitCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	37,  // 224: pulsara.terminal.v2.ResolvePlanExitCommand.plan_exit_decision:type_name -> pulsara.terminal.v2.PlanExitDecision
+	177, // 225: pulsara.terminal.v2.ResolveMcpInteractionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 226: pulsara.terminal.v2.CancelMcpInteractionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 227: pulsara.terminal.v2.QueueCancelCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 228: pulsara.terminal.v2.StartSuccessorSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 229: pulsara.terminal.v2.DetachSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 230: pulsara.terminal.v2.CloseSessionCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	177, // 231: pulsara.terminal.v2.ControllerTakeoverCommand.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	178, // 232: pulsara.terminal.v2.MutationCommand.submit_prompt:type_name -> pulsara.terminal.v2.SubmitPromptCommand
+	179, // 233: pulsara.terminal.v2.MutationCommand.stop_run:type_name -> pulsara.terminal.v2.StopRunCommand
+	181, // 234: pulsara.terminal.v2.MutationCommand.resolve_approval:type_name -> pulsara.terminal.v2.ResolveApprovalCommand
+	182, // 235: pulsara.terminal.v2.MutationCommand.resolve_plan_question:type_name -> pulsara.terminal.v2.ResolvePlanQuestionCommand
+	183, // 236: pulsara.terminal.v2.MutationCommand.resolve_plan_exit:type_name -> pulsara.terminal.v2.ResolvePlanExitCommand
+	184, // 237: pulsara.terminal.v2.MutationCommand.resolve_mcp_interaction:type_name -> pulsara.terminal.v2.ResolveMcpInteractionCommand
+	185, // 238: pulsara.terminal.v2.MutationCommand.cancel_mcp_interaction:type_name -> pulsara.terminal.v2.CancelMcpInteractionCommand
+	186, // 239: pulsara.terminal.v2.MutationCommand.queue_cancel:type_name -> pulsara.terminal.v2.QueueCancelCommand
+	187, // 240: pulsara.terminal.v2.MutationCommand.start_successor_session:type_name -> pulsara.terminal.v2.StartSuccessorSessionCommand
+	188, // 241: pulsara.terminal.v2.MutationCommand.detach_session:type_name -> pulsara.terminal.v2.DetachSessionCommand
+	189, // 242: pulsara.terminal.v2.MutationCommand.close_session:type_name -> pulsara.terminal.v2.CloseSessionCommand
+	190, // 243: pulsara.terminal.v2.MutationCommand.controller_takeover:type_name -> pulsara.terminal.v2.ControllerTakeoverCommand
+	38,  // 244: pulsara.terminal.v2.CommandOutcome.outcome_status:type_name -> pulsara.terminal.v2.CommandOutcomeStatus
+	192, // 245: pulsara.terminal.v2.QueryCommandResponse.outcome:type_name -> pulsara.terminal.v2.CommandOutcome
+	39,  // 246: pulsara.terminal.v2.TerminalSecretLeaseIdentity.terminal_secret_kind:type_name -> pulsara.terminal.v2.TerminalSecretKind
+	177, // 247: pulsara.terminal.v2.SecretRevealRequest.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	195, // 248: pulsara.terminal.v2.SecretRevealResult.lease_identity:type_name -> pulsara.terminal.v2.TerminalSecretLeaseIdentity
+	177, // 249: pulsara.terminal.v2.SecretFormSubmit.binding:type_name -> pulsara.terminal.v2.CommandBinding
+	52,  // 250: pulsara.terminal.v2.ClientFrame.hello:type_name -> pulsara.terminal.v2.HelloRequest
+	62,  // 251: pulsara.terminal.v2.ClientFrame.attach:type_name -> pulsara.terminal.v2.AttachRequest
+	71,  // 252: pulsara.terminal.v2.ClientFrame.heartbeat:type_name -> pulsara.terminal.v2.HeartbeatRequest
+	131, // 253: pulsara.terminal.v2.ClientFrame.snapshot:type_name -> pulsara.terminal.v2.ProjectionSnapshotRequest
+	145, // 254: pulsara.terminal.v2.ClientFrame.observe_next:type_name -> pulsara.terminal.v2.ObserveNextRequest
+	171, // 255: pulsara.terminal.v2.ClientFrame.history_page:type_name -> pulsara.terminal.v2.HistoryPageRequest
+	191, // 256: pulsara.terminal.v2.ClientFrame.mutation:type_name -> pulsara.terminal.v2.MutationCommand
+	193, // 257: pulsara.terminal.v2.ClientFrame.query_command:type_name -> pulsara.terminal.v2.QueryCommandRequest
+	196, // 258: pulsara.terminal.v2.ClientFrame.secret_reveal:type_name -> pulsara.terminal.v2.SecretRevealRequest
+	198, // 259: pulsara.terminal.v2.ClientFrame.secret_form_submit:type_name -> pulsara.terminal.v2.SecretFormSubmit
+	143, // 260: pulsara.terminal.v2.ClientFrame.operational_snapshot:type_name -> pulsara.terminal.v2.OperationalSnapshotRequest
+	69,  // 261: pulsara.terminal.v2.ClientFrame.attach_ack:type_name -> pulsara.terminal.v2.AttachReceiptAck
+	61,  // 262: pulsara.terminal.v2.ServerFrame.hello:type_name -> pulsara.terminal.v2.HelloOutcome
+	68,  // 263: pulsara.terminal.v2.ServerFrame.attach:type_name -> pulsara.terminal.v2.AttachResultReceipt
+	74,  // 264: pulsara.terminal.v2.ServerFrame.heartbeat:type_name -> pulsara.terminal.v2.HeartbeatResult
+	134, // 265: pulsara.terminal.v2.ServerFrame.snapshot:type_name -> pulsara.terminal.v2.ProjectionSnapshotResponse
+	144, // 266: pulsara.terminal.v2.ServerFrame.operational_snapshot:type_name -> pulsara.terminal.v2.OperationalSnapshotFrame
+	170, // 267: pulsara.terminal.v2.ServerFrame.observation:type_name -> pulsara.terminal.v2.ObservationResponse
+	176, // 268: pulsara.terminal.v2.ServerFrame.history_page:type_name -> pulsara.terminal.v2.HistoryPageResponse
+	192, // 269: pulsara.terminal.v2.ServerFrame.command_outcome:type_name -> pulsara.terminal.v2.CommandOutcome
+	194, // 270: pulsara.terminal.v2.ServerFrame.query_command:type_name -> pulsara.terminal.v2.QueryCommandResponse
+	197, // 271: pulsara.terminal.v2.ServerFrame.secret_reveal:type_name -> pulsara.terminal.v2.SecretRevealResult
+	199, // 272: pulsara.terminal.v2.ServerFrame.secret_submit:type_name -> pulsara.terminal.v2.SecretSubmitReceipt
+	200, // 273: pulsara.terminal.v2.ServerFrame.secret_revoked:type_name -> pulsara.terminal.v2.SecretLeaseRevoked
+	202, // 274: pulsara.terminal.v2.ServerFrame.error:type_name -> pulsara.terminal.v2.ProtocolError
+	70,  // 275: pulsara.terminal.v2.ServerFrame.attach_ack:type_name -> pulsara.terminal.v2.AttachAckResult
+	276, // [276:276] is the sub-list for method output_type
+	276, // [276:276] is the sub-list for method input_type
+	276, // [276:276] is the sub-list for extension type_name
+	276, // [276:276] is the sub-list for extension extendee
+	0,   // [0:276] is the sub-list for field type_name
 }
 
 func init() { file_terminal_client_proto_init() }
@@ -18298,17 +18777,18 @@ func file_terminal_client_proto_init() {
 		(*HelloOutcome_Unavailable)(nil),
 		(*HelloOutcome_Rejected)(nil),
 	}
-	file_terminal_client_proto_msgTypes[23].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[29].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[24].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[25].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[31].OneofWrappers = []any{
 		(*HeartbeatResult_Accepted)(nil),
 		(*HeartbeatResult_Rejected)(nil),
 	}
-	file_terminal_client_proto_msgTypes[33].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[35].OneofWrappers = []any{
 		(*PresentationContentBlock_Text)(nil),
 		(*PresentationContentBlock_Data)(nil),
 	}
-	file_terminal_client_proto_msgTypes[34].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[44].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[36].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[46].OneofWrappers = []any{
 		(*DurableHistoryCell_UserPrompt)(nil),
 		(*DurableHistoryCell_AssistantMessage)(nil),
 		(*DurableHistoryCell_ToolTerminal)(nil),
@@ -18319,95 +18799,99 @@ func file_terminal_client_proto_init() {
 		(*DurableHistoryCell_Audit)(nil),
 		(*DurableHistoryCell_SystemNotice)(nil),
 	}
-	file_terminal_client_proto_msgTypes[47].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[49].OneofWrappers = []any{
 		(*HistorySourceView_CanonicalTranscript)(nil),
 		(*HistorySourceView_DurableAudit)(nil),
 	}
-	file_terminal_client_proto_msgTypes[48].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[52].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[50].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[54].OneofWrappers = []any{
 		(*HistoryRankBasis_ConfirmedRoot)(nil),
 		(*HistoryRankBasis_ActiveHead)(nil),
 	}
-	file_terminal_client_proto_msgTypes[55].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[56].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[60].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[61].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[57].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[58].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[62].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[63].OneofWrappers = []any{
 		(*PresentationHistoryCapacityState_Available)(nil),
 		(*PresentationHistoryCapacityState_SessionRotationRequired)(nil),
 		(*PresentationHistoryCapacityState_TreeCapacityExhausted)(nil),
 		(*PresentationHistoryCapacityState_ReconciliationRequired)(nil),
 	}
-	file_terminal_client_proto_msgTypes[68].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[71].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[70].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[73].OneofWrappers = []any{
 		(*PendingInteraction_Approval)(nil),
 		(*PendingInteraction_PlanQuestion)(nil),
 		(*PendingInteraction_PlanExit)(nil),
 		(*PendingInteraction_McpInput)(nil),
 	}
-	file_terminal_client_proto_msgTypes[74].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[75].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[78].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[76].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[77].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[80].OneofWrappers = []any{
 		(*PromptQueueProjectionHead_EmptyGenesis)(nil),
 		(*PromptQueueProjectionHead_Committed)(nil),
 	}
-	file_terminal_client_proto_msgTypes[81].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[86].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[87].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[93].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[83].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[88].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[89].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[91].OneofWrappers = []any{
+		(*ProjectionSnapshotResponse_Snapshot)(nil),
+		(*ProjectionSnapshotResponse_ControlRebaseRequired)(nil),
+	}
+	file_terminal_client_proto_msgTypes[97].OneofWrappers = []any{
 		(*OperationalActivityCell_ModelActivity)(nil),
 		(*OperationalActivityCell_ToolActivity)(nil),
 		(*OperationalActivityCell_TerminalProcessActivity)(nil),
 		(*OperationalActivityCell_SubagentActivity)(nil),
 	}
-	file_terminal_client_proto_msgTypes[95].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[99].OneofWrappers = []any{
 		(*OperationalActivityChange_Upsert)(nil),
 		(*OperationalActivityChange_Remove)(nil),
 	}
-	file_terminal_client_proto_msgTypes[99].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[101].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[103].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[105].OneofWrappers = []any{
 		(*HistoryEntryChange_Upsert)(nil),
 		(*HistoryEntryChange_Remove)(nil),
 	}
-	file_terminal_client_proto_msgTypes[106].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[108].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[110].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[112].OneofWrappers = []any{
 		(*PresentationHistoryResidentChange_Upsert)(nil),
 		(*PresentationHistoryResidentChange_Remove)(nil),
 	}
-	file_terminal_client_proto_msgTypes[111].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[115].OneofWrappers = []any{
 		(*PresentationHistoryRootResidentTransition_Unchanged)(nil),
 		(*PresentationHistoryRootResidentTransition_BoundedChanges)(nil),
 		(*PresentationHistoryRootResidentTransition_RebaseRequired)(nil),
 	}
-	file_terminal_client_proto_msgTypes[119].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[123].OneofWrappers = []any{
 		(*DurableObservationBranch_ProjectionDelta)(nil),
 		(*DurableObservationBranch_AuthorityAdvance)(nil),
 		(*DurableObservationBranch_RootAdvanced)(nil),
 		(*DurableObservationBranch_Gap)(nil),
 	}
-	file_terminal_client_proto_msgTypes[120].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[124].OneofWrappers = []any{
 		(*OperationalObservationBranch_Delta)(nil),
 		(*OperationalObservationBranch_Gap)(nil),
 	}
-	file_terminal_client_proto_msgTypes[121].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[125].OneofWrappers = []any{
 		(*ControlObservationBranch_Changed)(nil),
 		(*ControlObservationBranch_Gap)(nil),
 	}
-	file_terminal_client_proto_msgTypes[122].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[123].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[126].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[127].OneofWrappers = []any{
 		(*ObservationResponse_Batch)(nil),
 		(*ObservationResponse_NoChange)(nil),
 	}
-	file_terminal_client_proto_msgTypes[125].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[126].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[128].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[129].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[129].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[130].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[132].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[133].OneofWrappers = []any{
 		(*HistoryPageResponse_Page)(nil),
 		(*HistoryPageResponse_Stale)(nil),
 		(*HistoryPageResponse_Rebase)(nil),
 		(*HistoryPageResponse_Reconciliation)(nil),
 	}
-	file_terminal_client_proto_msgTypes[135].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[144].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[139].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[148].OneofWrappers = []any{
 		(*MutationCommand_SubmitPrompt)(nil),
 		(*MutationCommand_StopRun)(nil),
 		(*MutationCommand_ResolveApproval)(nil),
@@ -18421,8 +18905,8 @@ func file_terminal_client_proto_init() {
 		(*MutationCommand_CloseSession)(nil),
 		(*MutationCommand_ControllerTakeover)(nil),
 	}
-	file_terminal_client_proto_msgTypes[147].OneofWrappers = []any{}
-	file_terminal_client_proto_msgTypes[154].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[151].OneofWrappers = []any{}
+	file_terminal_client_proto_msgTypes[158].OneofWrappers = []any{
 		(*ClientFrame_Hello)(nil),
 		(*ClientFrame_Attach)(nil),
 		(*ClientFrame_Heartbeat)(nil),
@@ -18436,7 +18920,7 @@ func file_terminal_client_proto_init() {
 		(*ClientFrame_OperationalSnapshot)(nil),
 		(*ClientFrame_AttachAck)(nil),
 	}
-	file_terminal_client_proto_msgTypes[156].OneofWrappers = []any{
+	file_terminal_client_proto_msgTypes[160].OneofWrappers = []any{
 		(*ServerFrame_Hello)(nil),
 		(*ServerFrame_Attach)(nil),
 		(*ServerFrame_Heartbeat)(nil),
@@ -18457,8 +18941,8 @@ func file_terminal_client_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_terminal_client_proto_rawDesc), len(file_terminal_client_proto_rawDesc)),
-			NumEnums:      42,
-			NumMessages:   157,
+			NumEnums:      43,
+			NumMessages:   161,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

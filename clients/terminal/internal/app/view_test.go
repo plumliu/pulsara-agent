@@ -51,16 +51,12 @@ func TestViewAlwaysFillsValidatedTerminalGeometry(t *testing.T) {
 
 func TestReadyViewRendersPreparedWideTranscriptInsideBody(t *testing.T) {
 	state := NewInitialAppState("terminal-client:ready-view")
-	snapshot := protocolvalue.DurableSnapshot{
-		HostSessionID: "host:view", RuntimeSessionID: "runtime:view",
-		Control:             protocolvalue.ControlProjection{RuntimeSessionID: "runtime:view", CursorFingerprint: "control:view"},
-		SnapshotFingerprint: "snapshot:view",
-		Cells: []protocolvalue.HistoryCell{{
-			ID: "entry:view", Kind: "assistant",
-			PublicText:  "中文 emoji 🌍 and " + strings.Repeat("long-unbreakable", 20),
-			Fingerprint: "cell:view",
-		}},
-	}
+	snapshot := testDurableSnapshot("runtime:view", []protocolvalue.HistoryCell{{
+		ID: "entry:view", Kind: "assistant",
+		PublicText:  "中文 emoji 🌍 and " + strings.Repeat("long-unbreakable", 20),
+		Fingerprint: "cell:view",
+	}})
+	snapshot.HostSessionID = "host:view"
 	var err error
 	state.durable, err = state.durable.Install(snapshot)
 	if err != nil {
@@ -85,12 +81,8 @@ func TestReadyViewRendersPreparedWideTranscriptInsideBody(t *testing.T) {
 
 func TestViewMakesTranscriptControlSequencesInert(t *testing.T) {
 	state := NewInitialAppState("terminal-client:public-text")
-	snapshot := protocolvalue.DurableSnapshot{
-		HostSessionID: "host:public", RuntimeSessionID: "runtime:public",
-		Control:             protocolvalue.ControlProjection{RuntimeSessionID: "runtime:public", CursorFingerprint: "control:public"},
-		SnapshotFingerprint: "snapshot:public",
-		Cells:               []protocolvalue.HistoryCell{{ID: "entry:public", Kind: "assistant", PublicText: "safe\x1b]52;c;ZXZpbA==\aafter", Fingerprint: "cell:public"}},
-	}
+	snapshot := testDurableSnapshot("runtime:public", []protocolvalue.HistoryCell{{ID: "entry:public", Kind: "assistant", PublicText: "safe\x1b]52;c;ZXZpbA==\aafter", Fingerprint: "cell:public"}})
+	snapshot.HostSessionID = "host:public"
 	var err error
 	state.durable, err = state.durable.Install(snapshot)
 	if err != nil {

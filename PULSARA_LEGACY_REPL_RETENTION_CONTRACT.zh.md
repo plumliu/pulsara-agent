@@ -3,7 +3,7 @@
 > 状态：FROZEN LEGACY SURFACE；maintenance-only，无计划删除日期
 > Requirement namespace：`TUI-COMPAT-*`
 > 唯一owner：现有prompt_toolkit顺序式REPL的保留范围、禁止扩张和隔离规则
-> 未来一等Terminal入口：Bubble Tea v2 client（S0 feasibility为PASS、S1只读纵切已实施；S2–S6、Go production packaging与默认TTY activation尚未实施）
+> 未来一等Terminal入口：Bubble Tea v2 client（S0 feasibility为PASS、S1只读纵切与S2 live observation/page/reconnect已实施；S3–S6、Go production packaging与默认TTY activation尚未实施）
 
 ## 0. 定位
 

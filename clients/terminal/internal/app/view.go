@@ -1,13 +1,13 @@
 package app
 
 import (
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	statusview "github.com/plumliu/pulsara-agent/clients/terminal/internal/components/status"
 	transcriptview "github.com/plumliu/pulsara-agent/clients/terminal/internal/components/transcript"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/publictext"
 )
@@ -29,7 +29,11 @@ func render(state AppState) tea.View {
 				rows = append(rows, fitLayoutLine(line, plan.Width))
 			}
 		}
-		rows = append(rows, fitLayoutLine(compactFooter(plan.Width), plan.Width))
+		footer := compactFooter(plan.Width)
+		if count := len(state.localNotifications.Items); count > 0 {
+			footer = state.localNotifications.Items[count-1]
+		}
+		rows = append(rows, fitLayoutLine(footer, plan.Width))
 	}
 
 	view := tea.NewView(strings.Join(rows, "\n"))
@@ -51,8 +55,8 @@ func headerLine(state AppState) string {
 	if state.attachment.Valid {
 		status += " · observer"
 	}
-	if state.durable.Ready() {
-		status += fmt.Sprintf(" · revision %d · queue %d", state.durable.ProjectionRevision(), state.control.QueueItemCount())
+	if state.durable.Installed() {
+		status += " · " + statusview.Durable(state.durable.ProjectionRevision(), state.control.QueueItemCount(), state.transcript.UnseenTerminalCount(), state.durable.Stale() || state.control.SnapshotRequired())
 	}
 	if state.hasPublicFailure {
 		status += " · failed"
@@ -69,7 +73,7 @@ func singleLineStatus(state AppState) string {
 }
 
 func bodyLines(state AppState, width int) []string {
-	if state.durable.Ready() {
+	if state.durable.Installed() {
 		return transcriptview.Render(state.transcript)
 	}
 	message := "Connecting to the Pulsara runtime…"

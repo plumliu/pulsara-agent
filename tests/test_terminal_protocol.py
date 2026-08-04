@@ -15,7 +15,10 @@ from tests.test_host_core import ScriptedTransport, _core, _open_project_session
 
 from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
 from pulsara_agent.terminal_protocol import gateway as terminal_gateway
-from pulsara_agent.terminal_protocol.codec import HEARTBEAT_INTERVAL_MS
+from pulsara_agent.terminal_protocol.codec import (
+    HEARTBEAT_INTERVAL_MS,
+    history_ranked_entry_vector_decoded_bytes,
+)
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
 from pulsara_agent.event_log.in_memory import InMemoryEventLog
 from pulsara_agent.ports.terminal_application import (
@@ -52,6 +55,102 @@ def test_protocol_v2_observation_is_three_plane_and_control_cursor_bound() -> No
     assert "ObservationGap" not in {
         message.name for message in wire.DESCRIPTOR.message_types_by_name.values()
     }
+
+
+def test_history_page_full_carrier_accounting_and_gateway_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = wire.PresentationHistoryRankedEntry(
+        entry=wire.PresentationHistoryEntry(
+            history_entry_id="history:metadata",
+            placement_key=wire.PresentationHistoryPlacementKey(
+                stable_source_tiebreaker="m" * 4096
+            ),
+        ),
+        ranked_view_fingerprint="sha256:" + "a" * 64,
+    )
+    expected = len(entry.SerializeToString(deterministic=True))
+    assert history_ranked_entry_vector_decoded_bytes((entry,)) == expected
+    assert expected > 1024
+
+    monkeypatch.setattr(
+        terminal_gateway, "PresentationHistoryPageData", SimpleNamespace
+    )
+    monkeypatch.setattr(terminal_gateway, "entry_to_wire", lambda _item: entry)
+    outcome = SimpleNamespace(
+        ordered_history_entries=(object(),),
+        validated_input_cursor_fingerprint="sha256:" + "b" * 64,
+    )
+    response = terminal_gateway._history_outcome_to_wire(
+        outcome,
+        "request:metadata-bound",
+        maximum_decoded_bytes=1024,
+    )
+    assert response.HasField("reconciliation")
+    assert (
+        response.reconciliation.fault_code
+        == "PRESENTATION_PAGE_WIRE_DECODED_BOUND_EXCEEDED"
+    )
+
+
+def test_gateway_root_lease_set_is_bounded_per_attachment() -> None:
+    class _Retention:
+        def __init__(self) -> None:
+            self.active: dict[str, str] = {}
+            self.released: list[str] = []
+
+        def renew(self, lease_id: str, *, ttl_seconds: float) -> bool:
+            assert ttl_seconds > 0
+            return lease_id in self.active
+
+        def borrow(
+            self,
+            *,
+            attachment_id: str,
+            root_identity_fingerprint: str,
+            ttl_seconds: float,
+        ) -> SimpleNamespace:
+            assert attachment_id == "attachment:bounded" and ttl_seconds > 0
+            lease_id = f"lease:{root_identity_fingerprint}"
+            self.active[lease_id] = root_identity_fingerprint
+            return SimpleNamespace(lease_id=lease_id)
+
+        def release(self, lease_id: str) -> None:
+            self.active.pop(lease_id, None)
+            self.released.append(lease_id)
+
+    retention = _Retention()
+    runtime = SimpleNamespace(
+        terminal_presentation_foundation_service=SimpleNamespace(
+            retention_owner=retention
+        ),
+        presentation_history_materialization_policy=SimpleNamespace(
+            root_retention_ttl_seconds=300
+        ),
+    )
+    host = SimpleNamespace(
+        wiring=SimpleNamespace(runtime_wiring=SimpleNamespace(runtime_session=runtime))
+    )
+    state = terminal_gateway._ConnectionState(
+        attachment_id="attachment:bounded", attachment_generation=1
+    )
+    server = object.__new__(TerminalProtocolServer)
+
+    for index in range(70):
+        server._borrow_root(
+            state,
+            host,
+            SimpleNamespace(root_identity_fingerprint=f"root:{index:03d}"),
+        )
+
+    assert tuple(state.root_lease_order) == (
+        "root:066",
+        "root:067",
+        "root:068",
+        "root:069",
+    )
+    assert len(state.root_lease_ids) == len(retention.active) == 4
+    assert len(retention.released) == 66
 
 
 def _submit_request(*, command_id: str, text: str) -> SubmitPromptRequest:
@@ -414,17 +513,25 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
         )
         assert page.WhichOneof("outcome") == "page"
 
-        detach = await client.detach()
-        assert detach.outcome_status == wire.SUCCEEDED
-        await client.close()
-        # Reconnect with the same stable client identity.  The durable command
-        # receipt must remain queryable without touching HostSession internals.
-        await client.connect(
-            host_session_id=session.host_session_id,
-            runtime_session_id=session.runtime_session_id,
-            controller=True,
+        previous_attachment_id = client.attachment.attachment_id
+        previous_attachment_generation = client.attachment.attachment_generation
+        # Ordinary reconnect rotates the credential and installs the exact next
+        # semantic attachment generation.  It is not a second generation-1
+        # attachment created through the original launch credential.
+        await client.ordinary_reconnect()
+        assert client.attachment is not None
+        assert client.attachment.attachment_id != previous_attachment_id
+        assert (
+            client.attachment.attachment_generation
+            == previous_attachment_generation + 1
         )
-        await client.attach(session.host_session_id, controller=True)
+        with pytest.raises(PermissionError, match="unavailable"):
+            session.terminal_application_services.attachments.heartbeat(
+                attachment_id=previous_attachment_id,
+                attachment_generation=previous_attachment_generation,
+            )
+        # The durable command receipt remains queryable without touching
+        # HostSession internals.
         reconnected_query = await client.query_command(command.command_id)
         assert reconnected_query.found
         assert reconnected_query.outcome.command_id == winner.command_id
@@ -432,6 +539,91 @@ def test_headless_client_consumes_snapshot_delta_page_command_and_gap(
         assert (
             reconnected_query.outcome.outcome_fingerprint == winner.outcome_fingerprint
         )
+        detach = await client.detach()
+        assert detach.outcome_status == wire.SUCCEEDED
+        await client.close()
+        await server.close()
+        socket_root.cleanup()
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_headless_observe_signals_control_only_transition_without_history_delta(
+    tmp_path: Path, monkeypatch
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def scenario() -> None:
+        session = await _open_project_session(core, tmp_path)
+        socket_root = TemporaryDirectory(prefix="pulsara-terminal-control-", dir="/tmp")
+        socket_path = Path(socket_root.name) / "terminal-v2.sock"
+        server = TerminalProtocolServer(
+            socket_path=socket_path,
+            session_provider=lambda host_id: (
+                session
+                if host_id == session.host_session_id
+                else (_ for _ in ()).throw(KeyError(host_id))
+            ),
+        )
+        await server.start()
+        client = HeadlessTerminalConformanceClient(
+            socket_path=socket_path,
+            client_instance_id="headless:control-only",
+            launch_id=server.launch_id,
+            launch_capability=server.launch_capability,
+        )
+        await client.connect(
+            host_session_id=session.host_session_id,
+            runtime_session_id=session.runtime_session_id,
+            controller=False,
+        )
+        await client.attach(session.host_session_id, controller=False)
+        initial = await client.snapshot()
+        operational = await client.operational_snapshot()
+
+        with monkeypatch.context() as control_source:
+            control_source.setattr(
+                type(session),
+                "active_run_id",
+                property(lambda _self: "run:control-only"),
+            )
+            changed = await client.observe_next(
+                authority_high_water=initial.authority_high_water,
+                projection_revision=initial.projection_revision,
+                operational_generation=operational.operational_generation,
+                operational_cursor=operational.operational_cursor,
+                maximum_wait_ms=10,
+            )
+            assert changed.WhichOneof("outcome") == "batch"
+            assert changed.batch.HasField("control")
+            assert not changed.batch.HasField("durable")
+            assert not changed.batch.HasField("operational")
+            assert changed.batch.control.WhichOneof("outcome") == "changed"
+            control_change = changed.batch.control.changed
+            assert list(control_change.changed_sections) == [wire.CONTROL_RUN_CONTROL]
+            assert control_change.base_control_projection_revision == (
+                initial.control_projection_snapshot.cursor.control_revision
+            )
+
+            refreshed = await client.snapshot(
+                minimum_control_cursor=control_change.resulting_control_cursor
+            )
+            assert (
+                refreshed.control_projection_snapshot.view.run_control.active_run_id
+                == ("run:control-only")
+            )
+            assert (
+                refreshed.control_projection_snapshot.cursor.control_revision
+                >= control_change.resulting_control_cursor.control_revision
+            )
+
+        previous_attachment_id = client.attachment.attachment_id
+        await client.ordinary_reconnect(controller=False)
+        assert client.attachment.role == wire.ATTACHMENT_ROLE_OBSERVER
+        assert client.attachment.attachment_id != previous_attachment_id
+        await client.snapshot()
+        await client.operational_snapshot()
         await client.close()
         await server.close()
         socket_root.cleanup()

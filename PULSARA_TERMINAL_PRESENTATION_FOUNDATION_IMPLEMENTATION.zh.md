@@ -2669,9 +2669,9 @@ External UI subscribers本身不参与close blocker；Foundation-owned internal 
 | INFRA-3 | unified history projection、persistent tree、checkpoint、capacity、viewport/page | IMPLEMENTED |
 | INFRA-4 | application services、durable queue、artifact hold、secret lease与bounded reopen | IMPLEMENTED |
 | INFRA-5 | versioned Python protocol server与test-only headless conformance consumer | IMPLEMENTED |
-| GO-READY-AQ | reducer-owned active queue projection、64项admission bound与snapshot/checkpoint join | SPEC FROZEN；NOT STARTED；S1 blocker |
+| GO-READY-AQ | reducer-owned active queue projection、64项admission bound与snapshot/checkpoint join | IMPLEMENTED；S1/S2 gate通过 |
 
-GO-READY-AQ是既有Foundation authority上的schema/projection extension，不推翻INFRA证据；其migration、Python mapper和headless 0/1/64/65 gates已随Protocol 2.0与Bubble Tea S1完成。Bubble Tea S0 feasibility与S1只读client的证据仍不参与Foundation完成判定，也不改变Foundation ownership；S2–S6、正式Go packaging与默认TTY activation继续由各自规格拥有。
+GO-READY-AQ是既有Foundation authority上的schema/projection extension，不推翻INFRA证据；其migration、Python mapper和headless 0/1/64/65 gates已随Protocol 2.0与Bubble Tea S1完成。Bubble Tea S0 feasibility、S1只读client与S2 live observation/page/reconnect证据仍不参与Foundation完成判定，也不改变Foundation ownership；S3–S6、正式Go packaging与默认TTY activation继续由各自规格拥有。
 
 ## 15. 文件修改面
 
@@ -2953,6 +2953,7 @@ src/pulsara_agent/runtime/terminal/process.py
 - tap subscriber在checkpoint physical I/O期间overflow进入GAP后，以durable observed high-water重新bootstrap并最终追到latest sequence；不会留下仍alive但无subscriber的worker；
 - presentation projection idempotence与revision；
 - viewport hard bounds、paged history、cursor stale/rebase矩阵；
+- Protocol attachment最多borrow 4个root且使用deterministic FIFO lease set；8个active attachments的最坏32项低于Foundation 64项process lease hard cap，heartbeat不得续租已从attachment set淘汰的root；
 - cached snapshot不执行I/O；重启后的首次history page通过session-owned bounded executor执行，阻塞artifact/SQL read不冻结event loop；waiter cancellation后Host close仍等待physical read真实退出；
 - history page、anchor lookup、viewport materialization与checkpoint path-copy使用调用方冻结的同一个absolute deadline；root/tree每次`ArtifactStore.get_text()`都必须原样传递该deadline，PostgreSQL connection checkout与statement timeout不得续期或回退为`None`；真实PostgreSQL表锁测试必须在blocker仍持有时观察目标read自行timeout并物理退出；
 - Long-Horizon rewrite后旧cursor可以继续读取其仍retained的旧immutable root，但不得按cell ID静默映射到新root；跨root只接受proved replacement cursor或typed rebase；

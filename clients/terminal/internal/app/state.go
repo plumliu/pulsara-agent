@@ -67,28 +67,39 @@ type SnapshotLoadingState struct {
 	OperationalSnapshotFingerprint  string
 	OperationalGeneration           uint64
 	OperationalCursor               uint64
+	OperationalRequired             bool
 }
 
 func (s SnapshotLoadingState) Validate(appPhase AppPhase) error {
 	switch s.Phase {
 	case SnapshotLoadingUninitialized:
-		if s.AttachmentID != "" || s.AttachmentGeneration != 0 || s.TransportBindingFingerprint != "" || s.DurableOperationID != "" || s.DurableSnapshotFingerprint != "" || s.OperationalOperationID != "" || s.OperationalSnapshotFingerprint != "" {
+		if s.AttachmentID != "" || s.AttachmentGeneration != 0 || s.TransportBindingFingerprint != "" || s.DurableOperationID != "" || s.DurableSnapshotFingerprint != "" || s.OperationalOperationID != "" || s.OperationalSnapshotFingerprint != "" || s.OperationalRequired {
 			return errors.New("uninitialized snapshot state contains authority")
 		}
 	case SnapshotAwaitingDurableSnapshot:
-		if appPhase != PhaseLoadingSnapshot || s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.DurableOperationID == "" || s.DurableOperationGeneration == 0 || s.DurableSnapshotFingerprint != "" || s.OperationalOperationID != "" {
+		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.DurableOperationID == "" || s.DurableOperationGeneration == 0 || s.DurableSnapshotFingerprint != "" || s.OperationalOperationID != "" {
 			return errors.New("durable snapshot wait state is invalid")
 		}
 	case SnapshotAwaitingOperationalSnapshot:
-		if appPhase != PhaseLoadingSnapshot || s.DurableSnapshotFingerprint == "" || s.DurableControlCursorFingerprint == "" || s.OperationalOperationID == "" || s.OperationalOperationGeneration == 0 || s.OperationalSnapshotFingerprint != "" {
+		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || !s.OperationalRequired || s.DurableSnapshotFingerprint == "" || s.DurableControlCursorFingerprint == "" || s.OperationalOperationID == "" || s.OperationalOperationGeneration == 0 || s.OperationalSnapshotFingerprint != "" {
 			return errors.New("operational snapshot wait state is invalid")
 		}
 	case SnapshotBaselinesInstalled:
-		if appPhase != PhaseReady && appPhase != PhaseReadOnly && appPhase != PhaseDetaching && appPhase != PhaseFatal && appPhase != PhaseExited {
+		// A Ready reconnect keeps the last confirmed baselines for display while
+		// the next physical connection and semantic attachment are negotiated.
+		// They remain stale/read-only and are replaced by the mandatory snapshots
+		// after the successor Attach ACK.
+		if appPhase != PhaseReady && appPhase != PhaseReadOnly &&
+			appPhase != PhaseReconnecting && appPhase != PhaseConnecting &&
+			appPhase != PhaseNegotiating && appPhase != PhaseAttaching &&
+			appPhase != PhaseDetaching && appPhase != PhaseFatal && appPhase != PhaseExited {
 			return errors.New("installed snapshot baseline has an invalid app phase")
 		}
 		if s.DurableSnapshotFingerprint == "" || s.DurableControlCursorFingerprint == "" || s.OperationalSnapshotFingerprint == "" || s.OperationalGeneration == 0 {
 			return errors.New("installed snapshot baseline proof is incomplete")
+		}
+		if s.OperationalRequired {
+			return errors.New("installed snapshot baseline retains rebuild intent")
 		}
 	default:
 		return errors.New("snapshot loading phase is unknown")
@@ -123,22 +134,25 @@ func (s HeartbeatScheduleState) Validate(attached bool) error {
 }
 
 type ConnectionState struct {
-	Phase                       ConnectionPhase
-	ClientInstanceID            string
-	BootstrapHandleID           string
-	TransportCredentialHandleID string
-	Generation                  uint64
-	HandleID                    string
-	ServerConnectionID          string
-	NextOperationGeneration     uint64
-	Outstanding                 OutstandingOperation
-	HandshakeCandidate          protocolvalue.HandshakeCandidate
-	TransportAuth               protocolvalue.TransportAuthResult
-	HelloWinner                 protocolvalue.HelloNegotiationWinner
-	HelloReceipt                protocolvalue.ValidatedServerHelloReceipt
-	AttachmentChallenge         AttachmentChallengeState
-	AttachReceipt               protocolvalue.AttachReceipt
-	HeartbeatSchedule           HeartbeatScheduleState
+	Phase                                 ConnectionPhase
+	ClientInstanceID                      string
+	BootstrapHandleID                     string
+	TransportCredentialHandleID           string
+	ReconnectCredentialHandleID           string
+	ReconnectCredentialCarrierFingerprint string
+	HasReconnectCredentialHandle          bool
+	Generation                            uint64
+	HandleID                              string
+	ServerConnectionID                    string
+	NextOperationGeneration               uint64
+	Outstanding                           OutstandingOperation
+	HandshakeCandidate                    protocolvalue.HandshakeCandidate
+	TransportAuth                         protocolvalue.TransportAuthResult
+	HelloWinner                           protocolvalue.HelloNegotiationWinner
+	HelloReceipt                          protocolvalue.ValidatedServerHelloReceipt
+	AttachmentChallenge                   AttachmentChallengeState
+	AttachReceipt                         protocolvalue.AttachReceipt
+	HeartbeatSchedule                     HeartbeatScheduleState
 }
 
 type AttachmentState struct {
@@ -160,6 +174,46 @@ type LocalNotificationState struct {
 	Items   []string
 	Dropped uint64
 }
+
+type ClipboardOperationState struct {
+	Pending bool
+	Token   LocalOperationToken
+}
+
+func (s ClipboardOperationState) Validate() error {
+	if s.Pending {
+		if s.Token.Kind != OpClipboard || !s.Token.Valid() {
+			return errors.New("terminal clipboard operation owner is invalid")
+		}
+		return nil
+	}
+	if s.Token != (LocalOperationToken{}) {
+		return errors.New("terminal idle clipboard owner retains an operation")
+	}
+	return nil
+}
+
+type ObservationLoopState struct {
+	Enabled                  bool
+	LastResultFingerprint    string
+	ViewportIntentGeneration uint64
+	SnapshotRebaseRounds     uint8
+	PendingPage              protocolvalue.PreparedHistoryPageRequest
+	HasPendingPage           bool
+	PageIntentDirection      protocolvalue.HistoryPageDirection
+	HasPageIntent            bool
+}
+
+func (s ObservationLoopState) Validate() error {
+	if s.ViewportIntentGeneration == 0 {
+		return errors.New("terminal viewport intent generation is zero")
+	}
+	if s.SnapshotRebaseRounds > 4 || s.HasPendingPage != (s.PendingPage.RequestID != "") || s.HasPageIntent != (s.PageIntentDirection != 0) {
+		return errors.New("terminal observation loop state is invalid")
+	}
+	return nil
+}
+
 type TeardownPhase uint8
 
 const (
@@ -728,6 +782,8 @@ type AppState struct {
 	durable             presentation.State
 	operational         presentation.OperationalState
 	control             presentation.ControlProjectionState
+	pageCache           presentation.PageCache
+	observation         ObservationLoopState
 	transcript          transcript.Model
 	composer            ComposerState
 	commands            commandstate.Registry
@@ -737,6 +793,7 @@ type AppState struct {
 	layout              LayoutPlan
 	mouseMode           ClientMouseMode
 	localNotifications  LocalNotificationState
+	clipboard           ClipboardOperationState
 	teardown            TeardownState
 	publicFailure       PublicFailure
 	hasPublicFailure    bool
@@ -759,6 +816,7 @@ func NewInitialAppState(clientInstanceID string) AppState {
 		connection:      ConnectionState{Phase: ConnectionDisconnected, ClientInstanceID: clientInstanceID, Generation: 1, NextOperationGeneration: 1, AttachmentChallenge: NewNoAttachmentChallenge()},
 		snapshotLoading: SnapshotLoadingState{Phase: SnapshotLoadingUninitialized},
 		durable:         presentation.New(), operational: presentation.NewOperational(), control: presentation.NewControlProjection(),
+		pageCache: presentation.NewPageCache(), observation: ObservationLoopState{ViewportIntentGeneration: 1},
 		transcript: transcript.New(layout.Width, layout.TranscriptRows),
 		commands:   commands, interaction: interaction.NewDormantState(), queue: queueState, secret: secret.NewDormantState(),
 		layout: layout, mouseMode: MouseCellMotion, teardown: NewIdleTeardownState(),
@@ -775,6 +833,17 @@ func (s AppState) Validate() error {
 	if s.mouseMode < MouseDisabled || s.mouseMode > MouseAllMotion {
 		return errors.New("terminal client mouse mode is invalid")
 	}
+	if len(s.localNotifications.Items) > maximumLocalNotifications {
+		return errors.New("terminal local notification window exceeds its closed bound")
+	}
+	for _, notification := range s.localNotifications.Items {
+		if notification == "" || len(notification) > 256 {
+			return errors.New("terminal local notification is invalid")
+		}
+	}
+	if err := s.clipboard.Validate(); err != nil {
+		return err
+	}
 	if !s.connection.Outstanding.Valid() {
 		return errors.New("terminal outstanding operation union is invalid")
 	}
@@ -783,6 +852,9 @@ func (s AppState) Validate() error {
 	}
 	if err := s.connection.AttachmentChallenge.Validate(); err != nil {
 		return err
+	}
+	if s.connection.HasReconnectCredentialHandle != (s.connection.ReconnectCredentialHandleID != "" && s.connection.ReconnectCredentialCarrierFingerprint != "") {
+		return errors.New("terminal reconnect credential handle matrix is invalid")
 	}
 	if err := s.durable.Validate(); err != nil {
 		return err
@@ -793,16 +865,36 @@ func (s AppState) Validate() error {
 	if s.transcript.Width() != s.layout.Width || s.transcript.Height() != s.layout.TranscriptRows {
 		return errors.New("terminal viewport geometry diverges from the validated layout")
 	}
-	if s.durable.Ready() != s.transcript.Ready() {
+	if s.durable.Installed() != s.transcript.Ready() {
 		return errors.New("terminal durable snapshot and viewport readiness diverge")
-	}
-	if s.durable.Ready() && s.transcript.SnapshotFingerprint() != s.durable.SnapshotFingerprint() {
-		return errors.New("terminal viewport snapshot identity diverges from durable authority")
 	}
 	if err := s.operational.Validate(); err != nil {
 		return err
 	}
 	if err := s.control.Validate(); err != nil {
+		return err
+	}
+	if err := s.pageCache.Validate(); err != nil {
+		return err
+	}
+	if s.durable.Ready() {
+		if err := s.pageCache.ValidateAgainstDurable(s.durable.Durable()); err != nil {
+			return err
+		}
+		if s.transcript.SnapshotFingerprint() != s.pageCache.CurrentMaterializationFingerprint() {
+			return errors.New("terminal viewport materialization diverges from the current pinned root")
+		}
+	} else if s.durable.Installed() && s.pageCache.Ready() {
+		if err := s.pageCache.ValidateAgainstDurable(s.durable.Durable()); err != nil {
+			return err
+		}
+		if s.transcript.SnapshotFingerprint() != s.pageCache.CurrentMaterializationFingerprint() {
+			return errors.New("terminal stale viewport materialization diverges from the current pinned root")
+		}
+	} else if s.pageCache.Ready() {
+		return errors.New("terminal page cache owns roots before durable installation")
+	}
+	if err := s.observation.Validate(); err != nil {
 		return err
 	}
 	if err := s.commands.Validate(); err != nil {
@@ -824,9 +916,22 @@ func (s AppState) Validate() error {
 	if err := s.connection.HeartbeatSchedule.Validate(heartbeatOwned); err != nil {
 		return err
 	}
-	if s.phase == PhaseReady || s.phase == PhaseReadOnly {
+	if s.phase == PhaseReady {
 		if !s.attachment.Valid || !s.durable.Ready() || !s.transcript.Ready() || !s.operational.Ready() || !s.control.Ready() || s.snapshotLoading.Phase != SnapshotBaselinesInstalled {
 			return errors.New("ready terminal state lacks required baselines")
+		}
+	} else if s.phase == PhaseReadOnly {
+		// ReadOnly deliberately preserves the last confirmed screen while a
+		// control/durable/operational rebuild is in flight.  The loading union
+		// owns that exact replacement operation, so requiring
+		// BaselinesInstalled here would turn every legitimate GAP or control
+		// invalidation into a client invariant failure before the snapshot can
+		// complete.
+		if !s.attachment.Valid || !s.durable.Installed() || !s.transcript.Ready() || !s.operational.Installed() || !s.control.Installed() ||
+			(s.snapshotLoading.Phase != SnapshotBaselinesInstalled &&
+				s.snapshotLoading.Phase != SnapshotAwaitingDurableSnapshot &&
+				s.snapshotLoading.Phase != SnapshotAwaitingOperationalSnapshot) {
+			return errors.New("read-only terminal state lacks preserved baselines")
 		}
 	}
 	if s.hasPublicFailure {

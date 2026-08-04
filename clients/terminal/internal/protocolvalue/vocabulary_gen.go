@@ -6,11 +6,12 @@ import "github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol"
 const (
 	ProtocolMajor     uint32 = 2
 	ProtocolMinor     uint32 = 0
-	SchemaFingerprint        = "sha256:ba796c11dc0906419163cd79ef9928553cd9de8f07156ba8a3ff3c45414cddda"
+	SchemaFingerprint        = "sha256:61c53a72b867a1f10794959e0b27244833ca5488a965550b1881f252a22004e6"
 
 	MaximumFrameBytes                  uint32 = 8 * 1024 * 1024
 	MaximumHistoryPageCells            uint32 = 256
 	MaximumHistoryPageDecodedBytes     uint32 = 4 * 1024 * 1024
+	MaximumPinnedHistoryRoots          uint32 = 4
 	MaximumObservationWaitMS           uint32 = 5_000
 	SecretFrameMaximumBytes            uint32 = 64 * 1024
 	MaximumDurableObservationBytes     uint32 = 4 * 1024 * 1024

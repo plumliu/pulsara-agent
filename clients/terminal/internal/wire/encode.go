@@ -25,3 +25,11 @@ func OperationalSnapshotFrame(value *protocol.OperationalSnapshotRequest) *proto
 func HeartbeatFrame(value *protocol.HeartbeatRequest) *protocol.ClientFrame {
 	return &protocol.ClientFrame{Request: &protocol.ClientFrame_Heartbeat{Heartbeat: value}}
 }
+
+func ObserveFrame(value *protocol.ObserveNextRequest) *protocol.ClientFrame {
+	return &protocol.ClientFrame{Request: &protocol.ClientFrame_ObserveNext{ObserveNext: value}}
+}
+
+func HistoryPageFrame(value *protocol.HistoryPageRequest) *protocol.ClientFrame {
+	return &protocol.ClientFrame{Request: &protocol.ClientFrame_HistoryPage{HistoryPage: value}}
+}

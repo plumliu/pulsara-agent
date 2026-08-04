@@ -70,11 +70,12 @@ from pulsara_agent.runtime.terminal_application.control_projection import (
 PROTOCOL_MAJOR = 2
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:ba796c11dc0906419163cd79ef9928553cd9de8f07156ba8a3ff3c45414cddda"
+    "sha256:61c53a72b867a1f10794959e0b27244833ca5488a965550b1881f252a22004e6"
 )
 MAXIMUM_FRAME_BYTES = 8 * 1024 * 1024
 MAXIMUM_HISTORY_PAGE_CELLS = 256
 MAXIMUM_HISTORY_PAGE_BYTES = 4 * 1024 * 1024
+MAXIMUM_PINNED_HISTORY_ROOTS = 4
 HEARTBEAT_INTERVAL_MS = 10_000
 HEARTBEAT_GRACE_MS = 20_000
 HEARTBEAT_MAXIMUM_MISSED_COUNT = 2
@@ -568,6 +569,14 @@ def entry_to_wire(ranked) -> wire.PresentationHistoryRankedEntry:
         rank_basis=basis_wire,
         ranked_view_fingerprint=ranked.ranked_view_fingerprint,
     )
+
+
+def history_ranked_entry_vector_decoded_bytes(
+    entries: tuple[wire.PresentationHistoryRankedEntry, ...],
+) -> int:
+    """Return the Protocol 2.0 decoded-page accounting for full entry carriers."""
+
+    return sum(len(entry.SerializeToString(deterministic=True)) for entry in entries)
 
 
 def root_to_wire(root) -> wire.PresentationHistoryRootIdentity:
@@ -1067,6 +1076,8 @@ def snapshot_to_wire(
             entry_to_wire(item) for item in viewport.ordered_resident_entries
         ),
         latest_root_cursor_pair=cursor_pair_to_wire(viewport.latest_root_cursor_pair),
+        resident_vector_fingerprint=viewport.resident_vector_fingerprint,
+        viewport_fingerprint=viewport.viewport_fingerprint,
         snapshot_fingerprint=snapshot.snapshot_fingerprint,
         control_projection_snapshot=control_snapshot_to_wire(control_snapshot),
     )
@@ -1262,6 +1273,7 @@ __all__ = [
     "MAXIMUM_FRAME_BYTES",
     "MAXIMUM_HISTORY_PAGE_BYTES",
     "MAXIMUM_HISTORY_PAGE_CELLS",
+    "MAXIMUM_PINNED_HISTORY_ROOTS",
     "MAXIMUM_OBSERVATION_WAIT_MS",
     "MAXIMUM_ACTIVE_QUEUE_ITEMS",
     "MAXIMUM_SERVER_CONTROL_NOTIFICATIONS",
@@ -1282,6 +1294,7 @@ __all__ = [
     "control_snapshot_to_wire",
     "cursor_to_wire",
     "entry_to_wire",
+    "history_ranked_entry_vector_decoded_bytes",
     "interaction_to_wire",
     "outcome_to_wire",
     "operational_activity_to_wire",

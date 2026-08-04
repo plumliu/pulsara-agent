@@ -3,7 +3,7 @@
 > 文档性质：竞品代码真值调研 + Pulsara Terminal 产品设计基线 + 规范索引
 > 状态：ACTIVE PRODUCT BASELINE；Bubble Tea v2已通过S0 feasibility gate，冻结为长期一等Terminal客户端
 >
-> 当前实施边界（2026-08-03）：renderer-neutral Python infrastructure baseline、Go-ready Protocol 2.0原子切换、attachment-attempt handshake recovery、atomic five-section control baseline、three-plane observation wire prerequisite与typed active-queue genesis extension已完成；隔离S0 feasibility spike为`PASS`，Bubble Tea S1只读production纵切为`IMPLEMENTED`。S2–S6行为、正式四平台Go packaging与默认TTY activation仍为`NOT STARTED`。S0证据不得计入Python Foundation或S1完成证据。
+> 当前实施边界（2026-08-04）：renderer-neutral Python infrastructure baseline、Go-ready Protocol 2.0原子切换、attachment-attempt handshake recovery、atomic five-section control baseline、three-plane observation、typed active-queue genesis、history page/GAP与rotating ordinary reconnect已完成；隔离S0 feasibility spike为`PASS`，Bubble Tea S1只读production纵切与S2 live纵切为`IMPLEMENTED`。S3–S6行为、正式四平台Go packaging与默认TTY activation仍为`NOT STARTED`。S0证据不得计入Python Foundation或S1/S2完成证据。
 > 规范口径：本文拥有`TUI-UX-*`产品行为与跨规格总边界；其中保留的DTO、算法和伪代码用于解释设计来源，不再充当唯一implementation authority
 > 调研对象：
 >
@@ -2745,6 +2745,8 @@ F/B namespace只表达contract ownership，不表达PR合入顺序。生产落�
 - `GAP -> bounded catch-up | snapshot rebuild`；
 - client detach/reconnect与duplicate/overlap ingestion；
 - Bubble Tea viewport在reconnect后保持合法follow-tail/unseen语义。
+- history page使用256 cells/4 MiB协商上限和lossless cursor carrier，response进入cache前再次按exact request复核count与完整ranked-entry deterministic-Protobuf bytes，完整root/cursor identity逐字段join，并拒绝same fingerprint/different payload、未知placement vocabulary或cross-contract cursor；latest/current root、resident/hydrated vector由单一bounded materializer拥有，delta、root advance、resize与`y`复制都必须读取current materialization，不得退回latest resident tail；clipboard超过4 MiB时明确拒绝且不得静默截断，其local operation独立于串行wire Observe owner；
+- client/server每attachment使用同一4-root FIFO cache/lease策略，每root最多512 cells/16 MiB；GAP后server只可暂时保留bounded superset，new attachment不继承predecessor pins；
 
 验收：
 
@@ -2752,6 +2754,7 @@ F/B namespace只表达contract ownership，不表达PR合入顺序。生产落�
 - overflow只detach受影响attachment或发送`GAP`；
 - event产生零个或多个projection change时两种cursor仍自洽；
 - reconnect不重复或遗漏可见semantic cell；
+- control invalidation与operational GAP同batch时只形成一个联合恢复计划，两个baseline均恢复前不得Ready；
 - Go client不接收或解释`AgentEvent`、`RawStoredEventEnvelope`或storage receipt。
 
 ### S3：主动控制vertical slice

@@ -1,6 +1,6 @@
 # Pulsara Bubble Tea v2 Terminal Client Hard-Cut 实施规格
 
-> 状态：S0 PASS；S1 IMPLEMENTED；S2–S6 NOT STARTED
+> 状态：S0 PASS；S1–S2 IMPLEMENTED；S3–S6 NOT STARTED
 > Requirement namespace：TUI-BT-*
 > 唯一 owner：Go Terminal client 的状态、渲染、交互、进程内 I/O 调度与发布
 > Python authority：PULSARA_TERMINAL_PRESENTATION_FOUNDATION_IMPLEMENTATION.zh.md
@@ -24,6 +24,22 @@ S1 已按本规格完成只读纵切：
 - 四平台production packaging、checksum release、wheel carrier和默认TTY activation仍归S6，未计入本回执。
 
 机器证据由`clients/terminal`的Go tests/race/vet、Python Protocol/Gateway/launcher/cross-language PTY tests、schema generator clean check和全量pytest共同提供；最终测试数字记录在本次实施交付报告中。
+
+## S2 实施回执（2026-08-04）
+
+S2 已在S1 full-height observer shell上完成live presentation纵切：
+
+- Go build只在history page四分支、three-plane observation、control invalidation和rotating reconnect credential全部接线后，才把`HISTORY_PAGE_V1 | OBSERVATION_STREAM_V1 | ROOT_ADVANCE_V1 | GAP_REBUILD_V1 | CONTROL_PROJECTION_OBSERVATION_V1 | RECONNECT_AUTH_ROTATION_V1`加入required/supported capability集合；
+- Python Gateway一次`ObserveNext`最多返回durable、operational、control各一个closed branch，同一batch一次交付；Go先验证完整batch，任一plane结构或predecessor不可信时不部分安装其他plane；
+- durable path已消费`ProjectionDelta | AuthorityAdvance | RootAdvanced | GAP`；唯一`PageCache`同时拥有latest root、current viewport root、resident vector与hydrated window，resize/delta/root/page均从该owner materialize。每attachment固定最多4个root，按与Python retention lease相同的FIFO集合换代；每root最多200 resident + 312 hydrated cells、resident/hydrated各8 MiB（总计512 cells/16 MiB），越界按请求方向从远端hydrated边缘淘汰并保留反向continuation cursor；
+- history page消费`PAGE | CURSOR_STALE | REBASE_REQUIRED | RECONCILIATION_REQUIRED`，请求固定使用Protocol协商的256 cells/4 MiB上限；response在进入PageCache前必须再次验证`len(entries) <= outstanding.maximum_cells`且全部完整`PresentationHistoryRankedEntry` deterministic Protobuf bytes之和不超过`outstanding.maximum_decoded_bytes`，累计312 cells/8 MiB hydrated window不得替代单页边界；Go decoder独占不可由app caller写入的计量proof，Python Gateway在发出PAGE前使用同一算法复核，超限降级为typed reconciliation；Go cursor carrier无损保留完整root contract/registry字段和完整placement key，decode→encode必须与原Protobuf cursor逐字段相等，拒绝未知relative-position enum、anchor placement contract与root contract不一致、server order drift、无anchor continuation和cross-root cursor；
+- control Changed/GAP只把`Fresh(view, confirmed cursor)`转为`SnapshotRequired(stale view, confirmed cursor, observed latest cursor)`，并以minimum-bound snapshot恢复；queue/run/interaction等control-only变化不依赖history delta；
+- durable GAP触发durable+operational正式snapshot恢复，operational GAP只重建operational baseline；同batch control invalidation + operational GAP先原子invalidate operational，再由minimum-bound durable snapshot continuation强制取得operational snapshot，不允许部分消费后暂时恢复Ready；slow renderer、local overflow或page I/O均不进入Python committed writer反压路径；
+- Ready ordinary reconnect使用runtime-owned rotating credential建立exact next handshake candidate与new attachment generation；Python attachment registry在同一CAS点退役predecessor，使旧binding、heartbeat和command立即fail closed。Pre-ACK same-candidate rebind与post-ACK tombstone recovery仍保持独立路径；
+- reconnect期间保留最后confirmed transcript与viewport为read-only；新attachment ACK后以新attachment generation重绑PageCache，清除predecessor的root set并重新安装durable/control/operational baselines，再恢复serial observe loop，不重放command或伪造server outcome；
+- S2仍只请求observer attachment，不生成mutation、interaction resolution、queue mutation或secret effect；这些继续归S3–S5。
+
+机器证据包括Go projection/app状态机与page/reconnect回归、Python Foundation/Protocol/headless ordinary-reconnect测试、cross-language contract generator、race/vet及Terminal回归。最终测试数字记录在本次实施交付报告中。
 
 ## 0. 本文裁决
 
@@ -416,7 +432,7 @@ type AppState struct {
 }
 ~~~
 
-`PhaseLoadingSnapshot`不再是一个同时表示三种进度的模糊标签。S1冻结下列closed substate；它在`PhaseReady | PhaseReadOnly`继续保留`SnapshotBaselinesInstalled`证明，而不是进入Ready后清零：
+`PhaseLoadingSnapshot`不再是一个同时表示三种进度的模糊标签。S1冻结下列closed substate；初次进入`PhaseReady | PhaseReadOnly`必须持有`SnapshotBaselinesInstalled`证明，而不是进入Ready后清零。S2发生durable/operational GAP或control invalidation时，`PhaseReadOnly`可在保留上一份已确认屏幕baseline的同时暂时进入`SnapshotAwaitingDurableSnapshot | SnapshotAwaitingOperationalSnapshot`；replacement FULL后才重新安装`SnapshotBaselinesInstalled`，`PhaseReady`始终只允许后者：
 
 ~~~go
 type SnapshotLoadingPhase uint8
@@ -1760,14 +1776,14 @@ App snapshot installer先验证完整`presentation.ControlProjectionState`，再
 
 每个state type必须提供`New...()`和`Validate() error`。除本package constructor/transition外禁止struct literal；slice/map均private并在constructor中deep-copy。`NewInitialAppState()`必须生成`PhaseBooting + disconnected connection + invalid attachment + SnapshotLoadingUninitialized + invalid presentation/operational/control + disabled composer + four dormant final owners + teardown idle`，其validator还必须执行：
 
-- `PhaseLoadingSnapshot`要求`SnapshotLoadingState`处于AwaitingDurable或AwaitingOperational且严格满足presence矩阵；`PhaseReady`要求valid attachment、`SnapshotBaselinesInstalled`、matching durable/operational fingerprints与`ControlProjectionFresh`；`PhaseReadOnly`同样要求BaselinesInstalled，Control只能为Fresh，或者为携完整stale view + matching confirmed cursor + same-generation strictly newer observed cursor / typed generation-rebase target的`ControlProjectionSnapshotRequired`；
+- `PhaseLoadingSnapshot`要求`SnapshotLoadingState`处于AwaitingDurable或AwaitingOperational且严格满足presence矩阵；`PhaseReady`要求valid attachment、`SnapshotBaselinesInstalled`、matching durable/operational fingerprints与`ControlProjectionFresh`；`PhaseReadOnly`必须保留已安装的durable/transcript/operational/control baseline，其loading union可为`BaselinesInstalled | AwaitingDurableSnapshot | AwaitingOperationalSnapshot`，后两者表示GAP/control invalidation后正在以唯一exact operation替换baseline；Control只能为Fresh，或者为携完整stale view + matching confirmed cursor + same-generation strictly newer observed cursor / typed generation-rebase target的`ControlProjectionSnapshotRequired`；
 - serial connection lane至多一个outstanding operation；page、command、secret与teardown各自在对应state slice安装bounded token。Wire token必须含exact non-empty RequestID，local token必须物理不存在RequestID；post-attach wire token还必须逐项绑定current attachment与transport-binding generation/fingerprint，pre-attach token则强制这些字段为zero；
 - attachment role为observer时controller generation仍可展示但mutation disabled；
 - viewport root只能是latest或retention-bound pinned root；
 - control projection为`SnapshotRequired`时interaction/queue/run mutation全部disabled，且interaction/queue仍只能引用confirmed cursor，不得引用observed latest cursor；
 - valid durable snapshot要求interaction/queue cursor都等于snapshot baseline confirmed control cursor；`Dormant`仅在snapshot前合法，snapshot后的read-only/projected state必须完整接纳server view，不能要求pending/queue为空；
 - `AttachmentChallengePreparedPromotionPending`只允许处于Negotiating、绑定current `OpHello`与matching winner/receipt，且不得存在active handle或`OpAttach`；`AttachmentChallengeActiveAcceptancePending`要求matching promotion receipt与`OpChallengePromotionConfirm | OpChallengeRevokeActive` local token，仍禁止`OpAttach`；`AttachmentChallengeActive`只允许matching application-acceptance receipt已安装、prepared identity已消费且下一步为Attaching/`OpAttach`。同一connection最多一个prepared、active-pending或active challenge；new Hello/connection generation必须先取得matching revoke receipt；
-- `PhaseReady` + `ControlProjectionSnapshotRequired | Uninitialized`、`PhaseReadOnly` + Uninitialized、Ready/ReadOnly但loading state非BaselinesInstalled、AwaitingOperational却缺durable result或仍存在durable outstanding、Fresh cursor与view fingerprint不一致、SnapshotRequired中same-generation observed cursor不比confirmed cursor新，或generation-change缺typed rebase reason，都是constructor-level invariant failure；
+- `PhaseReady` + `ControlProjectionSnapshotRequired | Uninitialized`、`PhaseReadOnly` + Uninitialized、Ready但loading state非BaselinesInstalled、ReadOnly但loading state不在`BaselinesInstalled | AwaitingDurableSnapshot | AwaitingOperationalSnapshot`、AwaitingOperational却缺durable result或仍存在durable outstanding、Fresh cursor与view fingerprint不一致、SnapshotRequired中same-generation observed cursor不比confirmed cursor新，或generation-change缺typed rebase reason，都是constructor-level invariant failure；
 - `PhaseExited`要求teardown terminal且无outstanding operation、prepared/active challenge或secret handle。
 
 Physical objects由`internal/client/runtime.go`中的单一`ClientRuntimeOwner`持有：connection handles、transport-auth credentials、`PREPARED -> ACTIVE_PENDING_APPLICATION_ACCEPTANCE -> ACTIVE -> CONSUMED | REVOKED` hello challenge records、operation cancellation/drain records，以及S4后注入的`SecretRuntimeOwner`。Authority-bearing AppState/application Message/Effect只保存opaque identity；唯一例外是framework input进入boundary normalizer前的bounded transient bytes，必须按TUI-BT-APP-003与secret ingress规则立即转成one-shot edit handle。Runtime owner按closed local operation token执行prepare/promote/confirm/borrow/revoke；prepared和active-pending challenge必须绑定delivery guard与absolute deadline，close必须在single teardown deadline内revoke/drain全部challenge records。它不是新的semantic context，也不得读取View state或推导server outcome。
@@ -2771,6 +2787,12 @@ viewport_intent_generation
 - entries按server顺序使用，不重排；
 - overlap entry只有exact same fingerprint可dedupe；
 - before/after cursor只写入该root的pinned page state；
+- request必须使用Hello冻结的256 cells / 4 MiB上限；Go的cursor decode→encode必须保留完整root identity、placement contract、两个registry fingerprints、anchor placement key所有optional presence与canonical bytes，Python exact rebind前不得降级成fingerprint-only carrier；
+- `HistoryPageAcceptedMsg`必须独立复核response count与decoder-owned full-carrier byte proof均不超过该outstanding request冻结的上限；byte proof唯一算法是按wire顺序求每个完整`PresentationHistoryRankedEntry.SerializeToString(deterministic=true)`的长度之和，必须覆盖source view、content blocks、placement key、rank basis及其全部metadata，不能从降维后的`HistoryCell`重算或接受caller自报；entry非空与byte proof非零必须同真。Python Gateway在发送PAGE前对同一ordered wire entries执行相同计量，超界返回`PRESENTATION_PAGE_WIRE_DECODED_BOUND_EXCEEDED` reconciliation。Cache的per-root累计上限、8 MiB hydrated allowance或8 MiB outer frame不得放宽单次256/4 MiB page contract；
+- PAGE的`validated_root_identity`必须逐字段等于outstanding cursor的完整root identity，before/after cursor中的root也必须逐字段相等；只比较`root_fingerprint`非法。Message gate与PageCache必须各自验证，禁止same fingerprint/different tree、placement、registry或checkpoint payload覆盖pinned root；
+- `relative_position_kind`只接受Protocol 2.0六个已声明非零值；anchor placement key的contract ID/version/fingerprint必须逐字段等于cursor root identity冻结的placement contract，否则在进入AppState前fail closed；
+- `PageCache`是current viewport root/materialized vector唯一owner；PAGE、durable transition与resize都从该vector更新`transcript.Model`，不能用resident-only durable snapshot覆盖hydrated cells；matching viewport intent的completed BEFORE/AFTER page按原user direction推进一页visual rows；late intent只更新cache/materialization而不夺回viewport；
+- V1每attachment的Go root cache与Python lease set共享固定4-root FIFO换代。新semantic attachment清空predecessor set；每root最多200 resident + 312 hydrated cells，resident/hydrated分别最多8 MiB，总计最多512 cells/16 MiB；达到任一hydrated bound时只从本次请求方向的远端淘汰并安装可返回该窗口的opposite cursor；
 - empty page只有matching has_more=false才表示该方向结束；
 - response到达时viewport intent已变，只填cache，不强制移动viewport。
 
@@ -3643,12 +3665,15 @@ clients/terminal/internal/presentation/gap.go
 clients/terminal/internal/presentation/control_change.go
 clients/terminal/internal/presentation/page.go
 clients/terminal/internal/presentation/cache.go
+clients/terminal/internal/presentation/s2_state_test.go
+clients/terminal/internal/protocolvalue/s2_carriers_gen.go
+clients/terminal/internal/app/observation.go
+clients/terminal/internal/app/s2_observation_test.go
+clients/terminal/internal/app/s2_test_helpers_test.go
 clients/terminal/internal/client/bridge.go
 clients/terminal/internal/client/observe.go
 clients/terminal/internal/client/history.go
 clients/terminal/internal/components/status/view.go
-clients/terminal/testdata/protocol/
-clients/terminal/testdata/view/
 ~~~
 
 修改：
@@ -3683,9 +3708,9 @@ tests/test_terminal_tui_cross_language.py
 | root | unchanged、bounded changes、rebase、retained noop suffix |
 | operational | coalesce、remove、generation gap、resnapshot |
 | control | queue/interaction/run/lifecycle/notification-only signal、atomic view+source versions+cursor、Python ring内union/range golden、Go opaque proof structural join、ring外/重启typed GAP；Fresh -> SnapshotRequired保留stale view/confirmed cursor且单独记observed latest，minimum-bound snapshot才恢复Fresh；generation-rebase response最多4轮且共享deadline；Ready对stale/uninitialized fail closed |
-| GAP | server gap、local overflow、dual snapshot rebuild |
-| page | PAGE/STALE/REBASE/RECONCILIATION、before/after同cursor |
-| viewport | follow-tail、unseen、old pinned root、new latest pair |
+| GAP | server gap、local overflow、dual snapshot rebuild、control invalidation + operational GAP同batch原子恢复 |
+| page | PAGE/STALE/REBASE/RECONCILIATION、before/after完整root exact join、same-root-fingerprint/different-payload拒绝、256/4 MiB真实PageUp、完整deterministic-Protobuf carrier bytes与forged-small accounting、巨大metadata/短public text越界拒绝、完整root/placement cursor Protobuf roundtrip、unknown relative-position与cross-contract anchor拒绝、server order与duplicate/conflict |
+| viewport | follow-tail、unseen、old pinned root、new latest pair、hydrated page经过delta与resize仍存在、late intent不夺回viewport、`y`只复制current PageCache materialization且4 MiB越界明确拒绝不截断、clipboard使用独立bounded local-operation owner且不得覆盖long-poll Observe、4-root FIFO、512-cell/16-MiB per-root hard bound、new attachment rebind |
 | reconnect | pre-Ready same candidate generation、Ready next generation、typed auth result、credential rotation、semantic winner/per-connection receipt、pre/post-ACK recovery、old/new grace、ordinary draft保留、secret为空、command无重放 |
 | fairness/performance | control+durable+operational同时pending全部进入一批；持续100Hz任一plane不饿死其他plane、不丢keypress、bounded memory |
 
@@ -3701,6 +3726,8 @@ tests/test_terminal_tui_cross_language.py
 8.仍无mutation/secret production path。
 9. `HISTORY_PAGE_V1`、`CONTROL_PROJECTION_OBSERVATION_V1`与`RECONNECT_AUTH_ROTATION_V1`只在page四分支/cache、control Changed/GAP消费和credential rotation gates全绿的build中进入required/selected set。
 10. Control invalidation不破坏cursor→view join；observed latest只是snapshot lower bound，matching snapshot前App仅能ReadOnly且不发新Observe。
+11. control invalidation与operational GAP同batch时形成一个atomic recovery plan；durable snapshot完成后仍必须取得operational snapshot才能Ready。
+12. Go bounded root set与Python attachment lease set使用同一Protocol固定上限及FIFO策略；连续交付时两端集合相等。GAP/rebuild后server可暂时保守持有不超过4项的superset，heartbeat只续租该bounded server set，不能恢复无界历史lease。
 
 ## 12. S3：Composer、submit、stop 与 command receipt
 

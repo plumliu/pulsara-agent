@@ -8,6 +8,7 @@ import (
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/app"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 )
 
 type challengePhase uint8
@@ -30,9 +31,77 @@ type challengeRecord struct {
 }
 
 type ClientRuntimeOwner struct {
-	mu        sync.Mutex
-	challenge *challengeRecord
-	closed    bool
+	mu               sync.Mutex
+	challenge        *challengeRecord
+	reconnectCurrent *reconnectCredentialRecord
+	reconnectPending *reconnectCredentialRecord
+	closed           bool
+}
+
+type reconnectCredentialRecord struct {
+	public             protocolvalue.ReconnectCredentialPublicIdentity
+	capability         []byte
+	carrierFingerprint string
+	expiresAt          time.Time
+}
+
+func (o *ClientRuntimeOwner) InstallPendingReconnectCredential(value protocolvalue.ReconnectCredentialCarrier) error {
+	expiresAt, err := time.Parse(time.RFC3339Nano, value.PublicIdentity.ExpiresAtUTC)
+	if err != nil || !time.Now().Before(expiresAt) || len(value.Capability) != 32 || value.Fingerprint == "" {
+		return errors.New("terminal reconnect credential is invalid")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return errors.New("terminal runtime owner is closed")
+	}
+	if o.reconnectPending != nil {
+		if o.reconnectPending.carrierFingerprint == value.Fingerprint {
+			return nil
+		}
+		return errors.New("terminal pending reconnect credential conflicts")
+	}
+	o.reconnectPending = &reconnectCredentialRecord{public: value.PublicIdentity, capability: append([]byte(nil), value.Capability...), carrierFingerprint: value.Fingerprint, expiresAt: expiresAt}
+	return nil
+}
+
+func (o *ClientRuntimeOwner) PromotePendingReconnectCredential(carrierFingerprint string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed || o.reconnectPending == nil || o.reconnectPending.carrierFingerprint != carrierFingerprint || !time.Now().Before(o.reconnectPending.expiresAt) {
+		return errors.New("terminal pending reconnect credential is unavailable")
+	}
+	if o.reconnectCurrent != nil {
+		clear(o.reconnectCurrent.capability)
+	}
+	o.reconnectCurrent, o.reconnectPending = o.reconnectPending, nil
+	return nil
+}
+
+func (o *ClientRuntimeOwner) BorrowReconnectCredential(expectedAttemptGeneration uint64) (protocolvalue.ReconnectCredentialPublicIdentity, []byte, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed || o.reconnectCurrent == nil || !time.Now().Before(o.reconnectCurrent.expiresAt) || o.reconnectCurrent.public.ExpectedNextAttachmentAttemptGeneration != expectedAttemptGeneration {
+		return protocolvalue.ReconnectCredentialPublicIdentity{}, nil, errors.New("terminal reconnect credential is unavailable")
+	}
+	return o.reconnectCurrent.public, append([]byte(nil), o.reconnectCurrent.capability...), nil
+}
+
+func (o *ClientRuntimeOwner) RevokeReconnectCredentials() uint32 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var count uint32
+	if o.reconnectCurrent != nil {
+		clear(o.reconnectCurrent.capability)
+		o.reconnectCurrent = nil
+		count++
+	}
+	if o.reconnectPending != nil {
+		clear(o.reconnectPending.capability)
+		o.reconnectPending = nil
+		count++
+	}
+	return count
 }
 
 func (o *ClientRuntimeOwner) PrepareAttachmentChallenge(helloOperation app.OperationToken, challenge [32]byte, validatedReceiptFingerprint, candidateFingerprint, connectionID, commitment string, expiresAt time.Time) (app.PreparedAttachmentChallengeHandleIdentity, error) {
@@ -230,6 +299,16 @@ func (o *ClientRuntimeOwner) Close() uint32 {
 		}
 		clear(o.challenge.value)
 		o.challenge.phase = challengeRevoked
+	}
+	if o.reconnectCurrent != nil {
+		clear(o.reconnectCurrent.capability)
+		o.reconnectCurrent = nil
+		revoked++
+	}
+	if o.reconnectPending != nil {
+		clear(o.reconnectPending.capability)
+		o.reconnectPending = nil
+		revoked++
 	}
 	return revoked
 }

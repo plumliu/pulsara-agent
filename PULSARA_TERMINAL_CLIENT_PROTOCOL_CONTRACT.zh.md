@@ -1,6 +1,6 @@
 # Pulsara Terminal Client Protocol Contract
 
-> 状态：PYTHON BOUNDARY与Go-ready Protocol 2.0 subcut IMPLEMENTED；Bubble Tea S1 consumer IMPLEMENTED；S2–S6消费、正式packaging与默认TTY activation为DEFERRED
+> 状态：PYTHON BOUNDARY与Go-ready Protocol 2.0 subcut IMPLEMENTED；Bubble Tea S1–S2 consumer IMPLEMENTED；S3–S6消费、正式packaging与默认TTY activation为DEFERRED
 > Requirement namespace：`TUI-PROTO-*`
 > 唯一owner：Python TerminalClientGateway与外部Terminal client之间的本地wire contract
 > Domain authority：`PULSARA_TERMINAL_PRESENTATION_FOUNDATION_IMPLEMENTATION.zh.md`
@@ -1281,11 +1281,13 @@ HistoryReconciliationRequired
 
 Wire `PresentationHistoryCursor`不得包含direction或feed kind；它只绑定unified `PresentationHistoryRootIdentity`与anchor。`HistoryPageRequest.direction`是本次读取方向的唯一真源，Python adapter必须原样调用`PresentationHistoryPagePort.read_page(cursor, direction, limits, deadline)`。禁止生成transcript/audit两套RPC、`read_before/read_after`两个method，也禁止从cursor、anchor位置或stale/rebase response反推direction。`HistoryCursorStale | HistoryRebaseRequired | HistoryReconciliationRequired`不得携带recommended/next direction；重建后的下一次direction仍由client新建request选择。
 
-`HistoryPageData`中的empty `ordered_history_entries`加matching `has_more_* = false`才表示该方向没有更多历史。Entries已由Python unified root按stable placement key完成transcript/audit全局排序，Go不得按display rank、cell kind、source sequence或arrival time再merge/reorder。每个display rank只绑定response中的confirmed root，不能缓存为跨root identity。`HistoryCursorStale`和`HistoryRebaseRequired`永不表示end-of-history：前者只有在server能证明same anchor placement key/entry ID在latest root中的exact映射时才可返回replacement cursor，`replacement_cursor`与`replacement_cursor_anchor_proof`必须同时存在或同时为空；无法证明时必须升级为rebase。后者要求client丢弃受影响的history cache并以snapshot/rebase token重建。`HistoryReconciliationRequired`不得伪造可信cursor/root；只有authority仍被证明的hint才可出现。
+`HistoryPageData`中的empty `ordered_history_entries`加matching `has_more_* = false`才表示该方向没有更多历史。Entries已由Python unified root按stable placement key完成transcript/audit全局排序，Go不得按display rank、cell kind、source sequence或arrival time再merge/reorder。每个display rank只绑定response中的confirmed root，不能缓存为跨root identity。Client在接受PAGE前必须按outstanding request重新验证entry count与完整wire carrier bytes；byte算法固定为按ordered entries求每个完整`PresentationHistoryRankedEntry` deterministic Protobuf serialization长度之和，覆盖未进入降维`HistoryCell`的source、placement、content-block metadata与rank basis。Python Gateway发送前与Go decoder使用同一算法；Go accounting proof为decoder-owned private state，app只能读取不能提供。两项计量分别不得超过该request冻结的`maximum_cells`与`maximum_decoded_bytes`，不能借用outer frame或累计hydrated cache上限。Gateway发现Foundation outcome的wire计量超限时必须返回`PRESENTATION_PAGE_WIRE_DECODED_BOUND_EXCEEDED` typed reconciliation，不得写出越界PAGE。`validated_root_identity`、before cursor root与after cursor root必须逐字段等于outstanding cursor完整root identity，只匹配root fingerprint非法；message gate与cache各自fail closed。`HistoryCursorStale`和`HistoryRebaseRequired`永不表示end-of-history：前者只有在server能证明same anchor placement key/entry ID在latest root中的exact映射时才可返回replacement cursor，`replacement_cursor`与`replacement_cursor_anchor_proof`必须同时存在或同时为空；无法证明时必须升级为rebase。后者要求client丢弃受影响的history cache并以snapshot/rebase token重建。`HistoryReconciliationRequired`不得伪造可信cursor/root；只有authority仍被证明的hint才可出现。
 
-Server每次向attachment发布snapshot/page cursor或接受旧cursor page request时，必须在读取root前获取attachment-bound process-local root-retention lease；该lease不进入wire DTO或cursor fingerprint。Detach/expiry释放lease；unleased immutable root只在Foundation冻结的generation-window与TTL双重horizon内可重新borrow。只有root已被合法retire/GC时才返回cursor stale，latest root推进本身不得让仍retained的旧cursor失效。
+Server每次向attachment发布snapshot/page cursor或接受旧cursor page request时，必须在读取root前获取attachment-bound process-local root-retention lease；该lease不进入wire DTO或cursor fingerprint。Protocol 2.0固定每attachment最多4个leased roots，并与Go `PageCache`使用同一个“首次安装顺序FIFO”策略：existing-root renew/page read不改变顺序；在连续交付路径中，第5个新root在两端确定性淘汰最早root，若该项正是client current viewport则client原子切回latest root。GAP/rebuild允许server在client清空local cache后暂时保守持有不超过4项的superset，随后按新root FIFO自然收敛；该superset不赋予client cursor authority，也不得增长或恢复已淘汰server lease。新semantic attachment generation从空集合开始，不继承predecessor lease/cache。Detach/expiry释放全部lease；unleased immutable root只在Foundation冻结的generation-window与TTL双重horizon内可重新borrow。只有root已被合法retire/GC时才返回cursor stale，latest root推进本身不得让仍在server bounded set内的旧cursor失效。最多8个active attachments × 4 roots = 32 leases，必须严格低于Foundation 64项process capacity。
 
-Client必须区分`latest_root_cursor_pair`和零个或多个`pinned_root_page_cursor`：follow-tail、jump-to-end、近期cache eviction后的rehydration及从current root发起的新page request只能使用latest pair；已经打开的old-root page可以继续用其pinned cursor读取同一immutable root。Root-advanced frame不得覆写或重标pinned cursor，也不得把old empty-after-page解释为new root的history end。
+固定值4虽不进入`NegotiatedLimits`，但必须由Protocol manifest的`fixed_cross_language_constants.maximum_pinned_history_roots`唯一冻结；生成器每次同时解析并exact断言Python `MAXIMUM_PINNED_HISTORY_ROOTS`与Go `MaximumPinnedHistoryRoots`。单边漂移必须在生成/check gate失败，不能等到运行时兼容检查。
+
+Client必须区分`latest_root_cursor_pair`和零个或多个`pinned_root_page_cursor`：follow-tail、jump-to-end、近期cache eviction后的rehydration及从current root发起的新page request只能使用latest pair；已经打开且仍位于bounded lease set的old-root page可以继续用其pinned cursor读取同一immutable root。Root-advanced frame不得覆写或重标pinned cursor，也不得把old empty-after-page解释为new root的history end。Client per-root materialization固定最多200 resident + 312 hydrated cells，resident/hydrated各自最多8 MiB、合计最多512 cells/16 MiB；page wire request仍是256 cells/4 MiB。Eviction只作用于hydrated window远端，必须安装可返回被淘汰区域的opposite continuation cursor，不能把bounded eviction伪装成history end。
 
 Protocol adapter必须把Foundation的`PAGE | CURSOR_STALE | REBASE_REQUIRED | RECONCILIATION_REQUIRED`逐branch无损映射；禁止把后三种降级为空page、generic transport error或`has_more=false`。
 
@@ -1683,10 +1685,11 @@ Protocol必须维护machine-readable field classification并让schema gate枚举
 | INFRA-5E | test-only Python headless attach/snapshot/delta/page/GAP/command/detach conformance | IMPLEMENTED |
 | TUI-BT-S0 | 隔离Go/Python process、TTY、framework与cross-build feasibility spike | PASS；不连接本协议的production adapter |
 | GO-READY-A | Protocol 2.0/v2 package原子切换、capability negotiation、bootstrap carrier、transport-auth preface/result、attachment-attempt candidate、stable Hello negotiation winner/current receipt、Attach semantic winner/current receipt、完整Attach ACK/tombstone、closed Heartbeat request/result、完整OperationalSnapshot request/frame、typed queue zero/first-tail head与active bound、operation identity、fingerprint helper与behavioral enum migration | IMPLEMENTED；S1 gate通过 |
-| GO-READY-B | atomic five-section control view+source versions+cursor、snapshot control baseline、opaque transition ring及control changed/GAP + three-plane batch wire prerequisite | S1 baseline/schema IMPLEMENTED；live source subscription、observation activation与Go消费为S2 gate |
+| GO-READY-B | atomic five-section control view+source versions+cursor、snapshot control baseline、opaque transition ring及control changed/GAP + three-plane batch wire prerequisite | IMPLEMENTED；S2 live observation/headless/Go consumption gate通过 |
 | GO-READY-C | ServerClosingFrame | SPEC FROZEN；NOT STARTED；S6 blocker |
 | TUI-BT-S1 | production Go supervision、只读TTY viewport与cross-language client | IMPLEMENTED |
-| TUI-BT-S2-S6 | live observation、mutation/interaction/queue/secret、production packaging与默认入口切换 | NOT STARTED |
+| TUI-BT-S2 | live three-plane observation、page/GAP与rotating ordinary reconnect | IMPLEMENTED |
+| TUI-BT-S3-S6 | mutation/interaction/queue/secret、production packaging与默认入口切换 | NOT STARTED |
 
 ## 14. Tests与gate
 
@@ -1753,6 +1756,9 @@ Protocol必须维护machine-readable field classification并让schema gate枚举
 - root identity携带materialization-policy与tree-contract fingerprints；wire page adapter不暴露flat manifest或全量page-reference vector；
 - placement key携带contract ID/version/fingerprint并严格验证75-byte fixed framing；six-kind/sentinel/uint/tiebreaker cross-language golden与unknown historical binding fail closed；
 - latest root推进不会让旧cursor立即stale；attachment root lease、detach/reconnect重新borrow、retention TTL与GC后stale矩阵全绿；
+- Go cursor对完整root identity、placement contract/optional coordinates/canonical bytes及policy/audit registry fingerprints执行decode→encode byte-equivalent roundtrip；unknown非零relative-position enum与anchor/root placement contract不一致均在decoder fail closed；真实256 cells/4 MiB PageUp经Python exact rebind成功；
+- PAGE response在进入cache前按原request复核entry count和完整ranked-entry deterministic-Protobuf bytes；257 cells、4 MiB+1 byte、巨大metadata/短public text、caller forged-small accounting与非空entries/zero-accounting均被拒绝；Python pre-send同算法超界返回typed reconciliation；
+- client/server 4-root FIFO策略、生成器跨语言固定常量断言、连续路径第五root淘汰current时回到latest、GAP后server bounded superset、new attachment空集合、per-root 200+312 cells与8+8 MiB hard bound、opposite continuation cursor和heartbeat只续租server bounded set均有回归；
 - root advanced frame原子安装new active head、new latest cursor pair与old pinned-root relation，并严格推进一个projection revision；frame loss触发GAP/snapshot rebuild；
 - root advanced frame逐字段映射consumed checkpoint segment cut、covered source-prefix lineage、retained concurrent segment suffix和三个closed resident-transition branch；resulting head可有non-empty tail；
 - resident unchanged验证equal vector proof，bounded changes验证ordered upsert/remove count/bytes/accumulator，rebase验证target root/head与bounded token；任一malformed branch fail closed；
@@ -1766,6 +1772,7 @@ Protocol必须维护machine-readable field classification并让schema gate枚举
 - control store的different-section concurrent replace在latest global view上rebase；same-section older/same-conflict/gap按source owner generation/revision/fingerprint返回closed disposition。Bootstrap必须先capture、再读五snapshot、再由五source publication sequencer flush/ack并签发fence receipts，最后按global ordinal回放至barrier；registration必须promote为五张store-owned live lease。Read/subscribe race、async callback尚未ack、fence后transition、promotion suffix、READY后错误release、partial-promotion rollback、generation replacement stable identity/mutable snapshot、双lease原子sink切换、锁外old-lease drain、retiring timeout/third-generation fence、source-port锁反转、close分别发生在0/1/4/5项new promotion与swap前后、CAPTURING/partial-live/active/retiring全集typed drain、close deadline保留blocker、512/8 MiB/deadline overflow与迟到interaction/notification candidate全部有对抗测试；
 - queue/interaction/run/lifecycle-only change不依赖history delta，必须推进control cursor；Python ring内Changed frame从immutable transition records重建exact section union与opaque range accumulator，ring外/重启/contract change返回ControlProjectionGap；client保留stale view + confirmed cursor、单独安装observed latest cursor并请求不早于它的snapshot，不得用hint覆盖confirmed authority；
 - 同一次Observe中control、durable、operational任意组合pending时，`ObservationBatchFrame`包含每个pending plane恰好一个branch；20Hz/100Hz单plane持续推进不能饿死其他plane，per-plane超限必须形成该plane GAP而不能静默省略；
+- 同batch control invalidation + operational GAP先原子安装control SnapshotRequired与operational invalid，再发minimum-bound durable snapshot；durable completion仍强制operational snapshot，两个baseline完成前不得Ready；
 - queue snapshot只投影Foundation active client set；0/1/64项、terminal-row exclusion、reconciliation read-only与第65项admission rejection均有Python/headless golden，任何mapper/client truncation为零；
 - headless happy-path只在目标assistant terminal cell真实出现在正式snapshot后继续；任意high-water advance不构成完成证明。目标cell出现后仍允许RunEnd/audit合法推进，client必须通过snapshot/observation追随successor root，直到从最新cursor得到真实`no_change`；
 - cross-language golden vectors覆盖每个branch、latest generation/root hints与unknown branch fail-closed。
