@@ -70,6 +70,15 @@ const (
 	PasteCancelled
 )
 
+type MouseWheelDirection uint8
+
+const (
+	MouseWheelScrollUp MouseWheelDirection = iota + 1
+	MouseWheelScrollDown
+)
+
+const mouseWheelVisualRows uint8 = 3
+
 func normalizeFrameworkMessage(
 	message tea.Msg,
 	header LocalMessageHeader,
@@ -142,6 +151,17 @@ func normalizeFrameworkMessage(
 		return PasteInputMsg{Header: header, ChunkUTF8: value.Content, ByteCount: uint32(len([]byte(value.Content)))}, true
 	case tea.PasteEndMsg:
 		return PasteBoundaryMsg{Header: header, Boundary: PasteCompleted}, true
+	case tea.MouseWheelMsg:
+		switch value.Mouse().Button {
+		case tea.MouseWheelUp:
+			return MouseWheelInputMsg{Header: header, Direction: MouseWheelScrollUp, VisualRows: mouseWheelVisualRows}, true
+		case tea.MouseWheelDown:
+			return MouseWheelInputMsg{Header: header, Direction: MouseWheelScrollDown, VisualRows: mouseWheelVisualRows}, true
+		default:
+			return FrameworkAdvisoryIgnoredMsg{Header: header, Kind: FrameworkAdvisoryMousePointer}, true
+		}
+	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		return FrameworkAdvisoryIgnoredMsg{Header: header, Kind: FrameworkAdvisoryMousePointer}, true
 	case tea.KeyboardEnhancementsMsg:
 		return KeyboardEnhancementsObservedMsg{Header: header, Flags: value.Flags}, true
 	case tea.EnvMsg:

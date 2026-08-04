@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,79 @@ func TestLocalMessageSequenceMustBeContiguous(t *testing.T) {
 	next, _, _ := state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 2), Key: key})
 	if next.phase != PhaseFatal {
 		t.Fatal("non-contiguous local message sequence crossed the reducer boundary")
+	}
+}
+
+func TestInvalidWindowSizeUsesBoundedFatalViewWithoutHiddenClamp(t *testing.T) {
+	state := NewInitialAppState("terminal-client:invalid-size")
+	next, effects, _ := state.update(ResizeMsg{Header: testLocalMessageHeader(t, 1), Width: 0, Height: 0})
+	if len(effects) != 0 || next.phase != PhaseFatal || next.layout.Width != 80 || next.layout.Height != 24 {
+		t.Fatalf("invalid resize did not preserve the last validated layout: %#v", next.layout)
+	}
+	if rows := strings.Count(render(next).Content, "\n") + 1; rows != 24 {
+		t.Fatalf("bounded fatal view rendered %d rows", rows)
+	}
+}
+
+func TestMouseWheelScrollsOnlyTheResidentTranscriptViewport(t *testing.T) {
+	state := NewInitialAppState("terminal-client:mouse-wheel")
+	durable, err := state.durable.Install(protocolvalue.DurableSnapshot{
+		HostSessionID: "host:mouse", RuntimeSessionID: "runtime:mouse",
+		Control:             protocolvalue.ControlProjection{RuntimeSessionID: "runtime:mouse", CursorFingerprint: "control:mouse"},
+		SnapshotFingerprint: "snapshot:mouse",
+		Cells: []protocolvalue.HistoryCell{{
+			ID: "entry:mouse", Kind: "assistant",
+			PublicText:  "一段足够长的中文 transcript，用于验证滚轮只改变应用自己的 resident viewport，而不触碰 terminal scrollback。",
+			Fingerprint: "cell:mouse",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout, err := NewLayoutPlan(12, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.layout = layout
+	state.transcript, err = state.transcript.Install(durable.Durable(), layout.Width, layout.TranscriptRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.durable = durable
+
+	state, effects, _ := state.update(MouseWheelInputMsg{
+		Header: testLocalMessageHeader(t, 1), Direction: MouseWheelScrollUp, VisualRows: mouseWheelVisualRows,
+	})
+	if len(effects) != 0 || state.transcript.ScrollOffset() != int(mouseWheelVisualRows) {
+		t.Fatalf("wheel up did not scroll the resident viewport: offset=%d effects=%#v", state.transcript.ScrollOffset(), effects)
+	}
+	state, effects, _ = state.update(MouseWheelInputMsg{
+		Header: testLocalMessageHeader(t, 2), Direction: MouseWheelScrollDown, VisualRows: mouseWheelVisualRows,
+	})
+	if len(effects) != 0 || state.transcript.ScrollOffset() != 0 {
+		t.Fatalf("wheel down did not return to follow-tail: offset=%d effects=%#v", state.transcript.ScrollOffset(), effects)
+	}
+	pageUp, err := NewNormalizedKey(KeyPageUp, 0, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, effects, _ = state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 3), Key: pageUp})
+	if len(effects) != 0 || state.transcript.ScrollOffset() != layout.TranscriptRows-1 {
+		t.Fatalf("PageUp did not move viewportRows-1: offset=%d", state.transcript.ScrollOffset())
+	}
+	end, err := NewNormalizedKey(KeyEnd, 0, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, effects, _ = state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 4), Key: end})
+	if len(effects) != 0 || state.transcript.ScrollOffset() != 0 || !state.transcript.FollowTail() {
+		t.Fatal("End did not restore the transcript tail")
+	}
+	state, _, _ = state.update(MouseWheelInputMsg{
+		Header: testLocalMessageHeader(t, 5), Direction: MouseWheelScrollUp, VisualRows: mouseWheelVisualRows + 1,
+	})
+	if state.phase != PhaseFatal {
+		t.Fatal("caller-defined wheel magnitude crossed the closed input contract")
 	}
 }
 

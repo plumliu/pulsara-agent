@@ -175,9 +175,7 @@ def _verify_fingerprint_field_inventory(manifest: dict[str, object]) -> None:
         raise SystemExit(
             "terminal opaque fingerprint inventory must use exact message/field entries"
         )
-    opaque = {
-        (str(item["message"]), str(item["field"])) for item in opaque_raw
-    }
+    opaque = {(str(item["message"]), str(item["field"])) for item in opaque_raw}
     if len(opaque) != len(opaque_raw):
         raise SystemExit("terminal opaque fingerprint inventory contains duplicates")
     overlap = recomputable & opaque
@@ -203,9 +201,7 @@ def _sync_opaque_fingerprint_fields() -> None:
     }
     manifest["opaque_domain_fingerprint_fields"] = [
         {"message": message, "field": field}
-        for message, field in sorted(
-            _descriptor_fingerprint_fields() - recomputable
-        )
+        for message, field in sorted(_descriptor_fingerprint_fields() - recomputable)
     ]
     MANIFEST.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",

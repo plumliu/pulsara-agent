@@ -47,9 +47,20 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		return validatedState(s), nil, nil
 	}
 	if size, ok := message.(ResizeMsg); ok {
-		s.layout.Width, s.layout.Height = max(size.Width, 1), max(size.Height, 1)
-		s.viewport.Width, s.viewport.Height = s.layout.Width, s.layout.Height
-		s.durable = s.durable.Resize(s.layout.Width, s.layout.Height)
+		layout, err := NewLayoutPlan(size.Width, size.Height)
+		if err != nil {
+			return fatalState(s, "terminal resize exceeds the bounded layout contract"), nil, nil
+		}
+		snapshot := protocolvalue.DurableSnapshot{}
+		if s.durable.Ready() {
+			snapshot = s.durable.Durable()
+		}
+		transcriptModel, err := s.transcript.Resize(snapshot, layout.Width, layout.TranscriptRows)
+		if err != nil {
+			return fatalState(s, fmt.Sprintf("terminal transcript resize: %v", err)), nil, nil
+		}
+		s.transcript = transcriptModel
+		s.layout = layout
 		return s, nil, nil
 	}
 	if key, ok := message.(KeyInputMsg); ok {
@@ -61,10 +72,16 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			var token LocalOperationToken
 			s, token = s.nextLocal(OpTeardown, s.teardown.Deadline)
 			return s, []Effect{BeginTeardownEffect{Header: newLocalHeader(token), Reason: TeardownUserQuit}}, nil
-		case KeyUp, KeyPageUp:
-			s.durable = s.durable.Scroll(1)
-		case KeyDown, KeyPageDown:
-			s.durable = s.durable.Scroll(-1)
+		case KeyUp:
+			s.transcript = s.transcript.Scroll(1)
+		case KeyDown:
+			s.transcript = s.transcript.Scroll(-1)
+		case KeyPageUp:
+			s.transcript = s.transcript.Page(1)
+		case KeyPageDown:
+			s.transcript = s.transcript.Page(-1)
+		case KeyEnd:
+			s.transcript = s.transcript.End()
 		case KeyText:
 			if key.Key.Modifiers == 0 && key.Key.TextUTF8 == "q" {
 				s.phase = PhaseDetaching
@@ -85,6 +102,17 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 			s, token = s.nextLocal(OpClipboard, observedAt.Add(localOperationDeadline))
 			return s, []Effect{CopyPublicTextEffect{Header: newLocalHeader(token), PublicUTF8: text.String()}}, nil
 		}
+		return s, nil, nil
+	}
+	if wheel, ok := message.(MouseWheelInputMsg); ok {
+		if wheel.VisualRows != mouseWheelVisualRows || wheel.Direction < MouseWheelScrollUp || wheel.Direction > MouseWheelScrollDown {
+			return fatalState(s, "terminal mouse wheel input is outside its closed contract"), nil, nil
+		}
+		delta := int(wheel.VisualRows)
+		if wheel.Direction == MouseWheelScrollDown {
+			delta = -delta
+		}
+		s.transcript = s.transcript.Scroll(delta)
 		return s, nil, nil
 	}
 	if due, ok := message.(ReconnectDueMsg); ok {
@@ -139,7 +167,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		return fatalState(s, "terminal framework input was outside its closed contract"), nil, nil
 	case FrameworkAdvisoryIgnoredMsg:
 		advisory := message.(FrameworkAdvisoryIgnoredMsg)
-		if advisory.Kind < FrameworkAdvisoryEnvironment || advisory.Kind > FrameworkAdvisoryClipboard || s.frameworkAdvisories == ^uint64(0) {
+		if advisory.Kind < FrameworkAdvisoryEnvironment || advisory.Kind > FrameworkAdvisoryMousePointer || s.frameworkAdvisories == ^uint64(0) {
 			return fatalState(s, "terminal framework advisory was outside its closed contract"), nil, nil
 		}
 		s.frameworkAdvisories++
@@ -308,12 +336,15 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		if value.Snapshot.RuntimeSessionID != s.attachment.Identity.RuntimeSessionID || value.Snapshot.Control.RuntimeSessionID != s.attachment.Identity.RuntimeSessionID {
 			return fatalState(s, "terminal durable snapshot crosses runtime sessions"), nil, nil
 		}
-		var err error
-		s.durable, err = s.durable.Install(value.Snapshot)
+		durable, err := s.durable.Install(value.Snapshot)
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
-		s.control, err = s.control.Install(value.Snapshot.Control, value.Snapshot.RuntimeSessionID)
+		transcriptModel, err := s.transcript.Install(value.Snapshot, s.layout.Width, s.layout.TranscriptRows)
+		if err != nil {
+			return fatalState(s, err.Error()), nil, nil
+		}
+		control, err := s.control.Install(value.Snapshot.Control, value.Snapshot.RuntimeSessionID)
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
@@ -322,7 +353,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		if !value.Snapshot.Control.PendingInteraction {
 			targetID, targetGeneration = "", 0
 		}
-		s.interaction, err = interaction.NewReadOnlyProjectedInteraction(
+		interactionState, err := interaction.NewReadOnlyProjectedInteraction(
 			value.Snapshot.Control.CursorFingerprint,
 			value.Snapshot.Control.PendingInteractionViewFingerprint,
 			targetID,
@@ -331,7 +362,7 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
-		s.queue, err = queue.NewReadOnlyProjectedQueue(
+		queueState, err := queue.NewReadOnlyProjectedQueue(
 			value.Snapshot.Control.CursorFingerprint,
 			value.Snapshot.Control.QueueViewFingerprint,
 			queue.S1MaximumActiveItems,
@@ -340,6 +371,11 @@ func (s AppState) update(message tea.Msg) (AppState, []Effect, tea.Cmd) {
 		if err != nil {
 			return fatalState(s, err.Error()), nil, nil
 		}
+		s.durable = durable
+		s.transcript = transcriptModel
+		s.control = control
+		s.interaction = interactionState
+		s.queue = queueState
 		var token OperationToken
 		s, token = s.nextWire(OpOperationalSnapshot, now.Add(wireOperationDeadline))
 		s.snapshotLoading.Phase = SnapshotAwaitingOperationalSnapshot

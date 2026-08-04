@@ -10,7 +10,10 @@ S1 deliberately stops at the first read-only vertical slice:
 
 - Protocol 2.0 transport authentication, Hello, observer Attach and Attach ACK;
 - heartbeat, durable presentation snapshot and operational snapshot;
-- a bounded resident transcript viewport with resize, scroll and public copy;
+- a full-height alternate-screen shell with a fixed header, bounded resident
+  transcript viewport and one-line read-only footer;
+- exact visual-row wrapping, resize anchors, keyboard/wheel scrolling and
+  public copy;
 - local quit, signal handling, parent supervision and deterministic teardown.
 
 S1 does not advertise or execute live observation, history paging, reconnect
@@ -25,6 +28,12 @@ The explicit Python entry remains opt-in:
 go build -trimpath -o /tmp/pulsara-tui ./cmd/pulsara-tui
 uv run pulsara host tui --tui-binary /tmp/pulsara-tui
 ```
+
+The default launch preserves the terminal's primary scrollback. For an
+explicit private-screen launch, Python also offers
+`--clear-scrollback`; it irreversibly clears the current display and saved
+scrollback exactly once before the first child starts. It is intentionally
+off by default.
 
 The default `pulsara host` and `pulsara host repl` behavior is unchanged.
 

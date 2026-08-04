@@ -9,14 +9,11 @@ import (
 // State is the immutable durable transcript projection consumed by the S1
 // renderer. Snapshot sequencing is owned by app.SnapshotLoadingState.
 type State struct {
-	snapshot     protocolvalue.DurableSnapshot
-	installed    bool
-	scrollOffset int
-	width        int
-	height       int
+	snapshot  protocolvalue.DurableSnapshot
+	installed bool
 }
 
-func New() State { return State{width: 80, height: 24} }
+func New() State { return State{} }
 
 func (s State) Install(value protocolvalue.DurableSnapshot) (State, error) {
 	if s.installed || value.RuntimeSessionID == "" || value.Control.CursorFingerprint == "" || value.SnapshotFingerprint == "" {
@@ -32,58 +29,21 @@ func (s State) Install(value protocolvalue.DurableSnapshot) (State, error) {
 	return s, nil
 }
 
-func (s State) Resize(width, height int) State {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-	s.width, s.height = width, height
-	return s
-}
-
-func (s State) Scroll(delta int) State {
-	// Scrolling is measured in visual rows. Decoded UTF-8 bytes are a safe
-	// upper bound for the number of rows at the narrowest legal viewport; the
-	// renderer clamps this conservative bound to the exact wrapped content.
-	maximum := 0
-	for _, cell := range s.snapshot.Cells {
-		maximum += len([]byte(cell.PublicText)) + 2
-	}
-	maximum -= s.height
-	if maximum < 0 {
-		maximum = 0
-	}
-	s.scrollOffset += delta
-	if s.scrollOffset < 0 {
-		s.scrollOffset = 0
-	}
-	if s.scrollOffset > maximum {
-		s.scrollOffset = maximum
-	}
-	return s
-}
-
 func (s State) Validate() error {
-	if s.width < 1 || s.height < 1 {
-		return errors.New("terminal viewport dimensions are invalid")
-	}
 	if s.installed && (s.snapshot.RuntimeSessionID == "" || s.snapshot.SnapshotFingerprint == "") {
 		return errors.New("durable presentation baseline is invalid")
 	}
 	return nil
 }
 
-func (s State) Ready() bool { return s.installed }
+func (s State) Ready() bool                 { return s.installed }
+func (s State) SnapshotFingerprint() string { return s.snapshot.SnapshotFingerprint }
+func (s State) ProjectionRevision() uint64  { return s.snapshot.ProjectionRevision }
 func (s State) Durable() protocolvalue.DurableSnapshot {
 	value := s.snapshot
 	value.Cells = cloneHistoryCells(value.Cells)
 	return value
 }
-func (s State) Width() int        { return s.width }
-func (s State) Height() int       { return s.height }
-func (s State) ScrollOffset() int { return s.scrollOffset }
 
 type OperationalState struct {
 	snapshot  protocolvalue.OperationalSnapshot
@@ -134,6 +94,9 @@ func (s ControlProjectionState) Validate() error {
 	return nil
 }
 func (s ControlProjectionState) Ready() bool { return s.installed }
+func (s ControlProjectionState) QueueItemCount() int {
+	return len(s.projection.QueueItems)
+}
 func (s ControlProjectionState) Projection() protocolvalue.ControlProjection {
 	value := s.projection
 	value.QueueItems = append([]protocolvalue.QueueItem(nil), value.QueueItems...)

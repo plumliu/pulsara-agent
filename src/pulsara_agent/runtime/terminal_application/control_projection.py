@@ -263,8 +263,7 @@ class TerminalControlSourceCaptureOwner:
             self._capture_ordinal += 1
             capture_ordinal = self._capture_ordinal
             barrier_id = (
-                f"terminal-control-capture:{self.runtime_session_id}:"
-                f"{capture_ordinal}"
+                f"terminal-control-capture:{self.runtime_session_id}:{capture_ordinal}"
             )
             sequencer_fingerprint = context_fingerprint(
                 "terminal-control-common-publication-sequencer:v1",
@@ -289,12 +288,10 @@ class TerminalControlSourceCaptureOwner:
                     self._source_fingerprints[section_kind] = view_fingerprint
                 revision = self._source_revisions[section_kind]
                 source_owner_id = (
-                    f"terminal-control-source:{self.runtime_session_id}:"
-                    f"{section_kind}"
+                    f"terminal-control-source:{self.runtime_session_id}:{section_kind}"
                 )
                 registration_id = (
-                    f"terminal-control-registration:{capture_ordinal}:"
-                    f"{section_kind}"
+                    f"terminal-control-registration:{capture_ordinal}:{section_kind}"
                 )
                 payload = {
                     "section_kind": section_kind,
@@ -327,7 +324,10 @@ class TerminalControlSourceCaptureOwner:
                     item.fence_receipt_fingerprint for item in receipt_tuple
                 ),
             }
-            if len(canonical_json_bytes(baseline_payload)) > MAXIMUM_CONTROL_CAPTURE_BYTES:
+            if (
+                len(canonical_json_bytes(baseline_payload))
+                > MAXIMUM_CONTROL_CAPTURE_BYTES
+            ):
                 raise RuntimeError("terminal control capture exceeds its byte bound")
             return TerminalControlCapturedBaseline(
                 capture_input=captured_input,
@@ -372,15 +372,16 @@ class TerminalControlProjectionStore:
     def install_captured(
         self, captured: TerminalControlCapturedBaseline
     ) -> TerminalControlProjectionSnapshot:
-        _validate_captured_baseline(captured, runtime_session_id=self.runtime_session_id)
+        _validate_captured_baseline(
+            captured, runtime_session_id=self.runtime_session_id
+        )
         session_snapshot = captured.capture_input.session_snapshot
         queue_projection = captured.capture_input.prompt_queue
         if session_snapshot.runtime_session_id != self.runtime_session_id:
             raise ValueError("terminal control projection crosses sessions")
         logical = dict(captured.capture_input.section_view_fingerprints)
         versions = tuple(
-            _source_version_from_fence(item)
-            for item in captured.ordered_fence_receipts
+            _source_version_from_fence(item) for item in captured.ordered_fence_receipts
         )
         with self._lock:
             changed = tuple(
@@ -992,19 +993,14 @@ def _validate_captured_baseline(
         or captured.common_sequencer_fingerprint != expected_sequencer
     ):
         raise ValueError("terminal control capture sequencer proof is invalid")
-    empty_callbacks = context_fingerprint(
-        "terminal-control-capture-callbacks:v1", ()
-    )
+    empty_callbacks = context_fingerprint("terminal-control-capture-callbacks:v1", ())
     logical_by_section = dict(logical)
     for section_kind, receipt in zip(
         CONTROL_SECTION_ORDER, captured.ordered_fence_receipts, strict=True
     ):
-        expected_owner = (
-            f"terminal-control-source:{runtime_session_id}:{section_kind}"
-        )
+        expected_owner = f"terminal-control-source:{runtime_session_id}:{section_kind}"
         expected_registration = (
-            f"terminal-control-registration:{captured.capture_ordinal}:"
-            f"{section_kind}"
+            f"terminal-control-registration:{captured.capture_ordinal}:{section_kind}"
         )
         payload = {
             "section_kind": section_kind,
@@ -1034,9 +1030,7 @@ def _validate_captured_baseline(
             or receipt.acknowledged_callback_count != 0
             or receipt.acknowledged_callback_accumulator != empty_callbacks
             or receipt.fence_receipt_fingerprint
-            != context_fingerprint(
-                "terminal-control-source-capture-fence:v1", payload
-            )
+            != context_fingerprint("terminal-control-source-capture-fence:v1", payload)
         ):
             raise ValueError("terminal control source fence receipt is invalid")
     baseline_payload = {
@@ -1045,8 +1039,7 @@ def _validate_captured_baseline(
         "capture_ordinal": captured.capture_ordinal,
         "common_sequencer_fingerprint": expected_sequencer,
         "fence_receipt_fingerprints": tuple(
-            item.fence_receipt_fingerprint
-            for item in captured.ordered_fence_receipts
+            item.fence_receipt_fingerprint for item in captured.ordered_fence_receipts
         ),
     }
     if captured.captured_baseline_fingerprint != context_fingerprint(

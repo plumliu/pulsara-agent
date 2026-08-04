@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,7 @@ _PARENT_RELAUNCH_EXIT_CODE = 75
 _MAXIMUM_PARENT_RELAUNCHES = 1
 _CHILD_GRACEFUL_EXIT_SECONDS = 5.0
 _CHILD_FORCE_EXIT_SECONDS = 2.0
+_CLEAR_TERMINAL_DISPLAY_AND_SCROLLBACK = b"\x1b[H\x1b[2J\x1b[3J"
 
 
 class TerminalClientLaunchError(RuntimeError):
@@ -50,6 +52,7 @@ async def launch_terminal_client(
     *,
     host_session,
     binary_path: Path | str | None = None,
+    clear_scrollback: bool = False,
 ) -> TerminalClientExit:
     """Serve one observer client until local quit; never close the conversation."""
 
@@ -64,6 +67,8 @@ async def launch_terminal_client(
     client_instance_id = ""
     try:
         await server.start()
+        if clear_scrollback:
+            _clear_terminal_display_and_scrollback(sys.stdout)
         launch_id, launch_capability = server.launch_id, server.launch_capability
         for relaunch_count in range(_MAXIMUM_PARENT_RELAUNCHES + 1):
             client_instance_id = f"terminal-client:{uuid4().hex}"
@@ -215,6 +220,33 @@ def _write_bootstrap_once(fd: int, payload: bytes) -> None:
         if written <= 0:
             raise TerminalClientLaunchError("terminal bootstrap pipe stopped early")
         view = view[written:]
+
+
+def _clear_terminal_display_and_scrollback(output) -> None:
+    """Perform the explicitly requested, irreversible terminal-local erase."""
+
+    try:
+        file_descriptor = output.fileno()
+    except (AttributeError, OSError, ValueError) as exc:
+        raise TerminalClientLaunchError(
+            "terminal scrollback erase requires a writable terminal"
+        ) from exc
+    if not os.isatty(file_descriptor):
+        raise TerminalClientLaunchError(
+            "terminal scrollback erase requires a writable terminal"
+        )
+    try:
+        output.flush()
+        remaining = memoryview(_CLEAR_TERMINAL_DISPLAY_AND_SCROLLBACK)
+        while remaining:
+            written = os.write(file_descriptor, remaining)
+            if written <= 0:
+                raise OSError("terminal erase write stopped early")
+            remaining = remaining[written:]
+    except (OSError, ValueError) as exc:
+        raise TerminalClientLaunchError(
+            "terminal display and scrollback could not be erased"
+        ) from exc
 
 
 async def _terminate_child(process: asyncio.subprocess.Process) -> None:

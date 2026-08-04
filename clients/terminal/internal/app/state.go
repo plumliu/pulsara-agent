@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/commandstate"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/components/transcript"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/interaction"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/presentation"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
@@ -145,15 +146,16 @@ type AttachmentState struct {
 	Identity protocolvalue.Attachment
 }
 
-type TranscriptViewportState struct {
-	Width              int
-	Height             int
-	FollowTail         bool
-	UnseenDurableCount uint32
-}
-
 type ComposerState struct{ Enabled bool }
-type LayoutState struct{ Width, Height int }
+
+type ClientMouseMode uint8
+
+const (
+	MouseDisabled ClientMouseMode = iota + 1
+	MouseCellMotion
+	MouseAllMotion
+)
+
 type LocalNotificationState struct {
 	Items   []string
 	Dropped uint64
@@ -726,13 +728,14 @@ type AppState struct {
 	durable             presentation.State
 	operational         presentation.OperationalState
 	control             presentation.ControlProjectionState
-	viewport            TranscriptViewportState
+	transcript          transcript.Model
 	composer            ComposerState
 	commands            commandstate.Registry
 	interaction         interaction.State
 	queue               queue.State
 	secret              secret.State
-	layout              LayoutState
+	layout              LayoutPlan
+	mouseMode           ClientMouseMode
 	localNotifications  LocalNotificationState
 	teardown            TeardownState
 	publicFailure       PublicFailure
@@ -747,23 +750,30 @@ type AppState struct {
 func NewInitialAppState(clientInstanceID string) AppState {
 	commands, commandErr := commandstate.NewDormantRegistry(commandstate.S1MaximumRecords)
 	queueState, queueErr := queue.NewDormantState(queue.S1MaximumActiveItems)
-	if commandErr != nil || queueErr != nil {
-		panic(fmt.Sprintf("invalid compiled S1 bounds: command=%v queue=%v", commandErr, queueErr))
+	layout, layoutErr := NewLayoutPlan(80, 24)
+	if commandErr != nil || queueErr != nil || layoutErr != nil {
+		panic(fmt.Sprintf("invalid compiled S1 bounds: command=%v queue=%v layout=%v", commandErr, queueErr, layoutErr))
 	}
 	return AppState{
 		phase: PhaseBooting, appGeneration: 1,
 		connection:      ConnectionState{Phase: ConnectionDisconnected, ClientInstanceID: clientInstanceID, Generation: 1, NextOperationGeneration: 1, AttachmentChallenge: NewNoAttachmentChallenge()},
 		snapshotLoading: SnapshotLoadingState{Phase: SnapshotLoadingUninitialized},
 		durable:         presentation.New(), operational: presentation.NewOperational(), control: presentation.NewControlProjection(),
-		viewport: TranscriptViewportState{Width: 80, Height: 24, FollowTail: true},
-		commands: commands, interaction: interaction.NewDormantState(), queue: queueState, secret: secret.NewDormantState(),
-		layout: LayoutState{Width: 80, Height: 24}, teardown: NewIdleTeardownState(),
+		transcript: transcript.New(layout.Width, layout.TranscriptRows),
+		commands:   commands, interaction: interaction.NewDormantState(), queue: queueState, secret: secret.NewDormantState(),
+		layout: layout, mouseMode: MouseCellMotion, teardown: NewIdleTeardownState(),
 	}
 }
 
 func (s AppState) Validate() error {
 	if s.appGeneration == 0 || s.connection.Generation == 0 || s.connection.NextOperationGeneration == 0 {
 		return errors.New("terminal application generation is invalid")
+	}
+	if err := s.layout.Validate(); err != nil {
+		return err
+	}
+	if s.mouseMode < MouseDisabled || s.mouseMode > MouseAllMotion {
+		return errors.New("terminal client mouse mode is invalid")
 	}
 	if !s.connection.Outstanding.Valid() {
 		return errors.New("terminal outstanding operation union is invalid")
@@ -776,6 +786,18 @@ func (s AppState) Validate() error {
 	}
 	if err := s.durable.Validate(); err != nil {
 		return err
+	}
+	if err := s.transcript.Validate(); err != nil {
+		return err
+	}
+	if s.transcript.Width() != s.layout.Width || s.transcript.Height() != s.layout.TranscriptRows {
+		return errors.New("terminal viewport geometry diverges from the validated layout")
+	}
+	if s.durable.Ready() != s.transcript.Ready() {
+		return errors.New("terminal durable snapshot and viewport readiness diverge")
+	}
+	if s.durable.Ready() && s.transcript.SnapshotFingerprint() != s.durable.SnapshotFingerprint() {
+		return errors.New("terminal viewport snapshot identity diverges from durable authority")
 	}
 	if err := s.operational.Validate(); err != nil {
 		return err
@@ -803,7 +825,7 @@ func (s AppState) Validate() error {
 		return err
 	}
 	if s.phase == PhaseReady || s.phase == PhaseReadOnly {
-		if !s.attachment.Valid || !s.durable.Ready() || !s.operational.Ready() || !s.control.Ready() || s.snapshotLoading.Phase != SnapshotBaselinesInstalled {
+		if !s.attachment.Valid || !s.durable.Ready() || !s.transcript.Ready() || !s.operational.Ready() || !s.control.Ready() || s.snapshotLoading.Phase != SnapshotBaselinesInstalled {
 			return errors.New("ready terminal state lacks required baselines")
 		}
 	}

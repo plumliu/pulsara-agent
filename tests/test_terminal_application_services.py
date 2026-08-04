@@ -150,24 +150,16 @@ def test_control_transition_ring_proves_control_only_successor() -> None:
     }
     assert successor_versions["run_control"] == initial_versions["run_control"] + 1
     assert {
-        key: value
-        for key, value in successor_versions.items()
-        if key != "run_control"
-    } == {
-        key: value for key, value in initial_versions.items() if key != "run_control"
-    }
+        key: value for key, value in successor_versions.items() if key != "run_control"
+    } == {key: value for key, value in initial_versions.items() if key != "run_control"}
 
 
 def test_control_baseline_rejects_more_than_64_active_queue_items() -> None:
     items = tuple(_active_item(ordinal=index) for index in range(1, 66))
     with pytest.raises(RuntimeError, match="exceeds 64"):
-        TerminalControlSourceCaptureOwner(
-            runtime_session_id="runtime:control"
-        ).capture(
+        TerminalControlSourceCaptureOwner(runtime_session_id="runtime:control").capture(
             lambda: build_terminal_control_capture_input(
-                session_snapshot=_session_snapshot(
-                    items=items, account_revision=65
-                ),
+                session_snapshot=_session_snapshot(items=items, account_revision=65),
                 queue_checkpoint=SimpleNamespace(),
                 queue_head_receipt=SimpleNamespace(),
                 durable_active_item_count=65,
@@ -186,9 +178,7 @@ def test_terminal_public_text_neutralizes_ansi_osc_and_c1_controls() -> None:
     assert "\x07" not in block.text
     assert "\x9b" not in block.text
     assert "\r" not in block.text
-    assert block.text == (
-        "safe\\x1B]52;c;clipboard\\x07\\x9B31mred\\x0D\nnext"
-    )
+    assert block.text == ("safe\\x1B]52;c;clipboard\\x07\\x9B31mred\\x0D\nnext")
     assert block.text_utf8_bytes == len(block.text.encode("utf-8"))
 
 

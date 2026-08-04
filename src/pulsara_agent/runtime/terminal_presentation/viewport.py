@@ -555,9 +555,7 @@ def _fit_newest_resident_suffix(
     for item in reversed(ranked):
         if len(selected_reversed) >= maximum_entries:
             break
-        item_canonical_bytes = len(
-            canonical_json_bytes(item.model_dump(mode="json"))
-        )
+        item_canonical_bytes = len(canonical_json_bytes(item.model_dump(mode="json")))
         item_rendered_bytes = _rendered_public_bytes(item)
         if (
             canonical_bytes + item_canonical_bytes > maximum_canonical_bytes

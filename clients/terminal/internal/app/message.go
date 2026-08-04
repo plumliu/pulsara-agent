@@ -287,6 +287,11 @@ type KeyboardEnhancementsObservedMsg struct {
 	Header LocalMessageHeader
 	Flags  int
 }
+type MouseWheelInputMsg struct {
+	Header     LocalMessageHeader
+	Direction  MouseWheelDirection
+	VisualRows uint8
+}
 type FrameworkInputRejectedMsg struct{ Header LocalMessageHeader }
 
 type FrameworkAdvisoryKind uint8
@@ -301,6 +306,7 @@ const (
 	FrameworkAdvisoryColorReport
 	FrameworkAdvisoryModeReport
 	FrameworkAdvisoryClipboard
+	FrameworkAdvisoryMousePointer
 )
 
 type FrameworkAdvisoryIgnoredMsg struct {
@@ -399,6 +405,7 @@ func (PasteBoundaryMsg) applicationMessage()                        {}
 func (ResizeMsg) applicationMessage()                               {}
 func (FocusChangedMsg) applicationMessage()                         {}
 func (KeyboardEnhancementsObservedMsg) applicationMessage()         {}
+func (MouseWheelInputMsg) applicationMessage()                      {}
 func (FrameworkInputRejectedMsg) applicationMessage()               {}
 func (FrameworkAdvisoryIgnoredMsg) applicationMessage()             {}
 func (TickMsg) applicationMessage()                                 {}
@@ -623,6 +630,8 @@ func messageObservedAt(message any) time.Time {
 		return value.Header.ProducedAt
 	case KeyboardEnhancementsObservedMsg:
 		return value.Header.ProducedAt
+	case MouseWheelInputMsg:
+		return value.Header.ProducedAt
 	case FrameworkInputRejectedMsg:
 		return value.Header.ProducedAt
 	case FrameworkAdvisoryIgnoredMsg:
@@ -653,6 +662,8 @@ func localMessageHeader(message any) (LocalMessageHeader, bool) {
 	case FocusChangedMsg:
 		return value.Header, true
 	case KeyboardEnhancementsObservedMsg:
+		return value.Header, true
+	case MouseWheelInputMsg:
 		return value.Header, true
 	case FrameworkInputRejectedMsg:
 		return value.Header, true
@@ -692,6 +703,9 @@ func installLocalMessageHeader(message any, header LocalMessageHeader) (any, boo
 		value.Header = header
 		return value, true
 	case KeyboardEnhancementsObservedMsg:
+		value.Header = header
+		return value, true
+	case MouseWheelInputMsg:
 		value.Header = header
 		return value, true
 	case FrameworkInputRejectedMsg:

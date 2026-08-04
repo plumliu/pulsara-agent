@@ -14,7 +14,7 @@
 - tmux `3.6a`
 - OpenSSH client `10.0p2`
 
-Bubble Tea `v2.0.6`的官方release明确包含wide-character handling修复；spike使用正式`charm.land/bubbletea/v2` import path，没有回退到旧GitHub v2路径。
+Bubble Tea `v2.0.6`的官方release明确包含wide-character handling修复；spike使用正式`charm.land/bubbletea/v2` import path，没有回退到旧GitHub v2路径。该验证对应的renderer-critical Ultraviolet版本为`v0.0.0-20260416155717-489999b90468`，production module必须保持同一compatibility pin，除非完整重跑Apple Terminal resize、wide-rune和render-jitter gate。
 
 ## 自动化结果
 

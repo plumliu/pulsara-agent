@@ -2706,6 +2706,8 @@ F/B namespace只表达contract ownership，不表达PR合入顺序。生产落�
 - 建立bounded `PresentationHistoryViewportSnapshot`、单一latest-root cursor pair、bounded pinned-root cursor states与`PresentationHistoryPagePort`；
 - 定义只读protocol bootstrap snapshot；
 - Bubble Tea显示真实session transcript viewport；
+- Bubble Tea从本阶段起拥有占满真实WindowSize的alternate-screen shell：固定单行header、bounded transcript body与单行observer/read-only footer；height 1/2使用compact降级，不绘制禁用composer外框；
+- S1冻结exact visual-row wrap/scroll/follow-tail/resize-anchor owner。普通启动保留primary scrollback；只有Python launcher的显式`--clear-scrollback`提供不可逆private-screen选项，默认关闭；
 - Legacy REPL继续作为冻结的旧入口，不参与该slice。
 
 验收：
@@ -2761,7 +2763,7 @@ F/B namespace只表达contract ownership，不表达PR合入顺序。生产落�
 - large paste；
 - command registry；
 - live assistant/activity projection；
-- viewport scroll/follow-tail/unseen count、selection/copy和lazy history navigation；
+- 在S1既有full-height几何与S2既有live/page viewport上激活selection和copy；不得重建scroll/follow-tail/wrap owner；
 - hierarchical Esc/Ctrl-C routing；
 - stop state；
 - alternate-screen恢复与bounded exit summary。

@@ -56,6 +56,39 @@ func TestFrameworkFocusAndClosedApplicationMessagesAreNormalizedExactlyOnce(t *t
 	}
 }
 
+func TestFrameworkMouseWheelIsNormalizedToClosedVisualRowInput(t *testing.T) {
+	header := testLocalMessageHeader(t, 1)
+	tests := []struct {
+		button    tea.MouseButton
+		direction MouseWheelDirection
+	}{
+		{button: tea.MouseWheelUp, direction: MouseWheelScrollUp},
+		{button: tea.MouseWheelDown, direction: MouseWheelScrollDown},
+	}
+	for _, test := range tests {
+		message, ok := normalizeFrameworkMessage(
+			tea.MouseWheelMsg(tea.Mouse{X: 4, Y: 7, Button: test.button}),
+			header,
+		)
+		wheel, isWheel := message.(MouseWheelInputMsg)
+		if !ok || !isWheel || wheel.Header != header || wheel.Direction != test.direction || wheel.VisualRows != mouseWheelVisualRows {
+			t.Fatalf("unexpected mouse wheel normalization: %#v", message)
+		}
+	}
+}
+
+func TestFrameworkNonWheelMouseInputIsOperationallyIgnored(t *testing.T) {
+	header := testLocalMessageHeader(t, 1)
+	message, ok := normalizeFrameworkMessage(
+		tea.MouseClickMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseLeft}),
+		header,
+	)
+	advisory, isAdvisory := message.(FrameworkAdvisoryIgnoredMsg)
+	if !ok || !isAdvisory || advisory.Header != header || advisory.Kind != FrameworkAdvisoryMousePointer {
+		t.Fatalf("unexpected pointer normalization: %#v", message)
+	}
+}
+
 func testLocalMessageHeader(t *testing.T, sequence uint64) LocalMessageHeader {
 	t.Helper()
 	return testLocalMessageHeaderAt(t, sequence, time.Now())

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pulsara_agent.cli import build_parser
 from pulsara_agent.terminal_client.binary import (
     TerminalClientBinaryError,
     resolve_terminal_client_binary,
@@ -126,6 +127,125 @@ def test_launcher_sends_secret_only_through_one_shot_bootstrap_pipe(
     assert len(carrier.carrier_nonce) == 32
     script = binary.read_text(encoding="utf-8")
     assert carrier.launch_capability.hex() not in script
+
+
+def test_host_tui_clear_scrollback_is_explicit_and_defaults_off() -> None:
+    parser = build_parser()
+    ordinary = parser.parse_args(["host", "tui"])
+    private = parser.parse_args(["host", "tui", "--clear-scrollback"])
+
+    assert ordinary.clear_scrollback is False
+    assert private.clear_scrollback is True
+
+
+def test_host_tui_clear_scrollback_help_discloses_irreversible_history_loss(
+    capsys,
+) -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["host", "tui", "--help"])
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    normalized_help = " ".join(help_text.split())
+    assert "Irreversibly erase" in help_text
+    assert "display and scrollback" in normalized_help
+
+
+def test_explicit_scrollback_erase_uses_one_bounded_terminal_write() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(write_fd, "wb", buffering=0, closefd=False) as output:
+            original_isatty = launcher_module.os.isatty
+            launcher_module.os.isatty = lambda fd: fd == write_fd
+            try:
+                launcher_module._clear_terminal_display_and_scrollback(output)
+            finally:
+                launcher_module.os.isatty = original_isatty
+        observed = os.read(read_fd, 64)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert observed == b"\x1b[H\x1b[2J\x1b[3J"
+
+
+def test_explicit_scrollback_erase_fails_closed_for_non_tty() -> None:
+    output = SimpleNamespace(fileno=lambda: 123, flush=lambda: None)
+    original_isatty = launcher_module.os.isatty
+    launcher_module.os.isatty = lambda _fd: False
+    try:
+        with pytest.raises(
+            launcher_module.TerminalClientLaunchError,
+            match="requires a writable terminal",
+        ):
+            launcher_module._clear_terminal_display_and_scrollback(output)
+    finally:
+        launcher_module.os.isatty = original_isatty
+
+
+def test_explicit_scrollback_erase_fails_closed_on_partial_write(monkeypatch) -> None:
+    output = SimpleNamespace(fileno=lambda: 123, flush=lambda: None)
+    monkeypatch.setattr(launcher_module.os, "isatty", lambda _fd: True)
+    writes = iter((1, 0))
+    monkeypatch.setattr(launcher_module.os, "write", lambda _fd, _payload: next(writes))
+    with pytest.raises(
+        launcher_module.TerminalClientLaunchError,
+        match="could not be erased",
+    ):
+        launcher_module._clear_terminal_display_and_scrollback(output)
+
+
+def test_default_launch_never_invokes_irreversible_scrollback_erase(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _fake_binary(tmp_path, schema=PROTOCOL_SCHEMA_FINGERPRINT)
+    session = SimpleNamespace(
+        host_session_id="host:ordinary",
+        runtime_session_id="runtime:ordinary",
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_clear_terminal_display_and_scrollback",
+        lambda _output: (_ for _ in ()).throw(
+            AssertionError("default launch attempted irreversible erase")
+        ),
+    )
+
+    async def scenario() -> None:
+        result = await launch_terminal_client(
+            host_session=session,
+            binary_path=binary,
+        )
+        assert result.returncode == 0
+
+    asyncio.run(scenario())
+
+
+def test_private_scrollback_erase_runs_once_before_parent_relaunch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _fake_relaunch_binary(tmp_path)
+    session = SimpleNamespace(
+        host_session_id="host:private-relaunch",
+        runtime_session_id="runtime:private-relaunch",
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "_clear_terminal_display_and_scrollback",
+        lambda output: calls.append(output),
+    )
+
+    async def scenario() -> None:
+        result = await launch_terminal_client(
+            host_session=session,
+            binary_path=binary,
+            clear_scrollback=True,
+        )
+        assert result.returncode == 0
+
+    asyncio.run(scenario())
+    assert calls == [launcher_module.sys.stdout]
 
 
 def test_launcher_relaunches_once_with_fresh_candidate_credential(

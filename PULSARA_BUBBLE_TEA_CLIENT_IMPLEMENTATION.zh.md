@@ -8,15 +8,18 @@
 > 产品与 UX 原则：PULSARA_TERMINAL_UI_UX_RESEARCH_AND_DESIGN.zh.md
 > Legacy 边界：PULSARA_LEGACY_REPL_RETENTION_CONTRACT.zh.md
 
-## S1 实施回执（2026-08-03）
+## S1 实施回执（2026-08-04）
 
 S1 已按本规格完成只读纵切：
 
 - Protocol 已原子切换至 major 2 / package `pulsara.terminal.v2`，Python 与 Go binding、canonical fingerprint helper、golden vector及behavioral vocabulary由同一schema生成；
 - Go client 已完成transport auth、Hello、observer Attach、Attach ACK、Heartbeat、durable snapshot、operational snapshot和atomic five-section control baseline；
 - Bubble Tea `Model/Update/View`只消费closed application message/effect，Update/View无I/O；framework signal handler已禁用，signal、parent supervision和single teardown由client owner接管；
-- resident viewport支持resize、scroll和public-text copy；pending interaction与active queue只读安装，S1不生成mutation、secret、composer、page或observation effect；
+- production View现在是renderer-owned full-height shell：默认进入alternate screen，按真实WindowSize精确输出一屏visual rows，固定header、bounded transcript viewport和单行read-only footer；高度1/2有closed compact降级，不再使用隐藏的`240×100` clamp，也不绘制伪composer；
+- `transcript.Model`已成为wrap cache、visual-row scroll、follow-tail、unseen、resize anchor的唯一owner；`presentation.State`只保存validated durable snapshot。Up/Down为1行、wheel为3行、PageUp/PageDown为`viewportRows-1`、End恢复tail，width变化才重建immutable wrap cache；
+- production View固定启用cell-motion mouse reporting，滚轮只改变client-owned transcript viewport，不泄漏到terminal native scrollback；pending interaction与active queue只读安装，S1不生成mutation、secret、composer、page或observation effect；
 - `pulsara host tui`为显式opt-in入口；`pulsara host`默认行为和`pulsara host repl`保持不变，缺失/不兼容binary时typed fail closed且不fallback；
+- Terminal emulator的native scrollbar属于窗口chrome，不产生Bubble Tea mouse event；标准alternate screen无法阻止Terminal.app回看primary-buffer scrollback。Python launcher提供显式`--clear-scrollback`作为不可逆private-screen选择，默认关闭且必须在帮助文本中明确其删除语义；Go client不得自行清空或伪造可恢复的terminal history；
 - Go S1 capability集合明确排除`HISTORY_PAGE_V1`、`OBSERVATION_STREAM_V1`、`CONTROL_PROJECTION_OBSERVATION_V1`和`RECONNECT_AUTH_ROTATION_V1`。Protocol已冻结control cursor/change/GAP和three-plane batch的wire prerequisite，但Go消费与server activation仍归S2；
 - 四平台production packaging、checksum release、wheel carrier和默认TTY activation仍归S6，未计入本回执。
 
@@ -109,9 +112,10 @@ S0 dependency baseline：
 - Bubble Tea v2.0.6；
 - Bubbles v2.1.0；
 - Lip Gloss v2.0.5；
+- Ultraviolet v0.0.0-20260416155717-489999b90468；
 - Protobuf Go runtime v1.36.11。
 
-升级任一项必须重跑 production PTY、wide-rune、paste、signal 和 render-jitter gates；S0 spike 不需要成为长期 product test dependency。
+Ultraviolet 虽为Go module graph中的间接依赖，但它是Bubble Tea v2 renderer的物理实现，属于renderer-critical compatibility pin。不得让`go get`或`go mod tidy`将它静默抬升到Bubble Tea v2.0.6未声明的pseudo-version。升级任一项必须重跑production PTY、Apple Terminal resize、wide-rune、paste、signal和render-jitter gates；S0 spike不需要成为长期product test dependency。
 
 ## 2. Production module 与逐文件目录
 
@@ -1527,6 +1531,18 @@ type NormalizedKey struct {
     Repeat    bool
 }
 
+type MouseWheelDirection uint8
+const (
+    MouseWheelScrollUp MouseWheelDirection = iota + 1
+    MouseWheelScrollDown
+)
+
+type MouseWheelInputMsg struct {
+    Header     LocalMessageHeader
+    Direction  MouseWheelDirection
+    VisualRows uint8 // V1固定为3；caller不得自报任意幅度
+}
+
 type TickKind uint8
 const (
     TickHeartbeat TickKind = iota + 1
@@ -1860,7 +1876,7 @@ Application messages 必须由 app package 定义 concrete type，并实现 pack
 | 类别 | Concrete messages |
 |---|---|
 | lifecycle | AppStartedMsg、ParentShutdownMsg、ReconnectDueMsg、ServerClosingMsg、TeardownCompletedMsg |
-| framework input | KeyInputMsg、PasteInputMsg、PasteBoundaryMsg、ResizeMsg、FocusChangedMsg、TickMsg |
+| framework input | KeyInputMsg、MouseWheelInputMsg、PasteInputMsg、PasteBoundaryMsg、ResizeMsg、FocusChangedMsg、TickMsg |
 | connection | ConnectSucceededMsg、ConnectFailedMsg、TransportAuthenticatedMsg、TransportAuthenticationFailedMsg、HelloAcceptedMsg、AttachmentChallengePromotedMsg、AttachmentChallengePromotionAcceptedMsg、AttachmentChallengePromotionFailedMsg、AttachmentChallengeRevokedMsg、HelloNegotiationUnavailableMsg、HelloRejectedMsg、AttachAcceptedMsg、AttachRejectedMsg、AttachAcknowledgedMsg、AttachAckFailedMsg、HeartbeatAcceptedMsg、HeartbeatRejectedMsg、ConnectionLostMsg |
 | bootstrap | SnapshotAcceptedMsg、SnapshotRejectedMsg、OperationalSnapshotAcceptedMsg、OperationalSnapshotRejectedMsg |
 | observation | ObservationBatchMsg、ObservationNoChangeMsg、LocalObservationOverflowMsg |
@@ -1869,7 +1885,7 @@ Application messages 必须由 app package 定义 concrete type，并实现 pack
 | secret | SecretEditReadyMsg、SecretHandleInstalledMsg、SecretBufferChangedMsg、SecretSubmittedMsg、SecretRevokedMsg、SecretTransportFailedMsg |
 | local effect result | ClipboardResultMsg、OpenURLResultMsg、ReleaseCheckResultMsg |
 
-Bubble Tea framework 原始消息只在top-level `FrameworkIngressNormalizer`中出现。v2.0.6 allowlist至少包括KeyPressMsg、PasteStartMsg、PasteMsg、PasteEndMsg、WindowSizeMsg、KeyboardEnhancementsMsg。Ordinary composer mode立刻转为`KeyInputMsg/PasteInputMsg`；active secret form mode不得构造这两个含text的message，而是把bounded normalized edit安装进`SecretRuntimeOwner`的one-shot edit cell，再只产生`SecretEditReadyMsg(target handle, edit handle)`。Component不直接switch framework message。
+Bubble Tea framework 原始消息只在top-level `FrameworkIngressNormalizer`中出现。v2.0.6 allowlist至少包括KeyPressMsg、MouseWheelMsg、MouseClickMsg、MouseReleaseMsg、MouseMotionMsg、PasteStartMsg、PasteMsg、PasteEndMsg、WindowSizeMsg、KeyboardEnhancementsMsg。Vertical wheel唯一转换为固定3 visual rows的`MouseWheelInputMsg`；horizontal wheel及非wheel pointer event只形成bounded operational advisory，不改变application semantic state，也不得触发fatal。Ordinary composer mode立刻转为`KeyInputMsg/PasteInputMsg`；active secret form mode不得构造这两个含text的message，而是把bounded normalized edit安装进`SecretRuntimeOwner`的one-shot edit cell，再只产生`SecretEditReadyMsg(target handle, edit handle)`。Component不直接switch framework message。
 
 未知 application message 是编程错误并进入 fatal diagnostic。未知 Bubble Tea 非必需 capability message可被 operationally ignore，但必须有计数，不得改变 authority-bearing state。
 
@@ -1972,6 +1988,7 @@ type ReconnectDueMsg struct { Header LocalMessageHeader; ReconnectGeneration uin
 type TeardownCompletedMsg struct { Header LocalResultHeader; Summary PublicTeardownSummary }
 
 type KeyInputMsg struct { Header LocalMessageHeader; Key NormalizedKey }
+type MouseWheelInputMsg struct { Header LocalMessageHeader; Direction MouseWheelDirection; VisualRows uint8 }
 type PasteInputMsg struct { Header LocalMessageHeader; ChunkUTF8 string; ByteCount uint32 }
 type PasteBoundaryMsg struct { Header LocalMessageHeader; Boundary PasteBoundary }
 type ResizeMsg struct { Header LocalMessageHeader; Width int; Height int }
@@ -2433,6 +2450,7 @@ View 只读取 AppState 并构造 tea.View：
 - 不修改follow-tail、selection或cache；
 - 不访问secret之外的private bytes；
 - declaratively设置AltScreen、cursor、mouse、paste和keyboard enhancements；
+- S1固定`MouseModeCellMotion`，捕获click/release/wheel但不请求无按键pointer motion；wheel up/down只滚动resident transcript，退出后framework必须关闭mouse reporting并恢复primary screen；
 -每次render输出不包含protocol frame、fingerprint、launch capability或secret diagnostic；
 - narrow/short terminal仍提供quit、stop、interaction action和capacity action。
 
@@ -3211,7 +3229,11 @@ Production go.mod固定direct dependencies：
 - charm.land/lipgloss/v2 v2.0.5；
 - google.golang.org/protobuf v1.36.11。
 
-go.sum必须完整提交。禁止replace到local path或unpinned pseudo fork。升级依赖需要独立PR和S0/PTY/view golden复跑。
+Renderer-critical transitive dependency额外固定为：
+
+- github.com/charmbracelet/ultraviolet v0.0.0-20260416155717-489999b90468。
+
+该版本与Bubble Tea v2.0.6官方module graph及S0验证一致。禁止使用未随当前Bubble Tea正式版发布的更高Ultraviolet pseudo-version；已验证`20260703-f5a850f9c2b7`在macOS Terminal.app的CJK transcript上经过窄→宽resize后会造成cursor/line diff错位。go.sum必须完整提交。禁止replace到local path或unpinned pseudo fork。升级依赖需要独立PR和S0/PTY/view golden复跑。
 
 Root mise配置在S1固定Go 1.26.5和protoc 34.0。CI不得隐式下载不同Go toolchain。
 
@@ -3386,12 +3408,48 @@ S1开工前先以独立全绿Protocol 2.0 subcut完成（old behavioral string f
 -transport auth preface、Hello/Attach/Attach ACK observer；
 -typed Heartbeat request/receipt与client-local schedule；
 -ProjectionSnapshot和OperationalSnapshot；
--unified resident transcript viewport；
+-占满真实Terminal WindowSize的alternate-screen shell，固定header、resident transcript viewport和单行read-only footer；
 -resize、scroll、copy；
 -local quit和parent supervision；
 -显式 pulsara host tui。
 
 不消费live delta，不发送domain mutation。
+
+### TUI-BT-S1-001A Full-height layout 与 viewport hard cut
+
+`clients/terminal/internal/app/layout.go`是S1几何的唯一owner。`NewLayoutPlan(width, height)`必须先验证positive dimensions和`width × height <= 256 Ki visual cells`，再产生不可变`LayoutPlan`：
+
+| Terminal height | Header | Transcript | Footer | closed mode |
+|---:|---:|---:|---:|---|
+| `1` | 1 | 0 | 0 | `phase · q`单行降级 |
+| `2` | 1 | 0 | 1 | compact status/failure + footer |
+| `>=3` | 1 | `height-2` | 1 | full-height read-only shell |
+
+每次`View`必须恰好产生`height`个visual rows。每行经ANSI-aware display-width truncation后补齐到exact width；header/footer不得自动wrap。Footer只按width执行closed降级：宽屏显示`observer · wheel/↑/↓ scroll · y copy · q quit`，中等宽度显示read-only紧凑提示，极窄显示`↑↓·y·q`。异常或超界WindowSize进入保留最后一个validated plan的bounded fatal view，禁止用隐藏的`240×100`或其他fallback尺寸继续渲染。
+
+`presentation.State`只拥有validated `DurableSnapshot`，不得保存width、height、scroll offset、follow-tail或wrap结果。`components/transcript.Model`唯一拥有：
+
+~~~go
+type Model struct {
+    cache               WrapCache
+    width               int
+    height              int
+    scrollOffset        int
+    followTail          bool
+    unseenTerminalCells uint32
+    installed           bool
+    anchor              viewportAnchor
+    hasAnchor           bool
+}
+~~~
+
+`WrapCache`按`snapshot fingerprint + body width`构造，每行保存stable cell ID、label/body discriminator和正文UTF-8 source offset；height-only resize不重建。Scrolled resize以当前top visual row的cell/source offset重定位，follow-tail resize保持tail。S1尚无live delta，因此`unseenTerminalCells`固定为0，但字段、validator和owner本阶段即冻结，S2只能推进既有owner。
+
+输入算法固定为：Up/Down移动1 visual row，vertical wheel移动3 visual rows，PageUp/PageDown移动`max(viewportRows-1, 1)`，End清零offset并恢复follow-tail。offset归零必须等价于follow-tail；View只读取Update已经准备好的rows，不执行wrap state transition、I/O或snapshot reconstruction。
+
+Production `tea.View`始终声明`AltScreen=true`和`MouseModeCellMotion`，统一teardown负责退出alternate screen并关闭mouse reporting。普通启动绝不发送`CSI 3J`，所以Terminal.app等emulator的native scrollbar仍可能访问启动前primary scrollback；这不属于Go renderer可逆控制。只有Python launcher拥有`--clear-scrollback`：默认关闭，显式开启后在首次child之前精确写一次`CSI H + CSI 2J + CSI 3J`，parent relaunch不重复，非TTY、partial write或flush失败typed fail closed。Protocol、Foundation与Go client不得持有或推导该策略。
+
+本subcut不提前激活composer、live delta、history page、command、interaction或queue mutation。S2拥有delta/root/GAP/page/reconnect以及unseen的live推进；S3只在既有full-height几何中激活composer。S6可增加semantic styling、sidebar和主题，但不得重新定义基础viewport几何、wrap、scroll或terminal mode ownership。
 
 ### TUI-BT-S1-002 文件清单
 
@@ -3447,6 +3505,9 @@ clients/terminal/internal/components/transcript/model.go
 clients/terminal/internal/components/transcript/update.go
 clients/terminal/internal/components/transcript/view.go
 clients/terminal/internal/components/transcript/wrap_cache.go
+clients/terminal/internal/app/layout_test.go
+clients/terminal/internal/app/view_test.go
+clients/terminal/internal/components/transcript/view_test.go
 clients/terminal/internal/supervision/child.go
 clients/terminal/internal/supervision/signal_unix.go
 clients/terminal/internal/supervision/teardown.go
@@ -3520,9 +3581,11 @@ mise.toml
 | operational snapshot | 0/1/256 cells、1 MiB边界、count/bytes/accumulator/outer fingerprint、duplicate identity、超限拒绝；success只推进AwaitingOperational且不改durable/control |
 | queue/control snapshot | typed empty genesis、generation-0 checkpoint + first-transition tail committed head、0/1/64 active items、16 server notifications可安装；第65项、17th notification、truncation、count/accumulator/order mismatch拒绝；五section + source versions + cursor来自一个atomic Foundation snapshot；Ready拒绝uninitialized/stale control |
 | fingerprint | generated Go/Python canonical helper、opaque-domain denylist、Unicode/uint64/optional golden |
-| view golden | empty/loading/error、80/120/160、CJK/emoji |
+| layout/view golden | `1×1`、height 2/3、`80×24`、120/160列、极窄、CJK、emoji、长不可断字符串；exact visual row count/display width、fixed footer、header/footer no-wrap、无隐藏尺寸clamp |
+| viewport | exact wrapped visual rows；Up/Down 1行、wheel 3行、Page为`rows-1`、End、上下界、follow-tail；scrolled resize保留cell/source anchor，tail resize保持tail；height-only cache hit、width-change single rebuild |
 | cross-language | Python Gateway -> Go hello/attach/snapshot |
-| PTY | first frame、resize、copy-safe content、normal quit |
+| PTY | first frame、真实`SIGWINCH` resize、alternate-screen `1049h/l`、cell-motion mouse `1002h/l + 1006h/l`、copy-safe content、normal quit恢复；default physical output不得含`CSI 3J` |
+| launcher | `--clear-scrollback`默认false、help明确不可逆；显式路径exact single erase、parent relaunch不重复、non-TTY/partial write fail closed；Go/Protocol/Foundation无erase owner |
 | supervision | child exit、parent survives、terminal restore |
 | architecture | package DAG、no AgentEvent/raw storage import；`app`不importgenerated Protobuf，`protocolvalue` outputs生成后diff-clean且目录内无manual Go file/mirror enum |
 
@@ -3543,6 +3606,10 @@ mise.toml
 13. Attach winner只消费Protocol exact controller enum与唯一bootstrap value；ordinary/recovered ACK均保留完整validated result及acknowledged binding proof，Go无mirror enum或bool-union lowering。
 14. Heartbeat使用完整prepared request与accepted/rejected receipt；client-local schedule与semantic attachment分离，decoder不能返回下一份AttachmentState。
 15. Snapshot bootstrap严格经过AwaitingDurable、AwaitingOperational、BaselinesInstalled；Operational request/frame字段、256项/1 MiB bounds与outer fingerprint均有跨语言golden，Ready不能绕过substate validator。
+16. 正常terminal尺寸下View exact填满真实WindowSize：1行header、`height-2`行transcript、1行read-only footer；height 1/2按closed compact matrix降级且无伪composer。
+17. `transcript.Model`是scroll/follow/anchor/wrap cache唯一owner；`presentation.State`和`AppState`不存在第二套viewport state，View零I/O且不重算state transition。
+18. 默认alternate-screen启动不发送`CSI 3J`；显式`--clear-scrollback`只由Python launcher在首次child前执行一次，并对non-TTY/partial write fail closed。
+19. PTY证据证明alternate-screen与mouse mode正常enter/exit、真实resize生效、quit恢复primary terminal；basic full-height geometry不得推迟到S6。
 
 ## 11. S2：Delta、root、history、GAP 与 reconnect
 

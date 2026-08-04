@@ -267,6 +267,21 @@ def test_production_terminal_foundation_has_no_renderer_or_test_imports() -> Non
     assert violations == []
 
 
+def test_production_terminal_renderer_dependency_matches_s0_compatibility_pin() -> None:
+    production_go_mod = (ROOT / "clients" / "terminal" / "go.mod").read_text(
+        encoding="utf-8"
+    )
+    spike_go_mod = (
+        ROOT / "clients" / "terminal" / "spikes" / "s0" / "go.mod"
+    ).read_text(encoding="utf-8")
+    expected = (
+        "github.com/charmbracelet/ultraviolet "
+        "v0.0.0-20260416155717-489999b90468 // indirect"
+    )
+    assert production_go_mod.count(expected) == 1
+    assert spike_go_mod.count(expected) == 1
+
+
 def test_stored_event_carrier_and_receipt_have_single_definition_owners() -> None:
     expected = {
         "RawStoredEventEnvelope": "src/pulsara_agent/primitives/stored_event.py",
@@ -414,6 +429,50 @@ def test_s1_production_update_signal_and_foreground_owners_are_exact() -> None:
     ).read_text(encoding="utf-8")
     assert "process_group=0" in launcher
     assert "start_new_session=True" not in launcher
+
+
+def test_s1_layout_viewport_and_scrollback_owners_are_exact() -> None:
+    client_root = ROOT / "clients" / "terminal"
+    transcript_root = client_root / "internal" / "components" / "transcript"
+    viewport_tokens = ("scrollOffset", "followTail", "viewportAnchor", "WrapCache")
+    violations: list[str] = []
+    for path in (client_root / "internal").rglob("*.go"):
+        if path.name.endswith("_test.go") or path.is_relative_to(transcript_root):
+            continue
+        source = path.read_text(encoding="utf-8")
+        for token in viewport_tokens:
+            if token in source:
+                violations.append(f"{path.relative_to(ROOT).as_posix()}:{token}")
+    assert violations == []
+
+    presentation = (client_root / "internal" / "presentation" / "state.go").read_text(
+        encoding="utf-8"
+    )
+    for legacy_owner in (
+        "TranscriptViewportState",
+        "func (s State) Resize",
+        "func (s State) Scroll",
+        "scrollOffset",
+    ):
+        assert legacy_owner not in presentation
+
+    app_state = (client_root / "internal" / "app" / "state.go").read_text(
+        encoding="utf-8"
+    )
+    assert "transcript          transcript.Model" in app_state
+    assert "TranscriptViewportState" not in app_state
+
+    view = (client_root / "internal" / "app" / "view.go").read_text(encoding="utf-8")
+    for io_token in ("os.", "net.", "Read(", "RequestSnapshot", "Effect{"):
+        assert io_token not in view
+    assert "NewLayoutPlan(" not in view
+
+    clear_owners = []
+    for path in tuple(SRC.rglob("*.py")) + tuple(client_root.rglob("*.go")):
+        source = path.read_text(encoding="utf-8")
+        if "\\x1b[3J" in source or "ESC[3J" in source:
+            clear_owners.append(path.relative_to(ROOT).as_posix())
+    assert clear_owners == ["src/pulsara_agent/terminal_client/launcher.py"]
 
 
 def test_s1_physical_terminalization_owners_are_confined_and_drained() -> None:

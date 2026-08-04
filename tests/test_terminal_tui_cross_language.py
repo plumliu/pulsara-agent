@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import signal
 import struct
 import subprocess
 import termios
@@ -92,8 +93,38 @@ def test_python_gateway_to_go_s1_read_only_viewport(
             assert b"Pulsara" in output
             assert b"ready" in output
             assert b"S1 real transcript sentinel" in output
+            assert b"\x1b[?1049h" in output
+            assert b"\x1b[?1002h" in output
+            assert b"\x1b[?1006h" in output
+            assert b"\x1b[3J" not in output
+
+            # The production program must consume the real PTY size rather than
+            # a hidden renderer clamp. Width 30 selects the compact footer.
+            fcntl.ioctl(
+                master_fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", 8, 30, 0, 0),
+            )
+            os.kill(process.pid, signal.SIGWINCH)
+            resized = await asyncio.to_thread(
+                _read_pty_until,
+                master_fd,
+                (b"read-only",),
+                3.0,
+            )
+            assert b"read-only" in resized
+            assert b"\x1b[3J" not in resized
             os.write(master_fd, b"q")
+            restored = await asyncio.to_thread(
+                _read_pty_until,
+                master_fd,
+                (b"\x1b[?1049l", b"\x1b[?1002l", b"\x1b[?1006l"),
+                5.0,
+            )
             assert await asyncio.wait_for(process.wait(), timeout=5.0) == 0
+            assert b"\x1b[?1049l" in restored
+            assert b"\x1b[?1002l" in restored
+            assert b"\x1b[?1006l" in restored
         finally:
             if process.returncode is None:
                 process.terminate()

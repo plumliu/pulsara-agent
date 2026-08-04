@@ -170,6 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit path to a verified pulsara-tui binary.",
     )
+    tui.add_argument(
+        "--clear-scrollback",
+        action="store_true",
+        help=(
+            "Irreversibly erase the current terminal display and scrollback "
+            "before launching the TUI."
+        ),
+    )
     inspect_cmd = _add_host_permission_args(
         _add_host_workspace_args(
             host_subcommands.add_parser(
@@ -2151,6 +2159,7 @@ async def _host_tui(args) -> None:
         await launch_terminal_client(
             host_session=session,
             binary_path=getattr(args, "tui_binary", None),
+            clear_scrollback=bool(getattr(args, "clear_scrollback", False)),
         )
     finally:
         await core.shutdown()
