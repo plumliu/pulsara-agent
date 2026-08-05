@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/commandstate"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 )
 
@@ -289,6 +290,26 @@ type HistoryPageRejectedMsg struct {
 	Header  IOMessageHeader
 	Failure PublicFailure
 }
+type CommandOutcomeMsg struct {
+	Header    IOMessageHeader
+	Candidate commandstate.Candidate
+	Outcome   commandstate.Outcome
+}
+type CommandQueryFoundMsg struct {
+	Header    IOMessageHeader
+	Candidate commandstate.Candidate
+	Outcome   commandstate.Outcome
+}
+type CommandQueryMissingMsg struct {
+	Header    IOMessageHeader
+	Candidate commandstate.Candidate
+}
+type CommandTransportFailedMsg struct {
+	Header        IOMessageHeader
+	Candidate     commandstate.Candidate
+	Failure       PublicFailure
+	DeliveryPhase FailureDeliveryPhase
+}
 type LocalObservationOverflowMsg struct {
 	Header LocalMessageHeader
 	Reason protocolvalue.GapReason
@@ -357,6 +378,7 @@ type TickKind uint8
 const (
 	TickHeartbeat TickKind = iota + 1
 	TickReconnect
+	TickSnapshotRetry
 	TickCursorBlink
 	TickNotificationExpiry
 	TickTeardownDeadline
@@ -442,6 +464,10 @@ func (ObservationNoChangeMsg) applicationMessage()                  {}
 func (ObservationRejectedMsg) applicationMessage()                  {}
 func (HistoryPageAcceptedMsg) applicationMessage()                  {}
 func (HistoryPageRejectedMsg) applicationMessage()                  {}
+func (CommandOutcomeMsg) applicationMessage()                       {}
+func (CommandQueryFoundMsg) applicationMessage()                    {}
+func (CommandQueryMissingMsg) applicationMessage()                  {}
+func (CommandTransportFailedMsg) applicationMessage()               {}
 func (LocalObservationOverflowMsg) applicationMessage()             {}
 func (AppStartedMsg) applicationMessage()                           {}
 func (KeyInputMsg) applicationMessage()                             {}
@@ -589,6 +615,38 @@ func (m HeartbeatRejectedMsg) validate() error {
 	}
 	return nil
 }
+func (m CommandOutcomeMsg) validate() error {
+	if m.Header.Operation.Kind != OpMutation || m.Candidate.Validate() != nil || m.Outcome.Validate() != nil ||
+		m.Outcome.RequestID != m.Header.Operation.RequestID || m.Outcome.Fingerprint != m.Header.PayloadFingerprint ||
+		m.Outcome.CommandID != m.Candidate.ID() || m.Outcome.TargetID != m.Candidate.Binding().ExpectedTargetID ||
+		m.Outcome.TargetGeneration != m.Candidate.Binding().ExpectedTargetGeneration {
+		return errors.New("terminal command outcome message is invalid")
+	}
+	return nil
+}
+func (m CommandQueryFoundMsg) validate() error {
+	if m.Header.Operation.Kind != OpCommandQuery || m.Candidate.Validate() != nil || m.Outcome.Validate() != nil ||
+		m.Outcome.RequestID != m.Header.Operation.RequestID || m.Outcome.Fingerprint != m.Header.PayloadFingerprint ||
+		m.Outcome.CommandID != m.Candidate.ID() || m.Outcome.TargetID != m.Candidate.Binding().ExpectedTargetID ||
+		m.Outcome.TargetGeneration != m.Candidate.Binding().ExpectedTargetGeneration {
+		return errors.New("terminal command query winner is invalid")
+	}
+	return nil
+}
+func (m CommandQueryMissingMsg) validate() error {
+	if m.Header.Operation.Kind != OpCommandQuery || m.Candidate.Validate() != nil || m.Header.PayloadFingerprint != m.Candidate.Fingerprint() {
+		return errors.New("terminal command query missing result is invalid")
+	}
+	return nil
+}
+func (m CommandTransportFailedMsg) validate() error {
+	if m.Candidate.Validate() != nil || (m.Header.Operation.Kind != OpMutation && m.Header.Operation.Kind != OpCommandQuery) ||
+		m.DeliveryPhase != m.Failure.Production().DeliveryPhase() || m.Failure.Production().OperationID() != m.Header.Operation.OperationID ||
+		m.Failure.Production().EvidenceFingerprint() != m.Header.PayloadFingerprint {
+		return errors.New("terminal command transport failure is invalid")
+	}
+	return validateWireFailure(m.Header, m.Failure, m.Header.Operation.Kind)
+}
 
 func messageOutstanding(message any) (OutstandingOperation, bool) {
 	switch value := message.(type) {
@@ -647,6 +705,14 @@ func messageOutstanding(message any) (OutstandingOperation, bool) {
 	case HistoryPageAcceptedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
 	case HistoryPageRejectedMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case CommandOutcomeMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case CommandQueryFoundMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case CommandQueryMissingMsg:
+		return NewOutstandingWire(value.Header.Operation), true
+	case CommandTransportFailedMsg:
 		return NewOutstandingWire(value.Header.Operation), true
 	case TeardownCompletedMsg:
 		return NewOutstandingLocal(value.Header.Operation), true
@@ -720,6 +786,14 @@ func messageObservedAt(message any) time.Time {
 	case HistoryPageAcceptedMsg:
 		return value.Header.ReceivedAt
 	case HistoryPageRejectedMsg:
+		return value.Header.ReceivedAt
+	case CommandOutcomeMsg:
+		return value.Header.ReceivedAt
+	case CommandQueryFoundMsg:
+		return value.Header.ReceivedAt
+	case CommandQueryMissingMsg:
+		return value.Header.ReceivedAt
+	case CommandTransportFailedMsg:
 		return value.Header.ReceivedAt
 	case LocalObservationOverflowMsg:
 		return value.Header.ProducedAt

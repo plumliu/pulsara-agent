@@ -23,9 +23,9 @@ DIRECT_EVENT_LOG_MUTATION_ALLOWLIST = {
         "commit_batch",
     ),
     (
-        "runtime/session.py",
-        "RuntimeSession",
-        "_persist_runtime_projection_checkpoint",
+        "runtime/projection_checkpoint_maintenance.py",
+        "RuntimeProjectionCheckpointMaintenanceService",
+        "_drive_once",
         "self.event_log",
         "write_runtime_projection_checkpoint",
     ),

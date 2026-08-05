@@ -72,6 +72,7 @@ from pulsara_agent.event_log.protocol import (
 from pulsara_agent.primitives.stored_event import (
     RawRuntimeProjectionCheckpoint,
     RawTranscriptDomainPrefixFact,
+    canonical_json_object_carrier,
 )
 from pulsara_agent.event_log.transcript_prefix import (
     EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
@@ -356,8 +357,10 @@ class PostgresEventLog:
             validation_base_through_sequence=int(
                 row["validation_base_through_sequence"]
             ),
-            validation_base_state_payload=dict(row["validation_base_state_payload"]),
-            state_payload=dict(row["state_payload"]),
+            validation_base_state=canonical_json_object_carrier(
+                dict(row["validation_base_state_payload"])
+            ),
+            state=canonical_json_object_carrier(dict(row["state_payload"])),
             payload_fingerprint=str(row["payload_fingerprint"]),
         )
 
@@ -408,7 +411,7 @@ class PostgresEventLog:
         deadline = self._write_deadline(deadline_monotonic)
         with postgres_event_connection(
             self.connection_provider,
-            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            lane=PostgresConnectionLane.CHECKPOINT_MAINTENANCE,
             deadline_monotonic=deadline,
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
@@ -463,9 +466,14 @@ class PostgresEventLog:
                         or dict(existing["ledger_prefix"]) != expected_prefix_payload
                         or int(existing["validation_base_through_sequence"])
                         != checkpoint.validation_base_through_sequence
-                        or dict(existing["validation_base_state_payload"])
-                        != checkpoint.validation_base_state_payload
-                        or dict(existing["state_payload"]) != checkpoint.state_payload
+                        or canonical_json_object_carrier(
+                            dict(existing["validation_base_state_payload"])
+                        )
+                        != checkpoint.validation_base_state
+                        or canonical_json_object_carrier(
+                            dict(existing["state_payload"])
+                        )
+                        != checkpoint.state
                         or str(existing["payload_fingerprint"])
                         != checkpoint.payload_fingerprint
                     ):
@@ -478,8 +486,10 @@ class PostgresEventLog:
                     and (
                         checkpoint.validation_base_through_sequence
                         != int(existing["through_sequence"])
-                        or checkpoint.validation_base_state_payload
-                        != dict(existing["state_payload"])
+                        or checkpoint.validation_base_state
+                        != canonical_json_object_carrier(
+                            dict(existing["state_payload"])
+                        )
                         or checkpoint.projection_schema_version
                         != str(existing["projection_schema_version"])
                     )
@@ -524,9 +534,9 @@ class PostgresEventLog:
                             _runtime_projection_prefix_payload(checkpoint.ledger_prefix)
                         ),
                         checkpoint.validation_base_through_sequence,
-                        Jsonb(checkpoint.validation_base_state_payload),
+                        Jsonb(checkpoint.validation_base_state.decode_object()),
                         checkpoint.payload_fingerprint,
-                        Jsonb(checkpoint.state_payload),
+                        Jsonb(checkpoint.state.decode_object()),
                     ),
                 )
 

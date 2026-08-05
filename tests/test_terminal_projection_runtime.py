@@ -66,7 +66,7 @@ def test_tool_terminal_projection_is_atomic_and_independently_hydratable(
 ) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
 
-    committed = asyncio.run(runtime_session.emit_many(_tool_events()))
+    committed = asyncio.run(runtime_session.commit_accepted_events(_tool_events()))
 
     projection = next(
         event

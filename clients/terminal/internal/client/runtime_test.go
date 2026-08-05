@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/app"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 )
 
@@ -16,6 +17,7 @@ func TestServiceTakesExclusiveLaunchCapabilityOwnership(t *testing.T) {
 		HostSessionID: "host:one", RuntimeSessionID: "runtime:one",
 		SocketPath: "/tmp/pulsara-client-owner.sock", LaunchCapability: capability,
 		ParentPID: 1, ExpiresAt: time.Now().Add(time.Minute), Fingerprint: "bootstrap",
+		RequestedRole: protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER,
 	}
 	service, err := NewService(bootstrap)
 	if err != nil {
@@ -125,6 +127,7 @@ func TestServiceCloseSharesTheSinglePhysicalDrainOwner(t *testing.T) {
 		HostSessionID: "host:close", RuntimeSessionID: "runtime:close",
 		SocketPath: "/tmp/pulsara-client-close.sock", LaunchCapability: bytes.Repeat([]byte{0x33}, 32),
 		ParentPID: 1, ExpiresAt: time.Now().Add(time.Minute), Fingerprint: "bootstrap:close",
+		RequestedRole: protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER,
 	}
 	service, err := NewService(bootstrap)
 	if err != nil {

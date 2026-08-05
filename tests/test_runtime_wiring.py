@@ -101,7 +101,7 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
         runtime._adopt_unbootstrapped_in_memory_account_for_test(  # noqa: SLF001
             incoming_run_id=source_ctx.run_id
         )
-        source = await runtime.emit(
+        source = await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **source_ctx.event_fields(), block_id="text:1", delta="bind"
             )
@@ -123,7 +123,7 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
         assert governance_sequences[0] > source.sequence  # type: ignore[operator]
 
         final = await asyncio.wait_for(
-            runtime.emit(
+            runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **source_ctx.event_fields(), block_id="text:2", delta="after"
                 )

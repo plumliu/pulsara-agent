@@ -77,6 +77,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    TerminalProcessCompletedEvent,
     ToolExecutionSuspendedEvent,
     UserConfirmResultEvent,
 )
@@ -2294,7 +2295,7 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
         try:
             await asyncio.sleep(10)
         except asyncio.CancelledError:
-            await runtime_session.emit(
+            await runtime_session.commit_accepted_event(
                 RunEndEvent(
                     **run_end_contract_fields(
                         state.run_id, status="aborted", abort_kind="user_stop"
@@ -2311,7 +2312,7 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
             )
 
     async def run() -> None:
-        await runtime_session.emit(run_start)
+        await runtime_session.commit_accepted_event(run_start)
         task = asyncio.create_task(run_and_emit_after_cancel())
         await asyncio.sleep(0)
         task.cancel()
@@ -2425,6 +2426,175 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     )
 
 
+def test_terminal_completion_semantic_repair_allows_followup_and_final_reply(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class CompletionTransport(ScriptedTransport):
+        async def stream(self, *, call, context, event_context):
+            if not self.contexts:
+                reply = {
+                    "tool_calls": [
+                        {
+                            "id": "call:launch-repair",
+                            "name": "terminal",
+                            "arguments": json.dumps(
+                                {
+                                    "command": "sleep 0.05; echo completion-ready",
+                                    "yield_time_ms": 0,
+                                }
+                            ),
+                        }
+                    ]
+                }
+            else:
+                reply = {"text": "Completion repaired; final reply delivered."}
+            self.replies.append(reply)
+            async for event in super().stream(
+                call=call,
+                context=context,
+                event_context=event_context,
+            ):
+                yield event
+
+    transport = CompletionTransport([])
+    agent = build_test_agent_runtime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_terminal_bypass_policy(),
+    )
+    reducer_id = f"terminal_notification:{runtime_session.runtime_session_id}"
+    registration = runtime_session._committed_reducers[reducer_id]  # noqa: SLF001
+    original_ingress = registration.ingress
+    semantic_failure_seen = False
+
+    def fail_completion_once(events):
+        nonlocal semantic_failure_seen
+        if not semantic_failure_seen and any(
+            isinstance(event, TerminalProcessCompletedEvent) for event in events
+        ):
+            semantic_failure_seen = True
+            raise RuntimeError("synthetic completion semantic fold failure")
+        return original_ingress.prepare_owned_events(events)
+
+    registration.ingress = replace(
+        original_ingress,
+        prepare_owned_events=fail_completion_once,
+    )
+
+    # Freeze the incident's exact interleaving: the first terminal ToolResult
+    # says ``running``; the physical completion commits before the legal
+    # post-tool follow-up safe point; the next model call may start only after
+    # that semantic failure has an exact session-owned repair.
+    agent_type = type(agent)
+    original_continue_after_tool = agent_type._continue_after_tool_before_followup
+
+    async def wait_for_completion_before_followup(self, state):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if semantic_failure_seen and any(
+                isinstance(event, TerminalProcessCompletedEvent)
+                for event in runtime_session.event_log.iter()
+            ):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(
+                "physical terminal completion did not reach the post-tool safe point"
+            )
+        async for event in original_continue_after_tool(self, state):
+            yield event
+
+    monkeypatch.setattr(
+        agent_type,
+        "_continue_after_tool_before_followup",
+        wait_for_completion_before_followup,
+    )
+    event_log_type = type(runtime_session.event_log)
+    original_checkpoint_write = event_log_type.write_runtime_projection_checkpoint
+    checkpoint_failure_seen = False
+
+    def fail_completion_checkpoint_once(self, checkpoint, **kwargs):
+        nonlocal checkpoint_failure_seen
+        if self is runtime_session.event_log and not checkpoint_failure_seen:
+            prefix = runtime_session.event_log.iter()[: checkpoint.through_sequence]
+            if any(
+                isinstance(event, TerminalProcessCompletedEvent) for event in prefix
+            ):
+                checkpoint_failure_seen = True
+                raise OSError("synthetic completion checkpoint write failure")
+        return original_checkpoint_write(self, checkpoint, **kwargs)
+
+    monkeypatch.setattr(
+        event_log_type,
+        "write_runtime_projection_checkpoint",
+        fail_completion_checkpoint_once,
+    )
+
+    async def scenario():
+        result = await asyncio.wait_for(
+            run_agent_task(agent, "launch, wait, then report completion"),
+            timeout=15,
+        )
+        deadline = time.monotonic() + 3
+        diagnostic = None
+        while time.monotonic() < deadline:
+            diagnostic = runtime_session.runtime_projection_checkpoint_maintenance_service.diagnostics(
+                reducer_id
+            )
+            if diagnostic["state"] == "clean":
+                break
+            await asyncio.sleep(0.01)
+        assert diagnostic is not None and diagnostic["state"] == "clean"
+        close_deadline = time.monotonic() + 3
+        await runtime_session.quiesce_provider_input_event_producers_for_close(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=close_deadline
+        )
+        runtime_session.close()
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "Completion repaired; final reply delivered."
+    assert len(transport.contexts) == 2
+    assert semantic_failure_seen is True
+    assert checkpoint_failure_seen is True
+    assert registration.reconciliation_required is False
+    assert runtime_session.reconciliation_required is False
+    stored = runtime_session.event_log.iter()
+    completion_index = next(
+        index
+        for index, event in enumerate(stored)
+        if isinstance(event, TerminalProcessCompletedEvent)
+    )
+    model_start_indexes = [
+        index
+        for index, event in enumerate(stored)
+        if isinstance(event, ModelCallStartEvent)
+    ]
+    assert len(model_start_indexes) == 2
+    assert completion_index < model_start_indexes[1]
+    launch_result = next(
+        event
+        for event in stored
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:launch-repair"
+    )
+    assert json.loads(launch_result.delta)["status"] == "running"
+    assert any(
+        isinstance(event, RunEndEvent) and event.stop_reason == "final"
+        for event in stored
+        if event.run_id == result.run_id
+    )
+
+
 def test_render_cache_write_failure_cannot_block_model_followup(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2532,7 +2702,7 @@ def test_mid_turn_skip_publication_failure_installs_typed_run_termination(
         safe_point="before_followup_model_call",
     )
     stored = asyncio.run(
-        runtime_session.emit(
+        runtime_session.commit_accepted_event(
             MidTurnContextCompactionSkippedEvent(
                 run_id=state.run_id,
                 turn_id=state.turn_id,
@@ -2877,7 +3047,7 @@ def test_build_tool_result_error_events_use_standard_event_shape(tmp_path) -> No
     )
 
     events = asyncio.run(
-        runtime_session.emit_many(
+        runtime_session.commit_accepted_events(
             build_tool_result_error_events(
                 context,
                 tool_call_id="call:bad",
@@ -3480,7 +3650,18 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
             is TerminalStatus.RUNNING
         )
     finally:
-        runtime_session.close()
+
+        async def close_runtime() -> None:
+            close_deadline = time.monotonic() + 3
+            await runtime_session.quiesce_provider_input_event_producers_for_close(
+                deadline_monotonic=close_deadline
+            )
+            await runtime_session.drain_open_committed_reducer_barrier(
+                deadline_monotonic=close_deadline
+            )
+            runtime_session.close()
+
+        asyncio.run(close_runtime())
 
     if process_id is not None:
         assert (
@@ -4235,7 +4416,7 @@ def test_zero_subagent_cap_persists_omitted_only_selection_audit(
             turn_id="turn:selection-seed",
             reply_id="reply:selection-seed",
         )
-        await runtime_session.emit(
+        await runtime_session.commit_accepted_event(
             RunStartEvent(
                 **seed_context.event_fields(),
                 **run_start_permission_fields(

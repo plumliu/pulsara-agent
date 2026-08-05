@@ -31,6 +31,10 @@ from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.stored_event import (
+    CanonicalJsonObjectCarrier,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.primitives.host_ingress import RuntimeRequestRunIngressFact
 from pulsara_agent.primitives.terminal_observation import (
     MAXIMUM_TERMINAL_MONITOR_DURATION_SECONDS,
@@ -69,6 +73,10 @@ from pulsara_agent.primitives.terminal_observation import (
 from pulsara_agent.ports.terminal import (
     PreparedTerminalProcessMonitorCancellation,
     PreparedTerminalProcessMonitorRegistration,
+)
+from pulsara_agent.ports.event_write import (
+    CommittedSemanticFoldSettlement,
+    EventReconciliationRequired,
 )
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.event_write_service import (
@@ -366,6 +374,54 @@ class TerminalMonitorStore:
                 for item in current
             ),
         }
+
+    def prepare_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> tuple[
+        CanonicalJsonObjectCarrier,
+        CanonicalJsonObjectCarrier,
+        "TerminalMonitorStore",
+    ]:
+        """Validate a complete transition off-store without publishing it."""
+
+        base = canonical_json_object_carrier(self.checkpoint_payload())
+        candidate = type(self).from_checkpoint_payload(
+            base.decode_object(),
+            runtime_session_id=self.runtime_session_id,
+        )
+        candidate.apply_committed(events)
+        resulting = canonical_json_object_carrier(candidate.checkpoint_payload())
+        return base, resulting, candidate
+
+    def install_prepared_committed(
+        self,
+        prepared: object,
+        expected_base: CanonicalJsonObjectCarrier,
+    ) -> None:
+        if not isinstance(prepared, TerminalMonitorStore):
+            raise TypeError("terminal monitor prepared state has wrong owner")
+        with self._lock:
+            if canonical_json_object_carrier(self.checkpoint_payload()) != expected_base:
+                raise TerminalMonitorContractError(
+                    "terminal monitor semantic base changed during fold"
+                )
+            self._install_candidate_locked(prepared)
+
+    def replace_from_checkpoint_payload(self, payload: dict[str, object]) -> None:
+        """Install one independently validated repair result in place."""
+
+        candidate = type(self).from_checkpoint_payload(
+            payload,
+            runtime_session_id=self.runtime_session_id,
+        )
+        with self._lock:
+            self._install_candidate_locked(candidate)
+
+    def _install_candidate_locked(self, candidate: "TerminalMonitorStore") -> None:
+        self.through_sequence = candidate.through_sequence
+        self._records = dict(candidate._records)
+        self._observation_by_event_id = dict(candidate._observation_by_event_id)
+        self._tool_result_by_identity = dict(candidate._tool_result_by_identity)
 
     def rebuild(self, events: tuple[AgentEvent, ...]) -> None:
         with self._lock:
@@ -1414,6 +1470,7 @@ class TerminalMonitorCoordinator:
     def terminate_all_for_session_close(self, *, timeout_seconds: float = 2.0) -> None:
         """Stop physical workers and durably close every nonterminal monitor."""
 
+        deadline_monotonic = monotonic() + max(0.0, timeout_seconds)
         self.stop_admission_and_drain_workers(timeout_seconds=timeout_seconds)
         for record in self.store.snapshots():
             state = record.core_state
@@ -1422,11 +1479,14 @@ class TerminalMonitorCoordinator:
             candidates = self._session_close_candidates(record)
             if not candidates:
                 continue
-            result = self.runtime_session.write_events_from_thread(candidates)
-            if result.reconciliation_required:
-                raise TerminalMonitorContractError(
-                    "terminal monitor close requires reconciliation"
-                )
+            self.runtime_session.settle_events_from_thread(
+                candidates,
+                required_reducer_ids=(
+                    f"terminal_monitor:{self.runtime_session.runtime_session_id}",
+                ),
+                require_publication=False,
+                deadline_monotonic=deadline_monotonic,
+            )
 
     def _session_close_candidates(
         self, record: TerminalMonitorRecord
@@ -1773,18 +1833,39 @@ class TerminalMonitorCoordinator:
                 )
             owner.attempts += 1
             try:
-                if deadline_monotonic is None:
-                    result = self.runtime_session.write_events_from_thread(
-                        owner.stable_candidates
-                    )
-                else:
-                    result = self.runtime_session.write_events_from_thread(
-                        owner.stable_candidates,
-                        deadline_monotonic=deadline_monotonic,
-                    )
+                receipt = self.runtime_session.settle_events_from_thread(
+                    owner.stable_candidates,
+                    required_reducer_ids=(
+                        f"terminal_monitor:{self.runtime_session.runtime_session_id}",
+                    ),
+                    require_publication=False,
+                    deadline_monotonic=deadline_monotonic,
+                )
             except RuntimeEventWriteCancelled as cancelled:
                 result = getattr(cancelled, "operation_result", None)
-                if result is None:
+                if result is not None:
+                    try:
+                        settlement = self.runtime_session.accept_committed_event_result(
+                            result,
+                            requested_event_ids=tuple(
+                                event.id for event in owner.stable_candidates
+                            ),
+                            required_reducer_ids=(
+                                f"terminal_monitor:"
+                                f"{self.runtime_session.runtime_session_id}",
+                            ),
+                            require_publication=False,
+                        )
+                    except EventReconciliationRequired:
+                        self._mark_reconciliation_required(owner.monitor_id)
+                        return
+                    self._adopt_firing_settlement(owner, settlement.semantic_fold)
+                    return
+                error = getattr(cancelled, "operation_error", None)
+                outcome = getattr(error, "commit_outcome", None)
+                if outcome == "none" or isinstance(
+                    error, PendingRuntimeEventWriteError
+                ):
                     if self._closed:
                         return
                     if (
@@ -1796,6 +1877,11 @@ class TerminalMonitorCoordinator:
                         )
                     sleep(_MONITOR_RETRY_SECONDS)
                     continue
+                self._mark_reconciliation_required(
+                    owner.monitor_id,
+                    ledger_outcome_unknown=True,
+                )
+                return
             except Exception as exc:
                 outcome = getattr(exc, "commit_outcome", None)
                 if outcome == "none" or isinstance(exc, PendingRuntimeEventWriteError):
@@ -1810,24 +1896,44 @@ class TerminalMonitorCoordinator:
                         ) from exc
                     sleep(_MONITOR_RETRY_SECONDS)
                     continue
-                self._mark_reconciliation_required(owner.monitor_id)
+                self._mark_reconciliation_required(
+                    owner.monitor_id,
+                    ledger_outcome_unknown=outcome == "unknown",
+                )
                 return
-            if result.reconciliation_required:
-                self._mark_reconciliation_required(owner.monitor_id)
-                return
-            # FULL is adopted through the committed reducer callback before the
-            # physical call returns.  The explicit pop also supports test ports
-            # that return a FULL result without a callback.
-            with self._lock:
-                self._firing.pop(owner.monitor_id, None)
+            self._adopt_firing_settlement(owner, receipt.settlement.semantic_fold)
             return
 
-    def _mark_reconciliation_required(self, monitor_id: str) -> None:
+    def _adopt_firing_settlement(
+        self,
+        owner: _FiringOwner,
+        semantic_fold: CommittedSemanticFoldSettlement,
+    ) -> None:
+        if semantic_fold not in {
+            CommittedSemanticFoldSettlement.HEALTHY,
+            CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED,
+        }:
+            raise TerminalMonitorContractError(
+                "terminal monitor received an unknown semantic settlement"
+            )
+        # Both branches are durable FULL.  The latter transfers semantic fold
+        # completion to the exact reducer-repair owner; neither is a physical
+        # UNKNOWN and neither may poison the ledger outcome latch.
+        with self._lock:
+            self._firing.pop(owner.monitor_id, None)
+
+    def _mark_reconciliation_required(
+        self,
+        monitor_id: str,
+        *,
+        ledger_outcome_unknown: bool = False,
+    ) -> None:
         with self._lock:
             dormant = self._dormant.get(monitor_id)
             if dormant is not None:
                 dormant.owner_state = "reconciliation_required"
-        self.runtime_session.latch_event_commit_outcome_unknown()
+        if ledger_outcome_unknown:
+            self.runtime_session.latch_event_commit_outcome_unknown()
 
     def _observation_candidates(
         self,

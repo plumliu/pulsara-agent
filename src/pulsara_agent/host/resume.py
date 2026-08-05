@@ -336,7 +336,9 @@ async def repair_dangling_runs_for_resume(
                 raise RuntimeError("dangling run recovery publication is unavailable")
             repaired.append(run_id)
     finally:
-        runtime_session.close()
+        await runtime_session.teardown_temporary_recovery_session(
+            deadline_monotonic=deadline_monotonic
+        )
 
     return DanglingRunRepairResult(
         runtime_session_id=runtime_session_id,

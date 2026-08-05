@@ -121,6 +121,7 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.primitives.long_horizon import ToolActionClassificationFact
 from pulsara_agent.ports.run_execution import RunTerminalOutcome
+from pulsara_agent.ports.event_write import EventReconciliationRequired
 from pulsara_agent.ports.mcp import (
     McpInvocationOwner,
     McpPendingTerminalReason,
@@ -223,7 +224,10 @@ from pulsara_agent.runtime.context_input.compiler import (
     lower_transcript_for_context,
     provider_neutral_payload_fingerprint,
 )
-from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
+from pulsara_agent.runtime.context_input.event_slice import (
+    ContextEventSliceError,
+    event_reference_from_stored,
+)
 from pulsara_agent.runtime.context_input.live import (
     ContextInputPreparationError,
     descriptor_render_attribution,
@@ -735,7 +739,10 @@ class AgentRuntime:
         self._run_audit = run_audit_port
         self.run_execution_registry = run_execution_registry
         self._run_finalization_service = (
-            RunFinalizationService(registry=run_execution_registry)
+            RunFinalizationService(
+                registry=run_execution_registry,
+                repair_port=run_ledger_port,
+            )
             if run_execution_registry is not None
             else None
         )
@@ -870,7 +877,7 @@ class AgentRuntime:
     async def commit_run_entry_events(
         self, events: tuple[AgentEvent, ...]
     ) -> tuple[AgentEvent, ...]:
-        return tuple(await self._run_ledger.emit_many(events))
+        return tuple(await self._run_ledger.commit_accepted_events(events))
 
     def resolve_run_entry_write_failure(self, error: BaseException):
         return self._run_ledger.resolved_write_outcome(error)
@@ -1100,7 +1107,7 @@ class AgentRuntime:
     def continue_run_terminalization(
         self,
         state: RunActivationWorkingState,
-    ) -> asyncio.Task[tuple[AgentEvent, ...]]:
+    ) -> asyncio.Future[tuple[AgentEvent, ...]]:
         """Give retry ownership to the stable finalization service."""
 
         service = self._run_finalization_service
@@ -1196,7 +1203,7 @@ class AgentRuntime:
 
         reason_code = f"pending_approval_aborted:{reason.value}"
         for block in tuple(state.pending_tool_calls):
-            stored_events = await self._run_ledger.emit_many(
+            stored_events = await self._run_ledger.commit_accepted_events(
                 self._typed_tool_result_error_events(
                     state,
                     tool_call_id=block.id,
@@ -1385,7 +1392,10 @@ class AgentRuntime:
             raise RuntimeError("AgentRuntime is already bound to another run registry")
         self.run_execution_registry = registry
         if self._run_finalization_service is None:
-            self._run_finalization_service = RunFinalizationService(registry=registry)
+            self._run_finalization_service = RunFinalizationService(
+                registry=registry,
+                repair_port=self._run_ledger,
+            )
 
     def bind_run_reconciliation_service(self, service) -> None:
         current = self._run_reconciliation_service
@@ -1931,7 +1941,7 @@ class AgentRuntime:
             exposure_revision=1,
         )
         try:
-            stored_exposure = await self._run_ledger.emit(
+            stored_exposure = await self._run_ledger.commit_accepted_event(
                 exposure_event,
             )
         except BaseException as exc:
@@ -2095,7 +2105,7 @@ class AgentRuntime:
         )
         if plan is None:
             return ()
-        stored = tuple(await self._run_ledger.emit_many(plan.events))
+        stored = tuple(await self._run_ledger.commit_accepted_events(plan.events))
         if tuple(event.id for event in stored) != tuple(
             event.id for event in plan.events
         ):
@@ -2349,7 +2359,7 @@ class AgentRuntime:
         state: RunActivationWorkingState,
         fact: CapabilityGateDecisionFact,
     ) -> AsyncIterator[AgentEvent]:
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             self._capability_gate_decision_event(state, fact),
         )
 
@@ -2729,7 +2739,7 @@ class AgentRuntime:
             return
         if state.plan_progress.entry_audit_emitted:
             return
-        event = await self._run_ledger.emit(
+        event = await self._run_ledger.commit_accepted_event(
             PlanModeEnteredEvent(
                 **self._event_context(state).event_fields(),
                 source="user",
@@ -2805,7 +2815,7 @@ class AgentRuntime:
                 plan=plan,
             )
             try:
-                stored = await self._run_ledger.emit(candidate)
+                stored = await self._run_ledger.commit_accepted_event(candidate)
             except LongHorizonReducerApplyError:
                 # Terminal monitor/completion writers can advance the canonical
                 # ledger between rollout planning and this queued commit.  A
@@ -2901,6 +2911,14 @@ class AgentRuntime:
             if self._apply_stop_request(state):
                 break
 
+            # A terminal completion may commit between the prior ToolResult and
+            # this next model step.  Its semantic repair is session-owned and
+            # event-driven; wait for that exact owner before any context or
+            # memory safe-point mutation observes the temporary latch.
+            await self._run_ledger.await_committed_reducer_repair_safe_point(
+                deadline_monotonic=time.monotonic() + 30.0,
+            )
+
             async for event in self._project_memory(state):
                 yield event
 
@@ -2941,7 +2959,7 @@ class AgentRuntime:
                 )
                 state.error_message = rollout_terminal_reason
                 state.transition(LoopTransition.FAIL)
-                yield await self._run_ledger.emit(
+                yield await self._run_ledger.commit_accepted_event(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=rollout_terminal_reason,
@@ -2954,6 +2972,13 @@ class AgentRuntime:
                 resolved_call=resolved_call,
             ):
                 yield event
+            # Close the race where a background terminal completion commits
+            # while post-tool projection is being materialized.  Healthy
+            # checkpoint lag never reaches this barrier; only an exact online
+            # semantic-repair owner can make it wait.
+            await self._run_ledger.await_committed_reducer_repair_safe_point(
+                deadline_monotonic=time.monotonic() + 30.0,
+            )
             active_run_monitor_lease = (
                 await self._run_model.borrow_active_run_monitor_safe_point(
                     run_id=state.run_id,
@@ -3202,7 +3227,7 @@ class AgentRuntime:
                                     carrier=carrier,
                                 )
                             stored_rewrite = tuple(
-                                await self._run_ledger.emit_many(
+                                await self._run_ledger.commit_accepted_events(
                                     plan.events,
                                 )
                             )
@@ -3676,7 +3701,7 @@ class AgentRuntime:
                         state.stop_reason = RunStopReason.MODEL_ERROR
                         state.error_message = str(exc)
                         state.transition(LoopTransition.FAIL)
-                        yield await self._run_ledger.emit(
+                        yield await self._run_ledger.commit_accepted_event(
                             ContextCompiledEvent(
                                 **self._event_context(state).event_fields(),
                                 status="failed",
@@ -3690,7 +3715,7 @@ class AgentRuntime:
                                 input_failure=input_failure,
                             ),
                         )
-                        yield await self._run_ledger.emit(
+                        yield await self._run_ledger.commit_accepted_event(
                             RunErrorEvent(
                                 **self._event_context(state).event_fields(),
                                 message=str(exc),
@@ -3748,10 +3773,14 @@ class AgentRuntime:
                     compiled_context = final_compiled_context
                     break
                 except ContextInputPreparationError as exc:
+                    if self._run_ledger.reconciliation_required:
+                        await self._run_ledger.await_committed_reducer_repair_safe_point(
+                            deadline_monotonic=time.monotonic() + 30.0,
+                        )
+                        continue
                     if (
                         exc.reason_code
                         is ContextInputFailureReasonCode.LEDGER_UNTRUSTED
-                        or self._run_ledger.reconciliation_required
                     ):
                         raise
                     input_failure = _context_pre_manifest_input_failure(
@@ -3768,7 +3797,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -3790,7 +3819,7 @@ class AgentRuntime:
                             input_failure=input_failure,
                         ),
                     )
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=str(exc),
@@ -3828,7 +3857,7 @@ class AgentRuntime:
                             compile_attempt_index=compile_attempt_index,
                             context_retry_index=context_retry_index,
                         )
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="pressure",
@@ -3869,7 +3898,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -3892,7 +3921,7 @@ class AgentRuntime:
                             ),
                         ),
                     )
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=str(exc),
@@ -3902,7 +3931,10 @@ class AgentRuntime:
                     break
                 except Exception as exc:
                     if self._run_ledger.reconciliation_required:
-                        raise
+                        await self._run_ledger.await_committed_reducer_repair_safe_point(
+                            deadline_monotonic=time.monotonic() + 30.0,
+                        )
+                        continue
                     input_failure = None
                     if input_audit is None:
                         preparation_error = _context_stage_preparation_error(
@@ -3934,7 +3966,7 @@ class AgentRuntime:
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
@@ -3957,7 +3989,7 @@ class AgentRuntime:
                             input_failure=input_failure,
                         ),
                     )
-                    yield await self._run_ledger.emit(
+                    yield await self._run_ledger.commit_accepted_event(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=f"{type(exc).__name__}: {exc}",
@@ -4102,9 +4134,28 @@ class AgentRuntime:
                 ),
             )
             try:
-                stored_context_compiled = await self._run_ledger.emit(
+                stored_context_compiled = await self._run_ledger.commit_accepted_event(
                     context_compiled_candidate,
                 )
+            except EventReconciliationRequired:
+                await self._run_ledger.await_committed_reducer_repair_safe_point(
+                    deadline_monotonic=time.monotonic() + 30.0,
+                )
+                if active_run_monitor_lease is not None:
+                    self._run_model.release_active_run_monitor_safe_point(
+                        active_run_monitor_lease
+                    )
+                if active_run_prompt_steer_lease is not None:
+                    self._run_model.release_active_run_prompt_steer_safe_point(
+                        active_run_prompt_steer_lease
+                    )
+                await self._run_model.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
+                    reason="committed_reducer_repaired_before_model_start",
+                )
+                phase_restart_call = resolved_call
+                phase_restart_model_call_index = model_call_index
+                continue
             except EventPublicationAfterCommitError as exc:
                 if any(
                     event.id == context_compiled_candidate.id
@@ -4328,7 +4379,7 @@ class AgentRuntime:
                 estimated_input_tokens = (
                     estimate.total_input_tokens if estimate is not None else None
                 )
-                yield await self._run_ledger.emit(
+                yield await self._run_ledger.commit_accepted_event(
                     ModelCallRejectedEvent(
                         **self._event_context(state).event_fields(),
                         resolved_call=resolved_call.fact,
@@ -4352,7 +4403,7 @@ class AgentRuntime:
                 state.error_message = str(exc)
                 state.transition(LoopTransition.FAIL)
                 reply_had_run_error = True
-                yield await self._run_ledger.emit(
+                yield await self._run_ledger.commit_accepted_event(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=f"{type(exc).__name__}: {exc}",
@@ -4364,6 +4415,11 @@ class AgentRuntime:
                 # disposition candidate.  A later model call or RunEnd would
                 # cross that unresolved control fact, so fail closed here.
                 raise
+            except EventReconciliationRequired:
+                await self._run_ledger.await_committed_reducer_repair_safe_point(
+                    deadline_monotonic=time.monotonic() + 30.0,
+                )
+                active_run_monitor_replan_required = True
             except Exception as exc:
                 from pulsara_agent.runtime.terminal.notification import (
                     TerminalNotificationAdmissionStale,
@@ -4375,7 +4431,7 @@ class AgentRuntime:
                 ):
                     active_run_monitor_replan_required = True
                 else:
-                    event = await self._run_ledger.emit(
+                    event = await self._run_ledger.commit_accepted_event(
                         RunErrorEvent(
                             **self._event_context(state).event_fields(),
                             message=f"{type(exc).__name__}: {exc}",
@@ -4612,7 +4668,7 @@ class AgentRuntime:
             )
             for call in state.pending_tool_calls
         ]
-        event = await self._run_ledger.emit(
+        event = await self._run_ledger.commit_accepted_event(
             UserConfirmResultEvent(
                 **self._event_context(state).event_fields(),
                 confirm_results=confirm_results,
@@ -5355,7 +5411,26 @@ class AgentRuntime:
         state: RunActivationWorkingState,
     ) -> AsyncIterator[AgentEvent]:
         state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
-        compaction_result = await self._maybe_compact_mid_turn_before_followup(state)
+        repair_deadline = time.monotonic() + 30.0
+        while True:
+            # A background process completion may become durable immediately
+            # before this post-tool context read.  Join the writer boundary,
+            # then wait for any exact reducer repair it installed.  If a new
+            # completion wins between that join and the context snapshot's
+            # after-I/O validation, restart only this safe point after the
+            # matching receipt instead of failing the run.
+            await self._run_ledger.await_committed_reducer_repair_safe_point(
+                deadline_monotonic=repair_deadline,
+            )
+            try:
+                compaction_result = (
+                    await self._maybe_compact_mid_turn_before_followup(state)
+                )
+            except ContextEventSliceError:
+                if not self._run_ledger.reconciliation_required:
+                    raise
+                continue
+            break
         for event in compaction_result.events:
             yield event
         if compaction_result.mandatory_audit_publication_failed:
@@ -5451,7 +5526,7 @@ class AgentRuntime:
         question_id = str(payload.get("question_id") or "")
         tool_call_id = str(payload["tool_call_id"])
         tool_name = "ask_plan_question"
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             PlanQuestionAnsweredEvent(
                 **self._event_context(state).event_fields(),
                 question_id=question_id,
@@ -5489,7 +5564,7 @@ class AgentRuntime:
         )
         exit_request_id = str(payload.get("exit_request_id") or "")
         tool_call_id = str(payload["tool_call_id"])
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             PlanExitResolvedEvent(
                 **self._event_context(state).event_fields(),
                 exit_request_id=exit_request_id,
@@ -5533,7 +5608,7 @@ class AgentRuntime:
             restored_mode = plan_state.pre_plan_permission_mode
             restored_policy = self._policy_from_plan_state(plan_state)
             restored_mode_value = parse_permission_mode(restored_mode).value
-            stored_exit = await self._run_ledger.emit(
+            stored_exit = await self._run_ledger.commit_accepted_event(
                 PlanModeExitedEvent(
                     **event_context.event_fields(),
                     source="approved_exit_plan"
@@ -5886,6 +5961,14 @@ class AgentRuntime:
                 self._prepare_run_terminal_replan(state)
                 await asyncio.sleep(0)
                 continue
+            except EventReconciliationRequired:
+                # This is a pre-write safe-point rejection, not an uncertain
+                # physical commit.  The stable RunFinalizationService owner
+                # waits for the exact committed-reducer repair and retries the
+                # same frozen terminal candidate.  Classifying it as an
+                # unknown write outcome would permanently latch the ledger and
+                # make that repair path unreachable.
+                raise
             except BaseException as exc:
                 outcome = self._run_ledger.resolved_write_outcome(exc)
                 if outcome.status == "unknown":
@@ -5954,7 +6037,7 @@ class AgentRuntime:
         termination = finalization.publication_latched_termination
         if termination is None:
             return tuple(
-                await self._run_ledger.emit_many(
+                await self._run_ledger.commit_accepted_events(
                     candidates,
                     expected_last_sequence=expected_last_sequence,
                 )
@@ -6400,7 +6483,7 @@ class AgentRuntime:
         emitted_events: list[AgentEvent] = []
         try:
             for event in produced_events or ():
-                emitted_events.append(await self._run_ledger.emit(event))
+                emitted_events.append(await self._run_ledger.commit_accepted_event(event))
         except Exception as exc:
             emitted_events.append(
                 await self._mark_memory_hook_failed(state, hook_name, exc)
@@ -6416,7 +6499,7 @@ class AgentRuntime:
         state.stop_reason = RunStopReason.MEMORY_HOOK_ERROR
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self._run_ledger.emit(
+        return await self._run_ledger.commit_accepted_event(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
@@ -6430,7 +6513,7 @@ class AgentRuntime:
     ) -> AsyncIterator[AgentEvent]:
         projection_id = f"projection:{state.turn_id}"
         context = self._event_context(state)
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             ProjectionRequestedEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -6456,7 +6539,7 @@ class AgentRuntime:
         except TimeoutError:
             state.memory_projection = baseline
             if baseline is not None:
-                yield await self._run_ledger.emit(
+                yield await self._run_ledger.commit_accepted_event(
                     ProjectionReadyEvent(
                         **context.event_fields(),
                         projection_id=projection_id,
@@ -6477,7 +6560,7 @@ class AgentRuntime:
                     ),
                 )
                 return
-            yield await self._run_ledger.emit(
+            yield await self._run_ledger.commit_accepted_event(
                 ProjectionFailedEvent(
                     **context.event_fields(),
                     projection_id=projection_id,
@@ -6490,7 +6573,7 @@ class AgentRuntime:
             return
         except Exception as exc:
             state.memory_projection = None
-            yield await self._run_ledger.emit(
+            yield await self._run_ledger.commit_accepted_event(
                 ProjectionFailedEvent(
                     **context.event_fields(),
                     projection_id=projection_id,
@@ -6502,7 +6585,7 @@ class AgentRuntime:
             )
             return
         state.memory_projection = projection
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             ProjectionReadyEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -6526,7 +6609,7 @@ class AgentRuntime:
             try:
                 parsed_calls.append(_parse_tool_call(block))
             except ValueError as exc:
-                stored_events = await self._run_ledger.emit_many(
+                stored_events = await self._run_ledger.commit_accepted_events(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -6556,7 +6639,7 @@ class AgentRuntime:
             ]
             for duplicate_id in sorted(duplicate_ids):
                 call = next(call for call in parsed_calls if call.id == duplicate_id)
-                stored_events = await self._run_ledger.emit_many(
+                stored_events = await self._run_ledger.commit_accepted_events(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=call.id,
@@ -6684,7 +6767,7 @@ class AgentRuntime:
             state.status = LoopStatus.WAITING_USER
             state.stop_reason = RunStopReason.WAITING_USER
             state.transition(LoopTransition.WAIT_FOR_USER)
-            event = await self._run_ledger.emit(
+            event = await self._run_ledger.commit_accepted_event(
                 RequireUserConfirmEvent(
                     **self._event_context(state).event_fields(), tool_calls=blocks
                 ),
@@ -6896,7 +6979,7 @@ class AgentRuntime:
             reason=reason,
             pending_entry_audit=False,
         )
-        stored_entered = await self._run_ledger.emit(
+        stored_entered = await self._run_ledger.commit_accepted_event(
             PlanModeEnteredEvent(
                 **self._event_context(state).event_fields(),
                 source="agent",
@@ -6961,7 +7044,7 @@ class AgentRuntime:
         reason = _optional_str(call.arguments.get("reason"))
         question_id = f"plan_question:{uuid4().hex}"
         interaction_id = f"plan_interaction:{uuid4().hex}"
-        stored_question = await self._run_ledger.emit(
+        stored_question = await self._run_ledger.commit_accepted_event(
             PlanQuestionAskedEvent(
                 **self._event_context(state).event_fields(),
                 question_id=question_id,
@@ -7034,7 +7117,7 @@ class AgentRuntime:
         state.plan_progress.revision_feedback = ""
         exit_request_id = f"plan_exit:{uuid4().hex}"
         interaction_id = f"plan_interaction:{uuid4().hex}"
-        stored_exit_request = await self._run_ledger.emit(
+        stored_exit_request = await self._run_ledger.commit_accepted_event(
             PlanExitRequestedEvent(
                 **self._event_context(state).event_fields(),
                 exit_request_id=exit_request_id,
@@ -7983,7 +8066,7 @@ class AgentRuntime:
             rollout_reservation=rollout_reservation,
         ):
             yield event
-        yield await self._run_ledger.emit(
+        yield await self._run_ledger.commit_accepted_event(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
@@ -7999,7 +8082,7 @@ class AgentRuntime:
         state.stop_reason = RunStopReason.PLAN_INTERACTION_BUDGET
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self._run_ledger.emit(
+        return await self._run_ledger.commit_accepted_event(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
@@ -8068,7 +8151,7 @@ class AgentRuntime:
             if not decision.confirmed:
                 async for event in flush_parsed_calls():
                     yield event
-                stored_events = await self._run_ledger.emit_many(
+                stored_events = await self._run_ledger.commit_accepted_events(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -8095,7 +8178,7 @@ class AgentRuntime:
             except ValueError as exc:
                 async for event in flush_parsed_calls():
                     yield event
-                stored_events = await self._run_ledger.emit_many(
+                stored_events = await self._run_ledger.commit_accepted_events(
                     self._typed_tool_result_error_events(
                         state,
                         tool_call_id=block.id,
@@ -8234,7 +8317,7 @@ class AgentRuntime:
                 attempted_tool_call_count=len(calls),
             )
             if plan.action == "transition":
-                transition = await self._run_ledger.emit(
+                transition = await self._run_ledger.commit_accepted_event(
                     build_rollout_phase_transition_event(
                         event_context=self._event_context(state),
                         account=binding.account,

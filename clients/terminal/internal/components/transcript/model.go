@@ -139,7 +139,10 @@ func (m Model) Scroll(delta int) Model {
 	}
 	m.scrollOffset += delta
 	m.clampScroll()
-	m.followTail = m.scrollOffset == 0
+	// Reaching visual offset zero is not sufficient to claim the global live
+	// tail: unseen cells prove that a newer materialization exists. The app
+	// resolves the current/latest-root relation before calling End().
+	m.followTail = m.scrollOffset == 0 && m.unseenTerminalCells == 0
 	m.refreshAnchor()
 	return m
 }

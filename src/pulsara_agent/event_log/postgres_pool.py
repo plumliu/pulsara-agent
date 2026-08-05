@@ -47,6 +47,7 @@ def postgres_event_pool_capacity() -> PostgresEventPoolCapacity:
 class PostgresConnectionLane(StrEnum):
     CRITICAL_WRITE = "critical_write"
     BOUNDED_READ = "bounded_read"
+    CHECKPOINT_MAINTENANCE = "checkpoint_maintenance"
 
 
 def postgres_event_pool(
@@ -91,7 +92,15 @@ def postgres_event_connection(
             key,
             BoundedSemaphore(_MAX_CONNECTIONS - _CRITICAL_WRITE_RESERVE),
         )
-    read_lease = read_capacity if lane is PostgresConnectionLane.BOUNDED_READ else None
+    read_lease = (
+        read_capacity
+        if lane
+        in {
+            PostgresConnectionLane.BOUNDED_READ,
+            PostgresConnectionLane.CHECKPOINT_MAINTENANCE,
+        }
+        else None
+    )
     acquired = False
     try:
         if read_lease is not None:

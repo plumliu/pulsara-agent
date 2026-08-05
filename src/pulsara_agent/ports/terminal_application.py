@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -23,6 +24,22 @@ CommandOutcomeStatus = Literal[
     "reconciliation_required",
     "superseded_by_compatible_winner",
 ]
+
+MAXIMUM_TERMINAL_SUBMIT_TEXT_BYTES = 1024 * 1024 + 32 * 1024
+
+
+def _validate_terminal_submit_text(value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError("terminal prompt text is empty")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("terminal prompt text is not valid UTF-8") from exc
+    if len(encoded) > MAXIMUM_TERMINAL_SUBMIT_TEXT_BYTES:
+        raise ValueError("terminal prompt text exceeds the closed byte bound")
+    for character in value:
+        if character not in {"\n", "\t"} and unicodedata.category(character) == "Cc":
+            raise ValueError("terminal prompt text contains terminal controls")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +84,20 @@ class SubmitPromptRequest:
     text: str
     requested_delivery_mode: Literal["auto", "steer", "follow_up"]
     request_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.command_kind != "submit_prompt"
+            or not isinstance(self.binding, TerminalCommandBinding)
+            or not isinstance(self.client_submission_id, str)
+            or not self.client_submission_id
+            or not isinstance(self.requested_delivery_mode, str)
+            or self.requested_delivery_mode not in {"auto", "steer", "follow_up"}
+            or not isinstance(self.request_fingerprint, str)
+            or not self.request_fingerprint
+        ):
+            raise ValueError("terminal prompt request is malformed")
+        _validate_terminal_submit_text(self.text)
 
 
 @dataclass(frozen=True, slots=True)

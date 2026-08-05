@@ -69,7 +69,10 @@ from pulsara_agent.runtime.terminal.notification import (
     TerminalNotificationAccountCoordinator,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
+from pulsara_agent.primitives.stored_event import (
+    build_raw_runtime_projection_checkpoint,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.runtime.event_write_service import PendingRuntimeEventWriteError
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal.output import SanitizedOutputJournal
@@ -82,6 +85,7 @@ from pulsara_agent.runtime.terminal.ui_stream import (
     TerminalMonitorUIReconnectCursor,
 )
 from pulsara_agent.ports.tool_execution import ToolInvocationOwnerKind
+from pulsara_agent.ports.event_write import CommittedSemanticFoldSettlement
 from tests.support.capability import tool_runtime_context
 
 
@@ -819,23 +823,16 @@ def test_tm3_projection_checkpoints_restore_without_ledger_iteration() -> None:
         json_round_tripped_payload = json.loads(json.dumps(payload))
         ledger_prefix = event_log.read_raw_ledger_prefix(through_sequence=through)
         event_log.write_runtime_projection_checkpoint(
-            RawRuntimeProjectionCheckpoint(
+            build_raw_runtime_projection_checkpoint(
                 projection_kind=kind,
                 through_sequence=through,
                 projection_schema_version=version,
                 ledger_prefix=ledger_prefix,
                 validation_base_through_sequence=0,
-                validation_base_state_payload=json_round_tripped_payload,
-                state_payload=json_round_tripped_payload,
-                payload_fingerprint=RuntimeSession._runtime_projection_checkpoint_fingerprint(
-                    projection_kind=kind,
-                    through_sequence=through,
-                    projection_schema_version=version,
-                    ledger_prefix=ledger_prefix,
-                    validation_base_through_sequence=0,
-                    validation_base_state_payload=json_round_tripped_payload,
-                    state_payload=json_round_tripped_payload,
+                validation_base_state=canonical_json_object_carrier(
+                    json_round_tripped_payload
                 ),
+                state=canonical_json_object_carrier(json_round_tripped_payload),
             )
         )
 
@@ -898,23 +895,14 @@ def test_tm3_projection_checkpoint_cannot_skip_committed_reservation() -> None:
     forged_payload = forged_store.checkpoint_payload()
     base_payload = base_store.checkpoint_payload()
     ledger_prefix = event_log.read_raw_ledger_prefix(through_sequence=through_sequence)
-    checkpoint = RawRuntimeProjectionCheckpoint(
+    checkpoint = build_raw_runtime_projection_checkpoint(
         projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
         through_sequence=through_sequence,
         projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
         ledger_prefix=ledger_prefix,
         validation_base_through_sequence=0,
-        validation_base_state_payload=base_payload,
-        state_payload=forged_payload,
-        payload_fingerprint=RuntimeSession._runtime_projection_checkpoint_fingerprint(
-            projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
-            through_sequence=through_sequence,
-            projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
-            ledger_prefix=ledger_prefix,
-            validation_base_through_sequence=0,
-            validation_base_state_payload=base_payload,
-            state_payload=forged_payload,
-        ),
+        validation_base_state=canonical_json_object_carrier(base_payload),
+        state=canonical_json_object_carrier(forged_payload),
     )
     event_log.write_runtime_projection_checkpoint(checkpoint)
 
@@ -952,23 +940,14 @@ def test_tm3_projection_checkpoint_cannot_forge_notification_genesis() -> None:
     forged_base_store.through_sequence = through_sequence
     forged_result_payload = forged_base_store.checkpoint_payload()
     ledger_prefix = event_log.read_raw_ledger_prefix(through_sequence=through_sequence)
-    checkpoint = RawRuntimeProjectionCheckpoint(
+    checkpoint = build_raw_runtime_projection_checkpoint(
         projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
         through_sequence=through_sequence,
         projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
         ledger_prefix=ledger_prefix,
         validation_base_through_sequence=0,
-        validation_base_state_payload=forged_base_payload,
-        state_payload=forged_result_payload,
-        payload_fingerprint=RuntimeSession._runtime_projection_checkpoint_fingerprint(
-            projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
-            through_sequence=through_sequence,
-            projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
-            ledger_prefix=ledger_prefix,
-            validation_base_through_sequence=0,
-            validation_base_state_payload=forged_base_payload,
-            state_payload=forged_result_payload,
-        ),
+        validation_base_state=canonical_json_object_carrier(forged_base_payload),
+        state=canonical_json_object_carrier(forged_result_payload),
     )
     event_log.write_runtime_projection_checkpoint(checkpoint)
 
@@ -1042,50 +1021,10 @@ def test_tm3_restart_preserves_pending_progress_until_disposition() -> None:
     assert coordinator._restart_pending_delivery == {}
 
 
-def test_tm3_checkpoint_persistence_reuses_current_writer_deadline() -> None:
-    deadline = time.monotonic() + 3.0
-    event_log = InMemoryEventLog(runtime_session_id="runtime:deadline")
-    stored = event_log.append(
-        RunErrorEvent(
-            id="run_error:checkpoint-deadline",
-            run_id="run:checkpoint-deadline",
-            turn_id="turn:checkpoint-deadline",
-            reply_id="reply:checkpoint-deadline",
-            message="deadline fixture",
-            code="checkpoint_deadline_fixture",
-        )
-    )
-    calls: list[tuple[str, float | None]] = []
-
-    class RecordingEventLog:
-        def read_raw_ledger_prefix(self, *, through_sequence, deadline_monotonic):
-            calls.append(("read", deadline_monotonic))
-            return event_log.read_raw_ledger_prefix(through_sequence=through_sequence)
-
-        def write_runtime_projection_checkpoint(
-            self,
-            checkpoint,
-            *,
-            deadline_monotonic,
-        ):
-            calls.append(("write", deadline_monotonic))
-            event_log.write_runtime_projection_checkpoint(checkpoint)
-
-    session = object.__new__(RuntimeSession)
-    session.event_log = RecordingEventLog()
-    session.event_write_service = SimpleNamespace(
-        current_deadline_monotonic=lambda: deadline
-    )
-    base_payload = {"through_sequence": 0}
-    session._terminal_monitor_checkpoint_head = (0, base_payload)
-    session._persist_runtime_projection_checkpoint(
-        projection_kind=TERMINAL_MONITOR_CHECKPOINT_KIND,
-        projection_schema_version=TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
-        through_sequence=stored.sequence or 0,
-        state_payload={"through_sequence": stored.sequence or 0},
-    )
-
-    assert calls == [("read", deadline), ("write", deadline)]
+def test_tm3_committed_reducer_has_no_synchronous_checkpoint_writer() -> None:
+    assert not hasattr(RuntimeSession, "_persist_runtime_projection_checkpoint")
+    assert not hasattr(RuntimeSession, "_persist_terminal_monitor_checkpoint")
+    assert not hasattr(RuntimeSession, "_persist_terminal_notification_checkpoint")
 
 
 def test_tm3_restart_recovery_none_is_bounded_by_absolute_deadline() -> None:
@@ -1097,7 +1036,10 @@ def test_tm3_restart_recovery_none_is_bounded_by_absolute_deadline() -> None:
         raise PendingRuntimeEventWriteError("synthetic NONE")
 
     coordinator = TerminalMonitorCoordinator(
-        runtime_session=SimpleNamespace(write_events_from_thread=reject),
+        runtime_session=SimpleNamespace(
+            runtime_session_id="runtime:recovery-deadline",
+            settle_events_from_thread=reject,
+        ),
         store=SimpleNamespace(),
     )
     owner = _FiringOwner(
@@ -1124,6 +1066,51 @@ def test_tm3_restart_recovery_none_is_bounded_by_absolute_deadline() -> None:
 
     assert attempts == 1
     assert coordinator._firing[owner.monitor_id] is owner
+
+
+def test_tm3_full_with_reducer_repair_owner_is_not_ledger_unknown() -> None:
+    class RuntimeStub:
+        runtime_session_id = "runtime:monitor-repair"
+        ledger_unknown_latches = 0
+
+        @staticmethod
+        def settle_events_from_thread(_events, **_kwargs):
+            return SimpleNamespace(
+                settlement=SimpleNamespace(
+                    semantic_fold=(
+                        CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED
+                    )
+                )
+            )
+
+        def latch_event_commit_outcome_unknown(self) -> None:
+            self.ledger_unknown_latches += 1
+
+    runtime = RuntimeStub()
+    coordinator = TerminalMonitorCoordinator(
+        runtime_session=runtime,
+        store=SimpleNamespace(),
+    )
+    owner = _FiringOwner(
+        monitor_id="monitor:repair-owned-full",
+        stable_candidates=(
+            RunErrorEvent(
+                id="run_error:repair-owned-full",
+                run_id="run:repair-owned-full",
+                turn_id="turn:repair-owned-full",
+                reply_id="reply:repair-owned-full",
+                message="durable FULL with semantic repair owner",
+                code="synthetic_repair_owned_full",
+            ),
+        ),
+        source_state_fingerprint="sha256:" + "b" * 64,
+    )
+    coordinator._firing[owner.monitor_id] = owner
+
+    coordinator._commit_firing(owner)
+
+    assert owner.monitor_id not in coordinator._firing
+    assert runtime.ledger_unknown_latches == 0
 
 
 def test_tm3_registration_snapshot_and_baseline_share_one_journal_read(

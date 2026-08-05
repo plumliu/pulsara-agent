@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/commandstate"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 )
 
@@ -257,6 +258,16 @@ type ReadHistoryPageEffect struct {
 	ConnectionHandleID string
 	Request            protocolvalue.PreparedHistoryPageRequest
 }
+type SendMutationEffect struct {
+	Header             WireEffectHeader
+	ConnectionHandleID string
+	Candidate          commandstate.Candidate
+}
+type QueryCommandEffect struct {
+	Header             WireEffectHeader
+	ConnectionHandleID string
+	Candidate          commandstate.Candidate
+}
 type ScheduleTickEffect struct {
 	Header         LocalEffectHeader
 	Kind           TickKind
@@ -322,6 +333,8 @@ func (e RequestOperationalSnapshotEffect) Outstanding() OutstandingOperation {
 }
 func (e ObserveNextEffect) Outstanding() OutstandingOperation     { return wireOutstanding(e.Header) }
 func (e ReadHistoryPageEffect) Outstanding() OutstandingOperation { return wireOutstanding(e.Header) }
+func (e SendMutationEffect) Outstanding() OutstandingOperation    { return wireOutstanding(e.Header) }
+func (e QueryCommandEffect) Outstanding() OutstandingOperation    { return wireOutstanding(e.Header) }
 func (e ScheduleTickEffect) Outstanding() OutstandingOperation    { return localOutstanding(e.Header) }
 func (e CopyPublicTextEffect) Outstanding() OutstandingOperation  { return localOutstanding(e.Header) }
 func (e BeginTeardownEffect) Outstanding() OutstandingOperation   { return localOutstanding(e.Header) }
@@ -344,6 +357,8 @@ func (RequestSnapshotEffect) effect()                     {}
 func (RequestOperationalSnapshotEffect) effect()          {}
 func (ObserveNextEffect) effect()                         {}
 func (ReadHistoryPageEffect) effect()                     {}
+func (SendMutationEffect) effect()                        {}
+func (QueryCommandEffect) effect()                        {}
 func (ScheduleTickEffect) effect()                        {}
 func (CopyPublicTextEffect) effect()                      {}
 func (BeginTeardownEffect) effect()                       {}

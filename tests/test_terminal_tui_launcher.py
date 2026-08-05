@@ -122,7 +122,7 @@ def test_launcher_sends_secret_only_through_one_shot_bootstrap_pipe(
     carrier.ParseFromString(raw)
     assert carrier.host_session_id == session.host_session_id
     assert carrier.runtime_session_id == session.runtime_session_id
-    assert carrier.requested_attachment_role == wire.ATTACHMENT_ROLE_OBSERVER
+    assert carrier.requested_attachment_role == wire.ATTACHMENT_ROLE_CONTROLLER
     assert len(carrier.launch_capability) == 32
     assert len(carrier.carrier_nonce) == 32
     script = binary.read_text(encoding="utf-8")
@@ -219,6 +219,39 @@ def test_default_launch_never_invokes_irreversible_scrollback_erase(
         assert result.returncode == 0
 
     asyncio.run(scenario())
+
+
+def test_terminal_output_ownership_excludes_parent_writes_from_renderer_tty() -> None:
+    master_fd, slave_fd = os.openpty()
+    stdout = os.fdopen(os.dup(slave_fd), "wb", buffering=0)
+    stderr = os.fdopen(os.dup(slave_fd), "wb", buffering=0)
+    try:
+        lease = launcher_module._acquire_terminal_output_ownership(
+            stdout=stdout,
+            stderr=stderr,
+        )
+        assert lease.child_stdout_fd is not None
+        assert lease.child_stderr_fd is not None
+        try:
+            os.write(stdout.fileno(), b"parent-stdout-must-not-render")
+            os.write(stderr.fileno(), b"parent-stderr-must-not-render")
+            os.write(lease.child_stdout_fd, b"go-renderer-frame")
+            os.write(lease.child_stderr_fd, b"go-renderer-diagnostic")
+        finally:
+            lease.restore()
+        os.write(stdout.fileno(), b"parent-restored-after-child")
+        observed = os.read(master_fd, 4096)
+    finally:
+        stdout.close()
+        stderr.close()
+        os.close(master_fd)
+        os.close(slave_fd)
+
+    assert b"go-renderer-frame" in observed
+    assert b"go-renderer-diagnostic" in observed
+    assert b"parent-restored-after-child" in observed
+    assert b"parent-stdout-must-not-render" not in observed
+    assert b"parent-stderr-must-not-render" not in observed
 
 
 def test_private_scrollback_erase_runs_once_before_parent_relaunch(

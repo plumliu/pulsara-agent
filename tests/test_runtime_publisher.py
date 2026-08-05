@@ -50,7 +50,7 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
     release = threading.Event()
 
     async def run() -> tuple[int | None, list[int | None]]:
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             )
@@ -59,7 +59,7 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
         def second_thread() -> None:
             ready.set()
             release.wait(timeout=1)
-            runtime.emit_from_thread(
+            runtime.settle_event_from_thread(
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:2", delta="second"
                 )
@@ -68,7 +68,7 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
         worker = threading.Thread(target=second_thread)
         worker.start()
         ready.wait(timeout=1)
-        first = runtime.emit_from_thread(
+        first = runtime.settle_event_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="first"
             )
@@ -76,7 +76,7 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
         release.set()
         worker.join(timeout=1)
         await asyncio.sleep(0.05)
-        return first.sequence, [
+        return first.committed_event.sequence, [
             published.event.sequence for published in subscriber.events
         ]
 
@@ -93,12 +93,12 @@ def test_emit_from_thread_does_not_publish_mutable_run_state(tmp_path) -> None:
     runtime.publisher.subscribe(subscriber)
 
     async def run() -> None:
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             ),
         )
-        runtime.emit_from_thread(
+        runtime.settle_event_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="thread"
             ),
@@ -118,7 +118,7 @@ def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:
     runtime.publisher.subscribe(slow)
 
     async def run() -> float:
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             )
@@ -129,7 +129,7 @@ def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:
         def worker() -> None:
             nonlocal elapsed
             started = time.monotonic()
-            runtime.emit_from_thread(
+            runtime.settle_event_from_thread(
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:1", delta="thread"
                 )
@@ -153,12 +153,12 @@ def test_emit_from_thread_eventually_publishes_after_slow_subscriber(tmp_path) -
     runtime.publisher.subscribe(slow)
 
     async def run() -> list[int | None]:
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:0", delta="bind"
             )
         )
-        runtime.emit_from_thread(
+        runtime.settle_event_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="thread"
             )

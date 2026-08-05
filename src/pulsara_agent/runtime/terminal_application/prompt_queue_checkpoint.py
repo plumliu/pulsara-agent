@@ -12,7 +12,10 @@ from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log.historical_decoder import (
     decode_raw_stored_event_envelope,
 )
-from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.ports.prompt_queue import PromptQueueCheckpointCommitGuard
 from pulsara_agent.primitives.context import context_fingerprint
@@ -264,8 +267,8 @@ class PromptQueueCheckpointService:
             projection_schema_version=PROMPT_QUEUE_PROJECTION_SCHEMA_VERSION,
             ledger_prefix=ledger_prefix,
             validation_base_through_sequence=predecessor.through_sequence,
-            validation_base_state_payload=predecessor.state_payload,
-            state_payload=state_payload,
+            validation_base_state=predecessor.state,
+            state=canonical_json_object_carrier(state_payload),
             payload_fingerprint=context_fingerprint(
                 "prompt-queue-runtime-checkpoint-row:v2", payload
             ),

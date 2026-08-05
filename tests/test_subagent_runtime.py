@@ -250,7 +250,7 @@ async def _emit_parent_run_start(
     if existing is not None:
         return existing
     prior = runtime_session.event_log.iter()
-    stored = await runtime_session.emit(
+    stored = await runtime_session.commit_accepted_event(
         RunStartEvent(
             **event_context.event_fields(),
             **run_start_permission_fields(
@@ -611,7 +611,7 @@ def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
             run_id="run:child", turn_id="turn:child", reply_id="reply:child"
         )
 
-        stored = await child.emit(
+        stored = await child.commit_accepted_event(
             make_text_block_segment_event(
                 **child_ctx.event_fields(), block_id="text:1", delta="hello"
             )
@@ -860,7 +860,7 @@ def test_list_projection_does_not_hydrate_full_child_transcript(
             turn_id="turn:child-list-boundary",
             reply_id="reply:child-list-boundary",
         )
-        await child_session.emit(
+        await child_session.commit_accepted_event(
             typed_non_transcript_event(
                 **child_context.event_fields(),
                 name="child_raw_transcript_marker",
@@ -3657,7 +3657,7 @@ def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(
     async def run() -> None:
         from pulsara_agent.event import RunEndEvent, RunStartEvent
 
-        await parent.emit(
+        await parent.commit_accepted_event(
             RunStartEvent(
                 **CTX.event_fields(),
                 **run_start_permission_fields(
@@ -3671,7 +3671,7 @@ def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(
                 metadata={"user_input": "hello"},
             )
         )
-        await parent.emit(
+        await parent.commit_accepted_event(
             RunEndEvent(
                 **run_end_contract_fields(CTX.run_id, status="finished"),
                 **CTX.event_fields(),

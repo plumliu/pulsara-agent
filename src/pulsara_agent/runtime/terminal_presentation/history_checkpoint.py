@@ -29,7 +29,10 @@ from pulsara_agent.primitives.presentation_checkpoint_storage import (
     PresentationHistorySpineAccelerationFact,
 )
 from pulsara_agent.primitives.storage_frozen import build_frozen_storage_fact
-from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
     TRANSCRIPT_EVENT_REGISTRY_CONTRACT_FINGERPRINT,
     TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
@@ -905,8 +908,10 @@ class PresentationHistoryProjectionCheckpointOwner:
             projection_schema_version=PRESENTATION_HISTORY_PROJECTION_SCHEMA_VERSION,
             ledger_prefix=ledger_prefix,
             validation_base_through_sequence=validation_base_through_sequence,
-            validation_base_state_payload=validation_base_state_payload,
-            state_payload=state_payload,
+            validation_base_state=canonical_json_object_carrier(
+                validation_base_state_payload
+            ),
+            state=canonical_json_object_carrier(state_payload),
             payload_fingerprint=payload_fingerprint,
         )
 

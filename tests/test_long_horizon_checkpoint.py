@@ -1128,10 +1128,10 @@ def test_future_declared_graph_event_unsupported_by_run_contract_fails_before_em
         },
         user_input_chars=0,
     )
-    asyncio.run(runtime.emit(start))
+    asyncio.run(runtime.commit_accepted_event(start))
 
     with pytest.raises(ValueError, match="unsupported by the owning RunStart"):
-        asyncio.run(runtime.emit(_task("event:future-graph")))
+        asyncio.run(runtime.commit_accepted_event(_task("event:future-graph")))
     assert runtime.event_log.get_by_id("event:future-graph") is None
 
 
@@ -1141,7 +1141,7 @@ def test_graph_domain_event_without_owning_run_start_fails_before_emit(
     runtime = in_memory_runtime_session(tmp_path, runtime_session_id=RUNTIME_ID)
 
     with pytest.raises(ValueError, match="owning durable RunStart"):
-        asyncio.run(runtime.emit(_task("event:no-run-start")))
+        asyncio.run(runtime.commit_accepted_event(_task("event:no-run-start")))
     assert runtime.event_log.next_sequence() == 1
 
 

@@ -692,7 +692,10 @@ class _MutationServiceBase:
             self.host_session.runtime_session_id,
             self.host_session.active_run_id,
             self.host_session.suspended_run_id,
+            self.host_session.stopping_run_id,
         }
+        if binding.expected_target_generation != 1:
+            raise ValueError("terminal command target generation is stale")
         if binding.expected_target_id not in valid_targets:
             raise ValueError("terminal command target identity is stale")
 
@@ -750,14 +753,22 @@ class TerminalPromptSubmissionService(_MutationServiceBase):
                     event_context=_queue_event_context(host),
                 )
             )
-            self._delivery_scheduler(item.queue_item_id)
-            return _outcome(
+            outcome = _outcome(
                 status="succeeded",
                 binding=request.binding,
                 code="PROMPT_QUEUED",
                 text="The prompt is durably queued.",
                 references=(item.head_event_id, item.queue_item_id),
             )
+            try:
+                self._delivery_scheduler(item.queue_item_id)
+            except BaseException:
+                # Queue acceptance is already durable authority. Scheduling is
+                # only a live acceleration; a close race or wake failure must
+                # leave the item for pending-item recovery, never rewrite the
+                # command receipt as a rejection that invites duplication.
+                pass
+            return outcome
 
         return await self.commands.start_background(request, operation)
 

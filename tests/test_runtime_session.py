@@ -183,7 +183,7 @@ def runtime_session_for_test_confirms_uncertain_commit_and_catches_up_reducer_an
             delta="committed",
         )
 
-        stored = await runtime.emit(candidate)
+        stored = await runtime.commit_accepted_event(candidate)
 
         assert stored.id == candidate.id
         assert stored.sequence == 1
@@ -207,7 +207,7 @@ def runtime_session_for_test_reserves_deadline_for_stable_commit_confirmation(
         )
 
         with pytest.raises(EventCommitError, match="commit failed"):
-            await runtime.emit(candidate)
+            await runtime.commit_accepted_event(candidate)
 
         assert event_log.commit_deadline is not None
         assert event_log.confirmation_deadline is not None
@@ -361,7 +361,9 @@ def runtime_session_for_test_partial_batch_confirmation_latches_reconciliation(
 
         assert runtime.reconciliation_required is True
         assert runtime.ledger_reconciliation_required is True
-        runtime.reconcile_committed_reducer("test:partial-confirmation")
+        runtime._reconcile_committed_reducer_offline(  # noqa: SLF001
+            "test:partial-confirmation"
+        )
         assert runtime.reconciliation_required is True
         assert runtime.ledger_reconciliation_required is True
         with pytest.raises(EventReconciliationRequired):
@@ -535,12 +537,12 @@ def runtime_session_for_test_emit_and_emit_many_publish_events(tmp_path) -> None
     state = RunActivationWorkingState(session_id=runtime.runtime_session_id)
 
     async def run() -> None:
-        first = await runtime.emit(
+        first = await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="first"
             ),
         )
-        many = await runtime.emit_many(
+        many = await runtime.commit_accepted_events(
             [
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:2", delta="second"
@@ -570,7 +572,7 @@ def runtime_session_for_test_emit_many_uses_event_log_batch_extend(tmp_path) -> 
     )
 
     async def run() -> None:
-        stored = await runtime.emit_many(
+        stored = await runtime.commit_accepted_events(
             [
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:1", delta="one"
@@ -587,25 +589,25 @@ def runtime_session_for_test_emit_many_uses_event_log_batch_extend(tmp_path) -> 
     assert event_log.extend_calls == 1
 
 
-def runtime_session_for_test_emit_from_thread_without_bound_loop_only_appends(
+def test_settle_event_from_thread_without_bound_loop_only_appends(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
-    stored = runtime.emit_from_thread(
+    stored = runtime.settle_event_from_thread(
         make_text_block_segment_event(
             **CTX.event_fields(), block_id="text:1", delta="thread"
         )
     )
 
-    assert stored.sequence == 1
+    assert stored.committed_event.sequence == 1
     assert [event.sequence for event in runtime.event_log.iter()] == [1]
     assert subscriber.events == []
 
 
-def runtime_session_for_test_thread_writer_cannot_bypass_fresh_ledger_genesis(
+def test_thread_settlement_cannot_bypass_fresh_ledger_genesis(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(
@@ -617,7 +619,7 @@ def runtime_session_for_test_thread_writer_cannot_bypass_fresh_ledger_genesis(
         ValueError,
         match="fresh durable ledger genesis must use the async RunStart path",
     ):
-        runtime.emit_from_thread(
+        runtime.settle_event_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(),
                 block_id="text:thread-before-genesis",
@@ -629,14 +631,14 @@ def runtime_session_for_test_thread_writer_cannot_bypass_fresh_ledger_genesis(
     assert tuple(runtime.event_log.iter()) == ()
 
 
-def runtime_session_for_test_emit_after_unbound_emit_from_thread_does_not_block(
+def test_commit_after_unbound_thread_settlement_does_not_block(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
-    dropped = runtime.emit_from_thread(
+    dropped = runtime.settle_event_from_thread(
         make_text_block_segment_event(
             **CTX.event_fields(), block_id="text:0", delta="thread"
         )
@@ -644,7 +646,7 @@ def runtime_session_for_test_emit_after_unbound_emit_from_thread_does_not_block(
 
     async def run() -> None:
         stored = await asyncio.wait_for(
-            runtime.emit(
+            runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:1", delta="async"
                 )
@@ -655,7 +657,7 @@ def runtime_session_for_test_emit_after_unbound_emit_from_thread_does_not_block(
 
     asyncio.run(run())
 
-    assert dropped.sequence == 1
+    assert dropped.committed_event.sequence == 1
     assert [event.sequence for event in runtime.event_log.iter()] == [1, 2]
     assert [published.event.sequence for published in subscriber.events] == [2]
 
@@ -668,7 +670,7 @@ def runtime_session_for_test_publish_stored_events_bridges_direct_event_log_writ
     runtime.publisher.subscribe(subscriber)
 
     async def run() -> None:
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="bind"
             )
@@ -682,7 +684,7 @@ def runtime_session_for_test_publish_stored_events_bridges_direct_event_log_writ
 
         runtime.publish_stored_events([stored])
         final = await asyncio.wait_for(
-            runtime.emit(
+            runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:3", delta="after"
                 )
@@ -702,7 +704,7 @@ def runtime_session_for_test_emit_rejects_preassigned_sequence(tmp_path) -> None
 
     async def run() -> None:
         with pytest.raises(ValueError, match="sequence=None"):
-            await runtime.emit(
+            await runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **CTX.event_fields(), block_id="text:1", delta="bad", sequence=10
                 )
@@ -711,13 +713,13 @@ def runtime_session_for_test_emit_rejects_preassigned_sequence(tmp_path) -> None
     asyncio.run(run())
 
 
-def runtime_session_for_test_emit_from_thread_rejects_preassigned_sequence(
+def test_settle_event_from_thread_rejects_preassigned_sequence(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(tmp_path)
 
     with pytest.raises(ValueError, match="sequence=None"):
-        runtime.emit_from_thread(
+        runtime.settle_event_from_thread(
             make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="bad", sequence=10
             )
@@ -737,7 +739,7 @@ def runtime_session_for_test_default_event_metadata_is_merged_on_emit(tmp_path) 
     )
 
     async def run() -> None:
-        stored = await runtime.emit(
+        stored = await runtime.commit_accepted_event(
             make_text_block_segment_event(
                 **CTX.event_fields(),
                 block_id="text:1",
@@ -761,7 +763,7 @@ def runtime_session_for_test_default_event_metadata_is_merged_on_emit(tmp_path) 
     asyncio.run(run())
 
 
-def runtime_session_for_test_default_event_metadata_is_merged_on_emit_from_thread(
+def test_default_event_metadata_is_merged_on_thread_settlement(
     tmp_path,
 ) -> None:
     runtime = in_memory_runtime_session(
@@ -769,10 +771,13 @@ def runtime_session_for_test_default_event_metadata_is_merged_on_emit_from_threa
         default_event_metadata={"subagent": {"subagent_run_id": "subagent:thread"}},
     )
 
-    stored = runtime.emit_from_thread(
+    stored = runtime.settle_event_from_thread(
         make_text_block_segment_event(
             **CTX.event_fields(), block_id="text:1", delta="thread"
         )
     )
 
-    assert stored.metadata["subagent"]["subagent_run_id"] == "subagent:thread"
+    assert (
+        stored.committed_event.metadata["subagent"]["subagent_run_id"]
+        == "subagent:thread"
+    )

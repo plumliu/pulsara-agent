@@ -22,6 +22,10 @@ from uuid import uuid4
 from pulsara_agent.event import AgentEvent, EventContext, TerminalProcessCompletedEvent
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.ports.event_write import (
+    CommittedSemanticFoldSettlement,
+    RuntimeThreadEventSettlementReceipt,
+)
 from pulsara_agent.primitives.terminal_observation import (
     BoundedPreviewTerminalObservationCoverageFact,
     InlineTerminalObservationCoverageFact,
@@ -60,7 +64,12 @@ class TerminalKillReason(StrEnum):
 class TerminalCompletionRecordState(StrEnum):
     PENDING = "pending"
     RECORDING = "recording"
-    RECORDED = "recorded"
+    DURABLE_FULL = "durable_full"
+
+
+class TerminalCompletionSemanticSettlement(StrEnum):
+    HEALTHY = "healthy"
+    REPAIR_OWNED = "repair_owned"
 
 
 class ProcessLimitError(RuntimeError):
@@ -127,12 +136,15 @@ class TerminalProcessState:
         default=None,
         repr=False,
     )
+    completion_semantic_settlement: TerminalCompletionSemanticSettlement | None = (
+        None
+    )
     completion_record_attempts: int = 0
     completion_retry_timer: Timer | None = field(default=None, repr=False)
     completion_notification_reservation_required: bool = False
     completion_notification_reservation_confirmed: bool = False
     completion_reason: TerminalKillReason | None = None
-    record_event: Callable[[AgentEvent], AgentEvent] | None = field(
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = field(
         default=None, repr=False
     )
     reader_thread: Thread | None = None
@@ -153,7 +165,8 @@ class TerminalProcessState:
     def completion_event_recorded(self) -> bool:
         with self.lock:
             return (
-                self.completion_record_state is TerminalCompletionRecordState.RECORDED
+                self.completion_record_state
+                is TerminalCompletionRecordState.DURABLE_FULL
             )
 
 
@@ -197,7 +210,10 @@ class ProcessRegistry:
         origin_tool_call_id: str | None = None,
         origin_runtime_session_id: str | None = None,
         origin_run_entry_kind: str | None = None,
-        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        record_event: Callable[
+            [AgentEvent], RuntimeThreadEventSettlementReceipt
+        ]
+        | None = None,
         require_completion_notification_reservation: bool = False,
     ) -> tuple[TerminalProcessState, bool]:
         with self._lock:
@@ -681,7 +697,8 @@ def spawn_local_process(
     origin_tool_call_id: str | None = None,
     origin_runtime_session_id: str | None = None,
     origin_run_entry_kind: str | None = None,
-    record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
+    | None = None,
     require_completion_notification_reservation: bool = False,
 ) -> TerminalProcessState:
     process_id = f"proc_{uuid4().hex}"
@@ -1247,7 +1264,7 @@ def _start_completion_event_recording(state: TerminalProcessState) -> bool:
 def _completion_recording_worker(
     state: TerminalProcessState,
     event_data: tuple[
-        Callable[[AgentEvent], AgentEvent],
+        Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt],
         dict[str, object],
         TerminalProcessCompletedEvent | None,
     ],
@@ -1264,7 +1281,7 @@ def _completion_recording_worker(
 def _record_claimed_completion_event(
     state: TerminalProcessState,
     event_data: tuple[
-        Callable[[AgentEvent], AgentEvent],
+        Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt],
         dict[str, object],
         TerminalProcessCompletedEvent | None,
     ],
@@ -1282,7 +1299,8 @@ def _record_claimed_completion_event(
                     state.completion_event_candidate = event
                 else:
                     event = state.completion_event_candidate
-        stored = record_event(event)
+        settlement = record_event(event)
+        stored = settlement.committed_event
     except BaseException as exc:
         _finish_completion_event_recording(state, success=False)
         _schedule_completion_event_retry(state)
@@ -1291,6 +1309,12 @@ def _record_claimed_completion_event(
         raise
     with state.lock:
         state.completion_recorded_event = stored
+        state.completion_semantic_settlement = (
+            TerminalCompletionSemanticSettlement.REPAIR_OWNED
+            if settlement.settlement.semantic_fold
+            is CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED
+            else TerminalCompletionSemanticSettlement.HEALTHY
+        )
     _finish_completion_event_recording(state, success=True)
     return stored
 
@@ -1299,7 +1323,7 @@ def _claim_completion_event_recording(
     state: TerminalProcessState,
 ) -> (
     tuple[
-        Callable[[AgentEvent], AgentEvent],
+        Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt],
         dict[str, object],
         TerminalProcessCompletedEvent | None,
     ]
@@ -1379,7 +1403,7 @@ def _finish_completion_event_recording(
         if state.completion_record_state is not TerminalCompletionRecordState.RECORDING:
             return
         state.completion_record_state = (
-            TerminalCompletionRecordState.RECORDED
+            TerminalCompletionRecordState.DURABLE_FULL
             if success
             else TerminalCompletionRecordState.PENDING
         )
@@ -1426,7 +1450,8 @@ def _completion_record_is_pending(state: TerminalProcessState) -> bool:
     with state.lock:
         required = state.yielded and _completion_record_contract_present_locked(state)
         return required and (
-            state.completion_record_state is not TerminalCompletionRecordState.RECORDED
+            state.completion_record_state
+            is not TerminalCompletionRecordState.DURABLE_FULL
         )
 
 

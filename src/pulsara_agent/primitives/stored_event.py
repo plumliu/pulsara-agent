@@ -8,10 +8,11 @@ implementation boundary; this carrier only validates bytes and identity.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import asdict, dataclass, field
 from hashlib import sha256
-from typing import Any
 
+from pulsara_agent.primitives._context_base import canonical_json_bytes
 from pulsara_agent.primitives.context import (
     canonical_utc_timestamp,
     context_fingerprint,
@@ -19,6 +20,91 @@ from pulsara_agent.primitives.context import (
 
 
 STORED_EVENT_ENVELOPE_VERSION = "stored-agent-event:v1"
+CANONICAL_JSON_OBJECT_CODEC_ID = "pulsara.canonical_json_object"
+CANONICAL_JSON_OBJECT_CODEC_VERSION = "1"
+_CANONICAL_JSON_OBJECT_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalJsonObjectCarrier:
+    """Recursively immutable storage carrier for one canonical JSON object.
+
+    The carrier deliberately retains only canonical UTF-8.  Adapters may decode
+    a fresh object for JSONB or domain hydration, but producer-owned containers
+    can never remain reachable through this fact.
+    """
+
+    codec_id: str
+    codec_version: str
+    canonical_utf8: bytes
+    canonical_payload_fingerprint: str
+    _factory_token: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _CANONICAL_JSON_OBJECT_FACTORY_TOKEN:
+            raise TypeError("canonical JSON object carriers are factory-owned")
+        if self.codec_id != CANONICAL_JSON_OBJECT_CODEC_ID:
+            raise ValueError("canonical JSON object codec identity drifted")
+        if self.codec_version != CANONICAL_JSON_OBJECT_CODEC_VERSION:
+            raise ValueError("canonical JSON object codec version drifted")
+        try:
+            decoded = json.loads(self.canonical_utf8.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("canonical JSON object bytes are invalid") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("canonical JSON carrier root must be an object")
+        if canonical_json_bytes(decoded) != self.canonical_utf8:
+            raise ValueError("canonical JSON object bytes are not canonical")
+        expected = context_fingerprint(
+            "canonical-json-object-carrier:v1",
+            {
+                "codec_id": self.codec_id,
+                "codec_version": self.codec_version,
+                "canonical_utf8": self.canonical_utf8.decode("utf-8"),
+            },
+        )
+        if self.canonical_payload_fingerprint != expected:
+            raise ValueError("canonical JSON object fingerprint mismatch")
+
+    def decode_object(self) -> dict[str, object]:
+        """Return a fresh adapter/domain value derived from canonical bytes."""
+
+        value = json.loads(self.canonical_utf8.decode("utf-8"))
+        if not isinstance(value, dict):  # protected again for type narrowing
+            raise ValueError("canonical JSON carrier root must be an object")
+        return value
+
+
+def canonical_json_object_carrier(value: object) -> CanonicalJsonObjectCarrier:
+    """Build the only valid storage carrier for a JSON object."""
+
+    if not isinstance(value, dict):
+        raise ValueError("canonical JSON carrier root must be an object")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError("canonical JSON object keys must be strings")
+    try:
+        canonical = canonical_json_bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("value is not strict canonical JSON") from exc
+    # json.dumps accepts several Python-only Mapping shapes.  Decode once here
+    # and require an object root so every downstream adapter sees JSON values.
+    decoded = json.loads(canonical.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("canonical JSON carrier root must be an object")
+    return CanonicalJsonObjectCarrier(
+        codec_id=CANONICAL_JSON_OBJECT_CODEC_ID,
+        codec_version=CANONICAL_JSON_OBJECT_CODEC_VERSION,
+        canonical_utf8=canonical,
+        canonical_payload_fingerprint=context_fingerprint(
+            "canonical-json-object-carrier:v1",
+            {
+                "codec_id": CANONICAL_JSON_OBJECT_CODEC_ID,
+                "codec_version": CANONICAL_JSON_OBJECT_CODEC_VERSION,
+                "canonical_utf8": canonical.decode("utf-8"),
+            },
+        ),
+        _factory_token=_CANONICAL_JSON_OBJECT_FACTORY_TOKEN,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +223,8 @@ class RawRuntimeProjectionCheckpoint:
     projection_schema_version: str
     ledger_prefix: RawTranscriptDomainPrefixFact
     validation_base_through_sequence: int
-    validation_base_state_payload: dict[str, Any]
-    state_payload: dict[str, Any]
+    validation_base_state: CanonicalJsonObjectCarrier
+    state: CanonicalJsonObjectCarrier
     payload_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -150,13 +236,92 @@ class RawRuntimeProjectionCheckpoint:
             raise ValueError("runtime projection checkpoint ledger prefix is not exact")
         if not 0 <= self.validation_base_through_sequence <= self.through_sequence:
             raise ValueError("runtime projection checkpoint validation base is invalid")
-        if not self.payload_fingerprint.startswith("sha256:"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.payload_fingerprint) is None:
             raise ValueError("runtime projection checkpoint fingerprint is invalid")
+
+    @property
+    def validation_base_state_payload(self) -> dict[str, object]:
+        """Fresh compatibility view; canonical bytes remain the authority."""
+
+        return self.validation_base_state.decode_object()
+
+    @property
+    def state_payload(self) -> dict[str, object]:
+        """Fresh compatibility view; canonical bytes remain the authority."""
+
+        return self.state.decode_object()
+
+
+def runtime_projection_checkpoint_fingerprint(
+    *,
+    projection_kind: str,
+    through_sequence: int,
+    projection_schema_version: str,
+    ledger_prefix: RawTranscriptDomainPrefixFact,
+    validation_base_through_sequence: int,
+    validation_base_state: CanonicalJsonObjectCarrier,
+    state: CanonicalJsonObjectCarrier,
+) -> str:
+    """Return the sole fingerprint representation for checkpoint rows."""
+
+    return context_fingerprint(
+        "runtime-projection-checkpoint:v2",
+        {
+            "projection_kind": projection_kind,
+            "through_sequence": through_sequence,
+            "projection_schema_version": projection_schema_version,
+            "ledger_prefix": asdict(ledger_prefix),
+            "validation_base_through_sequence": validation_base_through_sequence,
+            "validation_base_state_payload": (
+                validation_base_state.decode_object()
+            ),
+            "state_payload": state.decode_object(),
+        },
+    )
+
+
+def build_raw_runtime_projection_checkpoint(
+    *,
+    projection_kind: str,
+    through_sequence: int,
+    projection_schema_version: str,
+    ledger_prefix: RawTranscriptDomainPrefixFact,
+    validation_base_through_sequence: int,
+    validation_base_state: CanonicalJsonObjectCarrier,
+    state: CanonicalJsonObjectCarrier,
+) -> RawRuntimeProjectionCheckpoint:
+    """Build one immutable checkpoint row from already canonical carriers."""
+
+    fingerprint = runtime_projection_checkpoint_fingerprint(
+        projection_kind=projection_kind,
+        through_sequence=through_sequence,
+        projection_schema_version=projection_schema_version,
+        ledger_prefix=ledger_prefix,
+        validation_base_through_sequence=validation_base_through_sequence,
+        validation_base_state=validation_base_state,
+        state=state,
+    )
+    return RawRuntimeProjectionCheckpoint(
+        projection_kind=projection_kind,
+        through_sequence=through_sequence,
+        projection_schema_version=projection_schema_version,
+        ledger_prefix=ledger_prefix,
+        validation_base_through_sequence=validation_base_through_sequence,
+        validation_base_state=validation_base_state,
+        state=state,
+        payload_fingerprint=fingerprint,
+    )
 
 
 __all__ = [
+    "CANONICAL_JSON_OBJECT_CODEC_ID",
+    "CANONICAL_JSON_OBJECT_CODEC_VERSION",
+    "CanonicalJsonObjectCarrier",
     "RawRuntimeProjectionCheckpoint",
     "RawStoredEventEnvelope",
     "RawTranscriptDomainPrefixFact",
     "STORED_EVENT_ENVELOPE_VERSION",
+    "build_raw_runtime_projection_checkpoint",
+    "canonical_json_object_carrier",
+    "runtime_projection_checkpoint_fingerprint",
 ]

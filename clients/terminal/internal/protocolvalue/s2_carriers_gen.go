@@ -135,8 +135,19 @@ type ActiveHead struct {
 	ThroughAuthoritySequence uint64
 	ResidentEntryCount       uint64
 	ResidentAccumulator      string
+	CapacityKind             HistoryCapacityKind
+	CapacityFingerprint      string
 	Fingerprint              string
 }
+
+type HistoryCapacityKind uint8
+
+const (
+	HistoryCapacityAvailable HistoryCapacityKind = iota + 1
+	HistoryCapacitySessionRotationRequired
+	HistoryCapacityTreeExhausted
+	HistoryCapacityReconciliationRequired
+)
 
 type HistoryChangeKind uint8
 
@@ -613,10 +624,21 @@ func rootFromProto(value *protocol.PresentationHistoryRootIdentity) (HistoryRoot
 	if value == nil || value.RuntimeSessionId == "" || value.HistoryProjectionContractFingerprint == "" ||
 		value.MaterializationPolicyFingerprint == "" || value.TreeContractFingerprint == "" ||
 		value.PlacementKeyContractId == "" || value.PlacementKeyContractVersion == "" || value.PlacementKeyContractFingerprint == "" ||
-		value.CheckpointFingerprint == "" || value.ProjectionGeneration == 0 || value.ProjectionRootFingerprint == "" ||
+		value.CheckpointFingerprint == "" || value.ProjectionRootFingerprint == "" ||
 		value.PresentationSourcePrefixAccumulator == "" || value.PresentationPolicyRegistryContractFingerprint == "" ||
 		value.AuditExtractorRegistryContractFingerprint == "" || !validFingerprint(value.RootIdentityFingerprint) {
 		return HistoryRootIdentity{}, errors.New("terminal history root identity is incomplete")
+	}
+	if value.CheckpointGeneration != value.ProjectionGeneration ||
+		value.ThroughAuthoritySequence != value.PresentationSourceSegmentCount {
+		return HistoryRootIdentity{}, errors.New("terminal history root generation continuity is invalid")
+	}
+	if value.ProjectionGeneration == 0 {
+		if value.ThroughAuthoritySequence != 0 || value.PresentationSourceSegmentCount != 0 {
+			return HistoryRootIdentity{}, errors.New("terminal history genesis root carries successor authority")
+		}
+	} else if value.ThroughAuthoritySequence == 0 || value.PresentationSourceSegmentCount == 0 {
+		return HistoryRootIdentity{}, errors.New("terminal history successor root lacks source authority")
 	}
 	return HistoryRootIdentity{RuntimeSessionID: value.RuntimeSessionId, ProjectionContractFingerprint: value.HistoryProjectionContractFingerprint, MaterializationFingerprint: value.MaterializationPolicyFingerprint, TreeContractFingerprint: value.TreeContractFingerprint, PlacementContractID: value.PlacementKeyContractId, PlacementContractVersion: value.PlacementKeyContractVersion, PlacementContractFingerprint: value.PlacementKeyContractFingerprint, CheckpointGeneration: value.CheckpointGeneration, CheckpointFingerprint: value.CheckpointFingerprint, ProjectionGeneration: value.ProjectionGeneration, ProjectionRootFingerprint: value.ProjectionRootFingerprint, ThroughAuthoritySequence: value.ThroughAuthoritySequence, SourceSegmentCount: value.PresentationSourceSegmentCount, SourcePrefixAccumulator: value.PresentationSourcePrefixAccumulator, PolicyRegistryFingerprint: value.PresentationPolicyRegistryContractFingerprint, AuditRegistryFingerprint: value.AuditExtractorRegistryContractFingerprint, RootFingerprint: value.RootIdentityFingerprint}, nil
 }
@@ -723,7 +745,32 @@ func activeHeadFromProto(value *protocol.PresentationHistoryActiveHeadIdentity) 
 	if err != nil || root.RuntimeSessionID != value.RuntimeSessionId || value.TailFromSequenceExclusive != root.ThroughAuthoritySequence || value.ThroughAuthoritySequence < root.ThroughAuthoritySequence {
 		return ActiveHead{}, errors.New("terminal active head root join is invalid")
 	}
-	return ActiveHead{RuntimeSessionID: value.RuntimeSessionId, ConfirmedRoot: root, ThroughAuthoritySequence: value.ThroughAuthoritySequence, ResidentEntryCount: value.ResultingResidentEntryCount, ResidentAccumulator: value.ResultingResidentEntryAccumulator, Fingerprint: value.ActiveHeadFingerprint}, nil
+	capacityKind, capacityFingerprint := HistoryCapacityKind(0), ""
+	if value.CapacityState == nil {
+		return ActiveHead{}, errors.New("terminal active head capacity is absent")
+	}
+	switch item := value.CapacityState.State.(type) {
+	case *protocol.PresentationHistoryCapacityState_Available:
+		if item.Available != nil {
+			capacityKind, capacityFingerprint = HistoryCapacityAvailable, item.Available.CapacityStateFingerprint
+		}
+	case *protocol.PresentationHistoryCapacityState_SessionRotationRequired:
+		if item.SessionRotationRequired != nil {
+			capacityKind, capacityFingerprint = HistoryCapacitySessionRotationRequired, item.SessionRotationRequired.CapacityStateFingerprint
+		}
+	case *protocol.PresentationHistoryCapacityState_TreeCapacityExhausted:
+		if item.TreeCapacityExhausted != nil {
+			capacityKind, capacityFingerprint = HistoryCapacityTreeExhausted, item.TreeCapacityExhausted.CapacityStateFingerprint
+		}
+	case *protocol.PresentationHistoryCapacityState_ReconciliationRequired:
+		if item.ReconciliationRequired != nil {
+			capacityKind, capacityFingerprint = HistoryCapacityReconciliationRequired, item.ReconciliationRequired.CapacityStateFingerprint
+		}
+	}
+	if capacityKind == 0 || !validFingerprint(capacityFingerprint) {
+		return ActiveHead{}, errors.New("terminal active head capacity is invalid")
+	}
+	return ActiveHead{RuntimeSessionID: value.RuntimeSessionId, ConfirmedRoot: root, ThroughAuthoritySequence: value.ThroughAuthoritySequence, ResidentEntryCount: value.ResultingResidentEntryCount, ResidentAccumulator: value.ResultingResidentEntryAccumulator, CapacityKind: capacityKind, CapacityFingerprint: capacityFingerprint, Fingerprint: value.ActiveHeadFingerprint}, nil
 }
 
 func historyCellFromRanked(value *protocol.PresentationHistoryRankedEntry) (HistoryCell, error) {

@@ -20,7 +20,6 @@ from pulsara_agent.ports.stored_event import (
     GroupingIndependentOwnedEventReducerAdapter,
 )
 from pulsara_agent.runtime.session import (
-    EventPublicationAfterCommitError,
     EventReconciliationRequired,
     EventWriteConflict,
 )
@@ -223,14 +222,15 @@ def test_event_batch_observer_failure_does_not_skip_later_sequences(tmp_path) ->
     assert [item.event.sequence for item in recording.events] == [1, 2]
 
 
-def test_emit_compat_error_carries_event_write_result(tmp_path) -> None:
+def test_emit_noncritical_publication_failure_does_not_rewrite_durable_outcome(
+    tmp_path,
+) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     runtime.publisher.subscribe(_FailingSubscriber())
 
     async def run() -> None:
-        with pytest.raises(EventPublicationAfterCommitError) as captured:
-            await runtime.emit(_event("compat"))
-        assert captured.value.result.committed_events[0].sequence == 1
+        stored = await runtime.commit_accepted_event(_event("compat"))
+        assert stored.sequence == 1
         assert runtime.event_log.next_sequence() == 2
 
     asyncio.run(run())
@@ -290,7 +290,9 @@ def test_initial_reducer_catch_up_failure_remains_registered_for_reconciliation(
         asyncio.run(runtime.write_event(_event("blocked")))
 
     allow_apply = True
-    runtime.reconcile_committed_reducer("test:failed-registration")
+    runtime._reconcile_committed_reducer_offline(  # noqa: SLF001
+        "test:failed-registration"
+    )
     assert applied == [1]
     assert runtime.reconciliation_required is False
 
@@ -322,7 +324,7 @@ def test_committed_reducer_reconciliation_uses_full_rebuild_callback(tmp_path) -
     result = asyncio.run(runtime.write_event(_event("committed")))
     assert result.reconciliation_required is True
 
-    runtime.reconcile_committed_reducer("test:rebuild")
+    runtime._reconcile_committed_reducer_offline("test:rebuild")  # noqa: SLF001
 
     assert applied == [1]
     assert runtime.reconciliation_required is False
@@ -354,7 +356,9 @@ def test_inconsistent_full_rebuild_keeps_runtime_reconciliation_required(
         )
 
     with pytest.raises(SubagentReducerApplyError, match="require reconciliation"):
-        runtime.reconcile_committed_reducer(store.reducer_id)
+        runtime._reconcile_committed_reducer_offline(  # noqa: SLF001
+            store.reducer_id
+        )
 
     assert store.state.consistent is False
     assert store.reconciliation_required is True

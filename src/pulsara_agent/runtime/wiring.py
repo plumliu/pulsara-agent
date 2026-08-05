@@ -429,7 +429,7 @@ def build_durable_runtime_wiring(
     )
 
     def governance_event_commit_port(events):
-        return runtime_session.write_events_from_thread(events).committed_events
+        return runtime_session.settle_events_from_thread(events).committed_events
 
     governance_event_dispatcher = GovernanceEventOutboxDispatcher(
         store=PostgresGovernanceEventOutboxStore(

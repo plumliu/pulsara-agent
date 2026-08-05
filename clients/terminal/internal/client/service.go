@@ -12,6 +12,7 @@ import (
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/app"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/buildinfo"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/commandstate"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocol"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/publictext"
@@ -60,6 +61,11 @@ func NewService(bootstrap protocolvalue.Bootstrap) (*Service, error) {
 	ownedCapability := append([]byte(nil), bootstrap.LaunchCapability...)
 	clear(bootstrap.LaunchCapability)
 	bootstrap.LaunchCapability = ownedCapability
+	if bootstrap.RequestedRole != protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER &&
+		bootstrap.RequestedRole != protocol.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER {
+		clear(bootstrap.LaunchCapability)
+		return nil, errors.New("terminal bootstrap attachment role is invalid")
+	}
 	buildIdentity, err := buildinfo.Current()
 	if err != nil {
 		clear(bootstrap.LaunchCapability)
@@ -92,14 +98,14 @@ func (s *Service) prepareHandshakeCandidate(generation uint64) *protocol.Handsha
 		AttachmentAttemptGeneration: generation,
 		HostSessionId:               s.bootstrap.HostSessionID,
 		RequestedRuntimeSessionId:   s.bootstrap.RuntimeSessionID,
-		RequestedAttachmentRole:     protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER,
+		RequestedAttachmentRole:     s.bootstrap.RequestedRole,
 		MinimumProtocolMajor:        protocolvalue.ProtocolMajor,
 		MinimumProtocolMinor:        protocolvalue.ProtocolMinor,
 		MaximumProtocolMajor:        protocolvalue.ProtocolMajor,
 		MaximumProtocolMinor:        protocolvalue.ProtocolMinor,
 		ClientBuildIdentity:         s.buildIdentity.Fingerprint(),
-		SupportedCapabilities:       append([]protocol.TerminalClientCapability(nil), protocolvalue.S2SupportedCapabilities...),
-		RequiredCapabilities:        append([]protocol.TerminalClientCapability(nil), protocolvalue.S2RequiredCapabilities...),
+		SupportedCapabilities:       append([]protocol.TerminalClientCapability(nil), protocolvalue.S3SupportedCapabilities...),
+		RequiredCapabilities:        append([]protocol.TerminalClientCapability(nil), protocolvalue.S3RequiredCapabilities...),
 		SchemaContractFingerprint:   protocolvalue.SchemaFingerprint,
 	}
 	fingerprint, err := protocol.InstallFingerprint("terminal-handshake-recovery-candidate:v1", candidate, "candidate_fingerprint", "candidate_id")
@@ -139,15 +145,15 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 		defer s.executeMu.Unlock()
 		operation := effect.Outstanding()
 		if err := s.operations.begin(operation); err != nil {
-			return s.admissionFailure(operation, err)
+			return s.effectAdmissionFailure(effect, err)
 		}
-		if err := s.validateS2Effect(effect); err != nil {
-			return s.failure(operation, err)
+		if err := s.validateS3Effect(effect); err != nil {
+			return s.effectFailure(effect, err)
 		}
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			return s.failure(operation, errors.New("terminal client is closed"))
+			return s.effectFailure(effect, errors.New("terminal client is closed"))
 		}
 		s.mu.Unlock()
 		var message tea.Msg
@@ -241,7 +247,7 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 					message = app.PublicTextCopiedMsg{Header: header}
 				}
 			default:
-				err = errors.New("unsupported S2 local terminal effect")
+				err = errors.New("unsupported terminal local effect")
 			}
 		case app.OutstandingWire:
 			token := operation.Wire
@@ -337,14 +343,33 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 					header, _ := app.NewIOHeader(token, value.Fingerprint, time.Now())
 					message = app.HistoryPageAcceptedMsg{Header: header, Request: request, Result: value}
 				}
+			case app.OpMutation:
+				candidate := effect.(app.SendMutationEffect).Candidate
+				var outcome commandstate.Outcome
+				outcome, err = s.mutation(token, candidate)
+				if err == nil {
+					header, _ := app.NewIOHeader(token, outcome.Fingerprint, time.Now())
+					message = app.CommandOutcomeMsg{Header: header, Candidate: candidate, Outcome: outcome}
+				}
+			case app.OpCommandQuery:
+				candidate := effect.(app.QueryCommandEffect).Candidate
+				var result commandstate.QueryResult
+				result, err = s.queryCommand(token, candidate)
+				if err == nil && result.Found {
+					header, _ := app.NewIOHeader(token, result.Outcome.Fingerprint, time.Now())
+					message = app.CommandQueryFoundMsg{Header: header, Candidate: candidate, Outcome: result.Outcome}
+				} else if err == nil {
+					header, _ := app.NewIOHeader(token, candidate.Fingerprint(), time.Now())
+					message = app.CommandQueryMissingMsg{Header: header, Candidate: candidate}
+				}
 			default:
-				err = errors.New("unsupported S2 terminal effect")
+				err = errors.New("unsupported terminal wire effect")
 			}
 		default:
 			err = errors.New("terminal effect has no operation carrier")
 		}
 		if err != nil {
-			return s.failure(operation, err)
+			return s.effectFailure(effect, err)
 		}
 		if err := s.operations.finishSuccess(operation); err != nil {
 			return s.admissionFailure(operation, err)
@@ -353,7 +378,7 @@ func (s *Service) execute(effect app.Effect) tea.Cmd {
 	}
 }
 
-func (s *Service) validateS2Effect(effect app.Effect) error {
+func (s *Service) validateS3Effect(effect app.Effect) error {
 	operation := effect.Outstanding()
 	switch value := effect.(type) {
 	case app.ConnectEffect:
@@ -426,6 +451,16 @@ func (s *Service) validateS2Effect(effect app.Effect) error {
 		if operation.Wire.Kind != app.OpHistoryPage || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
 			return errors.New("terminal history page effect is invalid")
 		}
+	case app.SendMutationEffect:
+		request, requestErr := value.Candidate.ToProto(operation.Wire.RequestID)
+		if operation.Wire.Kind != app.OpMutation || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
+			return errors.New("terminal mutation effect is invalid")
+		}
+	case app.QueryCommandEffect:
+		request, requestErr := value.Candidate.QueryToProto(operation.Wire.RequestID)
+		if operation.Wire.Kind != app.OpCommandQuery || value.Header.Operation != operation.Wire || value.ConnectionHandleID == "" || requestErr != nil || request.RequestId != operation.Wire.RequestID {
+			return errors.New("terminal command query effect is invalid")
+		}
 	case app.BeginTeardownEffect:
 		if operation.Local.Kind != app.OpTeardown || value.Header.Operation != operation.Local || value.Reason == 0 {
 			return errors.New("terminal teardown effect is invalid")
@@ -439,7 +474,7 @@ func (s *Service) validateS2Effect(effect app.Effect) error {
 			return errors.New("terminal public clipboard effect is invalid")
 		}
 	default:
-		return errors.New("unsupported S2 terminal effect type")
+		return errors.New("unsupported S3 terminal effect type")
 	}
 	return nil
 }
@@ -745,8 +780,16 @@ func (s *Service) attach(token app.OperationToken, acceptance app.AttachmentChal
 	if err := protocol.ValidateFingerprint("terminal-attach-result-receipt:v1", receipt, "receipt_fingerprint", receipt.ReceiptFingerprint); err != nil {
 		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, err
 	}
-	if semantic.ControllerDisposition != protocol.ControllerDisposition_OBSERVER_ATTACHED || semantic.BootstrapRequirement != protocol.BootstrapRequirement_PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED || binding.ConnectionId != s.helloReceipt.CurrentConnectionID {
-		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, errors.New("terminal S1 attach result is incompatible")
+	roleCompatible := false
+	switch s.bootstrap.RequestedRole {
+	case protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER:
+		roleCompatible = semantic.ControllerDisposition == protocol.ControllerDisposition_OBSERVER_ATTACHED && semantic.Attachment.Role == protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER
+	case protocol.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER:
+		roleCompatible = (semantic.ControllerDisposition == protocol.ControllerDisposition_CONTROLLER_GRANTED && semantic.Attachment.Role == protocol.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER) ||
+			(semantic.ControllerDisposition == protocol.ControllerDisposition_CONTROLLER_UNAVAILABLE_OBSERVER_ATTACHED && semantic.Attachment.Role == protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER)
+	}
+	if !roleCompatible || semantic.BootstrapRequirement != protocol.BootstrapRequirement_PROJECTION_AND_OPERATIONAL_SNAPSHOT_REQUIRED || binding.ConnectionId != s.helloReceipt.CurrentConnectionID {
+		return protocolvalue.Attachment{}, protocolvalue.AttachReceipt{}, errors.New("terminal attach result is incompatible")
 	}
 	attachment, validatedReceipt, err := protocolvalue.AttachFromProto(receipt, s.bootstrap.ClientInstanceID)
 	if err != nil {
@@ -1088,6 +1131,39 @@ func (s *Service) failure(operation app.OutstandingOperation, err error) tea.Msg
 	default:
 		panic("terminal failure classified without an outstanding operation carrier")
 	}
+}
+
+func (s *Service) effectFailure(effect app.Effect, err error) tea.Msg {
+	message := s.failure(effect.Outstanding(), err)
+	return commandFailureForEffect(effect, message)
+}
+
+func (s *Service) effectAdmissionFailure(effect app.Effect, err error) tea.Msg {
+	message := s.admissionFailure(effect.Outstanding(), err)
+	return commandFailureForEffect(effect, message)
+}
+
+func commandFailureForEffect(effect app.Effect, message tea.Msg) tea.Msg {
+	var candidate commandstate.Candidate
+	switch value := effect.(type) {
+	case app.SendMutationEffect:
+		candidate = value.Candidate
+	case app.QueryCommandEffect:
+		candidate = value.Candidate
+	default:
+		return message
+	}
+	var header app.IOMessageHeader
+	var failure app.PublicFailure
+	switch value := message.(type) {
+	case app.TransportAuthenticationFailedMsg:
+		header, failure = value.Header, value.Failure
+	case app.HeartbeatTransportFailedMsg:
+		header, failure = value.Header, value.Failure
+	default:
+		return message
+	}
+	return app.CommandTransportFailedMsg{Header: header, Candidate: candidate, Failure: failure, DeliveryPhase: failure.Production().DeliveryPhase()}
 }
 
 func (s *Service) admissionFailure(operation app.OutstandingOperation, err error) tea.Msg {

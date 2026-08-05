@@ -60,7 +60,10 @@ class ProviderInputPreparationRecoveryService:
                 operation_name=(
                     f"provider-input-preparation-recovery:{preparation_id}"
                 ),
-                operation=lambda: self._read_recovery_basis(snapshot),
+                operation=lambda: self._read_recovery_basis(
+                    snapshot,
+                    deadline_monotonic=deadline,
+                ),
                 deadline_monotonic=deadline,
             )
             candidate, existing_outcome = self._resolve_candidate(
@@ -72,8 +75,9 @@ class ProviderInputPreparationRecoveryService:
                 return existing_outcome
             assert candidate is not None
             try:
-                await self._runtime_session.write_event(
+                await self._runtime_session.write_event_with_deadline(
                     candidate,
+                    deadline_monotonic=deadline,
                     expected_last_sequence=read.through_sequence,
                 )
             except BaseException as exc:
@@ -103,11 +107,21 @@ class ProviderInputPreparationRecoveryService:
 
     def recover_incomplete_preparations_sync(
         self,
+        *,
+        deadline_monotonic: float,
     ) -> tuple[ProviderInputPreparationRecoveryResult, ...]:
         results = []
         for initial in self._store.active_preparation_snapshots():
+            if monotonic() >= deadline_monotonic:
+                raise ProviderInputPreparationRecoveryError(
+                    "provider preparation recovery deadline exceeded"
+                )
             preparation_id = initial.attribution.ownership.preparation_id
             for _attempt in range(3):
+                if monotonic() >= deadline_monotonic:
+                    raise ProviderInputPreparationRecoveryError(
+                        "provider preparation recovery deadline exceeded"
+                    )
                 snapshot = self._store.preparation_snapshot(preparation_id)
                 if snapshot is None:
                     results.append(
@@ -118,7 +132,10 @@ class ProviderInputPreparationRecoveryService:
                         )
                     )
                     break
-                read = self._read_recovery_basis(snapshot)
+                read = self._read_recovery_basis(
+                    snapshot,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 candidate, existing_outcome = self._resolve_candidate(
                     snapshot=snapshot,
                     read=read,
@@ -132,6 +149,7 @@ class ProviderInputPreparationRecoveryService:
                     self._runtime_session.write_events_from_thread(
                         (candidate,),
                         expected_last_sequence=read.through_sequence,
+                        deadline_monotonic=deadline_monotonic,
                     )
                 except BaseException as exc:
                     outcome = _resolved_write_outcome(exc)
@@ -166,7 +184,12 @@ class ProviderInputPreparationRecoveryService:
                 )
         return tuple(results)
 
-    def _read_recovery_basis(self, snapshot):
+    def _read_recovery_basis(
+        self,
+        snapshot,
+        *,
+        deadline_monotonic: float,
+    ):
         owner = snapshot.attribution.ownership
         event_ids = (
             snapshot.attribution.context_compiled_event_ref.event_id,
@@ -174,10 +197,15 @@ class ProviderInputPreparationRecoveryService:
             f"model_call_start:{owner.resolved_model_call_id}",
             _abandonment_event_id(owner.preparation_id),
         )
-        through_sequence = self._runtime_session.event_log.next_sequence() - 1
+        through_sequence = (
+            self._runtime_session.event_log.next_sequence(
+                deadline_monotonic=deadline_monotonic
+            )
+            - 1
+        )
         raw = self._runtime_session.event_log.read_raw_events_by_id(
             event_ids,
-            deadline_monotonic=monotonic() + 30.0,
+            deadline_monotonic=deadline_monotonic,
         )
         return _RecoveryRead(
             through_sequence=through_sequence,

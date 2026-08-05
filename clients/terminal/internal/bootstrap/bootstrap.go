@@ -184,7 +184,7 @@ func Read(options Options) (protocolvalue.Bootstrap, error) {
 	if err != nil || !options.Now().Before(expires) {
 		return protocolvalue.Bootstrap{}, errors.New("terminal bootstrap is expired")
 	}
-	if carrier.CarrierVersion != 1 || carrier.LaunchId == "" || carrier.ClientInstanceId == "" || carrier.HostSessionId == "" || carrier.RuntimeSessionId == "" || carrier.ParentPid == 0 || len(carrier.LaunchCapability) < 32 || len(carrier.CarrierNonce) != 32 || carrier.RequestedAttachmentRole != protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER {
+	if carrier.CarrierVersion != 1 || carrier.LaunchId == "" || carrier.ClientInstanceId == "" || carrier.HostSessionId == "" || carrier.RuntimeSessionId == "" || carrier.ParentPid == 0 || len(carrier.LaunchCapability) < 32 || len(carrier.CarrierNonce) != 32 || (carrier.RequestedAttachmentRole != protocol.AttachmentRole_ATTACHMENT_ROLE_OBSERVER && carrier.RequestedAttachmentRole != protocol.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER) {
 		return protocolvalue.Bootstrap{}, errors.New("terminal bootstrap fields are invalid")
 	}
 	if !filepath.IsAbs(carrier.UnixSocketPath) || len([]byte(carrier.UnixSocketPath)) > 103 {
@@ -200,5 +200,6 @@ func Read(options Options) (protocolvalue.Bootstrap, error) {
 		ParentPID:        carrier.ParentPid,
 		ExpiresAt:        expires,
 		Fingerprint:      carrier.BootstrapFingerprint,
+		RequestedRole:    carrier.RequestedAttachmentRole,
 	}, nil
 }

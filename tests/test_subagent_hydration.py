@@ -110,7 +110,7 @@ def test_child_log_hydrates_native_run_id(tmp_path) -> None:
             turn_id="turn:child-native",
             reply_id="reply:child-native",
         )
-        await session.emit(
+        await session.commit_accepted_event(
             RunStartEvent(
                 id=f"run_start:test:{child_ctx.run_id}",
                 **child_ctx.event_fields(),
@@ -120,7 +120,7 @@ def test_child_log_hydrates_native_run_id(tmp_path) -> None:
                 user_input_chars=7,
             )
         )
-        await session.emit(
+        await session.commit_accepted_event(
             RunEndEvent(
                 **run_end_contract_fields(child_ctx.run_id, status="finished"),
                 **child_ctx.event_fields(),
@@ -173,7 +173,7 @@ def test_child_log_multiple_native_runs_is_v1_error(tmp_path) -> None:
                 run_transcript_seed_semantic=seed.seed_semantic,
                 run_transcript_seed_reference=seed.seed_reference,
             )
-            stored = await session.emit(
+            stored = await session.commit_accepted_event(
                 RunStartEvent(
                     id=f"run_start:test:{child_ctx.run_id}",
                     **child_ctx.event_fields(),
@@ -215,7 +215,7 @@ def test_reported_and_native_child_run_id_must_match(tmp_path) -> None:
             turn_id="turn:child-native",
             reply_id="reply:child-native",
         )
-        await session.emit(
+        await session.commit_accepted_event(
             RunStartEvent(
                 id=f"run_start:test:{child_ctx.run_id}",
                 **child_ctx.event_fields(),

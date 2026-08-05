@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.primitives.stored_event import (
     RawRuntimeProjectionCheckpoint,
     RawTranscriptDomainPrefixFact,
+    canonical_json_object_carrier,
 )
 from pulsara_agent.event_log.serialization import (
     hydrate_raw_stored_event_envelope_from_row,
@@ -510,8 +511,10 @@ def _raw_checkpoint_from_row(row) -> RawRuntimeProjectionCheckpoint:
         projection_schema_version=str(row["projection_schema_version"]),
         ledger_prefix=RawTranscriptDomainPrefixFact(**dict(row["ledger_prefix"])),
         validation_base_through_sequence=int(row["validation_base_through_sequence"]),
-        validation_base_state_payload=dict(row["validation_base_state_payload"]),
-        state_payload=dict(row["state_payload"]),
+        validation_base_state=canonical_json_object_carrier(
+            dict(row["validation_base_state_payload"])
+        ),
+        state=canonical_json_object_carrier(dict(row["state_payload"])),
         payload_fingerprint=str(row["payload_fingerprint"]),
     )
 

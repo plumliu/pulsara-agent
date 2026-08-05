@@ -165,6 +165,56 @@ class RunActivationService:
             return None
         return self._host_view(owner)
 
+    def run_finalization_diagnostics(
+        self, run_id: str
+    ) -> dict[str, object] | None:
+        """Expose the stable finalization owner without leaking working state."""
+
+        from pulsara_agent.runtime.run_execution.owner import RunFinalizationOwner
+
+        owner = self._registry.get(run_id)
+        if owner is None:
+            return None
+        finalization = owner.finalization_slot.owner
+        if not isinstance(finalization, RunFinalizationOwner):
+            return None
+        return {
+            "state": finalization.state,
+            "commit_state": finalization.commit_state,
+            "stable_run_end_event_id": finalization.terminal_event_id,
+            "candidate_event_id": (
+                None
+                if finalization.run_end_candidate is None
+                else finalization.run_end_candidate.id
+            ),
+            "confirmed_run_end_sequence": (
+                None
+                if finalization.confirmed_run_end_event_reference is None
+                else finalization.confirmed_run_end_event_reference.sequence
+            ),
+            "physical_attempt_generation": (
+                finalization.physical_attempt_generation
+            ),
+            "retry_not_before_monotonic": (
+                finalization.retry_not_before_monotonic
+            ),
+            "first_failure_monotonic": finalization.first_failure_monotonic,
+            "last_failure_monotonic": finalization.last_failure_monotonic,
+            "last_failure_code": finalization.last_failure_code,
+            "reducer_repairs": tuple(
+                {
+                    "reducer_id": getattr(handle, "reducer_id", None),
+                    "target_high_water": getattr(
+                        handle, "target_ledger_high_water", None
+                    ),
+                    "plan_fingerprint": getattr(
+                        handle, "plan_fingerprint", None
+                    ),
+                }
+                for handle in finalization.reducer_repair_handles
+            ),
+        }
+
     def has_run_owner(self, run_id: str) -> bool:
         return self._registry.get(run_id) is not None
 

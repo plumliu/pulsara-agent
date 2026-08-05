@@ -48,13 +48,58 @@ class TerminalClientExit:
     client_instance_id: str
 
 
+@dataclass(slots=True)
+class _TerminalOutputOwnershipLease:
+    """Give the renderer exclusive writes to the physical terminal.
+
+    The Go child writes through duplicates of the original terminal file
+    descriptions.  While it is alive, the Python parent's terminal-backed
+    stdout/stderr descriptors point at ``/dev/null`` so third-party imports,
+    C extensions, and logging handlers cannot corrupt Bubble Tea's cursor
+    state.  Non-terminal streams retain their existing ownership.
+    """
+
+    child_stdout_fd: int | None
+    child_stderr_fd: int | None
+    _saved_by_fd: dict[int, int]
+    _streams: tuple[object, ...]
+    _restored: bool = False
+
+    def restore(self) -> None:
+        if self._restored:
+            return
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except (AttributeError, OSError, ValueError):
+                pass
+        restore_error: OSError | None = None
+        try:
+            for target_fd, saved_fd in self._saved_by_fd.items():
+                try:
+                    os.dup2(saved_fd, target_fd)
+                except OSError as exc:
+                    restore_error = restore_error or exc
+        finally:
+            for saved_fd in self._saved_by_fd.values():
+                try:
+                    os.close(saved_fd)
+                except OSError:
+                    pass
+            self._restored = True
+        if restore_error is not None:
+            raise TerminalClientLaunchError(
+                "terminal parent output ownership could not be restored"
+            ) from restore_error
+
+
 async def launch_terminal_client(
     *,
     host_session,
     binary_path: Path | str | None = None,
     clear_scrollback: bool = False,
 ) -> TerminalClientExit:
-    """Serve one observer client until local quit; never close the conversation."""
+    """Serve one controller-preferred client until local quit; never close the conversation."""
 
     binary = await resolve_terminal_client_binary(binary_path)
     runtime_root = Path(tempfile.mkdtemp(prefix="pulsara-tui-", dir="/tmp"))
@@ -110,7 +155,13 @@ def build_terminal_client_bootstrap_carrier(
     client_instance_id: str,
     launch_id: str | None = None,
     launch_capability: bytes | None = None,
+    requested_attachment_role: int = wire.ATTACHMENT_ROLE_CONTROLLER,
 ) -> wire.TerminalClientBootstrapCarrier:
+    if requested_attachment_role not in {
+        wire.ATTACHMENT_ROLE_OBSERVER,
+        wire.ATTACHMENT_ROLE_CONTROLLER,
+    }:
+        raise ValueError("terminal bootstrap attachment role is unknown")
     now = datetime.now(UTC)
     carrier = wire.TerminalClientBootstrapCarrier(
         carrier_version=1,
@@ -124,7 +175,7 @@ def build_terminal_client_bootstrap_carrier(
             if launch_capability is not None
             else server.launch_capability
         ),
-        requested_attachment_role=wire.ATTACHMENT_ROLE_OBSERVER,
+        requested_attachment_role=requested_attachment_role,
         parent_pid=os.getpid(),
         issued_at_utc=now.isoformat().replace("+00:00", "Z"),
         expires_at_utc=(now + timedelta(seconds=_BOOTSTRAP_TTL_SECONDS))
@@ -152,14 +203,19 @@ async def _launch_one_terminal_client(
     os.set_inheritable(read_fd, True)
     process: asyncio.subprocess.Process | None = None
     foreground_lease = None
+    output_lease: _TerminalOutputOwnershipLease | None = None
     try:
+        output_lease = _acquire_terminal_output_ownership(
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
         process = await asyncio.create_subprocess_exec(
             str(binary.path),
             "--bootstrap-fd",
             str(read_fd),
             stdin=None,
-            stdout=None,
-            stderr=None,
+            stdout=output_lease.child_stdout_fd,
+            stderr=output_lease.child_stderr_fd,
             env=_sanitized_child_environment(read_fd),
             pass_fds=(read_fd,),
             # The child needs an isolated foreground process group, but must
@@ -188,17 +244,82 @@ async def _launch_one_terminal_client(
             "terminal client process or foreground-group setup failed"
         ) from exc
     finally:
-        restore_foreground(foreground_lease)
-        if read_fd >= 0:
-            os.close(read_fd)
-        if write_fd >= 0:
-            os.close(write_fd)
+        try:
+            try:
+                restore_foreground(foreground_lease)
+            finally:
+                if output_lease is not None:
+                    output_lease.restore()
+        finally:
+            if read_fd >= 0:
+                os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
 
 
 def _exact_host_session(host_session, host_session_id: str):
     if host_session_id != host_session.host_session_id:
         raise KeyError(host_session_id)
     return host_session
+
+
+def _acquire_terminal_output_ownership(
+    *,
+    stdout,
+    stderr,
+) -> _TerminalOutputOwnershipLease:
+    """Route parent writes away while preserving exact TTY handles for Go."""
+
+    streams = (stdout, stderr)
+    stream_fds: list[int | None] = []
+    terminal_fds: set[int] = set()
+    for stream in streams:
+        try:
+            stream.flush()
+            fd = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            stream_fds.append(None)
+            continue
+        stream_fds.append(fd)
+        if os.isatty(fd):
+            terminal_fds.add(fd)
+
+    saved_by_fd: dict[int, int] = {}
+    sink_fd = -1
+    try:
+        for fd in terminal_fds:
+            saved_by_fd[fd] = os.dup(fd)
+        if terminal_fds:
+            sink_fd = os.open(os.devnull, os.O_WRONLY)
+            for fd in terminal_fds:
+                os.dup2(sink_fd, fd)
+    except OSError as exc:
+        for target_fd, saved_fd in saved_by_fd.items():
+            try:
+                os.dup2(saved_fd, target_fd)
+            except OSError:
+                pass
+            try:
+                os.close(saved_fd)
+            except OSError:
+                pass
+        raise TerminalClientLaunchError(
+            "terminal parent output ownership could not be isolated"
+        ) from exc
+    finally:
+        if sink_fd >= 0:
+            os.close(sink_fd)
+
+    def child_target(index: int) -> int | None:
+        fd = stream_fds[index]
+        return None if fd is None else saved_by_fd.get(fd)
+
+    return _TerminalOutputOwnershipLease(
+        child_stdout_fd=child_target(0),
+        child_stderr_fd=child_target(1),
+        _saved_by_fd=saved_by_fd,
+        _streams=streams,
+    )
 
 
 def _sanitized_child_environment(bootstrap_fd: int) -> dict[str, str]:

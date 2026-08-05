@@ -37,6 +37,10 @@ from pulsara_agent.llm.user_carrier import (
 )
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.frozen import StableEventIdentityFact, build_frozen_fact
+from pulsara_agent.primitives.stored_event import (
+    CanonicalJsonObjectCarrier,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.primitives.host_ingress import (
     HostActiveRunMonitorDeliveryFact,
     HostRuntimeNotificationAttachmentFact,
@@ -348,6 +352,66 @@ class HostIngressNotificationProjectionStore:
                     for item in sorted(chain_ids)
                 ),
             }
+
+    def prepare_committed(
+        self, events: tuple[AgentEvent, ...]
+    ) -> tuple[
+        CanonicalJsonObjectCarrier,
+        CanonicalJsonObjectCarrier,
+        "HostIngressNotificationProjectionStore",
+    ]:
+        """Validate a complete transition off-store without publishing it."""
+
+        base = canonical_json_object_carrier(self.checkpoint_payload())
+        candidate = type(self).from_checkpoint_payload(
+            base.decode_object(),
+            runtime_session_id=self.runtime_session_id,
+        )
+        candidate.apply_committed(events)
+        resulting = canonical_json_object_carrier(candidate.checkpoint_payload())
+        return base, resulting, candidate
+
+    def install_prepared_committed(
+        self,
+        prepared: object,
+        expected_base: CanonicalJsonObjectCarrier,
+    ) -> None:
+        if not isinstance(prepared, HostIngressNotificationProjectionStore):
+            raise TypeError("terminal notification prepared state has wrong owner")
+        with self._lock:
+            if canonical_json_object_carrier(self.checkpoint_payload()) != expected_base:
+                raise TerminalNotificationContractError(
+                    "terminal notification semantic base changed during fold"
+                )
+            self._install_candidate_locked(prepared)
+
+    def replace_from_checkpoint_payload(self, payload: dict[str, object]) -> None:
+        """Install one independently validated repair result in place."""
+
+        candidate = type(self).from_checkpoint_payload(
+            payload,
+            runtime_session_id=self.runtime_session_id,
+        )
+        with self._lock:
+            self._install_candidate_locked(candidate)
+
+    def _install_candidate_locked(
+        self, candidate: "HostIngressNotificationProjectionStore"
+    ) -> None:
+        self.through_sequence = candidate.through_sequence
+        self._account = candidate._account
+        self._projection = candidate._projection
+        self._observation_events = dict(candidate._observation_events)
+        self._registration_events = dict(candidate._registration_events)
+        self._completion_events = dict(candidate._completion_events)
+        self._tool_result_by_identity = dict(candidate._tool_result_by_identity)
+        self._automatic_delivery_deferred_source_ids = set(
+            candidate._automatic_delivery_deferred_source_ids
+        )
+        self._autonomy_chain_attributions = dict(
+            candidate._autonomy_chain_attributions
+        )
+        self._autonomy_chain_states = dict(candidate._autonomy_chain_states)
 
     def _validate_checkpoint_references(self) -> None:
         through_sequence = self.through_sequence

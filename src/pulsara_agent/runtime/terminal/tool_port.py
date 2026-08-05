@@ -8,6 +8,7 @@ from typing import Callable, Literal
 
 from pulsara_agent.capability.terminal_risk import is_hardline_terminal_command
 from pulsara_agent.event import AgentEvent
+from pulsara_agent.ports.event_write import RuntimeThreadEventSettlementReceipt
 from pulsara_agent.ports.terminal import (
     DEFAULT_MAX_OUTPUT_CHARS,
     TerminalBackendType,
@@ -79,7 +80,9 @@ class RuntimeTerminalCommandPort:
     owner_host_session_id: str | None
     owner_conversation_id: str | None
     terminal_notification_account: TerminalNotificationAccountCoordinator | None
-    record_event: Callable[[AgentEvent], AgentEvent] | None = None
+    record_event: Callable[
+        [AgentEvent], RuntimeThreadEventSettlementReceipt
+    ] | None = None
 
     def execute(
         self,

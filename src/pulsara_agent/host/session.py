@@ -2096,7 +2096,7 @@ class HostSession:
         self._set_boundary_commit_state("commit_in_flight")
         try:
             stored = tuple(
-                await runtime_session.emit_many(
+                await runtime_session.commit_accepted_events(
                     candidates,
                     transaction_companion=transaction_companion,
                 )
@@ -3192,7 +3192,9 @@ class HostSession:
             observation_source_references=source_references,
             reason=reason,
         )
-        await self.wiring.runtime_wiring.runtime_session.emit(candidate)
+        await self.wiring.runtime_wiring.runtime_session.commit_accepted_event(
+            candidate
+        )
 
     def _committed_host_entry_from_stored(
         self,
@@ -4550,7 +4552,7 @@ class HostSession:
             self._interaction_transition_port.prepare_resume_activation(prepared)
             self._complete_boundary_attempt_after_activation()
             if pending.kind == "exit":
-                await self.wiring.runtime_wiring.runtime_session.emit(
+                await self.wiring.runtime_wiring.runtime_session.commit_accepted_event(
                     PlanExitResolvedEvent(
                         run_id=view.run_id,
                         turn_id=view.turn_id,
@@ -5015,13 +5017,43 @@ class HostSession:
         if dispatch_task is not None and not dispatch_task.done():
             dispatch_task.cancel()
             await asyncio.gather(dispatch_task, return_exceptions=True)
+        # Terminal completion facts are upstream of semantic repair and RunEnd.
+        # Drain them before asking any finalization owner to cross the mutation
+        # reconciliation gate.
+        await asyncio.to_thread(
+            runtime_session.terminal_monitor_coordinator.stop_admission_and_drain_workers,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_sessions.kill_owned,
+            self.host_session_id,
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_sessions.drain_pending_completions,
+            self.host_session_id,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=close_deadline
+        )
+        await asyncio.to_thread(
+            runtime_session.terminal_monitor_coordinator.terminate_all_for_session_close,
+            timeout_seconds=drain_timeout_seconds,
+        )
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=close_deadline
+        )
+        await self._close_terminal_notification_owners()
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=close_deadline
+        )
         await self.drain_active_run(
             reason=reason, timeout_seconds=drain_timeout_seconds
         )
-        await self._terminal_application_services.stop_and_drain_queue_deliveries(
+        await self._terminal_application_services.stop_and_drain_commands(
             deadline_monotonic=close_deadline
         )
-        await self._terminal_application_services.stop_and_drain_commands(
+        await self._terminal_application_services.stop_and_drain_queue_deliveries(
             deadline_monotonic=close_deadline
         )
         await self._terminal_application_services.retire_terminal_queue_content(
@@ -5053,25 +5085,6 @@ class HostSession:
         await runtime_session.tool_execution_terminal_registry.drain_pending(
             deadline_monotonic=close_deadline
         )
-        await asyncio.to_thread(
-            runtime_session.terminal_monitor_coordinator.stop_admission_and_drain_workers,
-            timeout_seconds=drain_timeout_seconds,
-        )
-        await asyncio.to_thread(
-            runtime_session.terminal_sessions.kill_owned,
-            self.host_session_id,
-        )
-        await asyncio.to_thread(
-            runtime_session.terminal_sessions.drain_pending_completions,
-            self.host_session_id,
-            timeout_seconds=drain_timeout_seconds,
-        )
-        await asyncio.to_thread(
-            runtime_session.terminal_monitor_coordinator.terminate_all_for_session_close,
-            timeout_seconds=drain_timeout_seconds,
-        )
-        await self._close_terminal_notification_owners()
-        await runtime_session.transcript_projection_checkpoint_service.request_close_cancellation()
         governance_engine = self.wiring.runtime_wiring.memory_governance_engine
         if governance_engine is not None:
             await governance_engine.stop_admission_and_drain(
@@ -5095,20 +5108,14 @@ class HostSession:
             await candidate_projection_port.flush_pending(
                 deadline_monotonic=time.monotonic() + drain_timeout_seconds
             )
+        # These close paths can themselves append preparation-abandonment and
+        # generation-terminal events.  They are therefore part of the producer
+        # barrier, not a synchronous afterthought in RuntimeSession.close().
+        await runtime_session.quiesce_provider_input_event_producers_for_close(
+            deadline_monotonic=close_deadline
+        )
         await runtime_session.context_input_io_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
-        )
-        await runtime_session.event_write_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
-        )
-        await runtime_session.subagent_graph_checkpoint_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
-        )
-        await runtime_session.transcript_projection_checkpoint_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
-        )
-        await runtime_session.prompt_queue_checkpoint_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            deadline_monotonic=close_deadline
         )
         window_compaction_service = runtime_session.window_compaction_service
         if window_compaction_service is not None:
@@ -5136,9 +5143,45 @@ class HostSession:
             await mcp_tool_execution_port.stop_admission_and_drain(
                 deadline_monotonic=close_deadline,
             )
-        runtime_session.require_mutation_allowed()
         if self.mcp_supervisor is not None:
             await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
+
+        # All EventLog producers are now quiescent.  Only at this fixed point
+        # may close retire the physical writer and the semantic repair owners.
+        # A late durable FULL from tool/governance/compaction/subagent/MCP close
+        # can still install an exact reducer repair until this boundary.
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=close_deadline
+        )
+        # Repair completion can hand off checkpoint work and process-local
+        # adoption.  Rejoin the writer/reducer chain once more before closing
+        # admission so the observed fixed point covers those successors.
+        await runtime_session.event_write_service.drain_pending(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.committed_reducer_repair_service.stop_admission_and_drain(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.committed_reducer_post_fold_service.stop_admission_and_drain(
+            deadline_monotonic=close_deadline
+        )
+        runtime_session.require_mutation_allowed()
+
+        # Checkpoint and presentation acceleration owners are downstream of
+        # the final semantic authority and therefore drain last.
+        await runtime_session.transcript_projection_checkpoint_service.request_close_cancellation()
+        await runtime_session.runtime_projection_checkpoint_maintenance_service.stop_admission_and_drain(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.subagent_graph_checkpoint_service.drain_pending(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.transcript_projection_checkpoint_service.drain_pending(
+            deadline_monotonic=close_deadline
+        )
+        await runtime_session.prompt_queue_checkpoint_service.drain_pending(
+            deadline_monotonic=close_deadline
+        )
         await runtime_session.terminal_presentation_foundation_service.stop_admission_and_drain(
             deadline_monotonic=close_deadline
         )
@@ -5205,7 +5248,7 @@ class HostSession:
                 )
             )
         if candidates:
-            await runtime_session.emit_many(tuple(candidates))
+            await runtime_session.commit_accepted_events(tuple(candidates))
 
     async def drain_active_run(
         self,
@@ -5686,6 +5729,31 @@ class HostSession:
             )
             and event.started_event_id is not None
         }
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        reducer_diagnostics = (
+            runtime_session.committed_reducer_operational_diagnostics()
+        )
+        finalization_diagnostics = (
+            self._run_activation_service.run_finalization_diagnostics(run_id)
+            if run_id is not None
+            else None
+        )
+        if run_view is None:
+            run_control_state = "idle"
+        elif run_view.run_completion_done or (
+            finalization_diagnostics is not None
+            and finalization_diagnostics["state"] == "completed"
+        ):
+            run_control_state = "terminal"
+        elif (
+            reducer_diagnostics["reconciliation_required"]
+            or finalization_diagnostics is not None
+            and finalization_diagnostics["state"]
+            in {"waiting_reducer_repair", "reconciliation_required"}
+        ):
+            run_control_state = "blocked"
+        else:
+            run_control_state = "active"
         return {
             "state": live_state,
             "boundary_id": (
@@ -5751,6 +5819,10 @@ class HostSession:
             "retiring_execution_handle_count": (
                 run_view.retiring_execution_handle_count if run_view is not None else 0
             ),
+            "controller_state": "closed" if self.closed else "ready",
+            "run_control_state": run_control_state,
+            "finalization": finalization_diagnostics,
+            "committed_reducers": reducer_diagnostics,
         }
 
     # -- Internal execution primitive -----------------------------------------
@@ -6497,7 +6569,7 @@ class HostSession:
 
         try:
             stored = tuple(
-                await runtime_session.emit_many(
+                await runtime_session.commit_accepted_events(
                     candidates,
                     transaction_companion=(
                         prepared_mcp_resolution.transaction_companion
@@ -7030,7 +7102,7 @@ class HostSession:
 
     def _emit_user_plan_mode_entered(self, *, reason: str = "") -> AgentEvent:
         suffix = uuid4().hex
-        stored = self.wiring.runtime_wiring.runtime_session.emit_from_thread(
+        settlement = self.wiring.runtime_wiring.runtime_session.settle_event_from_thread(
             PlanModeEnteredEvent(
                 run_id=f"run:host-plan-entry:{suffix}",
                 turn_id=f"turn:host-plan-entry:{suffix}",
@@ -7042,6 +7114,7 @@ class HostSession:
                 reason=reason,
             )
         )
+        stored = settlement.committed_event
         self.plan_state.apply_durable_event(stored)
         return stored
 
@@ -7100,15 +7173,17 @@ class HostSession:
         restored_mode_value = parse_permission_mode(restored_mode).value
         if event_context is None:
             raise RuntimeError("plan mode exit requires event attribution")
-        stored_exit = await self.wiring.runtime_wiring.runtime_session.emit(
-            PlanModeExitedEvent(
-                **event_context.event_fields(),
-                source=source,  # type: ignore[arg-type]
-                exit_request_id=exit_request_id,
-                restored_permission_mode=restored_mode_value,
-                restored_permission_policy=restored_policy.to_dict(),
-                transition_owner=transition_owner,  # type: ignore[arg-type]
-                host_workflow_operation_id=host_workflow_operation_id,
+        stored_exit = (
+            await self.wiring.runtime_wiring.runtime_session.commit_accepted_event(
+                PlanModeExitedEvent(
+                    **event_context.event_fields(),
+                    source=source,  # type: ignore[arg-type]
+                    exit_request_id=exit_request_id,
+                    restored_permission_mode=restored_mode_value,
+                    restored_permission_policy=restored_policy.to_dict(),
+                    transition_owner=transition_owner,  # type: ignore[arg-type]
+                    host_workflow_operation_id=host_workflow_operation_id,
+                )
             )
         )
         self.plan_state.apply_durable_event(stored_exit)

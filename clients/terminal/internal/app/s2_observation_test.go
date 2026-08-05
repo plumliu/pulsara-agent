@@ -186,6 +186,42 @@ func TestS2ControlInvalidationAndOperationalGapShareOneRecoveryPlan(t *testing.T
 	}
 }
 
+func TestS2ScrollToZeroResolvesUnseenCellsAgainstLatestRoot(t *testing.T) {
+	state := testReadyS2State(t, []protocolvalue.HistoryCell{{
+		ID: "entry:long", Kind: "assistant", PublicText: strings.Repeat("tool output ", 400),
+		Fingerprint: testFingerprint("entry:long"),
+	}})
+	state.transcript = state.transcript.Scroll(2)
+	request := testObserveRequest(state)
+	var err error
+	state, _, err = applyObservationBatch(state, request, protocolvalue.ObservationBatch{
+		RequestID:       request.RequestID,
+		ProjectionDelta: ptr(testProjectionDelta(state, request)),
+		PlaneCount:      1,
+		Fingerprint:     testFingerprint("batch:scrolled-unseen"),
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("durable delta did not install over a scrolled viewport: %v", err)
+	}
+	if state.transcript.FollowTail() || state.transcript.UnseenTerminalCount() == 0 {
+		t.Fatal("durable delta did not create the scrolled unseen state")
+	}
+	if err := state.Validate(); err != nil {
+		t.Fatalf("valid scrolled/unseen setup rejected: %v", err)
+	}
+	pageDown, err := NewNormalizedKey(KeyPageDown, 0, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, effects, _ := state.update(KeyInputMsg{Header: testLocalMessageHeader(t, 1), Key: pageDown})
+	if next.hasPublicFailure || next.phase == PhaseFatal {
+		t.Fatalf("scroll-to-tail entered fatal state: %s", next.publicFailure.message)
+	}
+	if len(effects) != 0 || next.transcript.ScrollOffset() != 0 || !next.transcript.FollowTail() || next.transcript.UnseenTerminalCount() != 0 {
+		t.Fatalf("latest-root tail resolution drifted: effects=%#v offset=%d follow=%v unseen=%d", effects, next.transcript.ScrollOffset(), next.transcript.FollowTail(), next.transcript.UnseenTerminalCount())
+	}
+}
+
 func TestS2PageUpPreparesLosslessMaximumHistoryRequest(t *testing.T) {
 	state := testReadyS2State(t, []protocolvalue.HistoryCell{{
 		ID: "entry:resident", Kind: "assistant", PublicText: "resident", Fingerprint: testFingerprint("entry:resident"),

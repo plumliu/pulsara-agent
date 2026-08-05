@@ -3355,7 +3355,7 @@ def test_window_compaction_source_stale_does_not_write_failure_or_charge_circuit
             invalid_citation=False,
         )
         try:
-            await runtime_session.emit(
+            await runtime_session.commit_accepted_event(
                 typed_non_transcript_event(
                     **CTX.event_fields(),
                     name="unrelated_background_fact",

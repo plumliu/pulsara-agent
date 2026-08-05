@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.primitives.stored_event import (
     RawRuntimeProjectionCheckpoint,
     RawTranscriptDomainPrefixFact,
+    canonical_json_object_carrier,
 )
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.prompt_queue import (
@@ -60,8 +61,8 @@ def build_prompt_queue_genesis_raw_checkpoint(
         projection_schema_version=PROMPT_QUEUE_PROJECTION_SCHEMA_VERSION,
         ledger_prefix=prefix,
         validation_base_through_sequence=0,
-        validation_base_state_payload={},
-        state_payload=state_payload,
+        validation_base_state=canonical_json_object_carrier({}),
+        state=canonical_json_object_carrier(state_payload),
         payload_fingerprint=context_fingerprint(
             "prompt-queue-runtime-checkpoint-row:v2", payload
         ),

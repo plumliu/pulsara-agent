@@ -38,6 +38,26 @@ func testHistoryCell(id string, rank uint64) protocolvalue.HistoryCell {
 	}
 }
 
+func testRootCursorPair(root protocolvalue.HistoryRootIdentity, cells []protocolvalue.HistoryCell) protocolvalue.RootCursorPair {
+	pair := protocolvalue.RootCursorPair{Root: root, Fingerprint: "pair:" + root.RootFingerprint}
+	if len(cells) == 0 {
+		return pair
+	}
+	pair.Before = protocolvalue.HistoryCursor{
+		RuntimeSessionID: root.RuntimeSessionID,
+		Root:             root,
+		Fingerprint:      "cursor:before:" + root.RootFingerprint,
+	}
+	pair.HasBefore = true
+	pair.After = protocolvalue.HistoryCursor{
+		RuntimeSessionID: root.RuntimeSessionID,
+		Root:             root,
+		Fingerprint:      "cursor:after:" + root.RootFingerprint,
+	}
+	pair.HasAfter = true
+	return pair
+}
+
 func testDurableState(t *testing.T, root protocolvalue.HistoryRootIdentity, cells []protocolvalue.HistoryCell, resident string) State {
 	t.Helper()
 	head := protocolvalue.ActiveHead{
@@ -103,6 +123,41 @@ func TestProjectionDeltaAcceptsExactDuplicateAndRejectsRevisionConflict(t *testi
 	overlap.Fingerprint = "delta:overlap"
 	if _, err := next.ApplyProjectionDelta(overlap); err == nil {
 		t.Fatal("overlapping projection delta was accepted")
+	}
+}
+
+func TestLatestCursorAnchorsDoNotPinViewportToPredecessorRoot(t *testing.T) {
+	oldRoot := testHistoryRoot("cursor-anchor-old", 1)
+	oldCells := []protocolvalue.HistoryCell{testHistoryCell("old", 0)}
+	oldState := testDurableState(t, oldRoot, oldCells, "resident:cursor-anchor-old")
+	oldSnapshot := oldState.Durable()
+	oldSnapshot.LatestRootCursorPair = testRootCursorPair(oldRoot, oldCells)
+
+	cache, err := NewPageCache().InstallLatest(oldSnapshot, true, "attachment:cursor-anchor", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, ok := cache.Current()
+	if !ok || !current.HasAfterCursor || current.HasMoreAfter || !cache.ShouldFollowLatest(true) {
+		t.Fatalf("latest after-anchor was mistaken for a continuation: %#v", current)
+	}
+
+	newRoot := testHistoryRoot("cursor-anchor-new", 2)
+	newCells := []protocolvalue.HistoryCell{testHistoryCell("old", 0), testHistoryCell("new", 1)}
+	newState := testDurableState(t, newRoot, newCells, "resident:cursor-anchor-new")
+	newSnapshot := newState.Durable()
+	newSnapshot.LatestRootCursorPair = testRootCursorPair(newRoot, newCells)
+
+	cache, err = cache.InstallLatest(newSnapshot, cache.ShouldFollowLatest(true), "attachment:cursor-anchor", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := cache.MaterializeCurrent(newSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cache.CurrentIsLatest() || len(materialized.Cells) != 2 || materialized.Cells[1].ID != "new" {
+		t.Fatalf("latest root did not remain the visible viewport: %#v", materialized.Cells)
 	}
 }
 

@@ -22,6 +22,7 @@ from pulsara_agent.terminal_protocol.codec import (
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
 from pulsara_agent.event_log.in_memory import InMemoryEventLog
 from pulsara_agent.ports.terminal_application import (
+    MAXIMUM_TERMINAL_SUBMIT_TEXT_BYTES,
     SubmitPromptRequest,
     TerminalCommandBinding,
     TerminalCommandOutcome,
@@ -32,6 +33,7 @@ from pulsara_agent.runtime.terminal_application.command_receipt import (
 )
 from pulsara_agent.runtime.terminal_application.services import (
     TerminalCommandOwner,
+    TerminalPromptSubmissionService,
     terminal_request_semantic_fingerprint,
 )
 from pulsara_agent.runtime.terminal_application.secret import TerminalMcpSecretService
@@ -228,6 +230,104 @@ def _pending_outcome(request: SubmitPromptRequest) -> TerminalCommandOutcome:
             query_token="query:pending-recovery",
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_text",
+    (
+        "",
+        "unsafe\x1b]52;c;payload\x07",
+        "x" * (MAXIMUM_TERMINAL_SUBMIT_TEXT_BYTES + 1),
+    ),
+)
+def test_submit_prompt_request_authority_rejects_invalid_text(
+    invalid_text: str,
+) -> None:
+    valid = _submit_request(command_id="command:bounds", text="valid")
+    with pytest.raises(ValueError):
+        replace(valid, text=invalid_text)
+
+
+def test_durable_queue_acceptance_wins_over_live_scheduler_failure() -> None:
+    async def scenario() -> None:
+        event_log = InMemoryEventLog(runtime_session_id="runtime:receipt")
+        owner = TerminalCommandOwner(
+            runtime_session_id="runtime:receipt",
+            receipt_storage=build_terminal_command_receipt_storage(event_log),
+        )
+
+        class QueueMutationService:
+            calls = 0
+
+            async def submit(self, _request):
+                self.calls += 1
+                return SimpleNamespace(
+                    queue_item_id="queue:item:durable",
+                    head_event_id="event:queue:accepted",
+                )
+
+        queue_service = QueueMutationService()
+        run_view = SimpleNamespace(
+            run_id="run:active", turn_id="turn:active", reply_id="reply:active"
+        )
+        activation = SimpleNamespace(
+            active_host_run_view=lambda: run_view,
+            suspended_host_run_view=lambda: None,
+            current_host_run_view=lambda: run_view,
+        )
+        host = SimpleNamespace(
+            host_session_id="host:receipt",
+            runtime_session_id="runtime:receipt",
+            active_run_id="run:active",
+            stopping_run_id=None,
+            suspended_run_id=None,
+            _run_activation_service=activation,
+            wiring=SimpleNamespace(
+                runtime_wiring=SimpleNamespace(
+                    runtime_session=SimpleNamespace(
+                        prompt_queue_mutation_service=queue_service
+                    )
+                )
+            ),
+        )
+        attachments = Mock()
+
+        def fail_scheduler(_queue_item_id: str) -> None:
+            raise RuntimeError("injected close-race scheduler failure")
+
+        service = TerminalPromptSubmissionService(
+            host_session=host,
+            attachments=attachments,
+            commands=owner,
+            delivery_scheduler=fail_scheduler,
+        )
+        request = _submit_request(command_id="command:queue-wins", text="queue me")
+        pending = await service.submit(request)
+        assert pending.status == "pending_confirmation"
+        terminal = None
+        for _ in range(50):
+            terminal = await owner.query(
+                client_instance_id=request.binding.client_instance_id,
+                command_id=request.binding.command_id,
+            )
+            if terminal is not None and terminal.status == "succeeded":
+                break
+            await asyncio.sleep(0.01)
+        assert terminal is not None
+        assert terminal.status == "succeeded"
+        assert terminal.public_result_code == "PROMPT_QUEUED"
+        assert terminal.durable_reference_ids == (
+            "event:queue:accepted",
+            "queue:item:durable",
+        )
+        repeated = await service.submit(request)
+        assert repeated == terminal
+        assert queue_service.calls == 1
+        attachments.validate_controller.assert_called_once_with(request.binding)
+        await owner.drain(deadline_monotonic=asyncio.get_running_loop().time() + 1.0)
+        owner.close()
+
+    asyncio.run(scenario())
 
 
 def test_mcp_form_secret_handle_binds_exact_request_owner_and_expires() -> None:

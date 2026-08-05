@@ -150,7 +150,7 @@ def test_evidence_cursor_same_high_water_and_delta_extension(
             TranscriptProjectionMaterializationMismatchCode.PROJECTION_AUTHORITY
         )
 
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             typed_non_transcript_event(
                 **context.event_fields(),
                 name="cursor-non-semantic-suffix",
@@ -171,7 +171,7 @@ def test_evidence_cursor_same_high_water_and_delta_extension(
             == next_high_water
         )
 
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             PlanExitResolvedEvent(
                 **context.event_fields(),
                 exit_request_id="exit:cursor",
@@ -662,7 +662,7 @@ def test_delta_read_cancellation_preserves_previous_cursor(
         await service.prepare_projection_evidence(requested_through_sequence=high_water)
         original_handle = service._verified_evidence_cursor_handle  # noqa: SLF001
         assert original_handle is not None
-        await runtime.emit(
+        await runtime.commit_accepted_event(
             typed_non_transcript_event(
                 **context.event_fields(),
                 name="cursor-cancelled-suffix",

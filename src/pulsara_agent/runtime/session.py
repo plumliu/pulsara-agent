@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
@@ -58,14 +58,11 @@ from pulsara_agent.event import (
     SubagentRunFailedEvent,
     SubagentRunStartedEvent,
     SubagentRunSuspendedEvent,
-    TerminalNotificationReservationCreatedEvent,
-    TerminalNotificationReservationReleasedEvent,
     TerminalProcessCompletedEvent,
     TerminalProcessMonitorObservationCommittedEvent,
     TerminalProcessMonitorReceiptAppliedEvent,
     TerminalProcessMonitorRegisteredEvent,
     TerminalProcessMonitorTerminatedEvent,
-    TerminalProcessObservationDeliveryDeferredEvent,
     TerminalProcessObservationDeliveryDispositionEvent,
     TextBlockSegmentEvent,
     ThinkingBlockSegmentEvent,
@@ -93,12 +90,13 @@ from pulsara_agent.llm.execution import ModelStreamExecutionRegistry
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives.context import (
     ContextStaticInstructionFact,
-    canonical_json_bytes,
     context_fingerprint,
 )
 from pulsara_agent.primitives.stored_event import (
+    CanonicalJsonObjectCarrier,
     RawRuntimeProjectionCheckpoint,
-    RawTranscriptDomainPrefixFact,
+    canonical_json_object_carrier,
+    runtime_projection_checkpoint_fingerprint,
 )
 from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationConsumerKind,
@@ -154,20 +152,46 @@ from pulsara_agent.runtime.publication_maintenance import (
     PublicationTerminalMaintenanceOwnerKind,
     validate_publication_latched_run_termination_authority,
 )
+from pulsara_agent.runtime.projection_checkpoint_maintenance import (
+    CHECKPOINT_RECOVERY_HARD_BYTES,
+    CHECKPOINT_RECOVERY_HARD_EVENTS,
+    CheckpointedCommittedReducerIngress,
+    CommittedReducerFoldReceipt,
+    PreparedCheckpointedCommittedReducerFold,
+    RuntimeProjectionCheckpointAdmissionBlocked,
+    RuntimeProjectionCheckpointMaintenanceService,
+    RuntimeProjectionRecoveryBoundExceeded,
+    build_committed_reducer_fold_receipt,
+    read_bounded_runtime_projection_recovery_delta,
+)
+from pulsara_agent.runtime.committed_reducer_repair import (
+    CommittedReducerRepairPlan,
+    CommittedReducerRepairReceipt,
+    CommittedReducerRepairService,
+    OnlineReducerRepairBoundExceeded,
+    build_committed_reducer_repair_receipt,
+)
+from pulsara_agent.runtime.committed_reducer_post_fold import (
+    CommittedReducerPostFoldService,
+)
 from pulsara_agent.runtime.mandatory_audit import RuntimeSessionMandatoryAuditOwner
 from pulsara_agent.primitives.runtime_event_vocabulary import (
     RuntimeEventOperationDeadlineBudget,
 )
 from pulsara_agent.ports.event_write import (
+    CommittedEventSettlementReceipt,
     CommittedReducerError,
     EventBatchCommitOutcome,
     EventCommitError,
-    EventPublicationAfterCommitError,
+    EventPublicationAfterCommitError,  # noqa: F401 - historical public import owner
     EventPublicationError,
     EventReconciliationRequired,
     EventWriteCancelled,
     EventWriteResult,
+    RuntimeThreadEventBatchSettlementReceipt,
+    RuntimeThreadEventSettlementReceipt,
     business_accounting_partition_fingerprint,
+    classify_committed_event_settlement,
     event_batch_commit_outcome_from_error as _base_event_batch_commit_outcome,
 )
 from pulsara_agent.ports.mcp import McpContinuationTransactionAuthority
@@ -194,14 +218,28 @@ _ACTIVE_PUBLICATION_MAINTENANCE_LEASE_ID: ContextVar[str | None] = ContextVar(
 class RuntimeThreadRecorder:
     runtime_session: "RuntimeSession"
 
-    def __call__(self, event: AgentEvent) -> AgentEvent:
-        return self.runtime_session.emit_from_thread(event)
+    def __call__(self, event: AgentEvent) -> RuntimeThreadEventSettlementReceipt:
+        return self.runtime_session.settle_event_from_thread(event)
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeEventSnapshot:
     events: tuple[AgentEvent, ...]
     through_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderInputCloseQuiesceReceipt:
+    """Process-local proof that all provider-input close candidates were owned.
+
+    The receipt deliberately proves only producer quiescence.  Reducer repair
+    remains a separate Host close barrier and must consume every durable FULL
+    before the synchronous RuntimeSession finalizer accepts this receipt.
+    """
+
+    runtime_session_id: str
+    preparation_outcomes: tuple[tuple[str, str, str | None], ...]
+    generation_close_event_ids: tuple[str, ...]
 
 
 class EventWriteConflict(RuntimeError):
@@ -251,6 +289,8 @@ class _CommittedReducerRegistration:
     rebuild_owner: CommittedReducerRebuildPort | None = None
     reconciliation_required: bool = False
     last_error: str | None = None
+    last_fold_receipt: CommittedReducerFoldReceipt | None = None
+    post_fold: Callable[[tuple[AgentEvent, ...]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +451,20 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    _provider_input_close_quiesce_task: (
+        asyncio.Task[ProviderInputCloseQuiesceReceipt] | None
+    ) = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _provider_input_close_quiesce_receipt: ProviderInputCloseQuiesceReceipt | None = (
+        field(
+            default=None,
+            init=False,
+            repr=False,
+        )
+    )
     transcript_projection_checkpoint_service: Any = field(
         init=False,
         repr=False,
@@ -445,13 +499,14 @@ class RuntimeSession:
     terminal_monitor_event_channel: Any = field(init=False, repr=False)
     terminal_notification_store: Any = field(init=False, repr=False)
     terminal_notification_account_coordinator: Any = field(init=False, repr=False)
-    _terminal_notification_checkpoint_head: tuple[int, dict[str, object]] = field(
-        init=False,
-        repr=False,
+    runtime_projection_checkpoint_maintenance_service: RuntimeProjectionCheckpointMaintenanceService = field(
+        init=False, repr=False
     )
-    _terminal_monitor_checkpoint_head: tuple[int, dict[str, object]] = field(
-        init=False,
-        repr=False,
+    committed_reducer_repair_service: CommittedReducerRepairService = field(
+        init=False, repr=False
+    )
+    committed_reducer_post_fold_service: CommittedReducerPostFoldService = field(
+        init=False, repr=False
     )
     _runtime_open_deadline_monotonic: float = field(init=False, repr=False)
     _terminal_notification_listener: Callable[[tuple[AgentEvent, ...]], None] | None = (
@@ -575,6 +630,10 @@ class RuntimeSession:
         )
         self.context_input_io_service = ContextInputIoService()
         self.event_write_service = RuntimeEventWriteService()
+        self.committed_reducer_repair_service = CommittedReducerRepairService(
+            repair_operation=self._repair_committed_reducer_from_checkpoint
+        )
+        self.committed_reducer_post_fold_service = CommittedReducerPostFoldService()
         self._publication_maintenance_coordinator = (
             PublicationTerminalMaintenanceCoordinator(
                 runtime_session_id=self.runtime_session_id
@@ -1122,11 +1181,15 @@ class RuntimeSession:
         self._bind_terminal(self.terminal_binding)
         from pulsara_agent.runtime.terminal.notification import (
             TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
+            HostIngressNotificationProjectionStore,
             TerminalNotificationAccountCoordinator,
         )
         from pulsara_agent.runtime.terminal.monitor import (
             TERMINAL_MONITOR_CHECKPOINT_KIND,
+            TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
             TerminalMonitorCoordinator,
+            TerminalMonitorStore,
         )
         from pulsara_agent.runtime.terminal.ui_stream import (
             TerminalMonitorEventChannel,
@@ -1149,15 +1212,79 @@ class RuntimeSession:
             ),
             event_resolver=self.event_log.get_by_id,
         )
+        self.runtime_projection_checkpoint_maintenance_service = (
+            RuntimeProjectionCheckpointMaintenanceService(
+                runtime_session_id=self.runtime_session_id,
+                event_log=self.event_log,
+            )
+        )
+        notification_reducer_id = f"terminal_notification:{self.runtime_session_id}"
+        self.committed_reducer_post_fold_service.register(
+            reducer_id=notification_reducer_id,
+            callback=self.terminal_notification_account_coordinator.on_committed,
+        )
+        notification_checkpoint = self.event_log.read_runtime_projection_checkpoint(
+            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.runtime_projection_checkpoint_maintenance_service.register_projection(
+            reducer_id=notification_reducer_id,
+            projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+            projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
+            confirmed_head=notification_checkpoint,
+            genesis_state=canonical_json_object_carrier(
+                HostIngressNotificationProjectionStore.canonical_checkpoint_genesis_payload(
+                    runtime_session_id=self.runtime_session_id
+                )
+            ),
+            current_through_sequence=self.terminal_notification_store.through_sequence,
+            current_state=canonical_json_object_carrier(
+                self.terminal_notification_store.checkpoint_payload()
+            ),
+            relevant_event_types=(
+                EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
+                EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED.value,
+                EventType.TERMINAL_PROCESS_COMPLETED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED.value,
+            ),
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
         self.register_committed_reducer(
-            reducer_id=f"terminal_notification:{self.runtime_session_id}",
+            reducer_id=notification_reducer_id,
             through_sequence=self.terminal_notification_store.through_sequence,
-            ingress=GroupingIndependentOwnedEventReducerAdapter(
-                apply_owned_events=self._apply_terminal_notification_committed,
+            ingress=CheckpointedCommittedReducerIngress(
+                reducer_id=notification_reducer_id,
+                prepare_owned_events=(
+                    self.terminal_notification_store.prepare_committed
+                ),
+                install_prepared_owned_events=(
+                    self.terminal_notification_store.install_prepared_committed
+                ),
                 reset_owned_events=lambda: (
                     self._rebuild_terminal_notification_committed(())
                 ),
+                checkpoint_relevant=lambda events: any(
+                    str(event.type)
+                    in {
+                        EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
+                        EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED.value,
+                        EventType.TERMINAL_PROCESS_COMPLETED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DEFERRED.value,
+                    }
+                    for event in events
+                ),
             ),
+            post_fold=self._post_terminal_notification_committed_noexcept,
         )
 
         self.terminal_monitor_store = self._restore_terminal_monitor_projection(
@@ -1171,13 +1298,64 @@ class RuntimeSession:
             store=self.terminal_monitor_store,
             event_channel=self.terminal_monitor_event_channel,
         )
-        self.register_committed_reducer(
-            reducer_id=f"terminal_monitor:{self.runtime_session_id}",
-            through_sequence=self.terminal_monitor_store.through_sequence,
-            ingress=GroupingIndependentOwnedEventReducerAdapter(
-                apply_owned_events=self._apply_terminal_monitor_committed,
-                reset_owned_events=lambda: self._rebuild_terminal_monitor_committed(()),
+        monitor_reducer_id = f"terminal_monitor:{self.runtime_session_id}"
+        self.committed_reducer_post_fold_service.register(
+            reducer_id=monitor_reducer_id,
+            callback=self.terminal_monitor_coordinator.on_committed,
+        )
+        monitor_checkpoint = self.event_log.read_runtime_projection_checkpoint(
+            TERMINAL_MONITOR_CHECKPOINT_KIND,
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.runtime_projection_checkpoint_maintenance_service.register_projection(
+            reducer_id=monitor_reducer_id,
+            projection_kind=TERMINAL_MONITOR_CHECKPOINT_KIND,
+            projection_schema_version=TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+            confirmed_head=monitor_checkpoint,
+            genesis_state=canonical_json_object_carrier(
+                TerminalMonitorStore.canonical_checkpoint_genesis_payload(
+                    runtime_session_id=self.runtime_session_id
+                )
             ),
+            current_through_sequence=self.terminal_monitor_store.through_sequence,
+            current_state=canonical_json_object_carrier(
+                self.terminal_monitor_store.checkpoint_payload()
+            ),
+            relevant_event_types=(
+                EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+            ),
+            deadline_monotonic=self._runtime_open_deadline_monotonic,
+        )
+        self.register_committed_reducer(
+            reducer_id=monitor_reducer_id,
+            through_sequence=self.terminal_monitor_store.through_sequence,
+            ingress=CheckpointedCommittedReducerIngress(
+                reducer_id=monitor_reducer_id,
+                prepare_owned_events=(self.terminal_monitor_store.prepare_committed),
+                install_prepared_owned_events=(
+                    self.terminal_monitor_store.install_prepared_committed
+                ),
+                reset_owned_events=lambda: self._rebuild_terminal_monitor_committed(()),
+                checkpoint_relevant=lambda events: any(
+                    str(event.type)
+                    in {
+                        EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_RECEIPT_APPLIED.value,
+                        EventType.TERMINAL_PROCESS_MONITOR_TERMINATED.value,
+                        EventType.TERMINAL_PROCESS_OBSERVATION_DELIVERY_DISPOSITION.value,
+                    }
+                    for event in events
+                ),
+            ),
+            post_fold=self._post_terminal_monitor_committed_noexcept,
+        )
+        self.materialization_coordinator.bind_pre_commit_admission(
+            self._assert_runtime_projection_physical_batch_admission
         )
         self.terminal_monitor_coordinator.on_committed(
             tuple(
@@ -1187,7 +1365,9 @@ class RuntimeSession:
                 not in {"terminated", "reconciliation_required"}
             )
         )
-        self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
+        self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync(
+            deadline_monotonic=self._runtime_open_deadline_monotonic
+        )
         self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
 
         # Keep the imported identities live for architecture guards and make it
@@ -1283,10 +1463,6 @@ class RuntimeSession:
             store = HostIngressNotificationProjectionStore(
                 runtime_session_id=self.runtime_session_id
             )
-            self._terminal_notification_checkpoint_head = (
-                0,
-                store.checkpoint_payload(),
-            )
             minimum_sequence = 1
         else:
             self._validate_runtime_projection_checkpoint(
@@ -1314,7 +1490,7 @@ class RuntimeSession:
                     runtime_session_id=self.runtime_session_id,
                 )
             )
-            validation_events, validation_through = (
+            validation_events, validation_through, _, _ = (
                 self._read_terminal_projection_delta(
                     event_types=(
                         EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
@@ -1333,7 +1509,7 @@ class RuntimeSession:
                 )
                 if checkpoint.validation_base_through_sequence
                 < checkpoint.through_sequence
-                else ((), checkpoint.through_sequence)
+                else ((), checkpoint.through_sequence, 0, 0)
             )
             validation_store.apply_committed(validation_events)
             validation_store.through_sequence = max(
@@ -1342,7 +1518,7 @@ class RuntimeSession:
             )
             if not self._runtime_projection_payloads_equal(
                 validation_store.checkpoint_payload(),
-                checkpoint.state_payload,
+                checkpoint.state,
             ):
                 raise ValueError(
                     "terminal notification checkpoint reducer transition is untrusted"
@@ -1351,12 +1527,8 @@ class RuntimeSession:
                 checkpoint.state_payload,
                 runtime_session_id=self.runtime_session_id,
             )
-            self._terminal_notification_checkpoint_head = (
-                checkpoint.through_sequence,
-                checkpoint.state_payload,
-            )
             minimum_sequence = checkpoint.through_sequence + 1
-        events, through_sequence = self._read_terminal_projection_delta(
+        events, through_sequence, _, _ = self._read_terminal_projection_delta(
             event_types=(
                 EventType.TERMINAL_NOTIFICATION_RESERVATION_CREATED.value,
                 EventType.TERMINAL_NOTIFICATION_RESERVATION_RELEASED.value,
@@ -1393,10 +1565,6 @@ class RuntimeSession:
         )
         if checkpoint is None:
             store = TerminalMonitorStore(runtime_session_id=self.runtime_session_id)
-            self._terminal_monitor_checkpoint_head = (
-                0,
-                store.checkpoint_payload(),
-            )
             minimum_sequence = 1
         else:
             self._validate_runtime_projection_checkpoint(
@@ -1420,7 +1588,7 @@ class RuntimeSession:
                 checkpoint.validation_base_state_payload,
                 runtime_session_id=self.runtime_session_id,
             )
-            validation_events, validation_through = (
+            validation_events, validation_through, _, _ = (
                 self._read_terminal_projection_delta(
                     event_types=(
                         EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
@@ -1435,7 +1603,7 @@ class RuntimeSession:
                 )
                 if checkpoint.validation_base_through_sequence
                 < checkpoint.through_sequence
-                else ((), checkpoint.through_sequence)
+                else ((), checkpoint.through_sequence, 0, 0)
             )
             validation_store.apply_committed(validation_events)
             validation_store.through_sequence = max(
@@ -1444,7 +1612,7 @@ class RuntimeSession:
             )
             if not self._runtime_projection_payloads_equal(
                 validation_store.checkpoint_payload(),
-                checkpoint.state_payload,
+                checkpoint.state,
             ):
                 raise ValueError(
                     "terminal monitor checkpoint reducer transition is untrusted"
@@ -1453,12 +1621,8 @@ class RuntimeSession:
                 checkpoint.state_payload,
                 runtime_session_id=self.runtime_session_id,
             )
-            self._terminal_monitor_checkpoint_head = (
-                checkpoint.through_sequence,
-                checkpoint.state_payload,
-            )
             minimum_sequence = checkpoint.through_sequence + 1
-        events, through_sequence = self._read_terminal_projection_delta(
+        events, through_sequence, _, _ = self._read_terminal_projection_delta(
             event_types=(
                 EventType.TERMINAL_PROCESS_MONITOR_REGISTERED.value,
                 EventType.TERMINAL_PROCESS_MONITOR_OBSERVATION_COMMITTED.value,
@@ -1480,15 +1644,24 @@ class RuntimeSession:
         minimum_sequence: int,
         deadline_monotonic: float,
         through_sequence: int | None = None,
-    ) -> tuple[tuple[AgentEvent, ...], int]:
-        snapshot = self.event_log.read_raw_events_by_types(
-            event_types,
-            minimum_sequence=minimum_sequence,
-            through_sequence=through_sequence,
-            max_events=4_096,
-            max_payload_bytes=16 * 1024 * 1024,
-            deadline_monotonic=deadline_monotonic,
-        )
+    ) -> tuple[tuple[AgentEvent, ...], int, int, int]:
+        try:
+            snapshot = self.event_log.read_raw_events_by_types(
+                event_types,
+                minimum_sequence=minimum_sequence,
+                through_sequence=through_sequence,
+                max_events=CHECKPOINT_RECOVERY_HARD_EVENTS,
+                max_payload_bytes=CHECKPOINT_RECOVERY_HARD_BYTES,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except ValueError as exc:
+            message = str(exc).lower()
+            if "bound" in message or "exceed" in message:
+                raise OnlineReducerRepairBoundExceeded(
+                    "terminal reducer sparse delta exceeds its online bound"
+                ) from exc
+            raise
+        authority_envelopes = {item.event_id: item for item in snapshot.events}
         selected = [
             decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
             for item in snapshot.events
@@ -1505,6 +1678,13 @@ class RuntimeSession:
             and event.tool_result_end_event_identity is not None
         )
         if tool_result_ids:
+            if (
+                len(authority_envelopes) + len(tool_result_ids)
+                > CHECKPOINT_RECOVERY_HARD_EVENTS
+            ):
+                raise OnlineReducerRepairBoundExceeded(
+                    "terminal reducer authority set exceeds its online event bound"
+                )
             exact = self.event_log.read_raw_events_by_id(
                 tuple(sorted(tool_result_ids)),
                 deadline_monotonic=deadline_monotonic,
@@ -1512,6 +1692,23 @@ class RuntimeSession:
             if len(exact) != len(tool_result_ids):
                 raise ValueError(
                     "terminal projection delta lacks exact ToolResult authority"
+                )
+            for item in exact:
+                previous = authority_envelopes.get(item.event_id)
+                if previous is not None and previous != item:
+                    raise ValueError(
+                        "terminal projection authority identity is ambiguous"
+                    )
+                authority_envelopes[item.event_id] = item
+            if (
+                sum(
+                    len(item.canonical_payload_bytes)
+                    for item in authority_envelopes.values()
+                )
+                > CHECKPOINT_RECOVERY_HARD_BYTES
+            ):
+                raise OnlineReducerRepairBoundExceeded(
+                    "terminal reducer authority set exceeds its online byte bound"
                 )
             selected.extend(
                 decode_raw_stored_event_envelope(item, DEFAULT_EVENT_SCHEMA_REGISTRY)
@@ -1521,7 +1718,15 @@ class RuntimeSession:
         ordered = tuple(
             sorted(by_id.values(), key=lambda event: (event.sequence or 0, event.id))
         )
-        return ordered, snapshot.through_sequence
+        return (
+            ordered,
+            snapshot.through_sequence,
+            len(authority_envelopes),
+            sum(
+                len(item.canonical_payload_bytes)
+                for item in authority_envelopes.values()
+            ),
+        )
 
     def _validate_runtime_projection_checkpoint(
         self,
@@ -1531,7 +1736,7 @@ class RuntimeSession:
         expected_schema_version: str,
         deadline_monotonic: float,
     ) -> None:
-        expected = self._runtime_projection_checkpoint_fingerprint(
+        expected = runtime_projection_checkpoint_fingerprint(
             projection_kind=checkpoint.projection_kind,
             through_sequence=checkpoint.through_sequence,
             projection_schema_version=checkpoint.projection_schema_version,
@@ -1539,8 +1744,8 @@ class RuntimeSession:
             validation_base_through_sequence=(
                 checkpoint.validation_base_through_sequence
             ),
-            validation_base_state_payload=(checkpoint.validation_base_state_payload),
-            state_payload=checkpoint.state_payload,
+            validation_base_state=checkpoint.validation_base_state,
+            state=checkpoint.state,
         )
         committed_prefix = self.event_log.read_raw_ledger_prefix(
             through_sequence=checkpoint.through_sequence,
@@ -1556,34 +1761,20 @@ class RuntimeSession:
 
     @staticmethod
     def _runtime_projection_payloads_equal(
-        left: dict[str, object],
-        right: dict[str, object],
+        left: dict[str, object] | CanonicalJsonObjectCarrier,
+        right: dict[str, object] | CanonicalJsonObjectCarrier,
     ) -> bool:
-        return canonical_json_bytes(left) == canonical_json_bytes(right)
-
-    @staticmethod
-    def _runtime_projection_checkpoint_fingerprint(
-        *,
-        projection_kind: str,
-        through_sequence: int,
-        projection_schema_version: str,
-        ledger_prefix: RawTranscriptDomainPrefixFact,
-        validation_base_through_sequence: int,
-        validation_base_state_payload: dict[str, object],
-        state_payload: dict[str, object],
-    ) -> str:
-        return context_fingerprint(
-            "runtime-projection-checkpoint:v2",
-            {
-                "projection_kind": projection_kind,
-                "through_sequence": through_sequence,
-                "projection_schema_version": projection_schema_version,
-                "ledger_prefix": asdict(ledger_prefix),
-                "validation_base_through_sequence": (validation_base_through_sequence),
-                "validation_base_state_payload": validation_base_state_payload,
-                "state_payload": state_payload,
-            },
+        left_carrier = (
+            left
+            if isinstance(left, CanonicalJsonObjectCarrier)
+            else canonical_json_object_carrier(left)
         )
+        right_carrier = (
+            right
+            if isinstance(right, CanonicalJsonObjectCarrier)
+            else canonical_json_object_carrier(right)
+        )
+        return left_carrier == right_carrier
 
     def _restore_active_physical_reservations(self, durable_account: Any) -> None:
         self._physical_reservation_facts = {}
@@ -1633,144 +1824,46 @@ class RuntimeSession:
                     )
                 )
 
-    def _apply_terminal_monitor_committed(self, events: tuple[AgentEvent, ...]) -> None:
-        self.terminal_monitor_store.apply_committed(events)
-        if any(
-            isinstance(
-                event,
-                (
-                    TerminalProcessMonitorRegisteredEvent,
-                    TerminalProcessMonitorObservationCommittedEvent,
-                    TerminalProcessMonitorReceiptAppliedEvent,
-                    TerminalProcessMonitorTerminatedEvent,
-                    TerminalProcessObservationDeliveryDispositionEvent,
-                ),
-            )
-            for event in events
-        ):
-            self._persist_terminal_monitor_checkpoint()
-        self.terminal_monitor_coordinator.on_committed(events)
-
-    def _apply_terminal_notification_committed(
+    def _post_terminal_monitor_committed_noexcept(
         self, events: tuple[AgentEvent, ...]
     ) -> None:
-        self.terminal_notification_store.apply_committed(events)
-        if any(
-            isinstance(
-                event,
-                (
-                    TerminalNotificationReservationCreatedEvent,
-                    TerminalNotificationReservationReleasedEvent,
-                    TerminalProcessCompletedEvent,
-                    TerminalProcessMonitorRegisteredEvent,
-                    TerminalProcessMonitorObservationCommittedEvent,
-                    TerminalProcessMonitorReceiptAppliedEvent,
-                    TerminalProcessMonitorTerminatedEvent,
-                    TerminalProcessObservationDeliveryDispositionEvent,
-                    TerminalProcessObservationDeliveryDeferredEvent,
-                ),
-            )
-            for event in events
-        ):
-            self._persist_terminal_notification_checkpoint()
-        self.terminal_notification_account_coordinator.on_committed(events)
-        self.terminal_monitor_event_channel.publish_committed(events)
+        self.committed_reducer_post_fold_service.handoff(
+            reducer_id=f"terminal_monitor:{self.runtime_session_id}",
+            events=events,
+        )
+
+    def _post_terminal_notification_committed_noexcept(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        self.committed_reducer_post_fold_service.handoff(
+            reducer_id=f"terminal_notification:{self.runtime_session_id}",
+            events=events,
+        )
+        try:
+            self.terminal_monitor_event_channel.publish_committed(events)
+        except BaseException:
+            # UI replay is operational and may drop independently.  It is not
+            # a process-control handoff and therefore is deliberately not
+            # retried through the semantic/post-fold owner.
+            pass
         listener = self._terminal_notification_listener
         if listener is not None:
-            listener(events)
+            try:
+                listener(events)
+            except BaseException:
+                # The Host listener observes already-durable authority.  Its
+                # own ingress/recovery path must not poison this fold.
+                pass
 
     def _rebuild_terminal_notification_committed(
         self, events: tuple[AgentEvent, ...]
     ) -> None:
         self.terminal_notification_store.rebuild(events)
-        self.terminal_notification_account_coordinator.on_committed(events)
 
     def _rebuild_terminal_monitor_committed(
         self, events: tuple[AgentEvent, ...]
     ) -> None:
         self.terminal_monitor_store.rebuild(events)
-        self.terminal_monitor_coordinator.on_committed(events)
-
-    def _persist_terminal_notification_checkpoint(self) -> None:
-        from pulsara_agent.runtime.terminal.notification import (
-            TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
-            TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
-        )
-
-        self._persist_runtime_projection_checkpoint(
-            projection_kind=TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
-            projection_schema_version=(TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION),
-            through_sequence=self.terminal_notification_store.through_sequence,
-            state_payload=self.terminal_notification_store.checkpoint_payload(),
-        )
-
-    def _persist_terminal_monitor_checkpoint(self) -> None:
-        from pulsara_agent.runtime.terminal.monitor import (
-            TERMINAL_MONITOR_CHECKPOINT_KIND,
-            TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
-        )
-
-        self._persist_runtime_projection_checkpoint(
-            projection_kind=TERMINAL_MONITOR_CHECKPOINT_KIND,
-            projection_schema_version=TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
-            through_sequence=self.terminal_monitor_store.through_sequence,
-            state_payload=self.terminal_monitor_store.checkpoint_payload(),
-        )
-
-    def _persist_runtime_projection_checkpoint(
-        self,
-        *,
-        projection_kind: str,
-        projection_schema_version: str,
-        through_sequence: int,
-        state_payload: dict[str, object],
-    ) -> None:
-        deadline = self.event_write_service.current_deadline_monotonic()
-        if projection_kind == "terminal_notification_projection.v1":
-            head_attr = "_terminal_notification_checkpoint_head"
-        elif projection_kind == "terminal_monitor_projection.v1":
-            head_attr = "_terminal_monitor_checkpoint_head"
-        else:  # pragma: no cover - the runtime checkpoint registry is closed
-            raise ValueError("unknown runtime projection checkpoint kind")
-        base_through_sequence, base_state_payload = getattr(self, head_attr)
-        if through_sequence < base_through_sequence:
-            raise ValueError("runtime projection checkpoint cannot move backwards")
-        if through_sequence == base_through_sequence:
-            if not self._runtime_projection_payloads_equal(
-                state_payload,
-                base_state_payload,
-            ):
-                raise ValueError(
-                    "runtime projection state changed without ledger progress"
-                )
-            return
-        ledger_prefix = self.event_log.read_raw_ledger_prefix(
-            through_sequence=through_sequence,
-            deadline_monotonic=deadline,
-        )
-        checkpoint = RawRuntimeProjectionCheckpoint(
-            projection_kind=projection_kind,
-            through_sequence=through_sequence,
-            projection_schema_version=projection_schema_version,
-            ledger_prefix=ledger_prefix,
-            validation_base_through_sequence=base_through_sequence,
-            validation_base_state_payload=base_state_payload,
-            state_payload=state_payload,
-            payload_fingerprint=self._runtime_projection_checkpoint_fingerprint(
-                projection_kind=projection_kind,
-                through_sequence=through_sequence,
-                projection_schema_version=projection_schema_version,
-                ledger_prefix=ledger_prefix,
-                validation_base_through_sequence=base_through_sequence,
-                validation_base_state_payload=base_state_payload,
-                state_payload=state_payload,
-            ),
-        )
-        self.event_log.write_runtime_projection_checkpoint(
-            checkpoint,
-            deadline_monotonic=deadline,
-        )
-        setattr(self, head_attr, (through_sequence, state_payload))
 
     def _adopt_unbootstrapped_in_memory_account_for_test(
         self,
@@ -2736,6 +2829,7 @@ class RuntimeSession:
         through_sequence: int,
         ingress: CommittedReducerIngressPort,
         rebuild_owner: CommittedReducerRebuildPort | None = None,
+        post_fold: Callable[[tuple[AgentEvent, ...]], None] | None = None,
     ) -> None:
         with self.write_coordinator.lock:
             if reducer_id in self._committed_reducers:
@@ -2751,6 +2845,7 @@ class RuntimeSession:
                     if callable(getattr(ingress, "reset_for_rebuild", None))
                     else None
                 ),
+                post_fold=post_fold,
             )
             # Registration is durable process state even when initial catch-up
             # fails. Keeping the failed registration is what makes an explicit
@@ -2770,7 +2865,9 @@ class RuntimeSession:
                 self._reconciliation_required = True
                 raise
 
-    def reconcile_committed_reducer(self, reducer_id: str) -> None:
+    def _reconcile_committed_reducer_offline(self, reducer_id: str) -> None:
+        """Privileged unbounded rebuild primitive for tests/offline doctor only."""
+
         with self.write_coordinator.lock:
             registration = self._committed_reducers[reducer_id]
             try:
@@ -2798,6 +2895,172 @@ class RuntimeSession:
                 for item in self._committed_reducers.values()
             )
 
+    def _install_committed_reducer_repair(
+        self,
+        registration: _CommittedReducerRegistration,
+        *,
+        target_through_sequence: int,
+        error: BaseException,
+    ) -> None:
+        registration.reconciliation_required = True
+        registration.last_error = f"{type(error).__name__}: {_bounded_error(error)}"
+        self._reconciliation_required = True
+        if not registration.reducer_id.startswith(
+            ("terminal_notification:", "terminal_monitor:")
+        ):
+            return
+        self.committed_reducer_repair_service.install(
+            reducer_id=registration.reducer_id,
+            failed_registration_high_water=registration.through_sequence,
+            target_ledger_high_water=target_through_sequence,
+            last_error_code=type(error).__name__.upper(),
+            recovery_base_identity=context_fingerprint(
+                "terminal-projection-repair-base:v1",
+                {
+                    "reducer_id": registration.reducer_id,
+                    "failed_through_sequence": registration.through_sequence,
+                    "target_through_sequence": target_through_sequence,
+                },
+            ),
+        )
+
+    def _repair_committed_reducer_from_checkpoint(
+        self,
+        plan: CommittedReducerRepairPlan,
+        deadline_monotonic: float,
+    ) -> CommittedReducerRepairReceipt:
+        """Rebuild one terminal reducer from its validated checkpoint + delta."""
+
+        if plan.reducer_id.startswith("terminal_notification:"):
+            from pulsara_agent.runtime.terminal.notification import (
+                TERMINAL_NOTIFICATION_CHECKPOINT_KIND,
+                TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION,
+                HostIngressNotificationProjectionStore,
+            )
+
+            projection_kind = TERMINAL_NOTIFICATION_CHECKPOINT_KIND
+            schema_version = TERMINAL_NOTIFICATION_CHECKPOINT_SCHEMA_VERSION
+            store_type = HostIngressNotificationProjectionStore
+            live_store = self.terminal_notification_store
+            post_fold = self._post_terminal_notification_committed_noexcept
+        elif plan.reducer_id.startswith("terminal_monitor:"):
+            from pulsara_agent.runtime.terminal.monitor import (
+                TERMINAL_MONITOR_CHECKPOINT_KIND,
+                TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION,
+                TerminalMonitorStore,
+            )
+
+            projection_kind = TERMINAL_MONITOR_CHECKPOINT_KIND
+            schema_version = TERMINAL_MONITOR_CHECKPOINT_SCHEMA_VERSION
+            store_type = TerminalMonitorStore
+            live_store = self.terminal_monitor_store
+            post_fold = self._post_terminal_monitor_committed_noexcept
+        else:
+            raise OnlineReducerRepairBoundExceeded(
+                "committed reducer has no online checkpoint repair binding"
+            )
+        checkpoint = self.event_log.read_runtime_projection_checkpoint(
+            projection_kind,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if checkpoint is None:
+            base_sequence = 0
+            base_state = canonical_json_object_carrier(
+                store_type.canonical_checkpoint_genesis_payload(
+                    runtime_session_id=self.runtime_session_id
+                )
+            )
+            candidate_store = store_type(runtime_session_id=self.runtime_session_id)
+        else:
+            self._validate_runtime_projection_checkpoint(
+                checkpoint,
+                expected_kind=projection_kind,
+                expected_schema_version=schema_version,
+                deadline_monotonic=deadline_monotonic,
+            )
+            base_sequence = checkpoint.through_sequence
+            base_state = checkpoint.state
+            candidate_store = store_type.from_checkpoint_payload(
+                checkpoint.state_payload,
+                runtime_session_id=self.runtime_session_id,
+            )
+        try:
+            (
+                delta,
+                checkpoint_delta_event_count,
+                checkpoint_delta_payload_bytes,
+            ) = read_bounded_runtime_projection_recovery_delta(
+                self.event_log,
+                from_sequence_exclusive=base_sequence,
+                through_sequence=plan.target_ledger_high_water,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except RuntimeProjectionRecoveryBoundExceeded as exc:
+            raise OnlineReducerRepairBoundExceeded(str(exc)) from exc
+        candidate_store.apply_committed(delta)
+        candidate_store.through_sequence = max(
+            candidate_store.through_sequence, plan.target_ledger_high_water
+        )
+        resulting_state = canonical_json_object_carrier(
+            candidate_store.checkpoint_payload()
+        )
+        with self.write_coordinator.lock:
+            registration = self._committed_reducers[plan.reducer_id]
+            if (
+                not registration.reconciliation_required
+                or registration.through_sequence != plan.failed_registration_high_water
+                or self.event_log.next_sequence() - 1 != plan.target_ledger_high_water
+            ):
+                raise EventReconciliationRequired(
+                    "terminal reducer repair plan lost its exact authority"
+                )
+            live_store.replace_from_checkpoint_payload(resulting_state.decode_object())
+            registration.through_sequence = plan.target_ledger_high_water
+            registration.reconciliation_required = False
+            registration.last_error = None
+            fold_receipt = build_committed_reducer_fold_receipt(
+                reducer_id=plan.reducer_id,
+                base_through_sequence=base_sequence,
+                resulting_through_sequence=plan.target_ledger_high_water,
+                source_kind="restore_bootstrap",
+                source_ordered_join_fingerprint=plan.plan_fingerprint,
+                base_state=base_state,
+                resulting_state=resulting_state,
+                checkpoint_delta_event_count=checkpoint_delta_event_count,
+                checkpoint_delta_payload_bytes=checkpoint_delta_payload_bytes,
+            )
+            registration.last_fold_receipt = fold_receipt
+            self._reconciliation_required = any(
+                item.reconciliation_required
+                for item in self._committed_reducers.values()
+            )
+        try:
+            self.runtime_projection_checkpoint_maintenance_service.offer(fold_receipt)
+        except BaseException:
+            # Checkpoint acceleration has its own stable owner and diagnostics;
+            # it cannot revoke the semantic repair that was just installed.
+            pass
+        try:
+            post_fold(
+                _repair_post_fold_events(
+                    delta,
+                    failed_registration_high_water=(
+                        plan.failed_registration_high_water
+                    ),
+                )
+            )
+        except BaseException:
+            # Semantic repair is complete and authoritative at this point.
+            # Process-local observers/coordinators recover independently and
+            # cannot invalidate the exact reducer repair receipt.
+            pass
+        return build_committed_reducer_repair_receipt(
+            plan=plan,
+            resulting_semantic_state_fingerprint=(
+                resulting_state.canonical_payload_fingerprint
+            ),
+        )
+
     def _fold_committed_reducer_range(
         self,
         registration: _CommittedReducerRegistration,
@@ -2822,8 +3085,29 @@ class RuntimeSession:
                 raise EventReconciliationRequired(
                     "committed reducer historical range is unavailable"
                 )
-            registration.ingress.fold_restored_range(proof)
+            base_through_sequence = registration.through_sequence
+            prepared_or_fold = registration.ingress.fold_restored_range(proof)
+            fold_result = self._prepared_fold_receipt(prepared_or_fold)
+            self._validate_committed_reducer_fold_result(
+                registration,
+                fold_result=fold_result,
+                expected_base_through_sequence=base_through_sequence,
+                expected_resulting_through_sequence=page_end,
+            )
+            self._commit_prepared_reducer_fold(
+                registration,
+                prepared_or_fold=prepared_or_fold,
+            )
+            # The domain ingress has installed its immutable next state.  From
+            # this point to the registration-head install there are no calls
+            # that may fail, so both authorities become visible under the same
+            # writer lock without a store-advanced/registration-behind gap.
             registration.through_sequence = page_end
+            self._settle_committed_reducer_fold(
+                registration,
+                fold_result=fold_result,
+                events=proof.owned_stored_events,
+            )
 
     def _apply_live_receipt_to_reducer(
         self,
@@ -2844,8 +3128,25 @@ class RuntimeSession:
             )
         live_result: object | None = None
         if registration.through_sequence == first - 1:
-            live_result = registration.ingress.apply_live_committed(receipt)
+            base_through_sequence = registration.through_sequence
+            prepared_or_fold = registration.ingress.apply_live_committed(receipt)
+            live_result = self._prepared_fold_receipt(prepared_or_fold)
+            self._validate_committed_reducer_fold_result(
+                registration,
+                fold_result=live_result,
+                expected_base_through_sequence=base_through_sequence,
+                expected_resulting_through_sequence=last,
+            )
+            self._commit_prepared_reducer_fold(
+                registration,
+                prepared_or_fold=prepared_or_fold,
+            )
             registration.through_sequence = last
+            self._settle_committed_reducer_fold(
+                registration,
+                fold_result=live_result,
+                events=receipt.owned_stored_events,
+            )
         elif registration.through_sequence < last:
             raise EventReconciliationRequired(
                 "committed reducer partially overlaps a physical batch"
@@ -2858,6 +3159,85 @@ class RuntimeSession:
                 deadline_monotonic=deadline_monotonic,
             )
         return live_result
+
+    @staticmethod
+    def _prepared_fold_receipt(prepared_or_fold: object) -> object:
+        if isinstance(prepared_or_fold, PreparedCheckpointedCommittedReducerFold):
+            return prepared_or_fold.fold_receipt
+        return prepared_or_fold
+
+    @staticmethod
+    def _commit_prepared_reducer_fold(
+        registration: _CommittedReducerRegistration,
+        *,
+        prepared_or_fold: object,
+    ) -> None:
+        if not isinstance(prepared_or_fold, PreparedCheckpointedCommittedReducerFold):
+            return
+        ingress = registration.ingress
+        if not isinstance(ingress, CheckpointedCommittedReducerIngress):
+            raise EventReconciliationRequired(
+                "prepared committed reducer fold lacks its transaction owner"
+            )
+        ingress.commit_prepared(prepared_or_fold)
+
+    @staticmethod
+    def _validate_committed_reducer_fold_result(
+        registration: _CommittedReducerRegistration,
+        *,
+        fold_result: object,
+        expected_base_through_sequence: int,
+        expected_resulting_through_sequence: int,
+    ) -> None:
+        """Validate typed fold authority before publishing registration head.
+
+        Legacy reducers may return another domain-specific carrier.  A reducer
+        that opts into the checkpointed fold contract, however, must prove the
+        exact base and result before RuntimeSession advances its high-water.
+        """
+
+        if not isinstance(fold_result, CommittedReducerFoldReceipt):
+            return
+        if (
+            fold_result.reducer_id != registration.reducer_id
+            or fold_result.base_through_sequence != expected_base_through_sequence
+            or fold_result.resulting_through_sequence
+            != expected_resulting_through_sequence
+        ):
+            raise EventReconciliationRequired(
+                "committed reducer fold receipt does not match its exact range"
+            )
+
+    def _settle_committed_reducer_fold(
+        self,
+        registration: _CommittedReducerRegistration,
+        *,
+        fold_result: object,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        """Advance post-fold owners without widening semantic failure scope."""
+
+        if isinstance(fold_result, CommittedReducerFoldReceipt):
+            # Exact range validation happened before the registration head was
+            # installed.  Everything below is a no-fail handoff to an
+            # independently owned acceleration/observation path.
+            registration.last_fold_receipt = fold_result
+            try:
+                self.runtime_projection_checkpoint_maintenance_service.offer(
+                    fold_result
+                )
+            except BaseException:
+                # Checkpoint acceleration owns its independent diagnostics and
+                # must never roll back an already installed semantic fold.
+                pass
+        post_fold = registration.post_fold
+        if post_fold is not None:
+            try:
+                post_fold(events)
+            except BaseException:
+                # Process-local observers/coordinators repair from the fold
+                # receipt/store and do not poison durable semantic authority.
+                pass
 
     def unregister_committed_reducer(self, reducer_id: str) -> None:
         """Detach one process-local reducer without changing durable truth."""
@@ -2928,6 +3308,9 @@ class RuntimeSession:
                 deadline_monotonic=deadline_monotonic,
             )
         self.publisher.bind_running_loop()
+        self.runtime_projection_checkpoint_maintenance_service.bind_running_loop()
+        self.committed_reducer_repair_service.bind_running_loop()
+        self.committed_reducer_post_fold_service.bind_running_loop()
         deadline = deadline_monotonic
         self._preflight_publication_terminal_maintenance(
             events=events,
@@ -3134,6 +3517,25 @@ class RuntimeSession:
                     or event.publication_latched_termination is not None
                 )
             )
+            for event in events
+        )
+
+    @classmethod
+    def _batch_requires_publication_confirmation(
+        cls,
+        events: tuple[AgentEvent, ...],
+    ) -> bool:
+        """Return whether this producer must observe publication failure.
+
+        Run-boundary and MCP-installation producers terminalize their already
+        committed authority themselves.  They therefore require the typed
+        publication error without installing the global publication latch,
+        which is reserved for facts whose only legal successor uses the
+        terminal-maintenance lease protocol.
+        """
+
+        return cls._batch_requires_critical_publication(events) or any(
+            isinstance(event, (RunStartEvent, McpCapabilitySnapshotInstalledEvent))
             for event in events
         )
 
@@ -4932,6 +5334,17 @@ class RuntimeSession:
                 result=result, delivery_futures=(), published_events=()
             )
         with self._host_ingress_commit_guard(events), self.write_coordinator.lock:
+            materialization_account = self.materialization_account_store.snapshot()
+            if materialization_account is None:
+                try:
+                    self.runtime_projection_checkpoint_maintenance_service.assert_event_admission(
+                        events
+                    )
+                except RuntimeProjectionCheckpointAdmissionBlocked as exc:
+                    # An unaccounted compatibility/test batch has no physical
+                    # companion builder.  Its frozen events are already the
+                    # complete storage candidate and can be checked here.
+                    raise PendingRuntimeEventWriteError(str(exc)) from exc
             hard_reconciliation = (
                 self._ledger_reconciliation_required
                 or self._context_input_reconciliation_required
@@ -4953,7 +5366,6 @@ class RuntimeSession:
                     "RuntimeSession ledger or committed reducer requires reconciliation"
                     + (f" ({'; '.join(failed)})" if failed else "")
                 )
-            materialization_account = self.materialization_account_store.snapshot()
             if (
                 materialization_account is not None
                 and expected_last_sequence is not None
@@ -5067,11 +5479,11 @@ class RuntimeSession:
                             )
                         presentation_fold = fold_result
                 except Exception as exc:
-                    registration.reconciliation_required = True
-                    registration.last_error = (
-                        f"{type(exc).__name__}: {_bounded_error(exc)}"
+                    self._install_committed_reducer_repair(
+                        registration,
+                        target_through_sequence=last_sequence,
+                        error=exc,
                     )
-                    self._reconciliation_required = True
                     reducer_errors.append(
                         CommittedReducerError(
                             reducer_id=registration.reducer_id,
@@ -5158,6 +5570,19 @@ class RuntimeSession:
                 delivery_futures=enqueue.delivery_futures,
                 published_events=publisher_events,
             )
+
+    def _assert_runtime_projection_physical_batch_admission(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        """Reject an exact accounted batch before it reaches physical storage."""
+
+        try:
+            self.runtime_projection_checkpoint_maintenance_service.assert_event_admission(
+                events
+            )
+        except RuntimeProjectionCheckpointAdmissionBlocked as exc:
+            raise PendingRuntimeEventWriteError(str(exc)) from exc
 
     def _commit_accounted_one_shot_reduce_enqueue(
         self,
@@ -5604,9 +6029,11 @@ class RuntimeSession:
                         deadline_monotonic=deadline_monotonic,
                     )
             except Exception as exc:
-                registration.reconciliation_required = True
-                registration.last_error = f"{type(exc).__name__}: {_bounded_error(exc)}"
-                self._reconciliation_required = True
+                self._install_committed_reducer_repair(
+                    registration,
+                    target_through_sequence=through_sequence,
+                    error=exc,
+                )
         if live_receipt is not None and presentation_fold is not None:
             self._offer_presentation_tap_noexcept(
                 live_receipt,
@@ -5866,41 +6293,279 @@ class RuntimeSession:
             )
         return prefix + current
 
-    async def emit(self, event: AgentEvent) -> AgentEvent:
+    async def commit_accepted_event(self, event: AgentEvent) -> AgentEvent:
+        """Commit one event under the closed Runtime acceptance policy.
+
+        This is intentionally not named ``emit``: durability alone is not a
+        successful production outcome.  The method returns the stored event
+        only after the central classifier has accepted semantic settlement,
+        checkpoint handoff where applicable, and required publication.
+        """
+
         result = await self.write_event(event)
-        if result.publication_errors or (
-            result.publication_status == "unavailable"
-            and self._batch_requires_critical_publication(
-                tuple(result.committed_events)
-            )
-        ):
-            raise EventPublicationAfterCommitError(result)
+        self.accept_committed_event_result(
+            result,
+            requested_event_ids=(event.id,),
+            require_publication=self._batch_requires_publication_confirmation((event,)),
+        )
         return next(item for item in result.committed_events if item.id == event.id)
 
-    async def emit_many(
+    async def commit_accepted_events(
         self,
         events: Iterable[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
         transaction_companion: RuntimeTransactionCompanion | None = None,
     ) -> list[AgentEvent]:
+        """Commit a batch under the closed Runtime acceptance policy."""
+
+        candidates = tuple(events)
         result = await self.write_events(
-            tuple(events),
+            candidates,
             expected_last_sequence=expected_last_sequence,
             transaction_companion=transaction_companion,
         )
-        if result.publication_errors or (
-            result.publication_status == "unavailable"
-            and self._batch_requires_critical_publication(
+        requested_ids = tuple(event.id for event in candidates)
+        self.accept_committed_event_result(
+            result,
+            requested_event_ids=requested_ids,
+            require_publication=self._batch_requires_publication_confirmation(
                 tuple(result.committed_events)
-            )
-        ):
-            raise EventPublicationAfterCommitError(result)
+            ),
+        )
         return list(result.committed_events)
 
-    def emit_from_thread(self, event: AgentEvent) -> AgentEvent:
-        result = self.write_events_from_thread((event,))
-        return next(item for item in result.committed_events if item.id == event.id)
+    def accept_committed_event_result(
+        self,
+        result: EventWriteResult,
+        *,
+        requested_event_ids: tuple[str, ...],
+        require_publication: bool,
+        required_reducer_ids: tuple[str, ...] | None = None,
+    ) -> CommittedEventSettlementReceipt:
+        target = max(
+            (
+                int(event.sequence or 0)
+                for event in result.committed_events
+                if event.id in set(requested_event_ids)
+            ),
+            default=0,
+        )
+        required = (
+            tuple(self._committed_reducers)
+            if required_reducer_ids is None
+            else tuple(dict.fromkeys(required_reducer_ids))
+        )
+        unknown = tuple(
+            reducer_id
+            for reducer_id in required
+            if reducer_id not in self._committed_reducers
+        )
+        if unknown:
+            raise EventReconciliationRequired(
+                f"event settlement names unknown reducers: {unknown!r}"
+            )
+        checkpointed = tuple(
+            registration.reducer_id
+            for registration in self._committed_reducers.values()
+            if registration.reducer_id in required
+            if registration.last_fold_receipt is not None
+            and registration.last_fold_receipt.resulting_through_sequence >= target
+            and registration.last_fold_receipt.checkpoint_state is not None
+        )
+        return classify_committed_event_settlement(
+            result,
+            requested_event_ids=requested_event_ids,
+            required_reducer_ids=required,
+            repair_owner_installed=self.committed_reducer_repair_service.owns,
+            checkpoint_handoff_accepted=(
+                self.runtime_projection_checkpoint_maintenance_service.checkpoint_handoff_accepted
+            ),
+            checkpointed_reducer_ids=checkpointed,
+            require_publication=require_publication,
+        )
+
+    def pending_committed_reducer_repair_handles(self):
+        # Join the session writer boundary before observing registrations.  A
+        # stored event can already be visible in EventLog while its committed
+        # reducer callback is still installing the exact repair owner under
+        # this lock.  Reading the flags without this join creates a false
+        # healthy safe point in that narrow durable-FULL/handoff interval.
+        with self.write_coordinator.lock:
+            handles = []
+            for registration in self._committed_reducers.values():
+                if not registration.reconciliation_required:
+                    continue
+                handle = self.committed_reducer_repair_service.handle_for(
+                    registration.reducer_id,
+                    registration.through_sequence + 1,
+                )
+                if handle is None:
+                    raise EventReconciliationRequired(
+                        f"committed reducer {registration.reducer_id!r} has no online repair owner"
+                    )
+                handles.append(handle)
+            return tuple(handles)
+
+    async def await_committed_reducer_repair_safe_point(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[object, ...]:
+        """Wait for exact online semantic repairs before a run safe point.
+
+        The repair tasks are session-owned.  Cancelling this coroutine only
+        detaches its waiter; it cannot cancel or replace their stable plans.
+        Once all matching receipts are installed, every other reconciliation
+        latch is checked independently and still fails closed.
+        """
+
+        handles = self.pending_committed_reducer_repair_handles()
+        receipts: list[object] = []
+        for handle in handles:
+            receipt = await self.wait_committed_reducer_repair(
+                handle,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if (
+                receipt.plan_fingerprint != handle.plan_fingerprint
+                or receipt.reducer_id != handle.reducer_id
+                or receipt.repaired_through_sequence != handle.target_ledger_high_water
+            ):
+                raise EventReconciliationRequired(
+                    "committed reducer safe-point repair receipt is stale"
+                )
+            receipts.append(receipt)
+        self.require_mutation_allowed()
+        return tuple(receipts)
+
+    async def drain_open_committed_reducer_barrier(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Reach a semantic fixed point without closing repair admission.
+
+        Host teardown uses this between producer cohorts.  A durable FULL may
+        install an exact reducer repair and immediately latch subsequent
+        ordinary writes; waiting only at the final close boundary would make
+        the next terminalization producer fail before that boundary is
+        reachable.
+        """
+
+        await self.event_write_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.committed_reducer_repair_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.committed_reducer_post_fold_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+
+    async def wait_committed_reducer_repair(
+        self,
+        handle,
+        *,
+        deadline_monotonic: float,
+    ):
+        return await self.committed_reducer_repair_service.wait(
+            handle,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def committed_reducer_operational_diagnostics(self) -> dict[str, object]:
+        """Return bounded, secret-free live repair/checkpoint diagnostics."""
+
+        with self.write_coordinator.lock:
+            registrations = tuple(
+                {
+                    "reducer_id": registration.reducer_id,
+                    "through_sequence": registration.through_sequence,
+                    "reconciliation_required": (registration.reconciliation_required),
+                    "last_error_code": (
+                        None
+                        if registration.last_error is None
+                        else registration.last_error.split(":", 1)[0].upper()
+                    ),
+                }
+                for registration in self._committed_reducers.values()
+            )
+            aggregate_reconciliation = self._reconciliation_required
+        return {
+            "reconciliation_required": aggregate_reconciliation,
+            "registrations": registrations,
+            "repair_attempts": (self.committed_reducer_repair_service.diagnostics()),
+            "checkpoint_attempts": (
+                self.runtime_projection_checkpoint_maintenance_service.all_diagnostics()
+            ),
+            "post_fold_attempts": (
+                self.committed_reducer_post_fold_service.diagnostics()
+            ),
+        }
+
+    def settle_event_from_thread(
+        self, event: AgentEvent
+    ) -> RuntimeThreadEventSettlementReceipt:
+        batch = self.settle_events_from_thread((event,))
+        return RuntimeThreadEventSettlementReceipt(
+            committed_event=batch.committed_events[0],
+            settlement=batch.settlement,
+        )
+
+    def settle_events_from_thread(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        required_reducer_ids: tuple[str, ...] | None = None,
+        require_publication: bool | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> RuntimeThreadEventBatchSettlementReceipt:
+        """Commit and classify one thread-owned batch without losing outcome axes."""
+
+        candidates = tuple(events)
+        if not candidates:
+            raise ValueError("thread event batch settlement cannot be empty")
+        result = self.write_events_from_thread(
+            candidates,
+            deadline_monotonic=deadline_monotonic,
+        )
+        selected_reducer_ids = required_reducer_ids
+        if len(candidates) == 1 and isinstance(
+            candidates[0], TerminalProcessCompletedEvent
+        ):
+            # Completion lifecycle retirement depends on the notification
+            # semantic authority, not on unrelated transcript/UI reducers.
+            # A failure in another reducer remains visible on EventWriteResult
+            # and the session latch, but can never make the physical process
+            # owner replay an event that is already durable FULL.
+            completion_reducer_ids = (
+                f"terminal_notification:{self.runtime_session_id}",
+            )
+            if (
+                selected_reducer_ids is not None
+                and selected_reducer_ids != completion_reducer_ids
+            ):
+                raise ValueError(
+                    "terminal completion thread settlement reducer policy drifted"
+                )
+            selected_reducer_ids = completion_reducer_ids
+        settlement = self.accept_committed_event_result(
+            result,
+            requested_event_ids=tuple(event.id for event in candidates),
+            require_publication=(
+                self._batch_requires_critical_publication(candidates)
+                if require_publication is None
+                else require_publication
+            ),
+            required_reducer_ids=selected_reducer_ids,
+        )
+        stored_by_id = {event.id: event for event in result.committed_events}
+        committed = tuple(stored_by_id[event.id] for event in candidates)
+        return RuntimeThreadEventBatchSettlementReceipt(
+            committed_events=committed,
+            settlement=settlement,
+        )
 
     def publish_stored_event(self, event: AgentEvent) -> None:
         if event.sequence is None:
@@ -5944,6 +6609,175 @@ class RuntimeSession:
     def make_thread_recorder(self) -> RuntimeThreadRecorder:
         return RuntimeThreadRecorder(runtime_session=self)
 
+    async def quiesce_provider_input_event_producers_for_close(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> ProviderInputCloseQuiesceReceipt:
+        """Own provider-input close I/O without blocking the Host event loop.
+
+        The stable session task and the underlying ContextInputIoService handle
+        outlive a cancelled waiter.  Every PostgreSQL read and every FIFO write
+        receives the one Host close deadline; no nested operation may mint a
+        fresh timeout.
+        """
+
+        receipt = self._provider_input_close_quiesce_receipt
+        if receipt is not None:
+            return receipt
+        task = self._provider_input_close_quiesce_task
+        if task is None:
+            task = asyncio.create_task(
+                self._execute_provider_input_close_quiesce(
+                    deadline_monotonic=deadline_monotonic
+                ),
+                name=f"provider-input-close-quiesce:{self.runtime_session_id}",
+            )
+            self._provider_input_close_quiesce_task = task
+        remaining = deadline_monotonic - monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "provider-input close quiesce deadline exceeded; close is blocked"
+            )
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "provider-input close quiesce deadline exceeded; close is blocked"
+            ) from exc
+
+    async def _execute_provider_input_close_quiesce(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> ProviderInputCloseQuiesceReceipt:
+        def physical_operation() -> ProviderInputCloseQuiesceReceipt:
+            recovery_results = self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync(
+                deadline_monotonic=deadline_monotonic
+            )
+            close_event_ids = self.provider_input_generation_coordinator.close_open_session_generations_sync(
+                deadline_monotonic=deadline_monotonic
+            )
+            return ProviderInputCloseQuiesceReceipt(
+                runtime_session_id=self.runtime_session_id,
+                preparation_outcomes=tuple(
+                    (
+                        item.preparation_id,
+                        item.outcome,
+                        item.terminal_event_id,
+                    )
+                    for item in recovery_results
+                ),
+                generation_close_event_ids=close_event_ids,
+            )
+
+        handle = await self.context_input_io_service.start_owned(
+            operation_name="provider-input-close-quiesce",
+            operation=physical_operation,
+            deadline_monotonic=deadline_monotonic,
+        )
+        receipt = await handle.wait_physical_completion()
+        if receipt.runtime_session_id != self.runtime_session_id:
+            raise RuntimeError("provider-input close quiesce receipt owner drifted")
+        self._provider_input_close_quiesce_receipt = receipt
+        return receipt
+
+    def _confirm_provider_input_close_quiesced(self) -> None:
+        """Accept only a finished receipt plus semantically folded close state."""
+
+        task = self._provider_input_close_quiesce_task
+        if task is not None:
+            if not task.done():
+                raise RuntimeError(
+                    "cannot close RuntimeSession while provider-input quiesce is pending"
+                )
+            receipt = task.result()
+            if receipt.runtime_session_id != self.runtime_session_id:
+                raise RuntimeError("provider-input close quiesce receipt owner drifted")
+            self._provider_input_close_quiesce_receipt = receipt
+        active_preparations = (
+            self.provider_input_generation_store.active_preparation_snapshots()
+        )
+        open_generations = (
+            self.provider_input_generation_store.open_session_continuity_snapshots()
+        )
+        if active_preparations or open_generations:
+            raise RuntimeError(
+                "cannot close RuntimeSession before provider-input close authority "
+                "is semantically folded"
+            )
+        # A direct RuntimeSession used by a focused test may have no provider
+        # producers at all.  Its empty local state is a valid no-I/O receipt;
+        # active state must always pass through the async Host-owned operation.
+        if self._provider_input_close_quiesce_receipt is None:
+            self._provider_input_close_quiesce_receipt = (
+                ProviderInputCloseQuiesceReceipt(
+                    runtime_session_id=self.runtime_session_id,
+                    preparation_outcomes=(),
+                    generation_close_event_ids=(),
+                )
+            )
+        self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
+
+    async def teardown_temporary_recovery_session(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Drain a resume-recovery RuntimeSession before synchronous close.
+
+        A temporary recovery session is a real durable writer: repairing a run
+        may dirty runtime-projection and transcript checkpoint owners.  It has
+        no HostSession to execute the normal teardown graph, so this narrow
+        owner supplies the corresponding bounded subset.  No error is ignored
+        and no owner is force-cleared.
+        """
+
+        await self.quiesce_provider_input_event_producers_for_close(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.mandatory_runtime_audit_owner.drain(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.drain_open_committed_reducer_barrier(
+            deadline_monotonic=deadline_monotonic
+        )
+        self.require_mutation_allowed()
+
+        # Runtime-projection maintenance consumes reducer fold receipts.  Stop
+        # and physically drain it only after the writer/repair/post-fold fixed
+        # point, while its dependencies are still alive.
+        await self.runtime_projection_checkpoint_maintenance_service.stop_admission_and_drain(
+            deadline_monotonic=deadline_monotonic
+        )
+
+        if self.window_compaction_service is not None:
+            await self.window_compaction_service.drain_pending(
+                deadline_monotonic=deadline_monotonic
+            )
+        await self.context_input_manifest_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.transcript_projection_checkpoint_service.request_close_cancellation()
+        await self.subagent_graph_checkpoint_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.transcript_projection_checkpoint_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.prompt_queue_checkpoint_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        await self.terminal_presentation_foundation_service.stop_admission_and_drain(
+            deadline_monotonic=deadline_monotonic
+        )
+        # Every owner above can use the shared blocking I/O service.  This is
+        # the final physical-operation join before close_if_idle() assertions.
+        await self.context_input_io_service.drain_pending(
+            deadline_monotonic=deadline_monotonic
+        )
+        self.close()
+
     def close(self) -> None:
         # Owned-local: we shut the manager down. Borrowed (HostCore path): we do
         # NOT kill/detach/shutdown the shared manager here — lease release is the
@@ -5957,15 +6791,16 @@ class RuntimeSession:
             raise RuntimeError(
                 "cannot close RuntimeSession with active physical operation admissions"
             )
+        self._confirm_provider_input_close_quiesced()
         self.terminal_presentation_foundation_service.close()
         self.terminal_monitor_coordinator.close()
         self._terminal_notification_listener = None
-        self.provider_input_preparation_recovery_service.recover_incomplete_preparations_sync()
-        self.provider_input_generation_coordinator.close_open_session_generations_sync()
-        self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
         self.context_input_manifest_service.close_if_idle()
         self.context_input_io_service.close_if_idle()
         self.event_write_service.close_if_idle()
+        self.committed_reducer_post_fold_service.close_if_idle()
+        self.committed_reducer_repair_service.close_if_idle()
+        self.runtime_projection_checkpoint_maintenance_service.close_if_idle()
         self.subagent_graph_checkpoint_service.close_if_idle()
         self.transcript_projection_checkpoint_service.close_if_idle()
         self.prompt_queue_checkpoint_service.close_if_idle()
@@ -5989,6 +6824,26 @@ class RuntimeSession:
             self._mandatory_audit_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
+
+
+def _repair_post_fold_events(
+    events: tuple[AgentEvent, ...],
+    *,
+    failed_registration_high_water: int,
+) -> tuple[AgentEvent, ...]:
+    """Return only control handoffs not published before the failed fold.
+
+    The semantic rebuild may start at an older checkpoint and therefore needs
+    its complete bounded delta.  Post-fold process owners and Host listeners,
+    however, already consumed every event through the registration high-water;
+    replaying that prefix could schedule duplicate autonomous ingress.
+    """
+
+    return tuple(
+        event
+        for event in events
+        if int(event.sequence or 0) > failed_registration_high_water
+    )
 
 
 def _commit_phase_deadline(terminal_deadline_monotonic: float) -> float:

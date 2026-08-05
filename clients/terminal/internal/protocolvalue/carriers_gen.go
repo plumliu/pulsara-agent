@@ -30,6 +30,7 @@ type Bootstrap struct {
 	ParentPID        uint64
 	ExpiresAt        time.Time
 	Fingerprint      string
+	RequestedRole    protocol.AttachmentRole
 }
 
 type HandshakeCandidate struct {
@@ -310,8 +311,10 @@ type ControlProjection struct {
 	CursorFingerprint                 string
 	SnapshotFingerprint               string
 	ViewFingerprint                   string
-	SessionLifecycle                  protocol.TerminalSessionLifecycleState
+	SessionLifecycle                  SessionLifecycle
 	ActiveRunID                       string
+	SuspendedRunID                    string
+	StoppingRunID                     string
 	PendingInteraction                bool
 	PendingInteractionID              string
 	PendingInteractionGeneration      uint64
@@ -324,6 +327,14 @@ type ControlProjection struct {
 	NotificationAccumulator           string
 	ServerNotifications               []ServerNotification
 }
+
+type SessionLifecycle uint8
+
+const (
+	SessionLifecycleOpen SessionLifecycle = iota + 1
+	SessionLifecycleClosing
+	SessionLifecycleClosed
+)
 
 type DurableSnapshot struct {
 	RequestID                                string
@@ -1010,7 +1021,29 @@ func controlProjectionFromWire(runtimeSessionID string, snapshot *protocol.Termi
 			return ControlProjection{}, errors.New("pending interaction identity is incomplete")
 		}
 	}
-	return ControlProjection{RuntimeSessionID: runtimeSessionID, Generation: cursor.ControlGeneration, Revision: cursor.ControlRevision, ProjectionFingerprint: cursor.ControlProjectionFingerprint, TransitionAccumulator: cursor.TransitionPrefixAccumulator, RegistryFingerprint: cursor.RegistryContractFingerprint, CursorFingerprint: cursor.CursorFingerprint, SnapshotFingerprint: snapshot.SnapshotFingerprint, ViewFingerprint: view.ControlViewFingerprint, SessionLifecycle: view.SessionLifecycle.Lifecycle, ActiveRunID: activeRun, PendingInteraction: view.PendingInteraction.Interaction != nil, PendingInteractionID: pendingID, PendingInteractionGeneration: view.PendingInteraction.SourceVersion.SourceOwnerGeneration, PendingInteractionViewFingerprint: pendingViewFingerprint, QueueHeadFingerprint: queue.headFingerprint, QueueViewFingerprint: view.PromptQueue.Projection.ProjectionFingerprint, QueueAccountRevision: view.PromptQueue.Projection.QueueAccountRevision, QueueAccumulator: view.PromptQueue.Projection.ActiveItemAccumulator, QueueItems: queue.items, NotificationAccumulator: notifications.NotificationAccumulator, ServerNotifications: notificationValues}, nil
+	suspendedRun := ""
+	if view.RunControl.SuspendedRunId != nil {
+		suspendedRun = *view.RunControl.SuspendedRunId
+	}
+	stoppingRun := ""
+	if view.RunControl.StoppingRunId != nil {
+		stoppingRun = *view.RunControl.StoppingRunId
+	}
+	lifecycle := map[protocol.TerminalSessionLifecycleState]SessionLifecycle{
+		protocol.TerminalSessionLifecycleState_TERMINAL_SESSION_OPEN:    SessionLifecycleOpen,
+		protocol.TerminalSessionLifecycleState_TERMINAL_SESSION_CLOSING: SessionLifecycleClosing,
+		protocol.TerminalSessionLifecycleState_TERMINAL_SESSION_CLOSED:  SessionLifecycleClosed,
+	}[view.SessionLifecycle.Lifecycle]
+	if lifecycle == 0 {
+		return ControlProjection{}, errors.New("terminal session lifecycle is unknown")
+	}
+	return ControlProjection{RuntimeSessionID: runtimeSessionID, Generation: cursor.ControlGeneration, Revision: cursor.ControlRevision, ProjectionFingerprint: cursor.ControlProjectionFingerprint, TransitionAccumulator: cursor.TransitionPrefixAccumulator, RegistryFingerprint: cursor.RegistryContractFingerprint, CursorFingerprint: cursor.CursorFingerprint, SnapshotFingerprint: snapshot.SnapshotFingerprint, ViewFingerprint: view.ControlViewFingerprint, SessionLifecycle: lifecycle, ActiveRunID: activeRun, SuspendedRunID: suspendedRun, StoppingRunID: stoppingRun, PendingInteraction: view.PendingInteraction.Interaction != nil, PendingInteractionID: pendingID, PendingInteractionGeneration: view.PendingInteraction.SourceVersion.SourceOwnerGeneration, PendingInteractionViewFingerprint: pendingViewFingerprint, QueueHeadFingerprint: queue.headFingerprint, QueueViewFingerprint: view.PromptQueue.Projection.ProjectionFingerprint, QueueAccountRevision: view.PromptQueue.Projection.QueueAccountRevision, QueueAccumulator: view.PromptQueue.Projection.ActiveItemAccumulator, QueueItems: queue.items, NotificationAccumulator: notifications.NotificationAccumulator, ServerNotifications: notificationValues}, nil
+}
+
+func (a Attachment) ControllerGranted() bool {
+	return a.Role == protocol.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER &&
+		a.ControllerDisposition == protocol.ControllerDisposition_CONTROLLER_GRANTED &&
+		a.ControllerGeneration > 0
 }
 
 func validatePendingInteractionPublicText(value *protocol.PendingInteraction) error {
@@ -1164,8 +1197,8 @@ func ValidateCapabilities(selected []protocol.TerminalClientCapability) error {
 		return errors.New("selected terminal capabilities are not sorted")
 	}
 	seen := map[protocol.TerminalClientCapability]bool{}
-	supported := make(map[protocol.TerminalClientCapability]bool, len(S2SupportedCapabilities))
-	for _, capability := range S2SupportedCapabilities {
+	supported := make(map[protocol.TerminalClientCapability]bool, len(S3SupportedCapabilities))
+	for _, capability := range S3SupportedCapabilities {
 		supported[capability] = true
 	}
 	for _, capability := range selected {
@@ -1174,7 +1207,7 @@ func ValidateCapabilities(selected []protocol.TerminalClientCapability) error {
 		}
 		seen[capability] = true
 	}
-	for _, required := range S2RequiredCapabilities {
+	for _, required := range S3RequiredCapabilities {
 		if !seen[required] {
 			return fmt.Errorf("required terminal capability %s is missing", required)
 		}

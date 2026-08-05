@@ -1,6 +1,6 @@
 # Pulsara Bubble Tea v2 Terminal Client Hard-Cut 实施规格
 
-> 状态：S0 PASS；S1–S2 IMPLEMENTED；S3–S6 NOT STARTED
+> 状态：S0 PASS；S1–S3 IMPLEMENTED；S4–S6 NOT STARTED
 > Requirement namespace：TUI-BT-*
 > 唯一 owner：Go Terminal client 的状态、渲染、交互、进程内 I/O 调度与发布
 > Python authority：PULSARA_TERMINAL_PRESENTATION_FOUNDATION_IMPLEMENTATION.zh.md
@@ -40,6 +40,26 @@ S2 已在S1 full-height observer shell上完成live presentation纵切：
 - S2仍只请求observer attachment，不生成mutation、interaction resolution、queue mutation或secret effect；这些继续归S3–S5。
 
 机器证据包括Go projection/app状态机与page/reconnect回归、Python Foundation/Protocol/headless ordinary-reconnect测试、cross-language contract generator、race/vet及Terminal回归。最终测试数字记录在本次实施交付报告中。
+
+## S3 实施回执（2026-08-05）
+
+S3 已在 S2 live presentation 与 reconnect 纵切上完成 controller command plane：
+
+- Python launcher 默认申请 `CONTROLLER` attachment，同时保留显式 observer carrier用于只读客户端和回归；server返回 `CONTROLLER_UNAVAILABLE_OBSERVER_ATTACHED` 时Go只安装read-only baseline，不激活composer或mutation admission；
+- `components/composer.Model`成为ordinary draft、grapheme cursor、multiline editing、bounded undo/redo、64项command history和large-paste review的唯一client owner；content revision/fingerprint与caret/view fingerprint物理分离，cursor-only movement不改变submission identity；history traversal首次进入时冻结exact bounded `historyScratch Revision`，回到latest端恢复原draft/caret identity，正文mutation及undo/redo退出traversal；active traversal期间Up/Down始终对称消费history而不被临时显示的multiline正文劫持；
+- Enter完成candidate validation与frame-bound validation后，在同一个pure Update transition中把frozen submission移交给`commandstate.Registry`并安装全新的empty draft；submitted body不再停留在editable composer，也不进入undo。handoff前的validation failure保留原正文；handoff后的pending/terminal outcome不得改写用户在fresh draft中的新输入。accepted receipt只按stable submission ID幂等写入prompt history；
+- 普通draft固定不超过32 KiB，paste固定不超过1 MiB。小paste直接编辑，大paste先进入review；review首行永久保留byte/line count与Enter/Esc操作，剩余高度展示bounded head/omission/tail。由于Protocol V2尚无artifact-backed submit branch，最终Mutation frame超过negotiated frame cap时V1明确拒绝并保留review authority，不写临时artifact、不截断、不发送部分正文。超过32 KiB的已接纳paste不进入ordinary command history，避免安装不可恢复entry；
+- `commandstate.Registry`在I/O前安装immutable `SubmitPrompt | StopRun` candidate，绑定client、attachment、controller、target generation、composer content revision/fingerprint和Protocol request semantic fingerprint；同一content revision/text在既有candidate未安全终结前只能复用该authority，连续Enter及`Enter → cursor move → Enter`都不能分配第二个command ID；accepted outcome按stable client submission ID幂等记录history，即使用户已经继续编辑也不会漏记；只有current content identity仍exact时才清除draft；
+- command outcome的 `SUCCEEDED | REJECTED | PENDING_CONFIRMATION | RECONCILIATION_REQUIRED | SUPERSEDED_BY_COMPATIBLE_WINNER` 五分支全部closed消费。丢失response或fully-sent failure先按同一command ID查询durable receipt；同attachment且从未出现durable outcome的missing结果才允许bounded backoff后重发原candidate，已有pending receipt或attachment换代后的missing结果只能进入reconciliation；
+- reconnect/attachment replacement不会用旧binding重放mutation：所有非terminal command先降为query-only，found结果消费durable winner，missing结果fail closed。Registry最多64项，只能淘汰terminal record；
+- active run期间composer保持可编辑，submit由Python authority决定立即run、steer或durable queue；Python authority独立拒绝empty、terminal-control或超过1 MiB + 32 KiB的submit正文。Queue acceptance一旦durable FULL便唯一决定`PROMPT_QUEUED`成功结果；其后的live delivery scheduler失败只留给pending-item recovery，不能改写为rejected。Host close先drain command owners，再drain其可能创建的delivery owners；
+- 高度小于4、没有可见composer row时保留exact draft但强制disable编辑、paste与全部server mutation admission；恢复可见布局后才重新启用。`Ctrl-C`/`Esc`在可见composer中只冻结stable `StopRun` candidate，不发送process signal、不进入application teardown。重复stop复用同一pending candidate；
+- mutation frame-cap预检与physical writer共同调用Protocol-owned deterministic payload marshal/bound helper；预检request ID使用真实`terminal-request:<64 hex>`字节形状，maximum只覆盖Protobuf payload、不包含4-byte transport length header；
+- `Ctrl-D`仅在draft与paste review均为空时detach；detach只关闭client attachment/transport，不等于close conversation。Observer输入、stale control、pending interaction与history-capacity fence均不能产生mutation；
+- pending command是从registry派生的persistent view state，不是瞬时通知。local notification保留`Information | Warning | Failure | CommandOutcome` severity：warning/failure为sticky，直到Esc显式确认或owner状态替换；普通info/outcome由唯一generation-bound earliest-expiry timer清理，键盘、鼠标和viewport输入不得抢先删除。typed submit block在composer/footer显示`Syncing · draft saved | Read-only · draft saved | Waiting for interaction · draft saved | History capacity reached · draft saved`，仍允许编辑但不允许mutation；server-projected notification仍只存在atomic control projection；
+- 本阶段复用既有Protocol V2 `MutationCommand`、`CommandOutcome`与`QueryCommand`，未修改Protobuf schema或Foundation/canonical transcript语义。跨语言PTY已证明controller attach、真实prompt submit、pending→terminal command receipt、durable assistant projection、继续Observe及clean detach完整链路。
+
+机器证据包括Go composer/command/app/client全量测试、race/vet/module verify、Protocol manifest generator、Python launcher/architecture/Protocol/PostgreSQL定向回归及Python↔Go controller PTY。完整pytest按本轮约定未运行，最终数字记录在交付报告中。
 
 ## 0. 本文裁决
 
@@ -81,7 +101,7 @@ S2 已在S1 full-height observer shell上完成live presentation纵切：
 
 ### TUI-BT-OWN-002 Go/Python physical boundary
 
-Python 进程拥有 Runtime、Host、Gateway、Unix socket、attachment/controller authority 和 durable command outcome。Go 进程拥有 real TTY、alternate screen、local render state 和 attachment-local UX。
+Python 进程拥有 Runtime、Host、Gateway、Unix socket、attachment/controller authority 和 durable command outcome。Go 进程拥有 real TTY、alternate screen、local render state 和 attachment-local UX。Go child 存活期间也是 physical TTY stdout/stderr 的唯一 writer：Python launcher 必须先复制原始 terminal file descriptions 交给 child，再把 parent 中所有 terminal-backed fd 1/2 重定向到零容量 sink；非 TTY diagnostic stream 保持原 owner。child 退出并完成 foreground restore 后，launcher 才可恢复 parent descriptors。Python、第三方库、C extension 或 logging handler 均不得与 Bubble Tea renderer 共享 terminal output。
 
 Go 永远不得：
 
@@ -1723,8 +1743,8 @@ Architecture gate要求attempt identity/snapshot/record、prepared/successor cap
 | `FailureHistoryPage` | `FailureRetryRead` | 仅当旧response已完整读取且typed page validation终结后，同authority建立新read token |
 | `FailureCommandPreDispatch` | `FailureRetryWithBackoff` | 只重发same stable candidate；必须保留zero-byte proof |
 | `FailureCommandOutcomeTimeout`、`FailureCommandDeliveryUnknown` | `FailureQueryCommand` | 只query stable command identity，不重发mutation |
-| `FailureProjectionSnapshot` | `FailureRebuildDurableSnapshot` | coalesce一次fresh durable snapshot |
-| `FailureOperationalSnapshot` | `FailureRebuildOperationalSnapshot` | 清空operational view并resnapshot |
+| `FailureProjectionSnapshot` | `FailureRebuildDurableSnapshot` | 进入独立durable backoff并只resnapshot一次 |
+| `FailureOperationalSnapshot` | `FailureRebuildOperationalSnapshot` | 进入独立operational backoff并只resnapshot一次 |
 | `FailureSecretTransport` | `FailureRevokeSecret` | revoke plaintext/handle，禁止自动重放 |
 | `FailureSecretSubmitDeliveryUnknown` | `FailureRevokeSecretAndQuery` | 先revoke plaintext，再以无plaintext stable identity query/reconcile |
 | `FailureTeardown`、`FailureTeardownDeadline` | `FailureContinueTeardown` | 继续restore/drain，必要时parent emergency restore |
@@ -2492,6 +2512,10 @@ starting client
 
 Matching Attach ACK（ordinary或auth tombstone recovery）只能把`SnapshotLoadingState`从Uninitialized切到`AwaitingDurableSnapshot`并产生一个exact `RequestSnapshotEffect`。Durable response获得`MessageApply`后，Update先原子安装durable history + complete control baseline及其fingerprint，再切到`AwaitingOperationalSnapshot`并产生exact `RequestOperationalSnapshotEffect`；不得在同一个effect、decoder callback或View中跳过中间态。Operational response获得`MessageApply`后，Update从完整validated Protocol frame构造operational state，验证attachment/binding与loading state，再切到`SnapshotBaselinesInstalled`和Ready/ReadOnly。任一阶段的timeout/retry只重建当前阶段operation；已经确认的前一阶段baseline及fingerprint保持不变。Ready validator以`SnapshotBaselinesInstalled`作为mandatory proof，不允许仅凭`presentation.State.Valid`猜测bootstrap已完成。
 
+Snapshot typed validation failure使用独立client-local closed owner`SnapshotRetryNone | SnapshotDurableBackoff | SnapshotOperationalBackoff`，不能复用control rebase rounds。第一次`FailureProjectionSnapshot | FailureOperationalSnapshot`在matching attachment/binding上安装唯一retry generation，进入100ms backoff且不得保留已结算operation；timer FULL后只建立一个fresh same-stage request。相同attachment generation的第二次同类validation failure直接fail closed并保留该snapshot/root错误。成功snapshot、successor Attach ACK、reconnect或teardown清空retry owner。过期retry timer静默丢弃，future generation fail closed；任何路径都不得形成零延迟snapshot request循环。
+
+进入reconnect必须通过唯一transition helper。若durable/control/operational三份baseline均已确认，则从三个store重建`SnapshotBaselinesInstalled`并只把旧画面标为stale/read-only；未安装或只安装部分baseline时，必须原子清空durable/control/operational、page cache、viewport与loading proof，回到`SnapshotLoadingUninitialized`。旧snapshot retry与page intent一并退休。`ReconnectDueMsg`小于current generation或在backoff已被推进后到达时是detached stale no-op；大于current generation fail closed；只有exact generation + `PhaseReconnecting` + `ConnectionBackoff` + no outstanding operation可以启动一次connect，matching backoff却持有operation属于client invariant。Stale timer不得覆盖更早的protocol/snapshot failure。
+
 每个阶段都有monotonic deadline、retry和quit。Host optional dependency状态只通过server view显示，不延迟Bubble Tea program start。
 
 S1/S2 attachment role 固定为 OBSERVER。S3开始才请求 CONTROLLER。Controller拒绝不阻止只读 attach，但所有 mutation UI disabled。
@@ -2839,6 +2863,7 @@ Scrolled | Selecting | Searching
 -新entry在FollowTail时保持tail anchor；
 -非FollowTail时只增加unseen count；
 -jump-to-end使用latest root pair，不使用pinned old root；
+-视觉`scrollOffset == 0`只是tail候选，不单独证明FollowTail：若仍有unseen、current root不是latest或current page仍有after continuation，viewport必须保持pinned；App与PageCache完成exact root relation后，只有`current == latest && !has_more_after`才能调用`End()`清零unseen并进入FollowTail；
 - page接近boundary才发ReadHistoryPageEffect；
 - resize只invalidatewrap cache；
 - stable selection key是history_entry_id + placement_key_fingerprint + cell semantic revision；
@@ -2885,9 +2910,19 @@ Submit冻结：
 - current attachment/controller binding；
 - request semantic fingerprint由Protocol helper生成。
 
-收到accepted terminal outcome时，只在current draft revision仍等于frozen revision时清空；用户已继续编辑则不得擦除新draft。Rejected保留frozen内容供编辑。Disconnect不生成新ID。
+Composer identity固定拆为：
 
-小paste进入textarea。大paste进入PasteReview，只保存bounded preview、byte/line count和local ephemeral payload owner。当前MutationCommand没有artifact preparation branch；超过negotiated frame cap的paste必须禁用提交并显示typed unsupported，直到Protocol owner增加artifact preparation command。Go不得绕过frame cap或写临时server artifact。
+- content revision/fingerprint覆盖revision number与exact draft UTF-8；
+- caret/view fingerprint覆盖content fingerprint、grapheme cursor与preferred column；
+- submission/candidate只绑定content identity与最终exact text，不绑定caret/view identity。
+
+Cursor-only movement不推进content revision，因此冻结candidate之前的caret变化不能改变submission semantic identity。Enter只有在candidate与negotiated frame均已验证后才能执行原子handoff：registry安装exact frozen authority，composer同时安装下一revision的empty draft；中间不得产生I/O。handoff前的typed failure保留原draft；handoff后即使收到pending、accepted、rejected或reconciliation outcome也只能推进command owner，不能清空、恢复或覆盖fresh draft。收到accepted terminal outcome时按stable client submission ID幂等记录可恢复history；该步骤不依赖current draft。Disconnect不生成新ID。
+
+小paste进入textarea。大paste进入PasteReview，只保存bounded head/tail preview、byte/line count和local ephemeral payload owner。review renderer无论高度都保留第一行title/action；其余visual rows按head、omission marker、tail分配，不能通过保留最后N行裁掉操作语义。当前MutationCommand没有artifact preparation branch；超过negotiated frame cap的paste必须禁用提交并显示typed unsupported，直到Protocol owner增加artifact preparation command。Go不得绕过frame cap或写临时server artifact。已接纳正文只有不超过ordinary 32 KiB restore bound时才进入command history；更大的paste成功后不产生无法由ordinary composer恢复的history entry。
+
+布局没有任何composer visual row时，Model切到Disabled但保留draft/paste owner；KeyInput、PasteInput与submit/stop mutation入口均不得修改draft或冻结candidate。恢复至少一行可见composer后，基于current controller/control authority重新激活。
+
+Command history traversal拥有唯一bounded `historyScratch Revision`：第一次`PreviousHistory`冻结当前exact revision，history row只替换临时display revision；越过最新端的`NextHistory`恢复scratch的正文、grapheme cursor、preferred column及两层fingerprint。Active history index必须与对应entry正文一致；active时Up/Down先对称切换history entry，即使临时正文为multiline也不得改走vertical caret movement；任意Insert/Delete/Paste正文mutation以及Undo/Redo清除scratch/index。Accepted history entry以stable client submission ID去重；receipt到达时若active scratch与frozen submission exact match，必须清空scratch、退出traversal并安装下一版empty revision，而不能只比较临时display revision；超过ordinary 32 KiB restore bound的accepted paste仍不进入history。
 
 ### TUI-BT-STATE-003 Command receipt
 
@@ -3447,7 +3482,7 @@ S1开工前先以独立全绿Protocol 2.0 subcut完成（old behavioral string f
 | `2` | 1 | 0 | 1 | compact status/failure + footer |
 | `>=3` | 1 | `height-2` | 1 | full-height read-only shell |
 
-每次`View`必须恰好产生`height`个visual rows。每行经ANSI-aware display-width truncation后补齐到exact width；header/footer不得自动wrap。Footer只按width执行closed降级：宽屏显示`observer · wheel/↑/↓ scroll · y copy · q quit`，中等宽度显示read-only紧凑提示，极窄显示`↑↓·y·q`。异常或超界WindowSize进入保留最后一个validated plan的bounded fatal view，禁止用隐藏的`240×100`或其他fallback尺寸继续渲染。
+每次`View`必须恰好产生`height`个visual rows。每行经ANSI-aware display-width truncation后补齐到exact width；header/footer不得自动wrap。Footer只按width执行closed降级：宽屏显示`observer · wheel/↑/↓ scroll · y copy · q detach`，中等宽度显示read-only紧凑提示，极窄显示`↑↓·y·q`；interactive footer必须区分`PgUp transcript`、`↑↓ prompts`与`Ctrl-D detach`，任何宽度不得把detach改写为quit。异常或超界WindowSize进入保留最后一个validated plan的bounded fatal view，禁止用隐藏的`240×100`或其他fallback尺寸继续渲染。
 
 `presentation.State`只拥有validated `DurableSnapshot`，不得保存width、height、scroll offset、follow-tail或wrap结果。`components/transcript.Model`唯一拥有：
 
@@ -3467,7 +3502,7 @@ type Model struct {
 
 `WrapCache`按`snapshot fingerprint + body width`构造，每行保存stable cell ID、label/body discriminator和正文UTF-8 source offset；height-only resize不重建。Scrolled resize以当前top visual row的cell/source offset重定位，follow-tail resize保持tail。S1尚无live delta，因此`unseenTerminalCells`固定为0，但字段、validator和owner本阶段即冻结，S2只能推进既有owner。
 
-输入算法固定为：Up/Down移动1 visual row，vertical wheel移动3 visual rows，PageUp/PageDown移动`max(viewportRows-1, 1)`，End清零offset并恢复follow-tail。offset归零必须等价于follow-tail；View只读取Update已经准备好的rows，不执行wrap state transition、I/O或snapshot reconstruction。
+输入算法固定为：Up/Down移动1 visual row，vertical wheel移动3 visual rows，PageUp/PageDown移动`max(viewportRows-1, 1)`，End切换到latest root、清零offset/unseen并恢复follow-tail。视觉offset归零后必须先由PageCache解析current/latest/after-continuation关系：old/paged root保持pinned或继续page，只有latest root的真实尾部才进入follow-tail；`followTail=true && unseen>0`永远是fatal invariant。View只读取Update已经准备好的rows，不执行wrap state transition、I/O或snapshot reconstruction。
 
 Production `tea.View`始终声明`AltScreen=true`和`MouseModeCellMotion`，统一teardown负责退出alternate screen并关闭mouse reporting。普通启动绝不发送`CSI 3J`，所以Terminal.app等emulator的native scrollbar仍可能访问启动前primary scrollback；这不属于Go renderer可逆控制。只有Python launcher拥有`--clear-scrollback`：默认关闭，显式开启后在首次child之前精确写一次`CSI H + CSI 2J + CSI 3J`，parent relaunch不重复，非TTY、partial write或flush失败typed fail closed。Protocol、Foundation与Go client不得持有或推导该策略。
 
@@ -3607,7 +3642,7 @@ mise.toml
 | viewport | exact wrapped visual rows；Up/Down 1行、wheel 3行、Page为`rows-1`、End、上下界、follow-tail；scrolled resize保留cell/source anchor，tail resize保持tail；height-only cache hit、width-change single rebuild |
 | cross-language | Python Gateway -> Go hello/attach/snapshot |
 | PTY | first frame、真实`SIGWINCH` resize、alternate-screen `1049h/l`、cell-motion mouse `1002h/l + 1006h/l`、copy-safe content、normal quit恢复；default physical output不得含`CSI 3J` |
-| launcher | `--clear-scrollback`默认false、help明确不可逆；显式路径exact single erase、parent relaunch不重复、non-TTY/partial write fail closed；Go/Protocol/Foundation无erase owner |
+| launcher | `--clear-scrollback`默认false、help明确不可逆；显式路径exact single erase、parent relaunch不重复、non-TTY/partial write fail closed；Go/Protocol/Foundation无erase owner；child持原始TTY duplicate时parent fd 1/2进入zero-capacity sink，Python print、logging与direct `os.write()`均不能污染renderer，child退出后exact restore |
 | supervision | child exit、parent survives、terminal restore |
 | architecture | package DAG、no AgentEvent/raw storage import；`app`不importgenerated Protobuf，`protocolvalue` outputs生成后diff-clean且目录内无manual Go file/mirror enum |
 
@@ -3688,6 +3723,8 @@ clients/terminal/internal/presentation/snapshot.go
 clients/terminal/internal/presentation/cursor.go
 clients/terminal/internal/client/service.go
 clients/terminal/internal/client/scheduler.go
+clients/terminal/internal/protocol/payload.go
+clients/terminal/internal/wire/framing.go
 clients/terminal/internal/client/auth.go
 clients/terminal/internal/components/transcript/*
 src/pulsara_agent/terminal_protocol/transport_auth.py
@@ -3710,7 +3747,7 @@ tests/test_terminal_tui_cross_language.py
 | control | queue/interaction/run/lifecycle/notification-only signal、atomic view+source versions+cursor、Python ring内union/range golden、Go opaque proof structural join、ring外/重启typed GAP；Fresh -> SnapshotRequired保留stale view/confirmed cursor且单独记observed latest，minimum-bound snapshot才恢复Fresh；generation-rebase response最多4轮且共享deadline；Ready对stale/uninitialized fail closed |
 | GAP | server gap、local overflow、dual snapshot rebuild、control invalidation + operational GAP同batch原子恢复 |
 | page | PAGE/STALE/REBASE/RECONCILIATION、before/after完整root exact join、same-root-fingerprint/different-payload拒绝、256/4 MiB真实PageUp、完整deterministic-Protobuf carrier bytes与forged-small accounting、巨大metadata/短public text越界拒绝、完整root/placement cursor Protobuf roundtrip、unknown relative-position与cross-contract anchor拒绝、server order与duplicate/conflict |
-| viewport | follow-tail、unseen、old pinned root、new latest pair、hydrated page经过delta与resize仍存在、late intent不夺回viewport、`y`只复制current PageCache materialization且4 MiB越界明确拒绝不截断、clipboard使用独立bounded local-operation owner且不得覆盖long-poll Observe、4-root FIFO、512-cell/16-MiB per-root hard bound、new attachment rebind |
+| viewport | follow-tail、unseen、durable delta后scroll/page-down归零、offset-zero仍需current/latest root join、old pinned root、new latest pair、hydrated page经过delta与resize仍存在、late intent不夺回viewport、`y`只复制current PageCache materialization且4 MiB越界明确拒绝不截断、clipboard使用独立bounded local-operation owner且不得覆盖long-poll Observe、4-root FIFO、512-cell/16-MiB per-root hard bound、new attachment rebind |
 | reconnect | pre-Ready same candidate generation、Ready next generation、typed auth result、credential rotation、semantic winner/per-connection receipt、pre/post-ACK recovery、old/new grace、ordinary draft保留、secret为空、command无重放 |
 | fairness/performance | control+durable+operational同时pending全部进入一批；持续100Hz任一plane不饿死其他plane、不丢keypress、bounded memory |
 
@@ -3731,6 +3768,8 @@ tests/test_terminal_tui_cross_language.py
 
 ## 12. S3：Composer、submit、stop 与 command receipt
 
+> 实施状态：IMPLEMENTED。本节的closed state、receipt/query和边界矩阵已由上方S3实施回执对应到代码与机器门控。
+
 ### TUI-BT-S3-001 前置
 
 Protocol必须明确关闭：
@@ -3745,7 +3784,7 @@ Protocol必须明确关闭：
 
 - controller attach；
 - ordinary composer；
--bounded undo/history/paste review；
+- bounded undo/history/paste review；
 - stable SubmitPrompt；
 - StopRun；
 - command outcome/query；
@@ -3785,7 +3824,11 @@ clients/terminal/internal/client/scheduler.go
 src/pulsara_agent/terminal_protocol/schema/terminal_client.proto   # only if prereq requires
 src/pulsara_agent/terminal_protocol/codec.py
 src/pulsara_agent/terminal_protocol/generated/terminal_client_pb2.py
+src/pulsara_agent/ports/terminal_application.py
+src/pulsara_agent/runtime/terminal_application/services.py
+src/pulsara_agent/host/session.py
 tests/test_terminal_protocol.py
+tests/test_terminal_infrastructure_architecture.py
 tests/test_terminal_tui_cross_language.py
 ~~~
 
@@ -3795,10 +3838,12 @@ Wire修改的语义必须写回Protocol文档，不由本文拥有。
 
 | 类别 | 必测 |
 |---|---|
-| composer | multiline、wide rune、undo bound、draft revision |
-| paste | small、large review、frame cap、cancel |
+| composer | multiline、wide rune、undo bound、content/view identity、candidate handoff后立即fresh empty draft、late outcome不覆盖新draft、history scratch exact round-trip、multiline history symmetric Up/Down、mutation/undo traversal exit、tiny-layout hidden mutation denial、typed blocked status仍可编辑 |
+| paste | small、large review、80×6 title + head/omission/tail golden、frame cap、cancel、accepted oversized entry不进入ordinary history |
 | command | SUCCEEDED/REJECTED/PENDING/RECONCILIATION/COMPATIBLE |
-| idempotency | receipt lost、query found/missing、same-ID resend |
+| idempotency | receipt lost、query found/missing、same-ID resend、delayed accepted history幂等记账、durable queue FULL后scheduler failure仍success且重复请求不二次入队 |
+| payload bound | canonical real-shape request ID、exact payload boundary pass、boundary-1 reject、physical writer共享helper、4-byte framing不计入maximum |
+| notification/footer | severity保留、warning/failure sticky、Esc explicit dismiss、ordinary input/wheel不dismiss、single earliest-expiry generation、pending command persistent status、`PgUp transcript · ↑↓ prompts · Ctrl-D detach`语义一致 |
 | controller | observer reject、takeover、stale generation |
 | stop | repeated key same command、disconnect query |
 | signals | Ctrl-C不杀Python、SIGTERM teardown |
@@ -3814,6 +3859,17 @@ Wire修改的语义必须写回Protocol文档，不由本文拥有。
 6.大paste不绕过frame/secret/authority boundary。
 7. detach不等于close conversation。
 8. S1/S2 observation gates保持全绿。
+9. submission只绑定content identity，caret/view变化不能绕过exact candidate去重。
+10. 无可见composer row时保留draft但不接纳edit/paste/server mutation。
+11. Python authority独立执行empty/control/UTF-8 byte bound；Go validation不是安全真源。
+12. durable queue acceptance不能被live scheduler failure改写，Host close按command owner → delivery owner顺序drain。
+13. history traversal可恢复进入前exact draft；active index/body及scratch存在矩阵由validator强制。
+14. accepted history记账独立于editable draft；late success不漏history，也永远不清空或恢复fresh draft。
+15. Enter把validated frozen submission与fresh empty draft原子换主；submitted正文不再可编辑，terminal receipt不得覆盖fresh draft。
+16. frame-cap预检与physical write使用同一Protocol payload helper及真实request-ID形状。
+17. paste review在任意bounded高度保留header/action并显示有意义的head/tail。
+18. submit-blocked reason进入composer/footer；pending command、sticky failure/reconciliation与expiring info各有独立view owner。
+19. footer必须区分`PgUp transcript`、`↑↓ prompts`与`Ctrl-D detach`，任何宽度不得把detach写成quit。
 
 ## 13. S4：Typed interaction 与 secret
 

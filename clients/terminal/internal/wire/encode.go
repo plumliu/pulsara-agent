@@ -33,3 +33,11 @@ func ObserveFrame(value *protocol.ObserveNextRequest) *protocol.ClientFrame {
 func HistoryPageFrame(value *protocol.HistoryPageRequest) *protocol.ClientFrame {
 	return &protocol.ClientFrame{Request: &protocol.ClientFrame_HistoryPage{HistoryPage: value}}
 }
+
+func MutationFrame(value *protocol.MutationCommand) *protocol.ClientFrame {
+	return &protocol.ClientFrame{Request: &protocol.ClientFrame_Mutation{Mutation: value}}
+}
+
+func QueryCommandFrame(value *protocol.QueryCommandRequest) *protocol.ClientFrame {
+	return &protocol.ClientFrame{Request: &protocol.ClientFrame_QueryCommand{QueryCommand: value}}
+}

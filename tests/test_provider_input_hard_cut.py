@@ -10,6 +10,8 @@ from tests.support.runtime_owner import (
 import asyncio
 import json
 from dataclasses import replace
+from threading import Event, get_ident
+from time import monotonic
 
 import pytest
 
@@ -1424,29 +1426,222 @@ description: Review pull requests.
     )
 
 
-def runtime_session_for_test_close_durably_closes_open_provider_generation(
+def test_runtime_session_for_test_close_durably_closes_open_provider_generation(
     tmp_path,
 ) -> None:
-    runtime_session = in_memory_runtime_session(tmp_path)
-    agent = build_test_agent_runtime(
-        capability_runtime=CapabilityRuntime(),
-        runtime_session=runtime_session,
-        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
-    )
-    result = asyncio.run(run_agent_task(agent, "close generation"))
-    assert result.status is LoopStatus.FINISHED
-    assert runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
+    async def scenario() -> None:
+        runtime_session = in_memory_runtime_session(tmp_path)
+        agent = build_test_agent_runtime(
+            capability_runtime=CapabilityRuntime(),
+            runtime_session=runtime_session,
+            llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+        )
+        result = await run_agent_task(agent, "close generation")
+        assert result.status is LoopStatus.FINISHED
+        assert runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
 
-    runtime_session.close()
+        before_close = runtime_session.event_log.next_sequence()
+        with pytest.raises(
+            RuntimeError,
+            match="provider-input close authority is semantically folded",
+        ):
+            runtime_session.close()
+        assert runtime_session.event_log.next_sequence() == before_close
 
-    closes = tuple(
-        event
-        for event in runtime_session.event_log.iter()
-        if isinstance(event, ProviderInputGenerationClosedEvent)
-        and event.close_reason == "session_close"
-    )
-    assert len(closes) == 1
-    assert (
-        runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
-        == ()
-    )
+        deadline = asyncio.get_running_loop().time() + 2
+        receipt = (
+            await runtime_session.quiesce_provider_input_event_producers_for_close(
+                deadline_monotonic=deadline
+            )
+        )
+        assert receipt.runtime_session_id == runtime_session.runtime_session_id
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=deadline
+        )
+        runtime_session.close()
+
+        closes = tuple(
+            event
+            for event in runtime_session.event_log.iter()
+            if isinstance(event, ProviderInputGenerationClosedEvent)
+            and event.close_reason == "session_close"
+        )
+        assert len(closes) == 1
+        assert (
+            runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
+            == ()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_provider_input_close_quiesce_runs_off_loop_with_one_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        runtime_session = in_memory_runtime_session(tmp_path)
+        agent = build_test_agent_runtime(
+            capability_runtime=CapabilityRuntime(),
+            runtime_session=runtime_session,
+            llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+        )
+        result = await run_agent_task(agent, "close generation off loop")
+        assert result.status is LoopStatus.FINISHED
+
+        loop_thread_id = get_ident()
+        recovery_started = Event()
+        release_recovery = Event()
+        observed: list[tuple[str, int, float]] = []
+        recovery_service = runtime_session.provider_input_preparation_recovery_service
+        generation_coordinator = runtime_session.provider_input_generation_coordinator
+        original_recovery = recovery_service.recover_incomplete_preparations_sync
+        original_generation_close = (
+            generation_coordinator.close_open_session_generations_sync
+        )
+
+        def observed_recovery(*, deadline_monotonic: float):
+            observed.append(("recovery", get_ident(), deadline_monotonic))
+            recovery_started.set()
+            assert release_recovery.wait(timeout=2)
+            return original_recovery(deadline_monotonic=deadline_monotonic)
+
+        def observed_generation_close(*, deadline_monotonic: float):
+            observed.append(("generation", get_ident(), deadline_monotonic))
+            return original_generation_close(deadline_monotonic=deadline_monotonic)
+
+        monkeypatch.setattr(
+            recovery_service,
+            "recover_incomplete_preparations_sync",
+            observed_recovery,
+        )
+        monkeypatch.setattr(
+            generation_coordinator,
+            "close_open_session_generations_sync",
+            observed_generation_close,
+        )
+        deadline = monotonic() + 3
+        quiesce = asyncio.create_task(
+            runtime_session.quiesce_provider_input_event_producers_for_close(
+                deadline_monotonic=deadline
+            )
+        )
+        assert await asyncio.to_thread(recovery_started.wait, 1)
+        # Reaching this await while the physical function is blocked proves
+        # the Host event loop did not execute the PostgreSQL-facing barrier.
+        await asyncio.sleep(0)
+        assert not quiesce.done()
+        release_recovery.set()
+        receipt = await quiesce
+
+        assert receipt.runtime_session_id == runtime_session.runtime_session_id
+        assert tuple(item[0] for item in observed) == ("recovery", "generation")
+        assert all(thread_id != loop_thread_id for _, thread_id, _ in observed)
+        assert all(item_deadline == deadline for _, _, item_deadline in observed)
+        await runtime_session.drain_open_committed_reducer_barrier(
+            deadline_monotonic=deadline
+        )
+        runtime_session.close()
+
+    asyncio.run(scenario())
+
+
+def test_provider_input_close_deadline_detaches_but_keeps_physical_owner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        runtime_session = in_memory_runtime_session(tmp_path)
+        recovery_service = runtime_session.provider_input_preparation_recovery_service
+        started = Event()
+        release = Event()
+
+        def blocked_recovery(*, deadline_monotonic: float):
+            assert deadline_monotonic > 0
+            started.set()
+            assert release.wait(timeout=2)
+            return ()
+
+        monkeypatch.setattr(
+            recovery_service,
+            "recover_incomplete_preparations_sync",
+            blocked_recovery,
+        )
+        with pytest.raises(TimeoutError, match="close is blocked"):
+            await runtime_session.quiesce_provider_input_event_producers_for_close(
+                deadline_monotonic=monotonic() + 0.05
+            )
+        assert started.is_set()
+        task = runtime_session._provider_input_close_quiesce_task  # noqa: SLF001
+        assert task is not None and not task.done()
+        with pytest.raises(RuntimeError, match="quiesce is pending"):
+            runtime_session.close()
+
+        release.set()
+        receipt = (
+            await runtime_session.quiesce_provider_input_event_producers_for_close(
+                deadline_monotonic=monotonic() + 1
+            )
+        )
+        assert receipt.runtime_session_id == runtime_session.runtime_session_id
+        await runtime_session.context_input_io_service.drain_pending(
+            deadline_monotonic=monotonic() + 1
+        )
+        runtime_session.close()
+
+    asyncio.run(scenario())
+
+
+def test_provider_input_close_reducer_failure_blocks_sync_finalizer(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        runtime_session = in_memory_runtime_session(tmp_path)
+        agent = build_test_agent_runtime(
+            capability_runtime=CapabilityRuntime(),
+            runtime_session=runtime_session,
+            llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+        )
+        result = await run_agent_task(agent, "close generation reducer failure")
+        assert result.status is LoopStatus.FINISHED
+
+        reducer_id = f"provider_input_generation:{runtime_session.runtime_session_id}"
+        registration = runtime_session._committed_reducers[  # noqa: SLF001
+            reducer_id
+        ]
+        original = registration.ingress
+        failed = False
+
+        def fail_once(events):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("synthetic provider close reducer failure")
+            return original.apply_owned_events(events)
+
+        registration.ingress = replace(
+            original,
+            apply_owned_events=fail_once,
+        )
+        deadline = monotonic() + 2
+        await runtime_session.quiesce_provider_input_event_producers_for_close(
+            deadline_monotonic=deadline
+        )
+
+        assert registration.reconciliation_required is True
+        with pytest.raises(
+            RuntimeError,
+            match="provider-input close authority is semantically folded",
+        ):
+            runtime_session.close()
+
+        # Provider-input has no online checkpoint repair owner in this hard
+        # cut.  A reducer fault is therefore an explicit close blocker; this
+        # privileged rebuild is test cleanup, not a production fallback.
+        runtime_session._reconcile_committed_reducer_offline(  # noqa: SLF001
+            reducer_id
+        )
+        assert registration.reconciliation_required is False
+        runtime_session.close()
+
+    asyncio.run(scenario())

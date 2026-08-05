@@ -52,7 +52,7 @@ func (s *localScheduler) schedule(effect app.ScheduleTickEffect) tea.Cmd {
 				return nil
 			}
 			switch effect.Kind {
-			case app.TickHeartbeat:
+			case app.TickHeartbeat, app.TickSnapshotRetry, app.TickNotificationExpiry:
 				return app.TickMsg{Kind: effect.Kind, TickGeneration: effect.TickGeneration}
 			case app.TickReconnect:
 				return app.ReconnectDueMsg{ReconnectGeneration: effect.TickGeneration}

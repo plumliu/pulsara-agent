@@ -157,6 +157,11 @@ func applyObservationBatch(s AppState, request protocolvalue.PreparedObserveRequ
 		next.observation.PendingPage, next.observation.HasPendingPage = protocolvalue.PreparedHistoryPageRequest{}, false
 		next.observation.HasPageIntent = false
 		next.phase = PhaseReadOnly
+		var refreshErr error
+		next, refreshErr = refreshInteractiveState(next)
+		if refreshErr != nil {
+			return s, nil, refreshErr
+		}
 		var minimum *protocolvalue.ControlCursor
 		if controlInvalidated {
 			observed, _ := next.control.ObservedLatestCursor()
@@ -170,6 +175,11 @@ func applyObservationBatch(s AppState, request protocolvalue.PreparedObserveRequ
 	}
 	if controlInvalidated {
 		next.phase = PhaseReadOnly
+		var refreshErr error
+		next, refreshErr = refreshInteractiveState(next)
+		if refreshErr != nil {
+			return s, nil, refreshErr
+		}
 		observed, _ := next.control.ObservedLatestCursor()
 		rebuilt, effect, err := requestDurableSnapshot(next, now, &observed, operationalRebuild)
 		if err != nil {
@@ -179,6 +189,11 @@ func applyObservationBatch(s AppState, request protocolvalue.PreparedObserveRequ
 	}
 	if operationalRebuild {
 		next.phase = PhaseReadOnly
+		var refreshErr error
+		next, refreshErr = refreshInteractiveState(next)
+		if refreshErr != nil {
+			return s, nil, refreshErr
+		}
 		next.snapshotLoading = SnapshotLoadingState{Phase: SnapshotAwaitingOperationalSnapshot, AttachmentID: next.attachment.Identity.ID, AttachmentGeneration: next.attachment.Identity.Generation, TransportBindingFingerprint: next.attachment.Identity.BindingFingerprint, DurableSnapshotFingerprint: next.durable.SnapshotFingerprint(), DurableControlCursorFingerprint: next.control.ConfirmedCursor().Fingerprint, OperationalRequired: true}
 		rebuilt, effect, err := requestOperationalSnapshot(next, now)
 		if err != nil {
@@ -187,6 +202,11 @@ func applyObservationBatch(s AppState, request protocolvalue.PreparedObserveRequ
 		return rebuilt, []Effect{effect}, nil
 	}
 	next.phase = PhaseReady
+	var refreshErr error
+	next, refreshErr = refreshInteractiveState(next)
+	if refreshErr != nil {
+		return s, nil, refreshErr
+	}
 	return nextLiveEffect(next, now)
 }
 
@@ -217,6 +237,10 @@ func applyHistoryPageResult(s AppState, request protocolvalue.PreparedHistoryPag
 					s.transcript = s.transcript.Page(1)
 				} else {
 					s.transcript = s.transcript.Page(-1)
+					s, err = resolveViewportTailAfterScroll(s)
+					if err != nil {
+						return s, nil, err
+					}
 				}
 			}
 		}

@@ -35,6 +35,8 @@ const (
 	KeyEscape
 	KeyInterrupt
 	KeyEOF
+	KeyUndo
+	KeyRedo
 )
 
 type KeyModifiers uint8
@@ -53,7 +55,7 @@ type NormalizedKey struct {
 }
 
 func NewNormalizedKey(action KeyAction, modifiers KeyModifiers, text string, repeat bool) (NormalizedKey, error) {
-	if action < KeyText || action > KeyEOF || modifiers&^(KeyModShift|KeyModAlt|KeyModCtrl) != 0 || !utf8.ValidString(text) || len([]byte(text)) > 256 {
+	if action < KeyText || action > KeyRedo || modifiers&^(KeyModShift|KeyModAlt|KeyModCtrl) != 0 || !utf8.ValidString(text) || len([]byte(text)) > 256 {
 		return NormalizedKey{}, errors.New("terminal normalized key is invalid")
 	}
 	if (action == KeyText) != (text != "") {
@@ -94,7 +96,7 @@ func normalizeFrameworkMessage(
 		keyValue := value.Key()
 		action, text := KeyText, keyValue.Text
 		switch value.Keystroke() {
-		case "enter":
+		case "enter", "alt+enter", "shift+enter":
 			action, text = KeyEnter, ""
 		case "backspace":
 			action, text = KeyBackspace, ""
@@ -126,6 +128,10 @@ func normalizeFrameworkMessage(
 			action, text = KeyInterrupt, ""
 		case "ctrl+d":
 			action, text = KeyEOF, ""
+		case "ctrl+z":
+			action, text = KeyUndo, ""
+		case "ctrl+y":
+			action, text = KeyRedo, ""
 		}
 		modifiers := KeyModifiers(0)
 		if keyValue.Mod&tea.ModShift != 0 {

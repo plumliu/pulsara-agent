@@ -8,8 +8,16 @@ from pathlib import Path
 import pytest
 import pulsara_agent.runtime.terminal.process as process_mod
 
-from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent
+from pulsara_agent.event import AgentEvent, EventContext, TerminalProcessCompletedEvent
 from pulsara_agent.event_log import InMemoryEventLog
+from pulsara_agent.ports.event_write import (
+    CommittedCheckpointHandoff,
+    CommittedEventSettlementReceipt,
+    CommittedPublicationSettlement,
+    CommittedSemanticFoldSettlement,
+    RuntimeThreadEventSettlementReceipt,
+)
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.terminal import (
     TerminalRequest,
     TerminalSessionManager,
@@ -22,6 +30,7 @@ from pulsara_agent.runtime.terminal.process import (
     PendingTerminalCompletionError,
     ProcessInputError,
     TerminalCompletionRecordState,
+    TerminalCompletionSemanticSettlement,
     TerminalKillReason,
     _maybe_record_completion_event,
     kill_process,
@@ -46,10 +55,42 @@ def run(session, command: str, **kwargs):
 
 
 def completion_owner(ctx, tool_call_id: str, recorder) -> TerminalExecutionOwner:
+    def test_only_settlement(event: AgentEvent) -> RuntimeThreadEventSettlementReceipt:
+        result = recorder(event)
+        if isinstance(result, RuntimeThreadEventSettlementReceipt):
+            return result
+        committed = result if isinstance(result, AgentEvent) else event
+        if committed.sequence is None:
+            committed = committed.model_copy(update={"sequence": 1})
+        references = ((committed.id, int(committed.sequence), f"test:{committed.id}"),)
+        payload = {
+            "stored_batch_receipt_identity": f"test-batch:{committed.id}",
+            "requested_event_references": references,
+            "durability": "full",
+            "semantic_fold": CommittedSemanticFoldSettlement.HEALTHY.value,
+            "checkpoint_handoff": CommittedCheckpointHandoff.NOT_APPLICABLE.value,
+            "publication": CommittedPublicationSettlement.COMPLETED.value,
+        }
+        settlement = CommittedEventSettlementReceipt(
+            stored_batch_receipt_identity=f"test-batch:{committed.id}",
+            requested_event_references=references,
+            durability="full",
+            semantic_fold=CommittedSemanticFoldSettlement.HEALTHY,
+            checkpoint_handoff=CommittedCheckpointHandoff.NOT_APPLICABLE,
+            publication=CommittedPublicationSettlement.COMPLETED,
+            settlement_fingerprint=context_fingerprint(
+                "committed-event-settlement-receipt:v1", payload
+            ),
+        )
+        return RuntimeThreadEventSettlementReceipt(
+            committed_event=committed,
+            settlement=settlement,
+        )
+
     return TerminalExecutionOwner(
         origin_event_context=ctx,
         origin_tool_call_id=tool_call_id,
-        record_event=recorder,
+        record_event=test_only_settlement,
     )
 
 
@@ -1024,7 +1065,7 @@ def test_terminal_completion_record_failure_returns_pending_and_retries_stable_e
     assert len(recorded) == 1
     assert len(set(attempts)) == 1
     assert recorded[0].id == state.completion_event_id
-    assert state.completion_record_state is TerminalCompletionRecordState.RECORDED
+    assert state.completion_record_state is TerminalCompletionRecordState.DURABLE_FULL
     assert state.completion_event_recorded is True
 
 
@@ -1067,7 +1108,75 @@ def test_terminal_completion_uncertain_commit_is_confirmed_by_bounded_retry(
     assert calls == 2
     assert len(event_log.iter()) == 1
     assert event_log.iter()[0].id == state.completion_event_id
-    assert state.completion_record_state is TerminalCompletionRecordState.RECORDED
+    assert state.completion_record_state is TerminalCompletionRecordState.DURABLE_FULL
+
+
+def test_terminal_completion_durable_full_with_repair_owner_is_not_replayed(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-repair-owned",
+        turn_id="turn:completion-repair-owned",
+        reply_id="reply:completion-repair-owned",
+    )
+    calls = 0
+
+    def recorder(event: AgentEvent) -> RuntimeThreadEventSettlementReceipt:
+        nonlocal calls
+        calls += 1
+        committed = event.model_copy(update={"sequence": 1})
+        references = ((committed.id, 1, f"test:{committed.id}"),)
+        payload = {
+            "stored_batch_receipt_identity": f"test-batch:{committed.id}",
+            "requested_event_references": references,
+            "durability": "full",
+            "semantic_fold": (
+                CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED.value
+            ),
+            "checkpoint_handoff": CommittedCheckpointHandoff.NOT_APPLICABLE.value,
+            "publication": CommittedPublicationSettlement.COMPLETED.value,
+        }
+        return RuntimeThreadEventSettlementReceipt(
+            committed_event=committed,
+            settlement=CommittedEventSettlementReceipt(
+                stored_batch_receipt_identity=f"test-batch:{committed.id}",
+                requested_event_references=references,
+                durability="full",
+                semantic_fold=(
+                    CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED
+                ),
+                checkpoint_handoff=CommittedCheckpointHandoff.NOT_APPLICABLE,
+                publication=CommittedPublicationSettlement.COMPLETED,
+                settlement_fingerprint=context_fingerprint(
+                    "committed-event-settlement-receipt:v1", payload
+                ),
+            ),
+        )
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    result = session.execute(
+        TerminalRequest(command="sleep 5", yield_time_ms=0),
+        execution_owner=completion_owner(
+            ctx,
+            "call:completion-repair-owned",
+            recorder,
+        ),
+    )
+    assert result.process_id is not None
+    manager.kill_process(result.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[result.process_id]  # noqa: SLF001
+    deadline = time.monotonic() + 1
+    while not state.completion_event_recorded and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert calls == 1
+    assert state.completion_record_state is TerminalCompletionRecordState.DURABLE_FULL
+    assert state.completion_semantic_settlement is (
+        TerminalCompletionSemanticSettlement.REPAIR_OWNED
+    )
+    _maybe_record_completion_event(state)
+    assert calls == 1
 
 
 def test_terminal_pending_completion_is_not_pruned_by_ttl_or_capacity(

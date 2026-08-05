@@ -40,6 +40,7 @@ from pulsara_agent.ports.artifact import (
     ToolResultArtifactProcessingPort,
     resolve_tool_result_artifact_policy_for_call,
 )
+from pulsara_agent.ports.event_write import RuntimeThreadEventSettlementReceipt
 from pulsara_agent.ports.tool_execution import (
     PreparedToolTerminalResult,
     ToolCall,
@@ -88,7 +89,9 @@ def _cancelled_execution_result(
 @dataclass(slots=True)
 class ToolExecutor:
     registry: ToolRegistry
-    record_event: Callable[[AgentEvent], AgentEvent] | None = None
+    record_event: Callable[
+        [AgentEvent], RuntimeThreadEventSettlementReceipt
+    ] | None = None
     artifact_service: ToolResultArtifactProcessingPort | None = None
     artifact_policies: Mapping[str, ToolResultArtifactProcessingPolicy] = field(
         default_factory=dict
@@ -382,7 +385,12 @@ class ToolExecutor:
 
     def _append(self, event):
         if self.record_event is not None:
-            return self.record_event(event)
+            receipt = self.record_event(event)
+            if not isinstance(receipt, RuntimeThreadEventSettlementReceipt):
+                raise TypeError(
+                    "tool event recorder returned no typed settlement receipt"
+                )
+            return receipt.committed_event
         return event
 
     def _tool_delta_emitter(

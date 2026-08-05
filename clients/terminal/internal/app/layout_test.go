@@ -51,13 +51,19 @@ func TestFitLayoutLineUsesANSIDisplayWidth(t *testing.T) {
 }
 
 func TestFooterResponsiveVocabulary(t *testing.T) {
-	if got := compactFooter(80); got != "observer · wheel/↑/↓ scroll · y copy · q quit" {
+	if got := compactFooter(80); got != "observer · wheel/↑/↓ scroll · y copy · q detach" {
 		t.Fatalf("unexpected wide footer: %q", got)
 	}
-	if got := compactFooter(30); got != "read-only · ↑↓ · y copy · q quit" {
+	if got := compactFooter(30); got != "read-only · ↑↓ · y copy · q detach" {
 		t.Fatalf("unexpected compact footer: %q", got)
 	}
 	if got := compactFooter(8); got != "↑↓·y·q" {
 		t.Fatalf("unexpected narrow footer: %q", got)
+	}
+	if got := interactiveFooter(120, true); got != "Enter send · Alt+Enter newline · Ctrl-C stop · PgUp transcript · ↑↓ prompts · Ctrl-D detach" {
+		t.Fatalf("interactive footer semantic vocabulary drifted: %q", got)
+	}
+	if got := interactiveFooter(30, false); got != "↵ send · ^D detach" {
+		t.Fatalf("narrow interactive footer changed detach into quit: %q", got)
 	}
 }

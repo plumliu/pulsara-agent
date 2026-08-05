@@ -868,7 +868,7 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
     )
     try:
         stored = tuple(
-            await runtime_session_for_test(agent).emit_many(
+            await runtime_session_for_test(agent).commit_accepted_events(
                 (draft.run_start_event, window_open, account_open, *audits),
             )
         )

@@ -53,16 +53,16 @@ class RuntimeSessionRunLedgerPort:
     def __init__(self, session: RuntimeSession) -> None:
         self.__session = session
 
-    async def emit(self, event: AgentEvent) -> AgentEvent:
-        return await self.__session.emit(event)
+    async def commit_accepted_event(self, event: AgentEvent) -> AgentEvent:
+        return await self.__session.commit_accepted_event(event)
 
-    async def emit_many(
+    async def commit_accepted_events(
         self,
         events: Iterable[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
     ) -> list[AgentEvent]:
-        return await self.__session.emit_many(
+        return await self.__session.commit_accepted_events(
             events,
             expected_last_sequence=expected_last_sequence,
         )
@@ -120,6 +120,24 @@ class RuntimeSessionRunLedgerPort:
 
     def resolved_write_outcome(self, error: BaseException):
         return self.__session.resolved_event_write_outcome(error)
+
+    def pending_committed_reducer_repair_handles(self):
+        return self.__session.pending_committed_reducer_repair_handles()
+
+    async def wait_committed_reducer_repair(
+        self, handle, *, deadline_monotonic: float
+    ):
+        return await self.__session.wait_committed_reducer_repair(
+            handle,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    async def await_committed_reducer_repair_safe_point(
+        self, *, deadline_monotonic: float
+    ):
+        return await self.__session.await_committed_reducer_repair_safe_point(
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def issue_publication_terminal_maintenance_lease(self, **kwargs):
         return self.__session.issue_publication_terminal_maintenance_lease(**kwargs)

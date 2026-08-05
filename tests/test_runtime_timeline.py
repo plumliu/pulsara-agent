@@ -88,7 +88,7 @@ async def _emit_tool_terminal_projection(
     prepared = await runtime.tool_terminal_projection_service.prepare_batch(
         (candidate,)
     )
-    await runtime.emit_many(prepared)
+    await runtime.commit_accepted_events(prepared)
 
 
 def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
@@ -180,7 +180,7 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
             model_call_index=1,
         )
         start_fields["provider_input_reference"] = provider_input.committed_reference
-        await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
+        await runtime.commit_accepted_event(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
         await runtime.write_events(
             (
                 *provider_input.companion_events,
@@ -212,7 +212,7 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
                 ],
             ),
         ]:
-            await runtime.emit(event)
+            await runtime.commit_accepted_event(event)
 
     asyncio.run(run())
 
@@ -265,7 +265,7 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta="ok"
             ),
         ]:
-            await runtime.emit(event)
+            await runtime.commit_accepted_event(event)
         await _emit_tool_terminal_projection(
             runtime,
             tool_call_id=tool_call.id,
@@ -336,7 +336,7 @@ def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> No
                 transition_owner="agent_run",
             ),
         ]:
-            await runtime.emit(event)
+            await runtime.commit_accepted_event(event)
 
     asyncio.run(run())
 
@@ -397,9 +397,9 @@ def test_run_timeline_preserves_non_success_run_end_status(
     runtime = in_memory_runtime_session(tmp_path)
 
     async def run() -> None:
-        await runtime.emit(_run_start())
-        await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
-        await runtime.emit(
+        await runtime.commit_accepted_event(_run_start())
+        await runtime.commit_accepted_event(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
+        await runtime.commit_accepted_event(
             RunEndEvent(
                 **run_end_contract_fields(
                     CTX.run_id,

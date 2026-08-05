@@ -62,7 +62,10 @@ from pulsara_agent.event_log import (
     dump_agent_event,
     load_agent_event,
 )
-from pulsara_agent.primitives.stored_event import RawRuntimeProjectionCheckpoint
+from pulsara_agent.primitives.stored_event import (
+    RawRuntimeProjectionCheckpoint,
+    canonical_json_object_carrier,
+)
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.llm.control import build_model_call_control_disposition_event
@@ -259,8 +262,12 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
         projection_schema_version="terminal_notification_projection_checkpoint.v1",
         ledger_prefix=ledger_prefix,
         validation_base_through_sequence=0,
-        validation_base_state_payload={"revision": 0, "active_refs": []},
-        state_payload={"revision": 1, "active_refs": []},
+        validation_base_state=canonical_json_object_carrier(
+            {"revision": 0, "active_refs": []}
+        ),
+        state=canonical_json_object_carrier(
+            {"revision": 1, "active_refs": []}
+        ),
         payload_fingerprint="sha256:" + "a" * 64,
     )
 
@@ -280,10 +287,8 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
                 validation_base_through_sequence=(
                     checkpoint.validation_base_through_sequence
                 ),
-                validation_base_state_payload=(
-                    checkpoint.validation_base_state_payload
-                ),
-                state_payload={"revision": 999},
+                validation_base_state=checkpoint.validation_base_state,
+                state=canonical_json_object_carrier({"revision": 999}),
                 payload_fingerprint="sha256:" + "c" * 64,
             )
         )
@@ -298,8 +303,12 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
                     ledger_continuity_accumulator="sha256:" + "f" * 64,
                 ),
                 validation_base_through_sequence=0,
-                validation_base_state_payload={"through_sequence": 0},
-                state_payload={"through_sequence": checkpoint.through_sequence},
+                validation_base_state=canonical_json_object_carrier(
+                    {"through_sequence": 0}
+                ),
+                state=canonical_json_object_carrier(
+                    {"through_sequence": checkpoint.through_sequence}
+                ),
                 payload_fingerprint="sha256:" + "d" * 64,
             )
         )
@@ -314,13 +323,75 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
                     through_sequence=checkpoint.through_sequence + 1,
                 ),
                 validation_base_through_sequence=0,
-                validation_base_state_payload=(
-                    checkpoint.validation_base_state_payload
-                ),
-                state_payload={"revision": 2},
+                validation_base_state=checkpoint.validation_base_state,
+                state=canonical_json_object_carrier({"revision": 2}),
                 payload_fingerprint="sha256:" + "b" * 64,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "projection_kind",
+    (
+        "incident_terminal_notification_projection.v1",
+        "incident_terminal_monitor_projection.v1",
+    ),
+)
+def test_postgres_runtime_projection_checkpoint_accepts_three_jsonb_successors(
+    event_log: EventLog,
+    projection_kind: str,
+) -> None:
+    """Tuple/list producer shape cannot split successor CAS from JSONB truth."""
+
+    schema_version = "incident_terminal_notification_projection_state.v1"
+    base_sequence = 0
+    base_state = canonical_json_object_carrier(
+        {"revision": 0, "process_heads": ()}
+    )
+    for revision in range(1, 4):
+        stored = event_log.extend(
+            _reply_events(
+                _ctx(
+                    "incident:jsonb-successor:"
+                    f"{projection_kind}:{revision}"
+                )
+            )
+        )
+        through_sequence = int(stored[-1].sequence or 0)
+        state = canonical_json_object_carrier(
+            {
+                "revision": revision,
+                "process_heads": (
+                    {
+                        "process_id": f"process:{revision}",
+                        "monitor_ids": (f"monitor:{revision}",),
+                    },
+                ),
+            }
+        )
+        checkpoint = RawRuntimeProjectionCheckpoint(
+            projection_kind=projection_kind,
+            through_sequence=through_sequence,
+            projection_schema_version=schema_version,
+            ledger_prefix=event_log.read_raw_ledger_prefix(
+                through_sequence=through_sequence
+            ),
+            validation_base_through_sequence=base_sequence,
+            # Rehydrate the prior carrier through ordinary JSON containers to
+            # model the exact PostgreSQL JSONB round-trip from the incident.
+            validation_base_state=canonical_json_object_carrier(
+                base_state.decode_object()
+            ),
+            state=state,
+            payload_fingerprint=(f"sha256:{revision:064x}"),
+        )
+        event_log.write_runtime_projection_checkpoint(checkpoint)
+        observed = event_log.read_runtime_projection_checkpoint(projection_kind)
+        assert observed == checkpoint
+        assert observed is not None
+        assert observed.state == state
+        base_sequence = through_sequence
+        base_state = state
 
 
 def test_event_log_single_append_is_idempotent_by_exact_event_payload(
@@ -1529,7 +1600,7 @@ def runtime_session_for_test_can_emit_with_postgres_event_log(tmp_path: Path) ->
         ctx = _ctx("postgres:runtime")
 
         async def run() -> None:
-            await runtime.emit(
+            await runtime.commit_accepted_event(
                 RunStartEvent(
                     id=f"run_start:test:{ctx.run_id}",
                     **ctx.event_fields(),
@@ -1543,12 +1614,12 @@ def runtime_session_for_test_can_emit_with_postgres_event_log(tmp_path: Path) ->
                     user_input_chars=len("postgres runtime contract"),
                 )
             )
-            first = await runtime.emit(
+            first = await runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **ctx.event_fields(), block_id="text:1", delta="hello"
                 )
             )
-            second = await runtime.emit(
+            second = await runtime.commit_accepted_event(
                 make_text_block_segment_event(
                     **ctx.event_fields(), block_id="text:1", delta=" world"
                 )

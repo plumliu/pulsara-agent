@@ -10,8 +10,9 @@
 	},
   "generated_contract_files_sha256": {
 		"clients/terminal/internal/protocolvalue/vocabulary_gen.go": "562fb38407efa938be5e74d30e7c342a1f7034d5f8acd38d32442e4c1811b64c",
-		"clients/terminal/internal/protocolvalue/carriers_gen.go": "5e03cc24f3ba567a83f277bff1ccc4750bdd7d1f47817fd41383ef8584894aba",
-		"clients/terminal/internal/protocolvalue/s2_carriers_gen.go": "49c9e7aee45d88effb609e2451fdbb6ea507549261edf7a433e93df4680410d0"
+		"clients/terminal/internal/protocolvalue/carriers_gen.go": "5d60f0863d5445cd6dd1ad1af5beddd90e889dba4291a337c20e5216e25bb072",
+		"clients/terminal/internal/protocolvalue/s2_carriers_gen.go": "2692c52c2c83e51ef38f129463da7565f6a30bab9d4545888fba7fad49894cc9",
+		"clients/terminal/internal/protocolvalue/s3_carriers_gen.go": "5467ddabb732842060e52a063e3edc80065f52ad55f55cd92a3ad28193fd64ee"
   },
   "fingerprint_contracts": [
     {

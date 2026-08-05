@@ -78,6 +78,32 @@ func TestViewportScrollPageEndAndBoundsUseVisualRows(t *testing.T) {
 	}
 }
 
+func TestScrollOffsetZeroDoesNotClaimTailWhileUnseenCellsExist(t *testing.T) {
+	model, err := New(12, 4).Install(
+		transcriptSnapshot(strings.Repeat("tool output ", 20)),
+		12,
+		4,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model = model.Scroll(2).NoteUnseen(4)
+	if model.FollowTail() || model.UnseenTerminalCount() != 4 {
+		t.Fatal("scrolled viewport did not retain unseen authority")
+	}
+	model = model.Scroll(-1000)
+	if model.ScrollOffset() != 0 || model.FollowTail() || model.UnseenTerminalCount() != 4 {
+		t.Fatal("visual offset zero incorrectly claimed the global live tail")
+	}
+	if err := model.Validate(); err != nil {
+		t.Fatalf("offset-zero pinned viewport became structurally invalid: %v", err)
+	}
+	model = model.End()
+	if !model.FollowTail() || model.UnseenTerminalCount() != 0 || model.Validate() != nil {
+		t.Fatal("explicit tail resolution did not consume unseen authority")
+	}
+}
+
 func TestResizePreservesScrolledContentAnchorAndTail(t *testing.T) {
 	snapshot := transcriptSnapshot(strings.Repeat("甲乙丙丁戊己庚辛壬癸", 8))
 	model, err := New(12, 4).Install(snapshot, 12, 4)

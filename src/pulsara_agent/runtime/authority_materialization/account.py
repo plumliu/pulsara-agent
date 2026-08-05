@@ -588,7 +588,29 @@ class LedgerMaterializationCoordinator:
         self.charge_contract = charge_contract
         self.limits = limits
         self._prepare_event = prepare_event or (lambda event: event)
+        self._pre_commit_admission: (
+            Callable[[tuple[AgentEvent, ...]], None] | None
+        ) = None
         self._lock = RLock()
+
+    def bind_pre_commit_admission(
+        self,
+        callback: Callable[[tuple[AgentEvent, ...]], None],
+    ) -> None:
+        """Bind the sole exact physical-batch admission owner.
+
+        RuntimeSession installs this only after every committed projection has
+        registered its durable recovery base.  The callback sees the complete
+        candidate batch, including materialization bookkeeping events, before
+        any storage transaction or transaction companion is entered.
+        """
+
+        with self._lock:
+            if self._pre_commit_admission is not None:
+                raise RuntimeError(
+                    "materialization pre-commit admission is already bound"
+                )
+            self._pre_commit_admission = callback
 
     def bootstrap_genesis(
         self,
@@ -3755,6 +3777,9 @@ class LedgerMaterializationCoordinator:
         """Commit or prove the exact stable event/account candidate FULL or NONE."""
 
         candidates = tuple(events)
+        admission = self._pre_commit_admission
+        if admission is not None:
+            admission(candidates)
         bound_companion: EventLogTransactionCompanion | None
         if isinstance(transaction_companion, McpContinuationTransactionIntent):
             bound_companion = transaction_companion.bind_candidate_batch(

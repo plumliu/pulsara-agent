@@ -58,3 +58,4 @@ logs/
 
 # Locally built terminal client binaries
 clients/terminal/bin/
+clients/terminal/pulsara-tui

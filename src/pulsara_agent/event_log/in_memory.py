@@ -154,8 +154,7 @@ class InMemoryEventLog:
                 if checkpoint.through_sequence > existing.through_sequence and (
                     checkpoint.validation_base_through_sequence
                     != existing.through_sequence
-                    or checkpoint.validation_base_state_payload
-                    != existing.state_payload
+                    or checkpoint.validation_base_state != existing.state
                     or checkpoint.projection_schema_version
                     != existing.projection_schema_version
                 ):

@@ -787,7 +787,7 @@ async def _emit_turn(
     payload = provisional.model_dump(
         mode="json", exclude={"event_fingerprint", "sequence"}
     )
-    await runtime_session.emit(
+    await runtime_session.commit_accepted_event(
         ModelCallControlDispositionResolvedEvent(
             **payload,
             event_fingerprint=sha256_fingerprint(
@@ -2143,7 +2143,7 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
             isinstance(event, ContextCompactionFailedEvent) for event in result.events
         )
         emitted = await asyncio.wait_for(
-            runtime_session.emit(
+            runtime_session.commit_accepted_event(
                 typed_non_transcript_event(
                     label="after_failed_mid_turn_compaction",
                     context=EventContext(

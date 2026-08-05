@@ -63,6 +63,14 @@ from pulsara_agent.runtime.session import (
     EventBatchCommitOutcome,
     EventWriteCancelled,
 )
+from pulsara_agent.ports.event_write import (
+    CommittedCheckpointHandoff,
+    CommittedEventSettlementReceipt,
+    CommittedPublicationSettlement,
+    CommittedSemanticFoldSettlement,
+    RuntimeThreadEventSettlementReceipt,
+)
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.ports.run_execution import (
     RunSuspendedOutcome,
     build_prepared_run_owner_reservation_key,
@@ -1068,7 +1076,30 @@ def test_host_close_pending_terminal_completion_preserves_retryable_session_and_
     def recorder(event):
         if not available:
             raise RuntimeError("synthetic terminal event store outage")
-        return event
+        committed = event.model_copy(update={"sequence": 1})
+        references = ((committed.id, 1, f"test:{committed.id}"),)
+        payload = {
+            "stored_batch_receipt_identity": f"test-batch:{committed.id}",
+            "requested_event_references": references,
+            "durability": "full",
+            "semantic_fold": CommittedSemanticFoldSettlement.HEALTHY.value,
+            "checkpoint_handoff": CommittedCheckpointHandoff.NOT_APPLICABLE.value,
+            "publication": CommittedPublicationSettlement.COMPLETED.value,
+        }
+        return RuntimeThreadEventSettlementReceipt(
+            committed_event=committed,
+            settlement=CommittedEventSettlementReceipt(
+                stored_batch_receipt_identity=f"test-batch:{committed.id}",
+                requested_event_references=references,
+                durability="full",
+                semantic_fold=CommittedSemanticFoldSettlement.HEALTHY,
+                checkpoint_handoff=CommittedCheckpointHandoff.NOT_APPLICABLE,
+                publication=CommittedPublicationSettlement.COMPLETED,
+                settlement_fingerprint=context_fingerprint(
+                    "committed-event-settlement-receipt:v1", payload
+                ),
+            ),
+        )
 
     async def run() -> None:
         nonlocal available

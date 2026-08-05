@@ -35,6 +35,7 @@ type RootPageState struct {
 	HasResidentBeforeCursor    bool
 	ResidentAfterCursor        protocolvalue.HistoryCursor
 	HasResidentAfterCursor     bool
+	ResidentHasMoreBefore      bool
 	HasMoreBefore              bool
 	HasMoreAfter               bool
 	CachedBytes                uint64
@@ -94,10 +95,16 @@ func (c PageCache) InstallLatest(snapshot protocolvalue.DurableSnapshot, followL
 	state.Root = root
 	state.ResidentBeforeCursor, state.HasResidentBeforeCursor = snapshot.LatestRootCursorPair.Before, snapshot.LatestRootCursorPair.HasBefore
 	state.ResidentAfterCursor, state.HasResidentAfterCursor = snapshot.LatestRootCursorPair.After, snapshot.LatestRootCursorPair.HasAfter
+	// A durable snapshot is always the newest resident suffix of its root.
+	// Cursor presence identifies an anchor; it does not prove that another
+	// entry exists on that side. In particular, Foundation intentionally emits
+	// an after cursor for the newest resident cell. Treating that cursor as
+	// "has more after" pins the client to the predecessor root forever.
+	state.ResidentHasMoreBefore = len(snapshot.Cells) > 0 && snapshot.Cells[0].DisplayRank > 0 && state.HasResidentBeforeCursor
 	if countHydrated(state) == 0 {
 		state.BeforeCursor, state.HasBeforeCursor = state.ResidentBeforeCursor, state.HasResidentBeforeCursor
 		state.AfterCursor, state.HasAfterCursor = state.ResidentAfterCursor, state.HasResidentAfterCursor
-		state.HasMoreBefore, state.HasMoreAfter = state.HasResidentBeforeCursor, state.HasResidentAfterCursor
+		state.HasMoreBefore, state.HasMoreAfter = state.ResidentHasMoreBefore, false
 	}
 	if err := finalizeRootState(&state); err != nil {
 		return PageCache{}, err
@@ -190,7 +197,7 @@ func (c PageCache) SwitchToLatest() (PageCache, error) {
 	state.Cells = filtered
 	state.BeforeCursor, state.HasBeforeCursor = state.ResidentBeforeCursor, state.HasResidentBeforeCursor
 	state.AfterCursor, state.HasAfterCursor = state.ResidentAfterCursor, state.HasResidentAfterCursor
-	state.HasMoreBefore, state.HasMoreAfter = state.HasResidentBeforeCursor, state.HasResidentAfterCursor
+	state.HasMoreBefore, state.HasMoreAfter = state.ResidentHasMoreBefore, false
 	if err := finalizeRootState(&state); err != nil {
 		return PageCache{}, err
 	}
@@ -445,8 +452,13 @@ func validateRootState(state RootPageState) error {
 		residentIDs[id] = struct{}{}
 	}
 	if state.HasBeforeCursor != (state.BeforeCursor.Fingerprint != "") || state.HasAfterCursor != (state.AfterCursor.Fingerprint != "") ||
+		state.HasResidentBeforeCursor != (state.ResidentBeforeCursor.Fingerprint != "") ||
+		state.HasResidentAfterCursor != (state.ResidentAfterCursor.Fingerprint != "") ||
+		state.ResidentHasMoreBefore && !state.HasResidentBeforeCursor ||
 		(state.HasBeforeCursor && state.BeforeCursor.Root.RootFingerprint != state.Root.RootFingerprint) ||
 		(state.HasAfterCursor && state.AfterCursor.Root.RootFingerprint != state.Root.RootFingerprint) ||
+		(state.HasResidentBeforeCursor && state.ResidentBeforeCursor.Root.RootFingerprint != state.Root.RootFingerprint) ||
+		(state.HasResidentAfterCursor && state.ResidentAfterCursor.Root.RootFingerprint != state.Root.RootFingerprint) ||
 		state.HasMoreBefore && !state.HasBeforeCursor || state.HasMoreAfter && !state.HasAfterCursor {
 		return errors.New("history page cache cursor matrix is invalid")
 	}

@@ -337,12 +337,9 @@ func receiptFingerprint(receipt PhysicalConnectionTerminalReceipt, _ bool) strin
 }
 
 func writeMessage(writer io.Writer, message proto.Message, maximum uint32) error {
-	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
+	payload, err := protocol.MarshalBoundedDeterministicPayload(message, maximum)
 	if err != nil {
 		return err
-	}
-	if len(payload) == 0 || uint64(len(payload)) > uint64(maximum) {
-		return errors.New("terminal output frame is outside its bound")
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))

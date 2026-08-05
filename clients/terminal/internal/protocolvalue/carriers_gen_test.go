@@ -55,6 +55,25 @@ func TestS1CapabilityVocabularyIsExactAndRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestS3CapabilityVocabularyAddsOnlyCommandPlane(t *testing.T) {
+	if len(S3SupportedCapabilities) != len(S2SupportedCapabilities)+2 || len(S3RequiredCapabilities) != len(S3SupportedCapabilities) {
+		t.Fatalf("unexpected S3 capability set: required=%d supported=%d", len(S3RequiredCapabilities), len(S3SupportedCapabilities))
+	}
+	want := map[protocol.TerminalClientCapability]bool{
+		protocol.TerminalClientCapability_CONTROLLER_COMMAND_V1: true,
+		protocol.TerminalClientCapability_COMMAND_QUERY_V1:      true,
+	}
+	for _, capability := range S3SupportedCapabilities[len(S2SupportedCapabilities):] {
+		delete(want, capability)
+	}
+	if len(want) != 0 {
+		t.Fatalf("S3 command capability hard cut is incomplete: %#v", want)
+	}
+	if err := ValidateCapabilities(S3RequiredCapabilities); err != nil {
+		t.Fatalf("exact S3 capability set was rejected: %v", err)
+	}
+}
+
 func TestTransportAuthResultRejectsUnknownDisposition(t *testing.T) {
 	value := &protocol.TerminalTransportAuthResult{
 		AuthRequestId:                     "request",
@@ -201,9 +220,9 @@ func TestS2HistoryCursorDecodeEncodeIsLosslessAtNegotiatedMaximum(t *testing.T) 
 		RuntimeSessionId: "runtime:history", HistoryProjectionContractFingerprint: sha('a'),
 		MaterializationPolicyFingerprint: sha('b'), TreeContractFingerprint: sha('c'),
 		PlacementKeyContractId: "presentation-placement-key", PlacementKeyContractVersion: "v1",
-		PlacementKeyContractFingerprint: sha('d'), CheckpointGeneration: 2, CheckpointFingerprint: sha('e'),
+		PlacementKeyContractFingerprint: sha('d'), CheckpointGeneration: 3, CheckpointFingerprint: sha('e'),
 		ProjectionGeneration: 3, ProjectionRootFingerprint: sha('f'), ThroughAuthoritySequence: 17,
-		PresentationSourceSegmentCount: 4, PresentationSourcePrefixAccumulator: sha('1'),
+		PresentationSourceSegmentCount: 17, PresentationSourcePrefixAccumulator: sha('1'),
 		PresentationPolicyRegistryContractFingerprint: sha('2'), AuditExtractorRegistryContractFingerprint: sha('3'),
 		RootIdentityFingerprint: sha('4'),
 	}
@@ -259,6 +278,64 @@ func TestS2HistoryCursorDecodeEncodeIsLosslessAtNegotiatedMaximum(t *testing.T) 
 	}}}
 	if _, err := HistoryPageFromProto(page); err == nil {
 		t.Fatal("history page continuation with same root fingerprint and different root payload was accepted")
+	}
+}
+
+func TestHistoryRootIdentityAcceptsOnlyClosedGenesisAndSuccessorShapes(t *testing.T) {
+	validRoot := func() *protocol.PresentationHistoryRootIdentity {
+		return &protocol.PresentationHistoryRootIdentity{
+			RuntimeSessionId: "runtime:root-matrix", HistoryProjectionContractFingerprint: sha('a'),
+			MaterializationPolicyFingerprint: sha('b'), TreeContractFingerprint: sha('c'),
+			PlacementKeyContractId: "presentation-placement-key", PlacementKeyContractVersion: "v1",
+			PlacementKeyContractFingerprint: sha('d'), CheckpointFingerprint: sha('e'),
+			ProjectionRootFingerprint: sha('f'), PresentationSourcePrefixAccumulator: sha('1'),
+			PresentationPolicyRegistryContractFingerprint: sha('2'), AuditExtractorRegistryContractFingerprint: sha('3'),
+			RootIdentityFingerprint: sha('4'),
+		}
+	}
+
+	genesis := validRoot()
+	decoded, err := rootFromProto(genesis)
+	if err != nil {
+		t.Fatalf("canonical generation-zero root was rejected: %v", err)
+	}
+	if decoded.CheckpointGeneration != 0 || decoded.ProjectionGeneration != 0 || decoded.ThroughAuthoritySequence != 0 || decoded.SourceSegmentCount != 0 {
+		t.Fatalf("canonical genesis root changed during decode: %#v", decoded)
+	}
+
+	successor := validRoot()
+	successor.CheckpointGeneration = 2
+	successor.ProjectionGeneration = 2
+	successor.ThroughAuthoritySequence = 17
+	successor.PresentationSourceSegmentCount = 17
+	if _, err := rootFromProto(successor); err != nil {
+		t.Fatalf("canonical successor root was rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*protocol.PresentationHistoryRootIdentity){
+		"genesis-checkpoint-only": func(value *protocol.PresentationHistoryRootIdentity) { value.CheckpointGeneration = 1 },
+		"genesis-projection-only": func(value *protocol.PresentationHistoryRootIdentity) { value.ProjectionGeneration = 1 },
+		"genesis-through-only":    func(value *protocol.PresentationHistoryRootIdentity) { value.ThroughAuthoritySequence = 1 },
+		"genesis-count-only":      func(value *protocol.PresentationHistoryRootIdentity) { value.PresentationSourceSegmentCount = 1 },
+		"successor-without-source": func(value *protocol.PresentationHistoryRootIdentity) {
+			value.CheckpointGeneration, value.ProjectionGeneration = 1, 1
+		},
+		"successor-generation-drift": func(value *protocol.PresentationHistoryRootIdentity) {
+			value.CheckpointGeneration, value.ProjectionGeneration = 1, 2
+			value.ThroughAuthoritySequence, value.PresentationSourceSegmentCount = 1, 1
+		},
+		"successor-source-drift": func(value *protocol.PresentationHistoryRootIdentity) {
+			value.CheckpointGeneration, value.ProjectionGeneration = 1, 1
+			value.ThroughAuthoritySequence, value.PresentationSourceSegmentCount = 2, 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := validRoot()
+			mutate(value)
+			if _, err := rootFromProto(value); err == nil {
+				t.Fatal("mixed generation/source root was accepted")
+			}
+		})
 	}
 }
 

@@ -226,6 +226,7 @@ class RunFinalizationOwner:
         "candidate_frozen",
         "committing",
         "retry_wait",
+        "waiting_reducer_repair",
         "full_output_pending",
         "completed",
         "reconciliation_required",
@@ -251,6 +252,12 @@ class RunFinalizationOwner:
     mcp_closure_event_reference: object | None = None
     mcp_publication_closure_reason: str | None = None
     physical_task: asyncio.Task[object] | None = None
+    physical_attempt_generation: int = 0
+    retry_not_before_monotonic: float | None = None
+    first_failure_monotonic: float | None = None
+    last_failure_monotonic: float | None = None
+    last_failure_code: str | None = None
+    reducer_repair_handles: tuple[object, ...] = ()
     output_materialization_task: asyncio.Task[None] | None = None
     materialization_owner: object | None = None
     materialization_attempt_generation: int = 0

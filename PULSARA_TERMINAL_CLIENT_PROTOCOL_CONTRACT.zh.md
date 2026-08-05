@@ -175,7 +175,8 @@ payload_length bytes of TerminalFrame protobuf
 规则：
 
 - `payload_length == 0`非法；
-- 大于negotiated hard max时立即close；
+- 大于negotiated hard max时立即close；该max只计`TerminalFrame` deterministic Protobuf payload，不包含4-byte `uint32_be` header；
+- mutation pre-dispatch admission与physical writer必须共用同一个Protocol-owned deterministic payload marshal/bound helper；需要在分配真实operation前估算时，request ID必须使用exact `terminal-request:<64 hex>` UTF-8字节形状，不得使用更短probe或把framing header混入payload quote；
 - frame不得压缩；
 - decoder必须在分配payload buffer前验证上限；
 - partial read由transport owner聚合，不向application暴露；
@@ -752,6 +753,8 @@ PresentationHistoryRootIdentity
   presentation_policy_registry_contract_fingerprint
   audit_extractor_registry_contract_fingerprint
   root_identity_fingerprint
+
+`PresentationHistoryRootIdentity`使用closed generation matrix。Canonical genesis唯一允许`checkpoint_generation == projection_generation == 0`且`through_authority_sequence == presentation_source_segment_count == 0`；successor唯一允许`checkpoint_generation == projection_generation > 0`且`through_authority_sequence == presentation_source_segment_count > 0`。两类branch都必须携带完整contract、registry、checkpoint/root/source-prefix与root-identity fingerprint。zero/non-zero混合、checkpoint/projection generation漂移、through/count漂移或successor缺少source authority全部拒绝；generation 0是正式wire authority，不得被client以“未初始化”解释。Cursor、active head、root advance、stale/rebase与page result必须复用同一root validator，不能各自放宽。
 
 PresentationHistoryCursor
   root_identity: PresentationHistoryRootIdentity

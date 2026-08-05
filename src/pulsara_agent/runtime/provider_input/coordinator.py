@@ -465,10 +465,17 @@ class ProviderInputGenerationCoordinator:
             self._store.discard_staged_resident(preparation_id)
             self._retire_attempt(preparation_id)
 
-    def close_open_session_generations_sync(self) -> None:
+    def close_open_session_generations_sync(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[str, ...]:
         """Durably terminalize every open session/window generation at teardown."""
 
+        close_event_ids: list[str] = []
         for snapshot in self._store.open_session_continuity_snapshots():
+            if monotonic() >= deadline_monotonic:
+                raise TimeoutError("provider generation close deadline exceeded")
             core = snapshot.core_state
             attribution = snapshot.attribution_state
             if core is None or attribution is None:
@@ -480,7 +487,7 @@ class ProviderInputGenerationCoordinator:
                 )
             rows = self._runtime_session.event_log.read_raw_events_by_id(
                 (start_ref.event_id,),
-                deadline_monotonic=monotonic() + 30.0,
+                deadline_monotonic=deadline_monotonic,
             )
             if len(rows) != 1:
                 raise RuntimeError("provider generation ModelStart is unavailable")
@@ -497,11 +504,16 @@ class ProviderInputGenerationCoordinator:
                     reply_id=start.reply_id,
                 ),
             )
-            result = self._runtime_session.write_events_from_thread((close_event,))
+            result = self._runtime_session.write_events_from_thread(
+                (close_event,),
+                deadline_monotonic=deadline_monotonic,
+            )
             if tuple(item.id for item in result.committed_events) != (close_event.id,):
                 raise RuntimeError(
                     "provider generation session close was not committed"
                 )
+            close_event_ids.append(close_event.id)
+        return tuple(close_event_ids)
 
     def _register_attempt(
         self,

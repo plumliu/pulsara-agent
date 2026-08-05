@@ -14,9 +14,16 @@ import (
 
 func TestFramingRoundTripAndBound(t *testing.T) {
 	value := &protocol.OperationalSnapshotRequest{RequestId: "request:one", RuntimeSessionId: "runtime:one", RequestFingerprint: wireSHA('a')}
-	var buffer bytes.Buffer
-	if err := writeMessage(&buffer, value, 1024); err != nil {
+	payload, err := protocol.MarshalBoundedDeterministicPayload(value, 1024)
+	if err != nil {
 		t.Fatal(err)
+	}
+	var buffer bytes.Buffer
+	if err := writeMessage(&buffer, value, uint32(len(payload))); err != nil {
+		t.Fatal(err)
+	}
+	if buffer.Len() != len(payload)+4 {
+		t.Fatalf("physical framing changed payload accounting: got=%d want=%d", buffer.Len(), len(payload)+4)
 	}
 	result := &protocol.OperationalSnapshotRequest{}
 	if err := readMessage(&buffer, result, 1024); err != nil {
@@ -25,7 +32,7 @@ func TestFramingRoundTripAndBound(t *testing.T) {
 	if result.RequestId != value.RequestId || result.RuntimeSessionId != value.RuntimeSessionId {
 		t.Fatalf("round trip changed request: %#v", result)
 	}
-	if err := writeMessage(&bytes.Buffer{}, value, 1); err == nil {
+	if err := writeMessage(&bytes.Buffer{}, value, uint32(len(payload)-1)); err == nil {
 		t.Fatal("oversized frame was accepted")
 	}
 }

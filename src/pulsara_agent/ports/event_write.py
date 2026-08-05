@@ -7,7 +7,8 @@ import json
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Mapping
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.primitives.context import context_fingerprint
@@ -172,6 +173,196 @@ class EventWriteResult:
         )
 
 
+class CommittedSemanticFoldSettlement(StrEnum):
+    HEALTHY = "healthy"
+    REPAIR_OWNER_INSTALLED = "repair_owner_installed"
+
+
+class CommittedCheckpointHandoff(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    ACCEPTED = "accepted"
+
+
+class CommittedPublicationSettlement(StrEnum):
+    COMPLETED = "completed"
+    ENQUEUED = "enqueued"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedEventSettlementReceipt:
+    stored_batch_receipt_identity: str
+    requested_event_references: tuple[tuple[str, int, str], ...]
+    durability: Literal["full"]
+    semantic_fold: CommittedSemanticFoldSettlement
+    checkpoint_handoff: CommittedCheckpointHandoff
+    publication: CommittedPublicationSettlement
+    settlement_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.requested_event_references:
+            raise ValueError("committed event settlement cannot be empty")
+        expected = context_fingerprint(
+            "committed-event-settlement-receipt:v1",
+            {
+                "stored_batch_receipt_identity": self.stored_batch_receipt_identity,
+                "requested_event_references": self.requested_event_references,
+                "durability": self.durability,
+                "semantic_fold": self.semantic_fold.value,
+                "checkpoint_handoff": self.checkpoint_handoff.value,
+                "publication": self.publication.value,
+            },
+        )
+        if self.settlement_fingerprint != expected:
+            raise ValueError("committed event settlement fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeThreadEventSettlementReceipt:
+    committed_event: AgentEvent
+    settlement: CommittedEventSettlementReceipt
+
+    def __post_init__(self) -> None:
+        if self.committed_event.sequence is None:
+            raise ValueError("thread event settlement requires a committed event")
+        if not any(
+            event_id == self.committed_event.id
+            and sequence == self.committed_event.sequence
+            for event_id, sequence, _ in self.settlement.requested_event_references
+        ):
+            raise ValueError("thread event settlement does not own its event")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeThreadEventBatchSettlementReceipt:
+    """Typed thread-boundary receipt for one accepted event batch."""
+
+    committed_events: tuple[AgentEvent, ...]
+    settlement: CommittedEventSettlementReceipt
+
+    def __post_init__(self) -> None:
+        if not self.committed_events:
+            raise ValueError("thread event batch settlement cannot be empty")
+        expected = tuple(
+            (event.id, int(event.sequence or 0)) for event in self.committed_events
+        )
+        observed = tuple(
+            (event_id, sequence)
+            for event_id, sequence, _ in self.settlement.requested_event_references
+        )
+        if expected != observed:
+            raise ValueError(
+                "thread event batch settlement does not exactly own its events"
+            )
+
+
+def classify_committed_event_settlement(
+    result: EventWriteResult,
+    *,
+    requested_event_ids: Iterable[str],
+    required_reducer_ids: Iterable[str],
+    repair_owner_installed: Callable[[str, int], bool],
+    checkpoint_handoff_accepted: Callable[[str, int], bool],
+    checkpointed_reducer_ids: Iterable[str] = (),
+    require_publication: bool,
+) -> CommittedEventSettlementReceipt:
+    """Narrow the low-level multidimensional result at one central boundary."""
+
+    receipt = result.stored_batch_receipt
+    if result.commit_status != "committed" or receipt is None:
+        raise EventCommitError("event settlement lacks durable FULL receipt")
+    requested = tuple(requested_event_ids)
+    by_id = {event.id: event for event in result.committed_events}
+    if len(requested) != len(set(requested)) or any(item not in by_id for item in requested):
+        raise EventReconciliationRequired(
+            "event settlement requested identity is absent or ambiguous"
+        )
+    target = max(int(by_id[item].sequence or 0) for item in requested)
+    required = tuple(dict.fromkeys(required_reducer_ids))
+    failed = {
+        error.reducer_id for error in result.reducer_errors if error.reducer_id in required
+    }
+    repair_owned = False
+    for reducer_id in required:
+        if (
+            reducer_id not in failed
+            and (result.reducer_high_waters.get(reducer_id) or 0) >= target
+        ):
+            continue
+        if not repair_owner_installed(reducer_id, target):
+            raise EventReconciliationRequired(
+                f"committed reducer {reducer_id!r} lacks exact repair ownership"
+            )
+        repair_owned = True
+    checkpointed = tuple(dict.fromkeys(checkpointed_reducer_ids))
+    healthy_checkpointed = tuple(
+        reducer_id for reducer_id in checkpointed if reducer_id not in failed
+    )
+    if checkpointed and failed.intersection(checkpointed):
+        # A failed semantic fold is owned by the reducer-repair service.  There
+        # is no resulting semantic head that the checkpoint owner can accept
+        # yet, so checkpoint settlement is deliberately orthogonal and not
+        # applicable.  The repair receipt will hand its rebuilt head to the
+        # checkpoint owner after the semantic authority is installed.
+        checkpoint = CommittedCheckpointHandoff.NOT_APPLICABLE
+    elif healthy_checkpointed and all(
+        checkpoint_handoff_accepted(reducer_id, target)
+        for reducer_id in healthy_checkpointed
+    ):
+        checkpoint = CommittedCheckpointHandoff.ACCEPTED
+    elif healthy_checkpointed:
+        raise EventReconciliationRequired(
+            "committed checkpoint semantic head lacks maintenance ownership"
+        )
+    else:
+        checkpoint = CommittedCheckpointHandoff.NOT_APPLICABLE
+    publication = CommittedPublicationSettlement(result.publication_status)
+    if require_publication and (
+        publication is CommittedPublicationSettlement.UNAVAILABLE
+        or result.publication_errors
+    ):
+        raise EventPublicationAfterCommitError(result)
+    references = tuple(
+        (
+            event_id,
+            int(by_id[event_id].sequence or 0),
+            next(
+                envelope.envelope_fingerprint
+                for envelope in receipt.raw_stored_envelopes
+                if envelope.event_id == event_id
+            ),
+        )
+        for event_id in requested
+    )
+    payload = {
+        "stored_batch_receipt_identity": receipt.ordered_join_fingerprint,
+        "requested_event_references": references,
+        "durability": "full",
+        "semantic_fold": (
+            CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED.value
+            if repair_owned
+            else CommittedSemanticFoldSettlement.HEALTHY.value
+        ),
+        "checkpoint_handoff": checkpoint.value,
+        "publication": publication.value,
+    }
+    return CommittedEventSettlementReceipt(
+        stored_batch_receipt_identity=receipt.ordered_join_fingerprint,
+        requested_event_references=references,
+        durability="full",
+        semantic_fold=(
+            CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED
+            if repair_owned
+            else CommittedSemanticFoldSettlement.HEALTHY
+        ),
+        checkpoint_handoff=checkpoint,
+        publication=publication,
+        settlement_fingerprint=context_fingerprint(
+            "committed-event-settlement-receipt:v1", payload
+        ),
+    )
+
+
 def business_accounting_partition_fingerprint(
     *,
     receipt: StoredEventBatchCommitReceipt | None,
@@ -284,7 +475,11 @@ def event_batch_commit_outcome_from_error(
 
 
 __all__ = [
+    "CommittedCheckpointHandoff",
+    "CommittedEventSettlementReceipt",
+    "CommittedPublicationSettlement",
     "CommittedReducerError",
+    "CommittedSemanticFoldSettlement",
     "EventBatchCommitOutcome",
     "EventCommitError",
     "EventPublicationAfterCommitError",
@@ -295,6 +490,9 @@ __all__ = [
     "FrozenEventWriteCandidate",
     "PendingRuntimeEventWriteError",
     "RuntimeEventWriteCancelled",
+    "RuntimeThreadEventBatchSettlementReceipt",
+    "RuntimeThreadEventSettlementReceipt",
     "business_accounting_partition_fingerprint",
+    "classify_committed_event_settlement",
     "event_batch_commit_outcome_from_error",
 ]

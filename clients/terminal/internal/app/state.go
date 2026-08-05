@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/commandstate"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/components/composer"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/components/notification"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/components/transcript"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/interaction"
 	"github.com/plumliu/pulsara-agent/clients/terminal/internal/presentation"
@@ -49,7 +51,9 @@ type SnapshotLoadingPhase uint8
 const (
 	SnapshotLoadingUninitialized SnapshotLoadingPhase = iota + 1
 	SnapshotAwaitingDurableSnapshot
+	SnapshotDurableRetryBackoff
 	SnapshotAwaitingOperationalSnapshot
+	SnapshotOperationalRetryBackoff
 	SnapshotBaselinesInstalled
 )
 
@@ -80,9 +84,17 @@ func (s SnapshotLoadingState) Validate(appPhase AppPhase) error {
 		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.DurableOperationID == "" || s.DurableOperationGeneration == 0 || s.DurableSnapshotFingerprint != "" || s.OperationalOperationID != "" {
 			return errors.New("durable snapshot wait state is invalid")
 		}
+	case SnapshotDurableRetryBackoff:
+		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.DurableOperationID != "" || s.DurableOperationGeneration != 0 || s.OperationalOperationID != "" || s.OperationalOperationGeneration != 0 {
+			return errors.New("durable snapshot retry backoff is invalid")
+		}
 	case SnapshotAwaitingOperationalSnapshot:
 		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || !s.OperationalRequired || s.DurableSnapshotFingerprint == "" || s.DurableControlCursorFingerprint == "" || s.OperationalOperationID == "" || s.OperationalOperationGeneration == 0 || s.OperationalSnapshotFingerprint != "" {
 			return errors.New("operational snapshot wait state is invalid")
+		}
+	case SnapshotOperationalRetryBackoff:
+		if (appPhase != PhaseLoadingSnapshot && appPhase != PhaseReadOnly) || !s.OperationalRequired || s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.DurableSnapshotFingerprint == "" || s.DurableControlCursorFingerprint == "" || s.DurableOperationID != "" || s.DurableOperationGeneration != 0 || s.OperationalOperationID != "" || s.OperationalOperationGeneration != 0 {
+			return errors.New("operational snapshot retry backoff is invalid")
 		}
 	case SnapshotBaselinesInstalled:
 		// A Ready reconnect keeps the last confirmed baselines for display while
@@ -103,6 +115,48 @@ func (s SnapshotLoadingState) Validate(appPhase AppPhase) error {
 		}
 	default:
 		return errors.New("snapshot loading phase is unknown")
+	}
+	return nil
+}
+
+type SnapshotRetryKind uint8
+
+const (
+	SnapshotRetryNone SnapshotRetryKind = iota
+	SnapshotRetryDurable
+	SnapshotRetryOperational
+)
+
+type SnapshotRetryState struct {
+	Kind                        SnapshotRetryKind
+	AttachmentID                string
+	AttachmentGeneration        uint64
+	TransportBindingFingerprint string
+	FailureCount                uint8
+	RetryGeneration             uint64
+	Pending                     bool
+	FailureEvidenceFingerprint  string
+}
+
+func (s SnapshotRetryState) Validate(loading SnapshotLoadingState) error {
+	if s.Kind == SnapshotRetryNone {
+		if s.AttachmentID != "" || s.AttachmentGeneration != 0 || s.TransportBindingFingerprint != "" || s.FailureCount != 0 || s.RetryGeneration != 0 || s.Pending || s.FailureEvidenceFingerprint != "" {
+			return errors.New("idle snapshot retry owner retains authority")
+		}
+		return nil
+	}
+	if s.Kind != SnapshotRetryDurable && s.Kind != SnapshotRetryOperational {
+		return errors.New("snapshot retry kind is unknown")
+	}
+	if s.AttachmentID == "" || s.AttachmentGeneration == 0 || s.TransportBindingFingerprint == "" || s.FailureCount != 1 || s.RetryGeneration == 0 || s.FailureEvidenceFingerprint == "" {
+		return errors.New("snapshot retry owner is incomplete")
+	}
+	wantBackoff, wantInFlight := SnapshotDurableRetryBackoff, SnapshotAwaitingDurableSnapshot
+	if s.Kind == SnapshotRetryOperational {
+		wantBackoff, wantInFlight = SnapshotOperationalRetryBackoff, SnapshotAwaitingOperationalSnapshot
+	}
+	if (s.Pending && loading.Phase != wantBackoff) || (!s.Pending && loading.Phase != wantInFlight) {
+		return errors.New("snapshot retry owner/loading phase mismatch")
 	}
 	return nil
 }
@@ -160,8 +214,6 @@ type AttachmentState struct {
 	Identity protocolvalue.Attachment
 }
 
-type ComposerState struct{ Enabled bool }
-
 type ClientMouseMode uint8
 
 const (
@@ -169,11 +221,6 @@ const (
 	MouseCellMotion
 	MouseAllMotion
 )
-
-type LocalNotificationState struct {
-	Items   []string
-	Dropped uint64
-}
 
 type ClipboardOperationState struct {
 	Pending bool
@@ -779,20 +826,21 @@ type AppState struct {
 	connection          ConnectionState
 	attachment          AttachmentState
 	snapshotLoading     SnapshotLoadingState
+	snapshotRetry       SnapshotRetryState
 	durable             presentation.State
 	operational         presentation.OperationalState
 	control             presentation.ControlProjectionState
 	pageCache           presentation.PageCache
 	observation         ObservationLoopState
 	transcript          transcript.Model
-	composer            ComposerState
+	composer            composer.Model
 	commands            commandstate.Registry
 	interaction         interaction.State
 	queue               queue.State
 	secret              secret.State
 	layout              LayoutPlan
 	mouseMode           ClientMouseMode
-	localNotifications  LocalNotificationState
+	localNotifications  notification.Model
 	clipboard           ClipboardOperationState
 	teardown            TeardownState
 	publicFailure       PublicFailure
@@ -805,7 +853,7 @@ type AppState struct {
 }
 
 func NewInitialAppState(clientInstanceID string) AppState {
-	commands, commandErr := commandstate.NewDormantRegistry(commandstate.S1MaximumRecords)
+	commands, commandErr := commandstate.NewDormantRegistry(commandstate.MaximumRecords)
 	queueState, queueErr := queue.NewDormantState(queue.S1MaximumActiveItems)
 	layout, layoutErr := NewLayoutPlan(80, 24)
 	if commandErr != nil || queueErr != nil || layoutErr != nil {
@@ -817,8 +865,10 @@ func NewInitialAppState(clientInstanceID string) AppState {
 		snapshotLoading: SnapshotLoadingState{Phase: SnapshotLoadingUninitialized},
 		durable:         presentation.New(), operational: presentation.NewOperational(), control: presentation.NewControlProjection(),
 		pageCache: presentation.NewPageCache(), observation: ObservationLoopState{ViewportIntentGeneration: 1},
-		transcript: transcript.New(layout.Width, layout.TranscriptRows),
-		commands:   commands, interaction: interaction.NewDormantState(), queue: queueState, secret: secret.NewDormantState(),
+		transcript:         transcript.New(layout.Width, layout.TranscriptRows),
+		composer:           composer.NewDisabled(),
+		localNotifications: notification.New(),
+		commands:           commands, interaction: interaction.NewDormantState(), queue: queueState, secret: secret.NewDormantState(),
 		layout: layout, mouseMode: MouseCellMotion, teardown: NewIdleTeardownState(),
 	}
 }
@@ -833,13 +883,8 @@ func (s AppState) Validate() error {
 	if s.mouseMode < MouseDisabled || s.mouseMode > MouseAllMotion {
 		return errors.New("terminal client mouse mode is invalid")
 	}
-	if len(s.localNotifications.Items) > maximumLocalNotifications {
-		return errors.New("terminal local notification window exceeds its closed bound")
-	}
-	for _, notification := range s.localNotifications.Items {
-		if notification == "" || len(notification) > 256 {
-			return errors.New("terminal local notification is invalid")
-		}
+	if err := s.localNotifications.Validate(); err != nil {
+		return err
 	}
 	if err := s.clipboard.Validate(); err != nil {
 		return err
@@ -849,6 +894,15 @@ func (s AppState) Validate() error {
 	}
 	if err := s.snapshotLoading.Validate(s.phase); err != nil {
 		return err
+	}
+	if err := s.snapshotRetry.Validate(s.snapshotLoading); err != nil {
+		return err
+	}
+	if s.snapshotRetry.Kind != SnapshotRetryNone &&
+		(!s.attachment.Valid || s.snapshotRetry.AttachmentID != s.attachment.Identity.ID ||
+			s.snapshotRetry.AttachmentGeneration != s.attachment.Identity.Generation ||
+			s.snapshotRetry.TransportBindingFingerprint != s.attachment.Identity.BindingFingerprint) {
+		return errors.New("snapshot retry owner crosses attachment authority")
 	}
 	if err := s.connection.AttachmentChallenge.Validate(); err != nil {
 		return err
@@ -861,6 +915,12 @@ func (s AppState) Validate() error {
 	}
 	if err := s.transcript.Validate(); err != nil {
 		return err
+	}
+	if err := s.composer.Validate(); err != nil {
+		return err
+	}
+	if s.composer.Enabled() != (s.layout.ComposerRows > 0) {
+		return errors.New("terminal composer mutation ownership is not visible in the validated layout")
 	}
 	if s.transcript.Width() != s.layout.Width || s.transcript.Height() != s.layout.TranscriptRows {
 		return errors.New("terminal viewport geometry diverges from the validated layout")
@@ -930,7 +990,9 @@ func (s AppState) Validate() error {
 		if !s.attachment.Valid || !s.durable.Installed() || !s.transcript.Ready() || !s.operational.Installed() || !s.control.Installed() ||
 			(s.snapshotLoading.Phase != SnapshotBaselinesInstalled &&
 				s.snapshotLoading.Phase != SnapshotAwaitingDurableSnapshot &&
-				s.snapshotLoading.Phase != SnapshotAwaitingOperationalSnapshot) {
+				s.snapshotLoading.Phase != SnapshotDurableRetryBackoff &&
+				s.snapshotLoading.Phase != SnapshotAwaitingOperationalSnapshot &&
+				s.snapshotLoading.Phase != SnapshotOperationalRetryBackoff) {
 			return errors.New("read-only terminal state lacks preserved baselines")
 		}
 	}
@@ -981,4 +1043,22 @@ func (s AppState) LastHeartbeatGeneration() uint64 {
 }
 func (s AppState) ParentRelaunchRequested() (ParentRelaunchCause, bool) {
 	return s.parentRelaunchCause, s.parentRelaunch
+}
+
+func (s AppState) controllerGranted() bool {
+	return s.attachment.Valid && s.attachment.Identity.ControllerGranted()
+}
+
+func (s AppState) activeRunID() string {
+	if !s.control.Installed() {
+		return ""
+	}
+	view := s.control.Projection()
+	if view.ActiveRunID != "" {
+		return view.ActiveRunID
+	}
+	if view.StoppingRunID != "" {
+		return view.StoppingRunID
+	}
+	return view.SuspendedRunID
 }
