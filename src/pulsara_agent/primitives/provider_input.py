@@ -1038,23 +1038,6 @@ class ProviderOrderedTranscriptProjectionIdentityFact(FrozenFactBase):
 
 
 @_fact(
-    "context_input_manifest_projection_reference.v1",
-    "reference_fingerprint",
-    "context-input-manifest-projection-reference:v1",
-)
-class ContextInputManifestProjectionReferenceFact(FrozenFactBase):
-    schema_version: Literal["context_input_manifest_projection_reference.v1"] = (
-        "context_input_manifest_projection_reference.v1"
-    )
-    context_id: str = Field(min_length=1)
-    input_manifest_artifact_id: str = Field(min_length=1)
-    input_manifest_content_fingerprint: Fingerprint
-    input_manifest_fact_fingerprint: Fingerprint
-    projection_identity: ProviderOrderedTranscriptProjectionIdentityFact
-    reference_fingerprint: Fingerprint
-
-
-@_fact(
     "provider_input_unit_semantic.v3",
     "semantic_fingerprint",
     "provider-input-unit-semantic:v3",
@@ -1524,19 +1507,19 @@ class ProviderTranscriptDeltaCommitProofFact(FrozenFactBase):
 
 
 @_fact(
-    "resolved_provider_input_causal_physical_policy.v1",
+    "resolved_provider_input_causal_physical_policy.v2",
     "policy_fingerprint",
-    "resolved-provider-input-causal-physical-policy:v1",
+    "resolved-provider-input-causal-physical-policy:v2",
 )
 class ResolvedProviderInputCausalAndPhysicalPolicyFact(FrozenFactBase):
-    schema_version: Literal["resolved_provider_input_causal_physical_policy.v1"] = (
-        "resolved_provider_input_causal_physical_policy.v1"
+    schema_version: Literal["resolved_provider_input_causal_physical_policy.v2"] = (
+        "resolved_provider_input_causal_physical_policy.v2"
     )
     max_parallel_tool_calls_per_model_call: PositiveInt
     max_non_tool_transcript_units_per_operation: PositiveInt
     max_visible_causal_predecessors_per_unit: PositiveInt
-    max_projection_units_per_manifest: PositiveInt
-    max_projection_canonical_bytes_per_manifest: PositiveInt
+    max_ordered_projection_units: PositiveInt
+    max_ordered_projection_canonical_bytes: PositiveInt
     max_generation_root_units: PositiveInt
     max_initial_generation_units: PositiveInt
     max_transcript_delta_units_per_append: PositiveInt
@@ -1546,7 +1529,7 @@ class ResolvedProviderInputCausalAndPhysicalPolicyFact(FrozenFactBase):
     allow_multi_append_before_model_start: Literal[False] = False
     provider_input_vector_contract_fingerprint: Fingerprint
     terminal_projection_contract_fingerprint: Fingerprint
-    context_manifest_physical_policy_fingerprint: Fingerprint
+    ordered_projection_physical_policy_fingerprint: Fingerprint
     policy_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -1568,7 +1551,7 @@ class ResolvedProviderInputCausalAndPhysicalPolicyFact(FrozenFactBase):
             raise ValueError("provider append unit partition exceeds hard bound")
         if self.max_initial_generation_units < (
             self.max_generation_root_units
-            + self.max_projection_units_per_manifest
+            + self.max_ordered_projection_units
             + self.max_context_frame_units_per_append
         ):
             raise ValueError("provider initial-generation bound is infeasible")
@@ -1814,17 +1797,18 @@ class ProviderInputRolloverIntentFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_input_rollover_request.v1",
+    "provider_input_rollover_request.v2",
     "request_fingerprint",
-    "provider-input-rollover-request:v1",
+    "provider-input-rollover-request:v2",
 )
 class ProviderInputRolloverRequestFact(FrozenFactBase):
-    schema_version: Literal["provider_input_rollover_request.v1"] = (
-        "provider_input_rollover_request.v1"
+    schema_version: Literal["provider_input_rollover_request.v2"] = (
+        "provider_input_rollover_request.v2"
     )
     rollover_request_id: str = Field(min_length=1)
     intent: ProviderInputRolloverIntentFact
-    manifest_projection_reference: ContextInputManifestProjectionReferenceFact
+    semantic_commit_fingerprint: Fingerprint
+    ordered_projection_identity: ProviderOrderedTranscriptProjectionIdentityFact
     request_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -1832,7 +1816,7 @@ class ProviderInputRolloverRequestFact(FrozenFactBase):
         authority = self.intent.authority
         if (
             authority.ordered_projection_identity_fingerprint
-            != self.manifest_projection_reference.projection_identity.identity_fingerprint
+            != self.ordered_projection_identity.identity_fingerprint
         ):
             raise ValueError("provider rollover request projection join mismatch")
         return self
@@ -2390,21 +2374,64 @@ class ProviderInputPreparationOwnershipFact(FrozenFactBase):
 
 
 @_fact(
-    "provider_input_preparation_ownership_attribution.v2",
+    "provider_input_preparation_ownership_attribution.v4",
     "attribution_fingerprint",
-    "provider-input-preparation-ownership-attribution:v2",
+    "provider-input-preparation-ownership-attribution:v4",
 )
 class ProviderInputPreparationOwnershipAttributionFact(FrozenFactBase):
-    schema_version: Literal["provider_input_preparation_ownership_attribution.v2"] = (
-        "provider_input_preparation_ownership_attribution.v2"
+    schema_version: Literal["provider_input_preparation_ownership_attribution.v4"] = (
+        "provider_input_preparation_ownership_attribution.v4"
     )
     ownership: ProviderInputPreparationOwnershipFact
     context_compiled_event_ref: ContextEventReferenceFact
     prepared_candidate_fingerprint: Fingerprint
     prepared_plan_fingerprint: Fingerprint
-    manifest_projection_reference_fingerprint: Fingerprint
+    canonical_provider_input_plan_fingerprint: Fingerprint
+    semantic_commit_fingerprint: Fingerprint
+    ordered_projection_identity_fingerprint: Fingerprint
     rollover_request_fingerprint: Fingerprint | None
     attribution_fingerprint: Fingerprint
+
+
+@_fact(
+    "provider_input_preparation_install.v2",
+    "install_fingerprint",
+    "provider-input-preparation-install:v2",
+)
+class ProviderInputPreparationInstallFact(FrozenFactBase):
+    """Compact durable installation proof for a process-local candidate."""
+
+    schema_version: Literal["provider_input_preparation_install.v2"] = (
+        "provider_input_preparation_install.v2"
+    )
+    semantic_commit_fingerprint: Fingerprint
+    preparation_ownership: ProviderInputPreparationOwnershipFact
+    prepared_candidate_fingerprint: Fingerprint
+    prepared_plan_fingerprint: Fingerprint
+    canonical_provider_input_plan_fingerprint: Fingerprint
+    ordered_projection_identity_fingerprint: Fingerprint
+    generation_commit_guard: ProviderInputGenerationCommitGuardFact
+    rollover_request_fingerprint: Fingerprint | None
+    install_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _joins(self) -> "ProviderInputPreparationInstallFact":
+        owner = self.preparation_ownership
+        guard = self.generation_commit_guard
+        if (
+            owner.resolved_model_call_id != guard.resolved_model_call_id
+            or owner.ownership_fingerprint
+            != guard.expected_preparation_ownership_fingerprint
+            or owner.provider_input_plan_fingerprint
+            != self.canonical_provider_input_plan_fingerprint
+        ):
+            raise ValueError("provider input installation ownership/guard mismatch")
+        if isinstance(guard, RolloverGenerationCommitGuardFact):
+            if self.rollover_request_fingerprint != guard.rollover_request_fingerprint:
+                raise ValueError("provider input installation rollover mismatch")
+        elif self.rollover_request_fingerprint is not None:
+            raise ValueError("non-rollover installation carries a rollover request")
+        return self
 
 
 @_fact(
@@ -2593,22 +2620,23 @@ class PreparedProviderInputPlanFact(FrozenFactBase):
 
 
 @_fact(
-    "prepared_provider_input_append_candidate.v2",
+    "prepared_provider_input_append_candidate.v3",
     "candidate_fingerprint",
-    "prepared-provider-input-append-candidate:v2",
+    "prepared-provider-input-append-candidate:v3",
 )
 class PreparedProviderInputAppendCandidateFact(FrozenFactBase):
-    schema_version: Literal["prepared_provider_input_append_candidate.v2"] = (
-        "prepared_provider_input_append_candidate.v2"
+    schema_version: Literal["prepared_provider_input_append_candidate.v3"] = (
+        "prepared_provider_input_append_candidate.v3"
     )
-    candidate_kind: Literal["compiled_manifest", "one_shot"]
+    candidate_kind: Literal["compiled_context", "one_shot"]
     generation_id: str
     preparation_ownership: ProviderInputPreparationOwnershipFact
     expected_committed_core_state_fingerprint: Fingerprint | None
     append_batch_reference: ProviderInputAppendBatchReferenceFact
     provider_input_plan: CanonicalProviderInputPlanFact
     prepared_plan: PreparedProviderInputPlanFact | None
-    manifest_projection_reference: ContextInputManifestProjectionReferenceFact | None
+    semantic_commit_fingerprint: Fingerprint | None
+    ordered_projection_identity_fingerprint: Fingerprint | None
     rollover_request: ProviderInputRolloverRequestFact | None
     stable_companion_event_ids: tuple[str, ...]
     generation_commit_guard: ProviderInputGenerationCommitGuardFact
@@ -2632,27 +2660,33 @@ class PreparedProviderInputAppendCandidateFact(FrozenFactBase):
             or owner.stable_companion_event_ids != self.stable_companion_event_ids
         ):
             raise ValueError("prepared provider input candidate join mismatch")
-        if self.candidate_kind == "compiled_manifest":
-            if self.prepared_plan is None or self.manifest_projection_reference is None:
-                raise ValueError("compiled provider candidate requires manifest plan")
+        if self.candidate_kind == "compiled_context":
+            if (
+                self.prepared_plan is None
+                or self.semantic_commit_fingerprint is None
+                or self.ordered_projection_identity_fingerprint is None
+            ):
+                raise ValueError("compiled provider candidate requires semantic commit")
             prepared = self.prepared_plan
-            manifest = self.manifest_projection_reference
             if (
                 prepared.resolved_model_call_id
                 != plan.resolved_model_call_fact.resolved_model_call_id
                 or prepared.target_generation_id != self.generation_id
                 or prepared.resulting_unit_vector_root_fingerprint
                 != plan.unit_vector_root.reference_fingerprint
-                or prepared.ordered_transcript_projection_identity
-                != manifest.projection_identity
+                or prepared.ordered_transcript_projection_identity.identity_fingerprint
+                != self.ordered_projection_identity_fingerprint
             ):
-                raise ValueError("compiled provider candidate manifest join mismatch")
+                raise ValueError("compiled provider candidate semantic join mismatch")
             if (prepared.rollover_intent is None) != (self.rollover_request is None):
                 raise ValueError("compiled provider candidate rollover matrix mismatch")
             if self.rollover_request is not None:
                 if (
                     self.rollover_request.intent != prepared.rollover_intent
-                    or self.rollover_request.manifest_projection_reference != manifest
+                    or self.rollover_request.semantic_commit_fingerprint
+                    != self.semantic_commit_fingerprint
+                    or self.rollover_request.ordered_projection_identity.identity_fingerprint
+                    != self.ordered_projection_identity_fingerprint
                     or not isinstance(
                         self.generation_commit_guard,
                         RolloverGenerationCommitGuardFact,
@@ -2665,26 +2699,27 @@ class PreparedProviderInputAppendCandidateFact(FrozenFactBase):
             item is not None
             for item in (
                 self.prepared_plan,
-                self.manifest_projection_reference,
+                self.semantic_commit_fingerprint,
+                self.ordered_projection_identity_fingerprint,
                 self.rollover_request,
             )
         ):
             raise ValueError(
-                "one-shot provider candidate cannot carry context manifest"
+                "one-shot provider candidate cannot carry compiled context authority"
             )
         return self
 
 
 @_fact(
-    "committed_provider_input_reference.v2",
+    "committed_provider_input_reference.v3",
     "reference_fingerprint",
-    "committed-provider-input-reference:v2",
+    "committed-provider-input-reference:v3",
 )
 class CommittedProviderInputReferenceFact(FrozenFactBase):
-    schema_version: Literal["committed_provider_input_reference.v2"] = (
-        "committed_provider_input_reference.v2"
+    schema_version: Literal["committed_provider_input_reference.v3"] = (
+        "committed_provider_input_reference.v3"
     )
-    reference_kind: Literal["compiled_manifest", "one_shot"]
+    reference_kind: Literal["compiled_context", "one_shot"]
     generation_id: str
     committed_generation_revision: int = Field(ge=1)
     resulting_generation_core_state_fingerprint: Fingerprint
@@ -2694,16 +2729,19 @@ class CommittedProviderInputReferenceFact(FrozenFactBase):
     authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
     replay_binding_set: ProviderInputReplayBindingSetReferenceFact
     provider_input_plan_fingerprint: Fingerprint
-    manifest_projection_reference_fingerprint: Fingerprint | None
+    semantic_commit_fingerprint: Fingerprint | None
+    ordered_projection_identity_fingerprint: Fingerprint | None
     causal_validation_fingerprint: Fingerprint | None
     transcript_frontier_fingerprint: Fingerprint | None
     reference_fingerprint: Fingerprint
 
     @model_validator(mode="after")
     def _carrier_matrix(self) -> "CommittedProviderInputReferenceFact":
-        compiled = self.reference_kind == "compiled_manifest"
-        if compiled != (self.manifest_projection_reference_fingerprint is not None):
-            raise ValueError("provider input reference manifest matrix mismatch")
+        compiled = self.reference_kind == "compiled_context"
+        if compiled != (self.semantic_commit_fingerprint is not None):
+            raise ValueError("provider input reference semantic commit matrix mismatch")
+        if compiled != (self.ordered_projection_identity_fingerprint is not None):
+            raise ValueError("provider input reference projection matrix mismatch")
         if compiled != (self.causal_validation_fingerprint is not None):
             raise ValueError("provider input reference validation matrix mismatch")
         if compiled != (self.transcript_frontier_fingerprint is not None):
@@ -2714,6 +2752,7 @@ class CommittedProviderInputReferenceFact(FrozenFactBase):
 ProviderInputUnitVectorNodeReferenceFact.model_rebuild()
 ProviderMessageFragmentFact.model_rebuild()
 ProviderInputToolResultBlockFact.model_rebuild()
+ProviderInputPreparationInstallFact.model_rebuild()
 
 
 __all__ = [

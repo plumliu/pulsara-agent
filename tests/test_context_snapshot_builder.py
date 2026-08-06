@@ -30,16 +30,10 @@ from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.primitives.capability import (
     build_capability_execution_surface_identity,
 )
-from pulsara_agent.primitives.context import (
-    ContextCompileInputManifestFact,
-    context_fingerprint,
-)
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.runtime.context_input.live import (
     _advance_sparse_relevant_through_sequence,
     collect_live_context_inputs,
-)
-from pulsara_agent.runtime.context_input.snapshot import (
-    build_context_snapshot,
 )
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
 from pulsara_agent.primitives.permission import PermissionMode
@@ -455,7 +449,7 @@ def test_raw_suspended_token_is_not_a_snapshot_build_field() -> None:
     assert "suspended_state_token" not in ContextSnapshotBuildInput.model_fields
 
 
-def test_manifest_semantic_fingerprint_excludes_checkpoint_acceleration(
+def test_compact_commit_excludes_checkpoint_acceleration_carrier(
     tmp_path, monkeypatch
 ) -> None:
     kwargs, runtime_session = asyncio.run(
@@ -472,33 +466,14 @@ def test_manifest_semantic_fingerprint_excludes_checkpoint_acceleration(
             "subagent-graph-acceleration:v1", acceleration_payload
         ),
     )
-    changed_input = original_input.model_copy(
-        update={"subagent_graph_acceleration": changed_acceleration}
-    )
     compiled = next(
         event
         for event in reversed(runtime_session.event_log.iter())
         if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
     )
-    assert compiled.input_audit is not None
-    manifest = ContextCompileInputManifestFact.model_validate_json(
-        runtime_session.archive.get_text(
-            compiled.input_audit.input_manifest_artifact_id,
-            session_id=runtime_session.runtime_session_id,
-        )
+    assert compiled.semantic_commit is not None
+    payload = compiled.semantic_commit.model_dump(mode="json")
+    assert "subagent_graph_acceleration" not in payload
+    assert changed_acceleration.acceleration_fingerprint != (
+        original_input.subagent_graph_acceleration.acceleration_fingerprint
     )
-    attribution = manifest.snapshot.long_horizon_attribution
-
-    original = build_context_snapshot(
-        original_input,
-        long_horizon_attribution=attribution,
-    )
-    changed = build_context_snapshot(
-        changed_input,
-        long_horizon_attribution=attribution,
-    )
-
-    assert original.snapshot_semantic_fingerprint == (
-        changed.snapshot_semantic_fingerprint
-    )
-    assert original.snapshot_fact_fingerprint != changed.snapshot_fact_fingerprint

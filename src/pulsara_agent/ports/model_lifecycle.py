@@ -62,6 +62,7 @@ class PreparedProviderInputStartBundlePort(Protocol):
     companion_events: tuple[Any, ...]
     append_semantic_fingerprint: str
     autonomy_delivery: Any
+    prepared_context_input_audit_source_basis: Any
 
     @property
     def resulting_core_state(self) -> Any: ...
@@ -76,6 +77,8 @@ class ModelLifecycleRuntimeGateway(Protocol):
     provider_input_generation_coordinator: Any
     long_horizon_state_store: Any
     event_log: Any
+    archive: Any
+    context_input_io_service: Any
 
     def resolve_run_rollout_binding(self, *, run_id: str) -> Any: ...
 

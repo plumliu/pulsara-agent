@@ -1,0 +1,7 @@
+{
+  "fixture_id": "context-input-flat-manifest-overflow-2026-08-sanitized-v1",
+  "legacy_flat_manifest_canonical_bytes": 1065543,
+  "legacy_flat_manifest_limit_bytes": 1048576,
+  "provider_estimated_tokens": 56000,
+  "expected_outcome": "provider_admitted_audit_optional"
+}

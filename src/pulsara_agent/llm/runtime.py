@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from time import monotonic_ns
+from time import monotonic, monotonic_ns
 from typing import Literal
 from uuid import uuid4
 
@@ -401,6 +401,56 @@ class LLMRuntime:
                         MODEL_STREAM_SEGMENT_POLICY.contract_fingerprint
                     ),
                 )
+                audit_source = (
+                    provider_input_start.prepared_context_input_audit_source_basis
+                    if provider_input_start is not None
+                    else None
+                )
+                if audit_source is not None:
+                    try:
+                        from pulsara_agent.runtime.context_input.audit_materializer import (
+                            AUDIT_OPERATION_DEADLINE_SECONDS,
+                            MAX_PREPARED_AUDIT_SOURCE_RESIDENT_CHARGE,
+                            PreparedContextInputAuditSourceCapture,
+                            bind_context_input_audit_capture_materialization,
+                            materialize_captured_context_input_audit,
+                        )
+                        from pulsara_agent.runtime.context_input.audit_storage import (
+                            ContextInputAuditArtifactRepository,
+                        )
+
+                        if not isinstance(
+                            audit_source, PreparedContextInputAuditSourceCapture
+                        ):
+                            raise TypeError("provider audit source has invalid owner")
+                        audit_deadline = monotonic() + AUDIT_OPERATION_DEADLINE_SECONDS
+                        audit_repository = ContextInputAuditArtifactRepository(
+                            runtime_session.archive
+                        )
+                        capture_materialization = (
+                            bind_context_input_audit_capture_materialization(
+                                source_capture=audit_source,
+                                runtime_session_id=(runtime_session.runtime_session_id),
+                                committed_start_batch=stored_start_batch,
+                            )
+                        )
+                        runtime_session.context_input_io_service.offer_best_effort_nowait(
+                            operation_name="context-input-audit-materialize",
+                            operation=lambda: materialize_captured_context_input_audit(
+                                capture_materialization=capture_materialization,
+                                repository=audit_repository,
+                                deadline_monotonic=audit_deadline,
+                            ),
+                            deadline_monotonic=audit_deadline,
+                            resident_charge_bytes=(
+                                MAX_PREPARED_AUDIT_SOURCE_RESIDENT_CHARGE
+                            ),
+                        )
+                    except Exception:
+                        # Audit materialization is deliberately outside model
+                        # admission. Its typed loader can later reconstruct or
+                        # report unavailability from canonical authorities.
+                        pass
             except BaseException as exc:
                 if runtime_session.reconciliation_required:
                     return reconciliation_blocked(

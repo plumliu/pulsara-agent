@@ -1142,9 +1142,7 @@ def test_terminal_completion_durable_full_with_repair_owner_is_not_replayed(
                 stored_batch_receipt_identity=f"test-batch:{committed.id}",
                 requested_event_references=references,
                 durability="full",
-                semantic_fold=(
-                    CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED
-                ),
+                semantic_fold=(CommittedSemanticFoldSettlement.REPAIR_OWNER_INSTALLED),
                 checkpoint_handoff=CommittedCheckpointHandoff.NOT_APPLICABLE,
                 publication=CommittedPublicationSettlement.COMPLETED,
                 settlement_fingerprint=context_fingerprint(

@@ -230,6 +230,111 @@ def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> 
     }
 
 
+def test_cli_context_input_audit_doctor_is_read_only_and_exact(monkeypatch) -> None:
+    _install_checkpoint_access(monkeypatch)
+    args = cli.build_parser().parse_args(
+        [
+            "checkpoint",
+            "doctor",
+            "runtime:audit:cli",
+            "--domain",
+            "context_input_audit",
+            "--require-exact-audit",
+            "--max-events",
+            "41",
+            "--max-payload-bytes",
+            "8192",
+        ]
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "_settings_from_inspect_args",
+        lambda _args: SimpleNamespace(
+            storage=SimpleNamespace(postgres_dsn="postgresql://checkpoint-test")
+        ),
+    )
+    monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: "event-log")
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: "archive")
+    monkeypatch.setattr(
+        cli,
+        "PostgresCheckpointMaintenanceAuthority",
+        lambda _provider: "maintenance-authority",
+    )
+
+    def doctor(**kwargs):
+        captured.update(kwargs)
+        return _CheckpointReport({"exact_count": 1})
+
+    monkeypatch.setattr(cli, "inspect_context_input_audits", doctor)
+
+    assert cli._checkpoint_command(args) == {"exact_count": 1}  # noqa: SLF001
+    assert captured == {
+        "runtime_session_id": "runtime:audit:cli",
+        "event_log": "event-log",
+        "artifact_store": "archive",
+        "require_exact_audit": True,
+        "through_sequence": None,
+        "max_events": 41,
+        "max_payload_bytes": 8192,
+        "operation_timeout_seconds": 120.0,
+    }
+
+
+def test_cli_context_input_audit_gc_uses_closed_session_maintenance(
+    monkeypatch,
+) -> None:
+    _install_checkpoint_access(monkeypatch)
+    args = cli.build_parser().parse_args(
+        [
+            "checkpoint",
+            "gc",
+            "runtime:audit:cli",
+            "--domain",
+            "context_input_audit",
+            "--through-sequence",
+            "73",
+            "--apply",
+        ]
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "_settings_from_inspect_args",
+        lambda _args: SimpleNamespace(
+            storage=SimpleNamespace(postgres_dsn="postgresql://checkpoint-test")
+        ),
+    )
+    monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: "event-log")
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _provider: "archive")
+    monkeypatch.setattr(
+        cli,
+        "PostgresCheckpointMaintenanceAuthority",
+        lambda _provider: "maintenance-authority",
+    )
+
+    def gc(**kwargs):
+        captured.update(kwargs)
+        return _CheckpointReport({"deleted_artifact_ids": []})
+
+    monkeypatch.setattr(cli, "garbage_collect_incomplete_context_input_audits", gc)
+
+    assert cli._checkpoint_command(args) == {  # noqa: SLF001
+        "deleted_artifact_ids": []
+    }
+    assert captured["runtime_session_id"] == "runtime:audit:cli"
+    assert captured["event_log"] == "event-log"
+    assert captured["archive"] == "archive"
+    assert captured["maintenance_authority"] == "maintenance-authority"
+    assert captured["dry_run"] is False
+    assert captured["through_sequence"] == 73
+    eligibility = captured["eligibility"]
+    assert eligibility.runtime_session_id == "runtime:audit:cli"
+    assert eligibility.session_close_confirmed
+    assert eligibility.run_owners_drained
+    assert eligibility.context_input_io_drained
+
+
 class FakeSession:
     host_session_id = "host:fake"
     runtime_session_id = "runtime:fake"

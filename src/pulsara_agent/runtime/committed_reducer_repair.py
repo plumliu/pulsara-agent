@@ -38,9 +38,7 @@ class CommittedReducerRepairPlan:
             "committed-reducer-repair-plan:v1",
             {
                 "reducer_id": self.reducer_id,
-                "failed_registration_high_water": (
-                    self.failed_registration_high_water
-                ),
+                "failed_registration_high_water": (self.failed_registration_high_water),
                 "target_ledger_high_water": self.target_ledger_high_water,
                 "last_error_code": self.last_error_code,
                 "recovery_base_identity": self.recovery_base_identity,
@@ -115,9 +113,7 @@ class CommittedReducerRepairService:
         # Keep a tiny receipt tombstone window so a waiter that captured the
         # prior handle can still observe its compatible winner while the
         # reducer's current slot advances to the new stable plan.
-        self._retired_receipts: dict[
-            str, dict[str, CommittedReducerRepairReceipt]
-        ] = {}
+        self._retired_receipts: dict[str, dict[str, CommittedReducerRepairReceipt]] = {}
         self._accepting = True
 
     def bind_running_loop(self) -> None:
@@ -125,9 +121,7 @@ class CommittedReducerRepairService:
         with self._lock:
             if self._loop is not None and self._loop is not loop:
                 if not self._loop.is_closed():
-                    raise RuntimeError(
-                        "committed reducer repair loop identity changed"
-                    )
+                    raise RuntimeError("committed reducer repair loop identity changed")
                 for attempt in self._attempts.values():
                     task = attempt.task
                     if task is not None and not task.done():
@@ -191,8 +185,7 @@ class CommittedReducerRepairService:
                     and existing.receipt is not None
                     and failed_registration_high_water
                     >= existing.plan.target_ledger_high_water
-                    and target_ledger_high_water
-                    > failed_registration_high_water
+                    and target_ledger_high_water > failed_registration_high_water
                 ):
                     self._retire_receipt_locked(existing)
                     existing = None
@@ -242,9 +235,7 @@ class CommittedReducerRepairService:
         )
         attempt.task.add_done_callback(_consume_task_exception)
 
-    async def _run_attempt(
-        self, attempt: _Attempt
-    ) -> CommittedReducerRepairReceipt:
+    async def _run_attempt(self, attempt: _Attempt) -> CommittedReducerRepairReceipt:
         deadline = attempt.deadline_monotonic
         while True:
             with self._lock:
@@ -268,9 +259,7 @@ class CommittedReducerRepairService:
                 # physical repair.  Shielding prevents loop/task cancellation
                 # from cancelling a queued executor operation.  A successor
                 # event loop wraps and joins the exact same future.
-                receipt = await asyncio.shield(
-                    asyncio.wrap_future(physical)
-                )
+                receipt = await asyncio.shield(asyncio.wrap_future(physical))
             except asyncio.CancelledError:
                 # Event-loop teardown only detaches this driver.  The executor
                 # future remains installed on the attempt and is rejoined by
@@ -330,7 +319,10 @@ class CommittedReducerRepairService:
     ) -> CommittedReducerRepairHandle | None:
         with self._lock:
             attempt = self._attempts.get(reducer_id)
-            if attempt is None or attempt.plan.target_ledger_high_water < target_through_sequence:
+            if (
+                attempt is None
+                or attempt.plan.target_ledger_high_water < target_through_sequence
+            ):
                 return None
             return CommittedReducerRepairHandle(
                 reducer_id=reducer_id,
@@ -351,9 +343,9 @@ class CommittedReducerRepairService:
                 attempt is None
                 or attempt.plan.plan_fingerprint != handle.plan_fingerprint
             ):
-                receipt = self._retired_receipts.get(
-                    handle.reducer_id, {}
-                ).get(handle.plan_fingerprint)
+                receipt = self._retired_receipts.get(handle.reducer_id, {}).get(
+                    handle.plan_fingerprint
+                )
                 if (
                     receipt is None
                     or receipt.repaired_through_sequence
@@ -381,9 +373,7 @@ class CommittedReducerRepairService:
         receipt = attempt.receipt
         if receipt is None:
             raise RuntimeError("repaired reducer attempt lacks its receipt")
-        receipts = self._retired_receipts.setdefault(
-            attempt.plan.reducer_id, {}
-        )
+        receipts = self._retired_receipts.setdefault(attempt.plan.reducer_id, {})
         receipts[attempt.plan.plan_fingerprint] = receipt
         # Process-local recovery history is acceleration only.  Two completed
         # winners cover a waiter spanning one subsequent independent failure
@@ -434,8 +424,7 @@ class CommittedReducerRepairService:
             if any(
                 (item.task is not None and not item.task.done())
                 or (
-                    item.physical_future is not None
-                    and not item.physical_future.done()
+                    item.physical_future is not None and not item.physical_future.done()
                 )
                 for item in self._attempts.values()
             ):
@@ -456,9 +445,7 @@ def build_committed_reducer_repair_receipt(
         "plan_fingerprint": plan.plan_fingerprint,
         "reducer_id": plan.reducer_id,
         "repaired_through_sequence": plan.target_ledger_high_water,
-        "resulting_semantic_state_fingerprint": (
-            resulting_semantic_state_fingerprint
-        ),
+        "resulting_semantic_state_fingerprint": (resulting_semantic_state_fingerprint),
     }
     return CommittedReducerRepairReceipt(
         **payload,

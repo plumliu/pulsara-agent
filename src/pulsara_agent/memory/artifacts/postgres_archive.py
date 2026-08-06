@@ -25,6 +25,7 @@ from pulsara_agent.storage.postgres_connection_provider import (
     VerifiedPostgresConnectionProviderProtocol,
     postgres_operation_deadline,
 )
+from pulsara_agent.storage.postgres_endpoint import PostgresPhysicalOperationControl
 
 
 @dataclass(slots=True)
@@ -353,6 +354,13 @@ class PostgresArtifactStore:
             "select set_config('statement_timeout', %s, true)",
             (f"{remaining_ms}ms",),
         )
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("artifact database deadline exceeded during statement")
+
+    @staticmethod
+    def _require_deadline_remaining(deadline_monotonic: float | None) -> None:
+        if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+            raise TimeoutError("artifact database absolute deadline exceeded")
 
     def get_bytes(self, blob_id: str, *, session_id: str | None = None) -> bytes:
         with self._connect(None) as connection:
@@ -372,36 +380,85 @@ class PostgresArtifactStore:
         digest: str,
         media_type: str,
         semantic_metadata_fingerprint: str,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         """Delete one cache artifact only when every durable identity matches."""
 
-        with self._connect(None) as connection:
-            with connection.cursor() as cursor:
-                self._lock_artifact(cursor, blob_id)
-                cursor.execute(
-                    """
-                    select id, session_id, media_type, digest, metadata
-                    from artifacts
-                    where id = %s
-                    for update
-                    """,
-                    (blob_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    return False
-                if (
-                    row["session_id"] != session_id
-                    or row["digest"] != digest
-                    or row["media_type"] != media_type
-                    or (row["metadata"] or {}).get("semantic_metadata_fingerprint")
-                    != semantic_metadata_fingerprint
-                ):
-                    raise ArtifactContentConflict(
-                        f"artifact {blob_id!r} maintenance identity mismatch"
+        operation_control = (
+            PostgresPhysicalOperationControl(deadline_monotonic=deadline_monotonic)
+            if deadline_monotonic is not None
+            else None
+        )
+        try:
+            if operation_control is not None:
+                operation_control.arm()
+            with self._connect(deadline_monotonic) as connection:
+                if operation_control is not None:
+                    operation_control.bind(connection)
+                with connection.cursor() as cursor:
+                    self._apply_statement_deadline(cursor, deadline_monotonic)
+                    self._lock_artifact(cursor, blob_id)
+                    self._require_deadline_remaining(deadline_monotonic)
+                    self._apply_statement_deadline(cursor, deadline_monotonic)
+                    cursor.execute(
+                        """
+                        select id, session_id, media_type, digest, metadata
+                        from artifacts
+                        where id = %s
+                        for update
+                        """,
+                        (blob_id,),
                     )
-                cursor.execute("delete from artifacts where id = %s", (blob_id,))
-                return cursor.rowcount == 1
+                    self._require_deadline_remaining(deadline_monotonic)
+                    row = cursor.fetchone()
+                    deleted = False
+                    if row is not None:
+                        if (
+                            row["session_id"] != session_id
+                            or row["digest"] != digest
+                            or row["media_type"] != media_type
+                            or (row["metadata"] or {}).get(
+                                "semantic_metadata_fingerprint"
+                            )
+                            != semantic_metadata_fingerprint
+                        ):
+                            raise ArtifactContentConflict(
+                                f"artifact {blob_id!r} maintenance identity mismatch"
+                            )
+                        self._apply_statement_deadline(cursor, deadline_monotonic)
+                        cursor.execute(
+                            "delete from artifacts where id = %s", (blob_id,)
+                        )
+                        self._require_deadline_remaining(deadline_monotonic)
+                        deleted = cursor.rowcount == 1
+                    # The provider normally commits after the borrowed context
+                    # exits.  Delete owns an absolute deadline, so refresh the
+                    # transaction-local timeout immediately before an explicit
+                    # COMMIT while the physical cancel owner remains armed.
+                    self._apply_statement_deadline(cursor, deadline_monotonic)
+                connection.commit()
+                self._require_deadline_remaining(deadline_monotonic)
+                return deleted
+        except Exception as exc:
+            deadline_expired = (
+                deadline_monotonic is not None and monotonic() >= deadline_monotonic
+            )
+            physically_cancelled = (
+                operation_control is not None and operation_control.cancelled
+            )
+            if deadline_monotonic is not None and (
+                deadline_expired
+                or physically_cancelled
+                or isinstance(exc, TimeoutError)
+                or isinstance(exc, psycopg.errors.QueryCanceled)
+            ):
+                raise TimeoutError(
+                    "artifact deletion absolute deadline exceeded"
+                ) from exc
+            raise
+        finally:
+            if operation_control is not None:
+                operation_control.finish()
 
     def _lock_artifact(self, cursor, blob_id: str) -> None:
         cursor.execute(

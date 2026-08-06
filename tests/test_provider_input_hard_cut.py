@@ -323,15 +323,19 @@ def _distinct_ordered_projections(compiled):
     return tuple(by_identity.values())
 
 
-def test_manifest_failure_retires_pre_start_provider_preparation(
+def test_compact_install_failure_retires_pre_start_provider_preparation(
     tmp_path, monkeypatch
 ) -> None:
     import pulsara_agent.runtime.agent as agent_module
 
-    def reject_manifest(*args, **kwargs):
-        raise RuntimeError("synthetic manifest construction failure")
+    def reject_install(*args, **kwargs):
+        raise RuntimeError("synthetic compact installation failure")
 
-    monkeypatch.setattr(agent_module, "build_context_input_manifest", reject_manifest)
+    monkeypatch.setattr(
+        agent_module,
+        "build_provider_input_preparation_install",
+        reject_install,
+    )
     runtime_session = in_memory_runtime_session(tmp_path)
     agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
@@ -1243,23 +1247,18 @@ def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -
     second = asyncio.run(run_agent_task(agent, "survive failed memory projection"))
 
     assert first.status is second.status is LoopStatus.FINISHED
-    compiled = tuple(
-        event
-        for event in runtime_session.event_log.iter()
-        if isinstance(event, ContextCompiledEvent)
-    )[-1]
-    disposition = next(
-        item
-        for item in compiled.prepared_provider_input.prepared_plan.source_dispositions
-        if item.source_id is ContextSourceId.MEMORY_PROJECTION
-    )
-    assert disposition.disposition == "retain"
-    assert disposition.reason == "projection_failed"
     append = tuple(
         event
         for event in runtime_session.event_log.iter()
         if isinstance(event, ProviderInputAppendCommittedEvent)
     )[-1]
+    disposition = next(
+        item
+        for item in append.source_dispositions
+        if item.source_id is ContextSourceId.MEMORY_PROJECTION
+    )
+    assert disposition.disposition == "retain"
+    assert disposition.reason == "projection_failed"
     assert disposition in append.source_dispositions
     assert (
         sum(

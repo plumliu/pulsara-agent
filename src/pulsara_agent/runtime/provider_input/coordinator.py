@@ -5,7 +5,7 @@ from __future__ import annotations
 from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 from time import monotonic
 
@@ -26,7 +26,6 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.provider_input import (
     CommittedProviderInputReferenceFact,
-    ContextInputManifestProjectionReferenceFact,
     OneShotGenerationScopeFact,
 )
 from pulsara_agent.runtime.context_engine.types import CompiledContext
@@ -150,7 +149,7 @@ class ProviderInputGenerationCoordinator:
                     )
                     if not isinstance(prepared, PreparedProviderInputPlanningBundle):
                         raise ProviderInputPreparationStale(
-                            "pre-manifest provider planner published a start candidate"
+                            "pre-commit provider planner published a start candidate"
                         )
                     break
                 except ProviderInputResidentRestoreRequired as exc:
@@ -215,10 +214,10 @@ class ProviderInputGenerationCoordinator:
         prepared_context_input: PreparedLiveContextSnapshot,
         event_context: EventContext,
         planning_bundle: PreparedProviderInputPlanningBundle,
-        manifest_projection_reference: ContextInputManifestProjectionReferenceFact,
+        semantic_commit_fingerprint: str,
         deadline_monotonic: float | None = None,
     ) -> PreparedProviderInputStartBundle:
-        """Create the sole preparation owner after the manifest is confirmed FULL."""
+        """Create the sole preparation owner after semantic commit validation."""
 
         deadline = deadline_monotonic or monotonic() + 30.0
         scope = build_session_provider_input_continuity_scope(
@@ -263,11 +262,11 @@ class ProviderInputGenerationCoordinator:
                 rollover_from=rollover_from,
                 rollover_intent=rollover_intent,
                 pending_continuation_materialization=pending_materialization,
-                manifest_projection_reference=manifest_projection_reference,
+                semantic_commit_fingerprint=semantic_commit_fingerprint,
             )
             if not isinstance(finalized, PreparedProviderInputStartBundle):
                 raise ProviderInputPreparationStale(
-                    "post-manifest provider planner did not produce a start candidate"
+                    "post-commit provider planner did not produce a start candidate"
                 )
             if (
                 finalized.prepared_plan != planning_bundle.prepared_plan
@@ -276,7 +275,7 @@ class ProviderInputGenerationCoordinator:
                 or finalized.artifacts != planning_bundle.artifacts
             ):
                 raise ProviderInputPreparationStale(
-                    "provider generation changed between manifest and finalization"
+                    "provider generation changed between planning and finalization"
                 )
             finalized = _bind_bundle_to_write_boundary(
                 runtime_session=self._runtime_session,
@@ -295,8 +294,12 @@ class ProviderInputGenerationCoordinator:
                 or current.preparation_attribution != snapshot.preparation_attribution
             ):
                 raise ProviderInputPreparationStale(
-                    "provider generation changed during post-manifest confirmation"
+                    "provider generation changed during post-commit confirmation"
                 )
+            self._store.stage_prepared_resident(
+                finalized.prepared_candidate,
+                finalized.resident,
+            )
             self._register_attempt(finalized, run_id=event_context.run_id)
             return finalized
 
@@ -380,14 +383,48 @@ class ProviderInputGenerationCoordinator:
             if attempt.activated:
                 return
             if bundle.is_one_shot:
-                self._store.stage_ephemeral_preparation(owner, bundle.resident)
+                self._store.stage_ephemeral_preparation(
+                    bundle.prepared_candidate,
+                    bundle.resident,
+                )
             else:
                 if self._store.preparation_snapshot(owner.preparation_id) is None:
                     raise ProviderInputPreparationStale(
                         "compiled provider preparation is not durably attributed"
                     )
-                self._store.stage_prepared_resident(owner, bundle.resident)
+                self._store.stage_prepared_resident(
+                    bundle.prepared_candidate,
+                    bundle.resident,
+                )
             attempt.activated = True
+
+    def bind_optional_context_audit_source(
+        self,
+        bundle: PreparedProviderInputStartBundle,
+        *,
+        source_basis: object,
+    ) -> PreparedProviderInputStartBundle:
+        """Attach process-local audit detail without changing durable authority.
+
+        Finalization installs the preparation attempt before the optional audit
+        source can be assembled.  This owner-scoped rebind keeps the exact
+        bundle identity used by later activation while leaving every durable
+        candidate and companion event unchanged.
+        """
+
+        owner = bundle.prepared_candidate.preparation_ownership
+        with self._attempt_lock:
+            attempt = self._attempts.get(owner.preparation_id)
+            if attempt is None or attempt.bundle != bundle or attempt.activated:
+                raise ProviderInputPreparationStale(
+                    "optional context audit source cannot rebind this preparation"
+                )
+            rebound = replace(
+                bundle,
+                prepared_context_input_audit_source_basis=source_basis,
+            )
+            attempt.bundle = rebound
+            return rebound
 
     @property
     def owned_preparation_count(self) -> int:
@@ -698,7 +735,7 @@ def _bind_bundle_to_write_boundary(
     source = bundle.committed_reference
     reference = build_frozen_fact(
         CommittedProviderInputReferenceFact,
-        schema_version="committed_provider_input_reference.v2",
+        schema_version="committed_provider_input_reference.v3",
         reference_kind=source.reference_kind,
         generation_id=source.generation_id,
         committed_generation_revision=source.committed_generation_revision,
@@ -714,8 +751,9 @@ def _bind_bundle_to_write_boundary(
         authority_horizon_set=source.authority_horizon_set,
         replay_binding_set=source.replay_binding_set,
         provider_input_plan_fingerprint=source.provider_input_plan_fingerprint,
-        manifest_projection_reference_fingerprint=(
-            source.manifest_projection_reference_fingerprint
+        semantic_commit_fingerprint=source.semantic_commit_fingerprint,
+        ordered_projection_identity_fingerprint=(
+            source.ordered_projection_identity_fingerprint
         ),
         causal_validation_fingerprint=source.causal_validation_fingerprint,
         transcript_frontier_fingerprint=source.transcript_frontier_fingerprint,

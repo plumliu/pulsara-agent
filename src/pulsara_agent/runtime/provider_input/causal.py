@@ -146,7 +146,7 @@ def append_same_batch_user_steer(
     """
 
     base = prepared.projection
-    if len(base.ordered_units) >= policy.max_projection_units_per_manifest:
+    if len(base.ordered_units) >= policy.max_ordered_projection_units:
         raise ProviderInputPhysicalPolicyError(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_UNIT_BOUND_EXCEEDED,
             "same-batch user steer exceeds provider transcript unit bound",
@@ -291,7 +291,7 @@ def append_same_batch_user_steer(
         projection_semantic_fingerprint=semantic,
     )
     if len(canonical_json_bytes(projection.model_dump(mode="json"))) > (
-        policy.max_projection_canonical_bytes_per_manifest
+        policy.max_ordered_projection_canonical_bytes
     ):
         raise ProviderInputPhysicalPolicyError(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_BYTE_BOUND_EXCEEDED,
@@ -372,18 +372,18 @@ def build_default_provider_transcript_source_selection_contract() -> (
 def build_default_resolved_causal_physical_policy(
     *,
     max_projection_canonical_bytes: int = 16 * 1024 * 1024,
-    context_manifest_physical_policy_fingerprint: str | None = None,
+    ordered_projection_physical_policy_fingerprint: str | None = None,
 ) -> ResolvedProviderInputCausalAndPhysicalPolicyFact:
-    """Build the V1 process contract shared by projection, planner and doctor."""
+    """Build the V2 process contract shared by projection, planner and doctor."""
 
     return build_frozen_fact(
         ResolvedProviderInputCausalAndPhysicalPolicyFact,
-        schema_version="resolved_provider_input_causal_physical_policy.v1",
+        schema_version="resolved_provider_input_causal_physical_policy.v2",
         max_parallel_tool_calls_per_model_call=128,
         max_non_tool_transcript_units_per_operation=256,
         max_visible_causal_predecessors_per_unit=130,
-        max_projection_units_per_manifest=16_384,
-        max_projection_canonical_bytes_per_manifest=(max_projection_canonical_bytes),
+        max_ordered_projection_units=16_384,
+        max_ordered_projection_canonical_bytes=(max_projection_canonical_bytes),
         max_generation_root_units=128,
         max_initial_generation_units=16_640,
         max_transcript_delta_units_per_append=384,
@@ -395,10 +395,10 @@ def build_default_resolved_causal_physical_policy(
         terminal_projection_contract_fingerprint=context_fingerprint(
             "terminal-projection-contract-binding:v1", "terminal-projection.v1"
         ),
-        context_manifest_physical_policy_fingerprint=(
-            context_manifest_physical_policy_fingerprint
+        ordered_projection_physical_policy_fingerprint=(
+            ordered_projection_physical_policy_fingerprint
             or context_fingerprint(
-                "context-manifest-physical-policy:v1",
+                "ordered-projection-physical-policy:v2",
                 {"max_projection_canonical_bytes": max_projection_canonical_bytes},
             )
         ),
@@ -423,7 +423,7 @@ def build_ordered_provider_transcript_projection(
         source_selection_contract
         or build_default_provider_transcript_source_selection_contract()
     )
-    if len(lowered_messages) > policy.max_projection_units_per_manifest:
+    if len(lowered_messages) > policy.max_ordered_projection_units:
         raise ProviderInputPhysicalPolicyError(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_UNIT_BOUND_EXCEEDED,
             "provider transcript projection exceeds unit bound",
@@ -619,7 +619,7 @@ def build_ordered_provider_transcript_projection(
         projection_semantic_fingerprint=projection_semantic_fingerprint,
     )
     encoded = canonical_json_bytes(projection.model_dump(mode="json"))
-    if len(encoded) > policy.max_projection_canonical_bytes_per_manifest:
+    if len(encoded) > policy.max_ordered_projection_canonical_bytes:
         raise ProviderInputPhysicalPolicyError(
             ProviderInputPhysicalPolicyFailureReason.PROVIDER_INPUT_PROJECTION_BYTE_BOUND_EXCEEDED,
             "provider transcript projection exceeds canonical byte bound",

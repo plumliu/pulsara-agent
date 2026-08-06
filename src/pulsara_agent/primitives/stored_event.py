@@ -272,9 +272,7 @@ def runtime_projection_checkpoint_fingerprint(
             "projection_schema_version": projection_schema_version,
             "ledger_prefix": asdict(ledger_prefix),
             "validation_base_through_sequence": validation_base_through_sequence,
-            "validation_base_state_payload": (
-                validation_base_state.decode_object()
-            ),
+            "validation_base_state_payload": (validation_base_state.decode_object()),
             "state_payload": state.decode_object(),
         },
     )

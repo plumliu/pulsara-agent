@@ -46,7 +46,7 @@ Canonical facts：
 生产 schema 不再包含 `CustomEvent` 或 `EventType.CUSTOM`。Diagnostic、audit 与
 compatibility 事实同样必须选择一个 bounded typed event；test-only non-transcript fixture
 不得进入 default `AgentEvent` union 或 production decoder。当前 hard-cut event schema
-generation 为 `6`，旧 CUSTOM payload 不属于 supported replay world，升级必须执行
+generation 为 `11`，旧 CUSTOM payload 不属于 supported replay world，升级必须执行
 reset-only PostgreSQL/Oxigraph event-world workflow。
 
 ### 2.1 Typed runtime audit vocabulary
@@ -89,8 +89,9 @@ post-commit publication failure清除committed audit ownership但仍向上传播
 ### 2.3 Context input durable carriers
 
 `RunStartEvent.current_user_message`、`ToolResultEndEvent.observation_timing/render_profile/essential_result/terminal_payload_timing`、
-`ContextCompiledEvent.input_audit|input_failure`均为required typed contract。Replay不得从`metadata`、tool output JSON或当前
-descriptor补造缺失字段。
+compiled `ContextCompiledEvent.semantic_commit|provider_input_preparation_install|audit_expectation`与non-compiled
+`ContextCompiledEvent.input_failure`构成closed typed union。Replay不得从`metadata`、tool output JSON或当前descriptor
+补造缺失字段；optional audit artifact缺失不得否定compact event或provider replay。
 
 Context compiler读取event时必须使用atomic range snapshot：同一次读取返回high-water与canonical stored bytes。每个
 `FrozenStoredEvent`的wrapper identity必须与decoded payload完全一致；range不连续、同ID异payload或structural latch一律
@@ -429,9 +430,11 @@ terminal event仍有open claim均 fail closed。
 
 ## 14. Provider input generation atomic storage contract
 
-`ContextInputManifest` artifact是完整ordered provider projection的唯一durable artifact owner；不得另建独立
-projection artifact writer。`ContextCompiledEvent(status="compiled")`必须引用已确认manifest和prepared
-provider input，`ModelCallStartEvent`必须携带required committed provider input reference。
+`ContextCompiledEvent(status="compiled")`只保存bounded semantic commit、provider preparation install与
+optional audit expectation；它不得嵌入完整transcript/snapshot。`ModelCallStartEvent`必须携带required
+committed provider input reference，provider vector/root与append proof是provider-visible payload的唯一
+durable replay authority。Context-input audit plan/page/root属于storage-only vocabulary，EventLog writer不得
+接受它们；其缺失、冲突或写入失败不得否定已确认的ModelStart。
 
 初始generation、普通append与rollover使用互斥commit guard。RuntimeSession writer在同一事务中验证predecessor
 scope/core/preparation、持久化COW vector artifacts所需引用，并原子提交：

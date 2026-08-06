@@ -77,6 +77,11 @@ from tests.support.model_call import prepared_provider_input_bundle_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.ports.runtime_session_teardown import (
+    NonHostRuntimeSessionTeardownPurpose,
+    NonHostRuntimeSessionTeardownReconciliationRequired,
+    NonHostRuntimeSessionTeardownRetryableError,
+)
 from pulsara_agent.runtime.subagent import (
     InMemoryEventLogLocator,
     SubagentBudget,
@@ -107,10 +112,9 @@ from tests.support.runtime_factory import (
     build_component_runtime_wiring,
 )
 from pulsara_agent.runtime.transcript import rebuild_prior_messages
-from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.context_input.replay import (
-    load_context_input_manifest,
-    replay_compiled_context,
+    load_committed_provider_payload_for_model_start,
 )
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tools.builtins.subagent import (
@@ -353,7 +357,7 @@ def test_child_registry_indexes_exact_mcp_binding_identities(tmp_path) -> None:
     registry.register_prepared(
         subagent_run_id="subagent_run:mcp",
         child_runtime_session_id="runtime:child:mcp",
-        child_session=session,
+        child_session=None,
         reservation=reservation,
         parent_runtime_session_id="runtime:parent",
         parent_run_id=CTX.run_id,
@@ -370,6 +374,271 @@ def test_child_registry_indexes_exact_mcp_binding_identities(tmp_path) -> None:
     )
     registry.mark_parent_graph_terminal_full("subagent_run:mcp")
     assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset()
+
+
+def test_child_session_physical_teardown_has_one_registry_owner(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        registry = ChildAdmissionSessionRegistry()
+        session = in_memory_runtime_session(
+            tmp_path,
+            runtime_session_id="runtime:child:teardown",
+        )
+        reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
+        horizon = read_ledger_horizon(session.event_log)
+        registry.register_prepared(
+            subagent_run_id="subagent_run:teardown",
+            child_runtime_session_id=session.runtime_session_id,
+            child_session=session,
+            reservation=reservation,
+            parent_runtime_session_id="runtime:parent",
+            parent_run_id=CTX.run_id,
+            spawn_edge_id="edge:teardown",
+            parent_graph_horizon=horizon,
+            parent_graph_state_fingerprint=context_fingerprint(
+                "test-child-teardown-graph:v1", horizon.horizon_fingerprint
+            ),
+        )
+        registered = registry.get("subagent_run:teardown")
+        assert registered is not None
+        capability = registered.child_composition_lease.physical_teardown_capability
+        assert capability is not None
+        assert capability.runtime_session_id == session.runtime_session_id
+        assert capability.purpose is NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+        assert not hasattr(capability, "event_log")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        physical_calls = 0
+
+        async def fake_teardown(self, *, purpose, deadline_monotonic):
+            nonlocal physical_calls
+            assert self is session
+            assert purpose is NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+            assert deadline_monotonic > monotonic()
+            physical_calls += 1
+            entered.set()
+            await release.wait()
+
+        monkeypatch.setattr(
+            RuntimeSession,
+            "teardown_non_host_runtime_session",
+            fake_teardown,
+        )
+        deadline = monotonic() + 5
+        first = registry.install_or_get_child_session_teardown_task(
+            "subagent_run:teardown",
+            deadline_monotonic=deadline,
+        )
+        assert first is not None
+        await entered.wait()
+        second = registry.install_or_get_child_session_teardown_task(
+            "subagent_run:teardown",
+            deadline_monotonic=deadline,
+        )
+        assert second is first
+        release.set()
+        await asyncio.gather(asyncio.shield(first), asyncio.shield(second))
+        assert physical_calls == 1
+        assert registry.child_session_is_physically_closed("subagent_run:teardown")
+        registry.mark_parent_graph_terminal_full("subagent_run:teardown")
+        assert registry.get("subagent_run:teardown") is None
+
+    asyncio.run(scenario())
+
+
+def test_child_session_physical_teardown_retries_after_exited_retryable_attempt(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        registry = ChildAdmissionSessionRegistry()
+        session = in_memory_runtime_session(
+            tmp_path,
+            runtime_session_id="runtime:child:teardown-retry",
+        )
+        reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
+        horizon = read_ledger_horizon(session.event_log)
+        registry.register_prepared(
+            subagent_run_id="subagent_run:teardown-retry",
+            child_runtime_session_id=session.runtime_session_id,
+            child_session=session,
+            reservation=reservation,
+            parent_runtime_session_id="runtime:parent",
+            parent_run_id=CTX.run_id,
+            spawn_edge_id="edge:teardown-retry",
+            parent_graph_horizon=horizon,
+            parent_graph_state_fingerprint=context_fingerprint(
+                "test-child-teardown-retry-graph:v1",
+                horizon.horizon_fingerprint,
+            ),
+        )
+        physical_calls = 0
+
+        async def fake_teardown(self, *, purpose, deadline_monotonic):
+            nonlocal physical_calls
+            assert self is session
+            assert purpose is NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+            assert deadline_monotonic > monotonic()
+            physical_calls += 1
+            if physical_calls < 3:
+                raise NonHostRuntimeSessionTeardownRetryableError(
+                    "synthetic retryable physical exit"
+                )
+
+        monkeypatch.setattr(
+            RuntimeSession,
+            "teardown_non_host_runtime_session",
+            fake_teardown,
+        )
+        first = registry.install_or_get_child_session_teardown_task(
+            "subagent_run:teardown-retry",
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert first is not None
+        await first
+        owner = registry.get("subagent_run:teardown-retry")
+        assert owner is not None
+        lease = owner.child_composition_lease
+        assert physical_calls == 3
+        assert lease.physical_teardown_state == "closed"
+        assert lease.physical_teardown_task is None
+        assert lease.physical_teardown_generation == 3
+        assert not issubclass(NonHostRuntimeSessionTeardownRetryableError, TimeoutError)
+
+    asyncio.run(scenario())
+
+
+def test_child_session_physical_teardown_terminal_failure_latches_reconciliation(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        registry = ChildAdmissionSessionRegistry()
+        session = in_memory_runtime_session(
+            tmp_path,
+            runtime_session_id="runtime:child:teardown-reconciliation",
+        )
+        reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
+        horizon = read_ledger_horizon(session.event_log)
+        registry.register_prepared(
+            subagent_run_id="subagent_run:teardown-reconciliation",
+            child_runtime_session_id=session.runtime_session_id,
+            child_session=session,
+            reservation=reservation,
+            parent_runtime_session_id="runtime:parent",
+            parent_run_id=CTX.run_id,
+            spawn_edge_id="edge:teardown-reconciliation",
+            parent_graph_horizon=horizon,
+            parent_graph_state_fingerprint=context_fingerprint(
+                "test-child-teardown-reconciliation-graph:v1",
+                horizon.horizon_fingerprint,
+            ),
+        )
+        physical_calls = 0
+
+        async def fake_teardown(self, *, purpose, deadline_monotonic):
+            nonlocal physical_calls
+            assert self is session
+            assert purpose is NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+            assert deadline_monotonic > monotonic()
+            physical_calls += 1
+            raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                "synthetic terminal physical failure"
+            )
+
+        monkeypatch.setattr(
+            RuntimeSession,
+            "teardown_non_host_runtime_session",
+            fake_teardown,
+        )
+        first = registry.install_or_get_child_session_teardown_task(
+            "subagent_run:teardown-reconciliation",
+            deadline_monotonic=monotonic() + 5,
+        )
+        assert first is not None
+        with pytest.raises(NonHostRuntimeSessionTeardownReconciliationRequired):
+            await first
+        owner = registry.get("subagent_run:teardown-reconciliation")
+        assert owner is not None
+        lease = owner.child_composition_lease
+        assert lease.physical_teardown_state == "reconciliation_required"
+        assert lease.physical_teardown_task is None
+        assert owner.settlement_state == "reconciliation_required"
+        registry.mark_parent_graph_terminal_full("subagent_run:teardown-reconciliation")
+        assert owner.settlement_state == "reconciliation_required"
+
+        with pytest.raises(NonHostRuntimeSessionTeardownReconciliationRequired):
+            registry.install_or_get_child_session_teardown_task(
+                "subagent_run:teardown-reconciliation",
+                deadline_monotonic=monotonic() + 5,
+            )
+        assert physical_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_child_session_physical_teardown_retry_exhaustion_never_strands_retry_wait(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        registry = ChildAdmissionSessionRegistry()
+        session = in_memory_runtime_session(
+            tmp_path,
+            runtime_session_id="runtime:child:teardown-retry-exhausted",
+        )
+        reservation = registry.reserve(parent_run_id=CTX.run_id, count=1)
+        horizon = read_ledger_horizon(session.event_log)
+        registry.register_prepared(
+            subagent_run_id="subagent_run:teardown-retry-exhausted",
+            child_runtime_session_id=session.runtime_session_id,
+            child_session=session,
+            reservation=reservation,
+            parent_runtime_session_id="runtime:parent",
+            parent_run_id=CTX.run_id,
+            spawn_edge_id="edge:teardown-retry-exhausted",
+            parent_graph_horizon=horizon,
+            parent_graph_state_fingerprint=context_fingerprint(
+                "test-child-teardown-retry-exhausted-graph:v1",
+                horizon.horizon_fingerprint,
+            ),
+        )
+        physical_calls = 0
+
+        async def fake_teardown(self, *, purpose, deadline_monotonic):
+            nonlocal physical_calls
+            assert self is session
+            assert purpose is NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+            assert deadline_monotonic > monotonic()
+            physical_calls += 1
+            raise NonHostRuntimeSessionTeardownRetryableError(
+                "synthetic retryable physical exit"
+            )
+
+        monkeypatch.setattr(
+            RuntimeSession,
+            "teardown_non_host_runtime_session",
+            fake_teardown,
+        )
+        task = registry.install_or_get_child_session_teardown_task(
+            "subagent_run:teardown-retry-exhausted",
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert task is not None
+        with pytest.raises(
+            NonHostRuntimeSessionTeardownReconciliationRequired,
+            match="retry budget was exhausted",
+        ):
+            await task
+
+        owner = registry.get("subagent_run:teardown-retry-exhausted")
+        assert owner is not None
+        lease = owner.child_composition_lease
+        assert physical_calls == 3
+        assert lease.physical_teardown_generation == 3
+        assert lease.physical_teardown_state == "reconciliation_required"
+        assert lease.physical_teardown_task is None
+        assert owner.settlement_state == "reconciliation_required"
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("operation", ("spawn", "batch"))
@@ -3026,6 +3295,10 @@ def test_closing_child_handle_continues_to_occupy_concurrency_capacity(
         task = runtime._activation_operations.task(child.subagent_run_id)  # noqa: SLF001
         assert task is not None
         await task
+        await runtime.teardown_child_session_for_terminal_handoff(
+            child.subagent_run_id,
+            deadline_monotonic=monotonic() + 5,
+        )
         await asyncio.sleep(0)
         runtime.validate_can_start_batch(CTX.run_id, count=1, budget=budget)
 
@@ -4615,58 +4888,29 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
     child_compiled = next(
         event for event in child_events if isinstance(event, ContextCompiledEvent)
     )
-    assert child_compiled.input_audit is not None
-    manifest = load_context_input_manifest(
-        audit=child_compiled.input_audit,
-        archive=parent_session.archive,
-    )
-    parent_ranges = manifest.snapshot.named_event_ranges
-    assert parent_ranges
-    assert all(
-        item.runtime_session_id == parent_session.runtime_session_id
-        for item in parent_ranges
-    )
-    assert tuple(item.first_sequence for item in parent_ranges) == tuple(
-        sorted(item.first_sequence for item in parent_ranges)
-    )
-    covered_parent_sequences = {
-        sequence
-        for item in parent_ranges
-        for sequence in range(item.first_sequence, item.through_sequence + 1)
-    }
-    assert 1 in covered_parent_sequences
-    assert started_event.sequence in covered_parent_sequences
     child_log = agent.subagent_runtime.child_event_log(graph.nodes[0].subagent_run_id)
-    child_read = child_log.read_raw_range_snapshot(
-        minimum_sequence=child_compiled.input_audit.authority_from_sequence,
-        through_sequence=child_compiled.input_audit.source_through_sequence,
+    assert child_compiled.semantic_commit is not None
+    child_start = next(
+        event for event in child_events if isinstance(event, ModelCallStartEvent)
     )
-    child_slice = ContextEventSlice.from_read_snapshot(
-        runtime_session_id=child_compiled.input_audit.source_runtime_session_id,
-        minimum_sequence=child_compiled.input_audit.authority_from_sequence,
-        snapshot=child_read,
-    )
-    parent_slices = tuple(
-        ContextEventSlice.from_read_snapshot(
-            runtime_session_id=parent_range.runtime_session_id,
-            minimum_sequence=parent_range.first_sequence,
-            snapshot=parent_session.event_log.read_raw_range_snapshot(
-                minimum_sequence=parent_range.first_sequence,
-                through_sequence=parent_range.through_sequence,
-            ),
-        )
-        for parent_range in parent_ranges
+    provider_payload = load_committed_provider_payload_for_model_start(
+        model_start_reference=event_reference_from_stored(
+            child_start,
+            runtime_session_id=(child_compiled.semantic_commit.runtime_session_id),
+        ),
+        event_log=child_log,
+        provider_input_store=None,
+        artifact_store=parent_session.archive,
     )
     assert (
-        replay_compiled_context(
-            event=child_compiled,
-            archive=parent_session.archive,
-            event_log=child_log,
-            event_slice=child_slice,
-            named_slices=parent_slices,
-        ).status.value
-        == "exact_replay"
+        provider_payload.committed_reference.semantic_commit_fingerprint
+        == child_compiled.semantic_commit.commit_fingerprint
     )
+    horizon_owners = {
+        item.runtime_session_id for item in provider_payload.authority_horizons
+    }
+    assert child_compiled.semantic_commit.runtime_session_id in horizon_owners
+    assert parent_session.runtime_session_id in horizon_owners
 
 
 def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
@@ -4977,19 +5221,11 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(
         for event in parent.event_log.iter(run_id=result.run_id)
         if isinstance(event, ContextCompiledEvent)
     )
-    subagent_section = next(
-        section
-        for section in compiled.sections
-        if section["source_id"] == "subagent_results"
-    )
-    source_timing = subagent_section["metadata"]["source_absolute_timing"]
-    assert source_timing["freshness_kind"] == "current_run_tail"
-    assert source_timing["clock_source"] == ("event_created_at")
-    assert any(
-        item["first_sequence"] == completed.sequence
-        and item["last_sequence"] == completed.sequence
-        for item in source_timing["source_sequence_ranges"]
-    )
+    assert compiled.semantic_commit is not None
+    # The compact durable commit proves that the source authority covered the
+    # completed child result.  Invocation-only source timing moved to the
+    # optional paged audit plane and is deliberately not a Run-success gate.
+    assert compiled.semantic_commit.source_through_sequence >= completed.sequence
     graph = subagent_runtime.graph()
     assert graph.nodes[0].delivered is True
     assert graph.nodes[0].consumed_by_wait is False

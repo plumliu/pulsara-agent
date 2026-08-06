@@ -132,11 +132,17 @@ from pulsara_agent.primitives.permission import (
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.primitives.context import (
-    ContextCompileInputAuditFact,
     ContextCompileFailureStage,
     ContextCompileInputFailureFact,
 )
-from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+from pulsara_agent.primitives.context_input_commit import (
+    ContextCompileInputCommitFact,
+    ContextInputAuditExpectationFact,
+)
+from pulsara_agent.primitives._context_base import (
+    ContextEventReferenceFact,
+    canonical_json_bytes,
+)
 from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
     ModelStreamRecoveryPlanFact,
@@ -159,8 +165,6 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultEssentialFact,
     ToolResultExecutionSemanticsFact,
     ToolResultRenderProfileFact,
-    ToolResultRenderDecisionFact,
-    ToolResultRenderOperationalFact,
     ToolResultRollupSemanticsFact,
     ToolResultStateFact,
 )
@@ -224,8 +228,6 @@ from pulsara_agent.projection_jobs.compaction_memory import (
 from pulsara_agent.primitives.provider_input import (
     CommittedProviderInputGenerationCoreStateFact,
     CommittedProviderInputReferenceFact,
-    ContextInputManifestProjectionReferenceFact,
-    PreparedProviderInputAppendCandidateFact,
     ProviderInputAppendBatchReferenceFact,
     ProviderInputCausalValidationResult,
     ProviderInputContinuationConsumptionProofFact,
@@ -233,6 +235,7 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputContinuationRewriteCoverageProofFact,
     ProviderInputGenerationFact,
     ProviderInputGenerationRootReferenceFact,
+    ProviderInputPreparationInstallFact,
     ProviderInvocationContextFramePlacementFact,
     ProviderInputRolloverRequestFact,
     ProviderTranscriptDeltaCommitProofFact,
@@ -1312,101 +1315,78 @@ class ContextCompiledEvent(EventBase):
     context_retry_index: int
     resolved_call: ResolvedModelCallFact
     budget: ContextBudgetReportEvent
-    sections: list[dict[str, Any]] = Field(default_factory=list)
-    tool_specs: list[dict[str, Any]] = Field(default_factory=list)
-    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
-    lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
-    tool_result_render_decisions: list[dict[str, Any]] = Field(default_factory=list)
-    tool_result_budget_report: dict[str, Any] = Field(default_factory=dict)
-    input_audit: ContextCompileInputAuditFact | None = None
     input_failure: ContextCompileInputFailureFact | None = None
-    provider_neutral_payload_fingerprint: str | None = None
-    canonical_render_decisions_fingerprint: str | None = None
-    tool_result_render_decision_facts: tuple[ToolResultRenderDecisionFact, ...] = ()
-    tool_result_render_operational_facts: tuple[
-        ToolResultRenderOperationalFact, ...
-    ] = ()
+    semantic_commit: ContextCompileInputCommitFact | None = None
+    provider_input_preparation_install: ProviderInputPreparationInstallFact | None = (
+        None
+    )
+    audit_expectation: ContextInputAuditExpectationFact | None = None
     long_horizon_context_budget_decision: (
         LongHorizonContextBudgetDecisionFact | None
     ) = None
     long_horizon_projection_pressure_shadow: (
         LongHorizonProjectionPressureShadowFact | None
     ) = None
-    prepared_provider_input: PreparedProviderInputAppendCandidateFact | None = None
-    manifest_projection_reference: (
-        ContextInputManifestProjectionReferenceFact | None
-    ) = None
-    prepared_provider_input_plan_fingerprint: str | None = None
-    prepared_provider_input_candidate_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def _validate_budget_stage(self) -> "ContextCompiledEvent":
-        if (self.input_audit is None) == (self.input_failure is None):
-            raise ValueError("context compile event requires exactly one input carrier")
+        compiled_carriers = (
+            self.semantic_commit,
+            self.provider_input_preparation_install,
+            self.audit_expectation,
+        )
+        if self.status == "compiled":
+            if self.input_failure is not None or any(
+                item is None for item in compiled_carriers
+            ):
+                raise ValueError("compiled context requires compact authority carriers")
+        elif self.input_failure is None or any(
+            item is not None for item in compiled_carriers
+        ):
+            raise ValueError("non-compiled context requires only failure authority")
         if self.status == "failed":
             if self.failure_stage is None:
                 raise ValueError("failed context compile requires failure stage")
-        elif self.status == "pressure" and self.input_failure is not None:
+        elif self.status == "pressure":
             if self.failure_stage is None:
-                raise ValueError("pre-manifest context pressure requires failure stage")
+                raise ValueError("context pressure requires failure stage")
         elif self.failure_stage is not None:
             raise ValueError("non-failed context compile cannot carry failure stage")
-        if self.status == "compiled" and self.input_audit is None:
-            raise ValueError("compiled context requires full input audit")
-        exact_fingerprints = (
-            self.provider_neutral_payload_fingerprint,
-            self.canonical_render_decisions_fingerprint,
-        )
         if self.status == "compiled":
-            if any(item is None for item in exact_fingerprints):
-                raise ValueError("compiled context requires exact replay fingerprints")
-            if self.prepared_provider_input is None:
-                raise ValueError("compiled context requires prepared provider input")
-            prepared = self.prepared_provider_input
+            assert self.semantic_commit is not None
+            assert self.provider_input_preparation_install is not None
+            assert self.audit_expectation is not None
+            commit = self.semantic_commit
+            install = self.provider_input_preparation_install
             if (
-                prepared.candidate_kind != "compiled_manifest"
-                or self.manifest_projection_reference is None
-                or self.manifest_projection_reference.context_id != self.context_id
-                or self.input_audit.input_manifest_artifact_id
-                != self.manifest_projection_reference.input_manifest_artifact_id
-                or prepared.manifest_projection_reference
-                != self.manifest_projection_reference
-                or prepared.prepared_plan is None
-                or self.prepared_provider_input_plan_fingerprint
-                != prepared.prepared_plan.plan_fingerprint
-                or self.prepared_provider_input_candidate_fingerprint
-                != prepared.candidate_fingerprint
-            ):
-                raise ValueError("compiled context provider manifest join mismatch")
-        elif any(item is not None for item in exact_fingerprints):
-            raise ValueError(
-                "non-compiled context cannot carry exact replay fingerprints"
-            )
-        elif self.prepared_provider_input is not None:
-            raise ValueError(
-                "non-compiled context cannot carry prepared provider input"
-            )
-        elif any(
-            item is not None
-            for item in (
-                self.manifest_projection_reference,
-                self.prepared_provider_input_plan_fingerprint,
-                self.prepared_provider_input_candidate_fingerprint,
-            )
-        ):
-            raise ValueError(
-                "non-compiled context cannot carry provider manifest joins"
-            )
-        if self.input_audit is not None:
-            audit = self.input_audit
-            if (
-                audit.resolved_model_call_id
+                commit.run_id != self.run_id
+                or commit.context_id != self.context_id
+                or commit.resolved_model_call_id
                 != self.resolved_call.resolved_model_call_id
-                or audit.model_call_index != self.model_call_index
-                or audit.compile_attempt_index != self.compile_attempt_index
-                or audit.context_retry_index != self.context_retry_index
+                or commit.model_call_index != self.model_call_index
+                or commit.compile_attempt_index != self.compile_attempt_index
+                or commit.context_retry_index != self.context_retry_index
+                or commit.resolved_model_target_fingerprint
+                != self.resolved_call.target.target_fingerprint
+                or commit.input_budget_tokens != self.budget.input_budget_tokens
+                or commit.final_payload_estimated_tokens
+                != self.budget.final_payload_estimated_tokens
+                or commit.token_estimator_fingerprint
+                != self.budget.estimator.estimator_fingerprint
             ):
-                raise ValueError("context input audit outer identity mismatch")
+                raise ValueError("compiled context semantic commit outer join mismatch")
+            if (
+                install.semantic_commit_fingerprint != commit.commit_fingerprint
+                or install.prepared_plan_fingerprint
+                != commit.prepared_provider_input_plan_fingerprint
+                or install.canonical_provider_input_plan_fingerprint
+                != commit.canonical_provider_input_plan_fingerprint
+                or install.ordered_projection_identity_fingerprint
+                != commit.ordered_projection_identity.identity_fingerprint
+                or self.audit_expectation.semantic_commit_fingerprint
+                != commit.commit_fingerprint
+            ):
+                raise ValueError("compiled context installation/audit join mismatch")
         if self.input_failure is not None:
             failure = self.input_failure
             if (
@@ -1419,16 +1399,6 @@ class ContextCompiledEvent(EventBase):
                 or failure.context_retry_index != self.context_retry_index
             ):
                 raise ValueError("context input failure outer identity mismatch")
-        decision_ids = tuple(
-            item.unit_id for item in self.tool_result_render_decision_facts
-        )
-        operational_ids = tuple(
-            item.unit_id for item in self.tool_result_render_operational_facts
-        )
-        if decision_ids != operational_ids:
-            raise ValueError("context render decision/operational unit mismatch")
-        if len(decision_ids) != len(set(decision_ids)):
-            raise ValueError("context render decision unit IDs are not unique")
         budget_decision = self.long_horizon_context_budget_decision
         pressure_shadow = self.long_horizon_projection_pressure_shadow
         if (budget_decision is None) != (pressure_shadow is None):
@@ -1448,11 +1418,6 @@ class ContextCompiledEvent(EventBase):
                 != pressure_shadow.unit_count_limit_exceeded
             ):
                 raise ValueError("long-horizon budget/shadow attribution mismatch")
-            if (
-                self.input_audit is not None
-                and self.input_audit.long_horizon_attribution_fingerprint == ""
-            ):
-                raise ValueError("long-horizon input attribution is required")
         if (
             self.status == "compiled"
             and self.budget.measurement_stage != "final_payload"
@@ -1485,6 +1450,8 @@ class ContextCompiledEvent(EventBase):
             or self.budget.estimator != target.token_estimator
         ):
             raise ValueError("compiled budget does not match resolved model target")
+        if len(canonical_json_bytes(self.model_dump(mode="json"))) > 256 * 1024:
+            raise ValueError("ContextCompiled candidate exceeds 256 KiB")
         return self
 
 
@@ -1524,10 +1491,10 @@ class ProviderInputAppendCommittedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_APPEND_COMMITTED] = (
         EventType.PROVIDER_INPUT_APPEND_COMMITTED
     )
-    schema_version: Literal["provider_input_append_committed_event.v8"] = (
-        "provider_input_append_committed_event.v8"
+    schema_version: Literal["provider_input_append_committed_event.v9"] = (
+        "provider_input_append_committed_event.v9"
     )
-    append_kind: Literal["compiled_manifest", "one_shot"]
+    append_kind: Literal["compiled_context", "one_shot"]
     generation_id: str = Field(min_length=1)
     generation_fingerprint: str = Field(min_length=1)
     expected_revision: int = Field(ge=0)
@@ -1537,7 +1504,8 @@ class ProviderInputAppendCommittedEvent(EventBase):
     consumed_preparation_ownership_fingerprint: str = Field(min_length=1)
     consumed_pending_continuation_fingerprint: str | None
     continuation_consumption_proof: ProviderInputContinuationConsumptionProofFact | None
-    manifest_projection_reference: ContextInputManifestProjectionReferenceFact | None
+    semantic_commit_fingerprint: str | None
+    ordered_projection_identity_fingerprint: str | None
     causal_validation: ProviderInputCausalValidationResult | None
     frame_placement: ProviderInvocationContextFramePlacementFact | None
     transcript_delta_proof: ProviderTranscriptDeltaCommitProofFact | None
@@ -1647,18 +1615,19 @@ class ProviderInputAppendCommittedEvent(EventBase):
             if semantic_id in observation_ids:
                 raise ValueError("runtime observation semantic identity is duplicated")
             observation_ids.add(semantic_id)
-        if self.append_kind == "compiled_manifest":
+        if self.append_kind == "compiled_context":
             if (
-                self.manifest_projection_reference is None
+                self.semantic_commit_fingerprint is None
+                or self.ordered_projection_identity_fingerprint is None
                 or self.causal_validation is None
                 or self.transcript_delta_proof is None
                 or self.prepared_provider_input_candidate_fingerprint is None
             ):
-                raise ValueError("compiled append requires manifest causal proof")
+                raise ValueError("compiled append requires semantic causal proof")
             if (
-                self.manifest_projection_reference.projection_identity.identity_fingerprint
+                self.ordered_projection_identity_fingerprint
                 != self.causal_validation.projection_identity_fingerprint
-                or self.manifest_projection_reference.projection_identity.identity_fingerprint
+                or self.ordered_projection_identity_fingerprint
                 != self.transcript_delta_proof.projection_identity_fingerprint
                 or self.transcript_delta_proof.resulting_frontier
                 != state.transcript_frontier
@@ -1667,14 +1636,15 @@ class ProviderInputAppendCommittedEvent(EventBase):
         elif any(
             item is not None
             for item in (
-                self.manifest_projection_reference,
+                self.semantic_commit_fingerprint,
+                self.ordered_projection_identity_fingerprint,
                 self.causal_validation,
                 self.frame_placement,
                 self.transcript_delta_proof,
                 self.prepared_provider_input_candidate_fingerprint,
             )
         ):
-            raise ValueError("one-shot append cannot carry compiled manifest proof")
+            raise ValueError("one-shot append cannot carry compiled context proof")
         return self
 
     @property

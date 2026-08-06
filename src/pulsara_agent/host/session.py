@@ -5122,10 +5122,6 @@ class HostSession:
             await window_compaction_service.drain_pending(
                 deadline_monotonic=time.monotonic() + drain_timeout_seconds
             )
-        manifest_service = runtime_session.context_input_manifest_service
-        await manifest_service.drain_pending(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
-        )
         if compaction_service is not None:
             await compaction_service.drain_pending_terminalizations(
                 timeout_seconds=drain_timeout_seconds

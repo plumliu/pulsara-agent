@@ -80,9 +80,9 @@ class RuntimeTerminalCommandPort:
     owner_host_session_id: str | None
     owner_conversation_id: str | None
     terminal_notification_account: TerminalNotificationAccountCoordinator | None
-    record_event: Callable[
-        [AgentEvent], RuntimeThreadEventSettlementReceipt
-    ] | None = None
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = (
+        None
+    )
 
     def execute(
         self,

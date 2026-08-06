@@ -368,6 +368,7 @@ class GroupingIndependentOwnedEventReducerAdapter:
     """Explicit adapter for reducers proven independent of input grouping."""
 
     apply_owned_events: Callable[[tuple[AgentEvent, ...]], object]
+    fold_restored_owned_events: Callable[[tuple[AgentEvent, ...]], object] | None = None
     reset_owned_events: Callable[[], None] | None = None
 
     def apply_live_committed(
@@ -380,7 +381,8 @@ class GroupingIndependentOwnedEventReducerAdapter:
         self,
         range_proof: JoinedRawStoredEventRangeProof,
     ) -> object:
-        return self.apply_owned_events(range_proof.owned_stored_events)
+        fold = self.fold_restored_owned_events or self.apply_owned_events
+        return fold(range_proof.owned_stored_events)
 
     def reset_for_rebuild(self) -> None:
         if self.reset_owned_events is None:

@@ -625,23 +625,24 @@ def _provider_input_append_for_start(
         raise ModelStreamRecoveryStructuralError(
             "model provider-input append/reference identity drifted"
         )
-    compiled = append.append_kind == "compiled_manifest"
-    if compiled != (reference.reference_kind == "compiled_manifest"):
+    compiled = append.append_kind == "compiled_context"
+    if compiled != (reference.reference_kind == "compiled_context"):
         raise ModelStreamRecoveryStructuralError(
             "model provider-input append/reference kind drifted"
         )
     if compiled and (
-        append.manifest_projection_reference is None
+        append.semantic_commit_fingerprint is None
         or append.causal_validation is None
-        or reference.manifest_projection_reference_fingerprint
-        != append.manifest_projection_reference.reference_fingerprint
+        or reference.semantic_commit_fingerprint != append.semantic_commit_fingerprint
+        or reference.ordered_projection_identity_fingerprint
+        != append.ordered_projection_identity_fingerprint
         or reference.causal_validation_fingerprint
         != append.causal_validation.result_fingerprint
         or reference.transcript_frontier_fingerprint
         != append.resulting_core_state.transcript_frontier.provider_semantic_frontier_fingerprint
     ):
         raise ModelStreamRecoveryStructuralError(
-            "model provider-input manifest proof drifted"
+            "model provider-input semantic proof drifted"
         )
     return append
 

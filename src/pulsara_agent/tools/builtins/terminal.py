@@ -74,9 +74,8 @@ class TerminalTool(WorkspaceTool):
         call: ToolCall,
         *,
         event_context: EventContext,
-        record_event: Callable[
-            [AgentEvent], RuntimeThreadEventSettlementReceipt
-        ] | None = None,
+        record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
+        | None = None,
         runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         return self._execute(
@@ -92,9 +91,8 @@ class TerminalTool(WorkspaceTool):
         emit_delta: Callable[[str], None],
         *,
         event_context: EventContext,
-        record_event: Callable[
-            [AgentEvent], RuntimeThreadEventSettlementReceipt
-        ] | None = None,
+        record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
+        | None = None,
         runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         return self._execute_streaming(
@@ -111,9 +109,8 @@ class TerminalTool(WorkspaceTool):
         emit_delta: Callable[[str], None],
         *,
         event_context: EventContext | None = None,
-        record_event: Callable[
-            [AgentEvent], RuntimeThreadEventSettlementReceipt
-        ] | None = None,
+        record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
+        | None = None,
         runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         max_output = _max_output_chars_arg(call.arguments)
@@ -133,9 +130,8 @@ class TerminalTool(WorkspaceTool):
         *,
         output_callback: Callable[[str], None] | None = None,
         event_context: EventContext | None = None,
-        record_event: Callable[
-            [AgentEvent], RuntimeThreadEventSettlementReceipt
-        ] | None = None,
+        record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
+        | None = None,
         runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         command = required_str_arg(call.arguments, "command")

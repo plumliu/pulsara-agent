@@ -32,7 +32,6 @@ from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ChildRolloutSubaccountClosedEvent,
     ConfirmResult,
-    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionRequestedEvent,
@@ -232,17 +231,21 @@ from pulsara_agent.runtime.context_input.live import (
     ContextInputPreparationError,
     descriptor_render_attribution,
 )
-from pulsara_agent.runtime.context_input.manifest import (
-    ContextInputManifestConfirmedAbsent,
-    ContextInputManifestWriteResult,
-    ContextInputManifestWriteConflict,
-    ContextInputManifestWriteDeadlineExceeded,
-    ContextInputManifestWriteOutcomeUnknown,
-    build_context_compile_input_audit,
-    build_context_input_manifest,
-    build_context_input_manifest_candidate,
-    build_context_input_manifest_projection_reference,
+from pulsara_agent.runtime.context_input.commit import (
+    build_context_compiled_event,
+    build_context_compile_input_commit,
+    build_context_input_aggregate_fingerprint,
+    build_context_input_audit_expectation_for_commit,
+    build_provider_input_preparation_install,
     build_long_horizon_context_attribution,
+)
+from pulsara_agent.runtime.context_input.audit_materializer import (
+    PreparedContextInputAuditCaptureComponent,
+    PreparedContextInputAuditSourceCapture,
+)
+from pulsara_agent.primitives.context_input_audit_storage import (
+    ContextInputAuditComponentKind,
+    ContextInputAuditComponentOwnership,
 )
 from pulsara_agent.runtime.context_input.transcript_authority import (
     prepare_transcript_projection_input,
@@ -363,7 +366,6 @@ from pulsara_agent.runtime.long_horizon.rollup import (
     prepare_observation_rollup_artifact,
 )
 from pulsara_agent.runtime.long_horizon.context_budget import (
-    long_horizon_context_diagnostics,
     measure_long_horizon_context_budget,
 )
 from pulsara_agent.runtime.long_horizon.feasibility import (
@@ -3011,11 +3013,13 @@ class AgentRuntime:
                 context_id = f"context:{uuid4().hex}"
                 provider_input_planning_bundle = None
                 provider_input_start_bundle = None
-                input_audit = None
+                semantic_commit = None
+                provider_input_preparation_install = None
+                audit_expectation = None
                 render_output = None
                 prepared_context_input = None
-                pre_manifest_failure_stage = ContextCompileFailureStage.EVENT_SLICE
-                pre_manifest_failure_reason = (
+                pre_commit_failure_stage = ContextCompileFailureStage.EVENT_SLICE
+                pre_commit_failure_reason = (
                     ContextInputFailureReasonCode.EVENT_SLICE_INVALID
                 )
                 try:
@@ -3065,10 +3069,10 @@ class AgentRuntime:
                         ),
                         memory_scope_instruction=memory_prompt,
                     )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.LONG_HORIZON_FOLD
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.LONG_HORIZON_FOLD_FAILED
                     )
                     (
@@ -3078,10 +3082,10 @@ class AgentRuntime:
                     ) = _resolve_prepared_long_horizon_context_facts(
                         prepared_context_input=prepared_context_input,
                     )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.TOOL_RESULT_RENDER
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.TOOL_RESULT_INVALID
                     )
                     render_output = render_prepared_tool_result_units(
@@ -3093,10 +3097,10 @@ class AgentRuntime:
                     )
                     long_horizon_store = self._run_long_horizon.store
                     base_render_output = render_output
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.TOOL_OBSERVATION_PROJECTION
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.TOOL_OBSERVATION_PROJECTION_FAILED
                     )
                     render_output = apply_tool_observation_projection(
@@ -3110,10 +3114,10 @@ class AgentRuntime:
                         ),
                         token_estimator=resolved_call.target.token_estimator,
                     )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.OBSERVATION_ROLLUP
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.OBSERVATION_ROLLUP_FAILED
                     )
                     prepared_rollups = await self._prepare_active_observation_rollups(
@@ -3124,10 +3128,10 @@ class AgentRuntime:
                         ),
                         projection_state=projection_state,
                     )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.WINDOW_COMPACTION_PLANNING
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.WINDOW_COMPACTION_PLANNING_FAILED
                     )
                     current_run_planning = prepare_current_run_projection_planning_input(
@@ -3248,7 +3252,7 @@ class AgentRuntime:
                                 )
                             safe_point_revision = next_safe_point_revision
                             # Rebuild the draft from a fresh authority slice;
-                            # no v2 manifest is persisted for the old generation.
+                            # No compact commit is persisted for the old generation.
                             continue
                     validate_prepared_tool_result_render_output(
                         output=render_output,
@@ -3256,10 +3260,10 @@ class AgentRuntime:
                         context_id=context_id,
                         model_call_index=model_call_index,
                     )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.CONTEXT_COMPILE
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.CANDIDATE_INVALID
                     )
                     historical_provider_source_heads = self._run_model.provider_input_generation_coordinator.committed_source_heads_for_compiled_call(
@@ -3281,10 +3285,8 @@ class AgentRuntime:
                             historical_provider_source_heads
                         ),
                     )
-                    pre_manifest_failure_stage = (
-                        ContextCompileFailureStage.CONTEXT_BUDGET
-                    )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_stage = ContextCompileFailureStage.CONTEXT_BUDGET
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.CONTEXT_BUDGET_EXCEEDED
                     )
                     working_set = self._require_run_working_set(state)
@@ -3387,10 +3389,10 @@ class AgentRuntime:
                                     f"{outcome.reason_code or outcome.status}"
                                 ),
                             )
-                    pre_manifest_failure_stage = (
+                    pre_commit_failure_stage = (
                         ContextCompileFailureStage.PAYLOAD_CONSISTENCY
                     )
-                    pre_manifest_failure_reason = (
+                    pre_commit_failure_reason = (
                         ContextInputFailureReasonCode.PAYLOAD_CONSISTENCY_FAILED
                     )
                     long_horizon_attribution = build_long_horizon_context_attribution(
@@ -3635,147 +3637,124 @@ class AgentRuntime:
                                 *prepared_context_input.exact_named_authority_events,
                             ),
                         )
-                        input_manifest = build_context_input_manifest(
-                            snapshot=snapshot_fact,
-                            prepared_transcript_projection=(
-                                prepared_transcript_projection
-                            ),
-                            prepared_tool_results=(
-                                prepared_context_input.prepared_tool_results
-                            ),
-                            rendered_tool_results=render_output,
-                            active_window=active_window,
-                            window_policy=window_policy,
-                            projection_state=projection_state,
-                            prepared_rollups=prepared_rollups,
-                            rollout_state=rollout_state,
-                            context_budget_decision=long_horizon_budget.decision,
-                            projection_pressure_shadow=(
-                                long_horizon_budget.pressure_shadow
-                            ),
-                            projection_target_unreachable=(
-                                projection_unreachable_audit
-                            ),
-                            safe_point_revision=safe_point_revision,
-                            prepared_candidates=(
-                                prepared_context_input.prepared_candidates
-                            ),
-                            ordered_transcript_projection=(
-                                final_compiled_context.prepared_ordered_transcript_projection.projection
-                            ),
-                            ordered_transcript_projection_identity=(
-                                final_compiled_context.prepared_ordered_transcript_projection.identity
-                            ),
-                            prepared_provider_input_plan=(
-                                provider_input_planning_bundle.prepared_plan
-                            ),
+                        input_aggregate_fingerprint = (
+                            build_context_input_aggregate_fingerprint(
+                                snapshot=snapshot_fact,
+                                prepared_context_input=prepared_context_input,
+                                prepared_transcript_projection=(
+                                    prepared_transcript_projection
+                                ),
+                                provider_input_planning_bundle=(
+                                    provider_input_planning_bundle
+                                ),
+                                active_window=active_window,
+                                window_policy=window_policy,
+                                projection_state=projection_state,
+                                prepared_rollups=prepared_rollups,
+                                rollout_state=rollout_state,
+                                context_budget_decision=(long_horizon_budget.decision),
+                                projection_target_unreachable=(
+                                    projection_unreachable_audit
+                                ),
+                            )
                         )
-                        manifest_candidate = build_context_input_manifest_candidate(
-                            input_manifest
+                        semantic_commit = build_context_compile_input_commit(
+                            snapshot=snapshot_fact,
+                            prepared_context_input=prepared_context_input,
+                            provider_input_planning_bundle=(
+                                provider_input_planning_bundle
+                            ),
+                            provider_neutral_payload_fingerprint=(
+                                provider_neutral_payload_fingerprint(
+                                    final_compiled_context.llm_context
+                                )
+                            ),
+                            input_aggregate_fingerprint=(input_aggregate_fingerprint),
+                            canonical_render_decisions_fingerprint=(
+                                canonical_render_decisions_fingerprint(
+                                    final_compiled_context.tool_result_render_decision_facts
+                                )
+                            ),
+                            final_budget=final_compiled_context.budget.to_event_value(),
+                        )
+                        audit_expectation = (
+                            build_context_input_audit_expectation_for_commit(
+                                semantic_commit
+                            )
                         )
                     except Exception as exc:
-                        raise _context_manifest_preparation_error(
+                        raise _context_commit_preparation_error(
                             prepared_context_input,
                             cause=exc,
                         ) from exc
-                    try:
-                        manifest_write = await (
-                            self._run_context.context_input_manifest_service.persist(
-                                manifest_candidate,
-                                deadline_monotonic=time.monotonic() + 30.0,
-                            )
-                        )
-                    except (
-                        ContextInputManifestConfirmedAbsent,
-                        ContextInputManifestWriteConflict,
-                        ContextInputManifestWriteDeadlineExceeded,
-                        ContextInputManifestWriteOutcomeUnknown,
-                    ) as exc:
-                        input_failure = _context_manifest_input_failure(
-                            snapshot=prepared_context_input,
-                            manifest=input_manifest,
-                            candidate=manifest_candidate,
-                            error=exc,
-                        )
-                        state.status = LoopStatus.FAILED
-                        state.stop_reason = RunStopReason.MODEL_ERROR
-                        state.error_message = str(exc)
-                        state.transition(LoopTransition.FAIL)
-                        yield await self._run_ledger.commit_accepted_event(
-                            ContextCompiledEvent(
-                                **self._event_context(state).event_fields(),
-                                status="failed",
-                                failure_stage="input_manifest_write",
-                                context_id=context_id,
-                                model_call_index=model_call_index,
-                                compile_attempt_index=compile_attempt_index,
-                                context_retry_index=context_retry_index,
-                                resolved_call=resolved_call.fact,
-                                budget=_empty_context_budget_report(resolved_call),
-                                input_failure=input_failure,
-                            ),
-                        )
-                        yield await self._run_ledger.commit_accepted_event(
-                            RunErrorEvent(
-                                **self._event_context(state).event_fields(),
-                                message=str(exc),
-                                code="context_input_manifest_write_failed",
-                            ),
-                        )
-                        if isinstance(
-                            exc,
-                            (
-                                ContextInputManifestWriteConflict,
-                                ContextInputManifestWriteOutcomeUnknown,
-                            ),
-                        ):
-                            self._require_run_finalization_owner(
-                                state
-                            ).context_input_latch_after_terminalization = True
-                        break
-                    manifest_projection_reference = (
-                        build_context_input_manifest_projection_reference(
-                            manifest=input_manifest,
-                            candidate=manifest_candidate,
-                            write_result=ContextInputManifestWriteResult(
-                                outcome=manifest_write.outcome,
-                                artifact_id=manifest_write.artifact_id,
-                                content_fingerprint=manifest_write.content_fingerprint,
-                            ),
-                        )
-                    )
+                    assert semantic_commit is not None
+                    assert audit_expectation is not None
                     provider_input_start_bundle = await self._run_model.provider_input_generation_coordinator.finalize_compiled_call(
                         call=resolved_call,
                         compiled_context=final_compiled_context,
                         prepared_context_input=prepared_context_input,
                         event_context=self._event_context(state),
                         planning_bundle=provider_input_planning_bundle,
-                        manifest_projection_reference=manifest_projection_reference,
-                    )
-                    input_audit = build_context_compile_input_audit(
-                        manifest=input_manifest,
-                        candidate=manifest_candidate,
-                        write_result=ContextInputManifestWriteResult(
-                            outcome=manifest_write.outcome,
-                            artifact_id=manifest_write.artifact_id,
-                            content_fingerprint=manifest_write.content_fingerprint,
-                        ),
-                        transcript_message_count=len(
-                            prepared_context_input.normalized_transcript.transcript.messages
-                        ),
-                        transcript_pair_count=len(
-                            prepared_context_input.normalized_transcript.transcript.tool_pairs
-                        ),
-                        tool_result_unit_count=len(
-                            prepared_context_input.prepared_tool_results.units
+                        semantic_commit_fingerprint=(
+                            semantic_commit.commit_fingerprint
                         ),
                     )
+                    provider_input_preparation_install = (
+                        build_provider_input_preparation_install(
+                            semantic_commit=semantic_commit,
+                            provider_input_start_bundle=(provider_input_start_bundle),
+                        )
+                    )
+                    audit_capture = None
+                    try:
+                        audit_capture = PreparedContextInputAuditSourceCapture(
+                            semantic_commit=semantic_commit,
+                            expectation=audit_expectation,
+                            components=_context_input_audit_capture_components(
+                                semantic_commit=semantic_commit,
+                                snapshot=snapshot_fact,
+                                prepared_context_input=prepared_context_input,
+                                prepared_transcript_projection=(
+                                    prepared_transcript_projection
+                                ),
+                                provider_input_planning_bundle=(
+                                    provider_input_planning_bundle
+                                ),
+                                compiled_context=final_compiled_context,
+                                active_window=active_window,
+                                window_policy=window_policy,
+                                projection_state=projection_state,
+                                prepared_rollups=prepared_rollups,
+                                rollout_state=rollout_state,
+                                context_budget_decision=(long_horizon_budget.decision),
+                                projection_pressure_shadow=(
+                                    long_horizon_budget.pressure_shadow
+                                ),
+                                projection_target_unreachable=(
+                                    projection_unreachable_audit
+                                ),
+                            ),
+                        )
+                    except Exception:
+                        # Optional capture construction cannot change admission.
+                        pass
+                    if audit_capture is not None:
+                        try:
+                            provider_input_start_bundle = self._run_model.provider_input_generation_coordinator.bind_optional_context_audit_source(
+                                provider_input_start_bundle,
+                                source_basis=audit_capture,
+                            )
+                        except Exception:
+                            # Optional audit ownership cannot change admission.
+                            pass
                     compiled_context = final_compiled_context
                     break
                 except ContextInputPreparationError as exc:
                     if self._run_ledger.reconciliation_required:
-                        await self._run_ledger.await_committed_reducer_repair_safe_point(
-                            deadline_monotonic=time.monotonic() + 30.0,
+                        await (
+                            self._run_ledger.await_committed_reducer_repair_safe_point(
+                                deadline_monotonic=time.monotonic() + 30.0,
+                            )
                         )
                         continue
                     if (
@@ -3783,7 +3762,7 @@ class AgentRuntime:
                         is ContextInputFailureReasonCode.LEDGER_UNTRUSTED
                     ):
                         raise
-                    input_failure = _context_pre_manifest_input_failure(
+                    input_failure = _context_pre_commit_input_failure(
                         error=exc,
                         context_id=context_id,
                         resolved_model_call_id=(
@@ -3798,7 +3777,7 @@ class AgentRuntime:
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
                     yield await self._run_ledger.commit_accepted_event(
-                        ContextCompiledEvent(
+                        build_context_compiled_event(
                             **self._event_context(state).event_fields(),
                             status="failed",
                             failure_stage=exc.failure_stage,
@@ -3808,14 +3787,6 @@ class AgentRuntime:
                             context_retry_index=context_retry_index,
                             resolved_call=resolved_call.fact,
                             budget=_empty_context_budget_report(resolved_call),
-                            diagnostics=[
-                                {
-                                    "severity": "error",
-                                    "code": exc.reason_code.value,
-                                    "message": str(exc)[:512],
-                                    "failure_stage": exc.failure_stage,
-                                }
-                            ],
                             input_failure=input_failure,
                         ),
                     )
@@ -3832,54 +3803,32 @@ class AgentRuntime:
                         exc.context_id or f"context:failed:{uuid4().hex}"
                     )
                     failed_model_call_index = exc.model_call_index or model_call_index
-                    pressure_diagnostics = [
-                        diagnostic.to_event_value() for diagnostic in exc.diagnostics
-                    ]
-                    pressure_tool_result_render_decisions = [
-                        dict(decision) for decision in exc.tool_result_render_decisions
-                    ]
-                    pressure_tool_result_budget_report = dict(
-                        exc.tool_result_budget_report
-                    )
                     if exc.budget_report is None:
                         raise RuntimeError(
                             "ContextBudgetExceeded is missing its resolved budget report"
                         ) from exc
-                    pressure_input_failure = input_audit is None
-                    if pressure_input_failure:
-                        input_failure = _context_budget_input_failure(
-                            prepared_context_input=prepared_context_input,
-                            context_id=failed_context_id,
-                            resolved_model_call_id=(
-                                resolved_call.fact.resolved_model_call_id
-                            ),
-                            model_call_index=failed_model_call_index,
-                            compile_attempt_index=compile_attempt_index,
-                            context_retry_index=context_retry_index,
-                        )
+                    input_failure = _context_budget_input_failure(
+                        prepared_context_input=prepared_context_input,
+                        context_id=failed_context_id,
+                        resolved_model_call_id=(
+                            resolved_call.fact.resolved_model_call_id
+                        ),
+                        model_call_index=failed_model_call_index,
+                        compile_attempt_index=compile_attempt_index,
+                        context_retry_index=context_retry_index,
+                    )
                     yield await self._run_ledger.commit_accepted_event(
-                        ContextCompiledEvent(
+                        build_context_compiled_event(
                             **self._event_context(state).event_fields(),
                             status="pressure",
-                            failure_stage=(
-                                "context_budget" if pressure_input_failure else None
-                            ),
+                            failure_stage="context_budget",
                             context_id=failed_context_id,
                             model_call_index=failed_model_call_index,
                             compile_attempt_index=compile_attempt_index,
                             context_retry_index=context_retry_index,
                             resolved_call=resolved_call.fact,
                             budget=exc.budget_report.to_event_value(),
-                            sections=[],
-                            tool_specs=[],
-                            diagnostics=pressure_diagnostics,
-                            lifecycle_decisions=[],
-                            tool_result_render_decisions=pressure_tool_result_render_decisions,
-                            tool_result_budget_report=pressure_tool_result_budget_report,
-                            input_audit=input_audit,
-                            input_failure=(
-                                input_failure if pressure_input_failure else None
-                            ),
+                            input_failure=input_failure,
                         ),
                     )
                     if (
@@ -3899,7 +3848,7 @@ class AgentRuntime:
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
                     yield await self._run_ledger.commit_accepted_event(
-                        ContextCompiledEvent(
+                        build_context_compiled_event(
                             **self._event_context(state).event_fields(),
                             status="failed",
                             failure_stage="context_budget",
@@ -3909,16 +3858,7 @@ class AgentRuntime:
                             context_retry_index=context_retry_index,
                             resolved_call=resolved_call.fact,
                             budget=exc.budget_report.to_event_value(),
-                            sections=[],
-                            tool_specs=[],
-                            diagnostics=pressure_diagnostics,
-                            lifecycle_decisions=[],
-                            tool_result_render_decisions=pressure_tool_result_render_decisions,
-                            tool_result_budget_report=pressure_tool_result_budget_report,
-                            input_audit=input_audit,
-                            input_failure=(
-                                input_failure if input_audit is None else None
-                            ),
+                            input_failure=input_failure,
                         ),
                     )
                     yield await self._run_ledger.commit_accepted_event(
@@ -3931,43 +3871,36 @@ class AgentRuntime:
                     break
                 except Exception as exc:
                     if self._run_ledger.reconciliation_required:
-                        await self._run_ledger.await_committed_reducer_repair_safe_point(
-                            deadline_monotonic=time.monotonic() + 30.0,
+                        await (
+                            self._run_ledger.await_committed_reducer_repair_safe_point(
+                                deadline_monotonic=time.monotonic() + 30.0,
+                            )
                         )
                         continue
-                    input_failure = None
-                    if input_audit is None:
-                        preparation_error = _context_stage_preparation_error(
-                            prepared_context_input=prepared_context_input,
-                            failure_stage=pre_manifest_failure_stage,
-                            reason_code=pre_manifest_failure_reason,
-                            cause=exc,
-                        )
-                        failure_stage = preparation_error.failure_stage
-                        diagnostic_code = preparation_error.reason_code.value
-                        input_failure = _context_pre_manifest_input_failure(
-                            error=preparation_error,
-                            context_id=context_id,
-                            resolved_model_call_id=(
-                                resolved_call.fact.resolved_model_call_id
-                            ),
-                            model_call_index=model_call_index,
-                            compile_attempt_index=compile_attempt_index,
-                            context_retry_index=context_retry_index,
-                        )
-                    else:
-                        failure_stage = (
-                            "tool_result_render"
-                            if render_output is None
-                            else "context_compile"
-                        )
-                        diagnostic_code = f"context_{failure_stage}_failed"
+                    preparation_error = _context_stage_preparation_error(
+                        prepared_context_input=prepared_context_input,
+                        failure_stage=pre_commit_failure_stage,
+                        reason_code=pre_commit_failure_reason,
+                        cause=exc,
+                    )
+                    failure_stage = preparation_error.failure_stage
+                    diagnostic_code = preparation_error.reason_code.value
+                    input_failure = _context_pre_commit_input_failure(
+                        error=preparation_error,
+                        context_id=context_id,
+                        resolved_model_call_id=(
+                            resolved_call.fact.resolved_model_call_id
+                        ),
+                        model_call_index=model_call_index,
+                        compile_attempt_index=compile_attempt_index,
+                        context_retry_index=context_retry_index,
+                    )
                     state.status = LoopStatus.FAILED
                     state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
                     yield await self._run_ledger.commit_accepted_event(
-                        ContextCompiledEvent(
+                        build_context_compiled_event(
                             **self._event_context(state).event_fields(),
                             status="failed",
                             failure_stage=failure_stage,
@@ -3977,15 +3910,6 @@ class AgentRuntime:
                             context_retry_index=context_retry_index,
                             resolved_call=resolved_call.fact,
                             budget=_empty_context_budget_report(resolved_call),
-                            diagnostics=[
-                                {
-                                    "severity": "error",
-                                    "code": diagnostic_code,
-                                    "message": (f"{type(exc).__name__}: {exc}")[:512],
-                                    "failure_stage": failure_stage,
-                                }
-                            ],
-                            input_audit=input_audit,
                             input_failure=input_failure,
                         ),
                     )
@@ -4066,15 +3990,9 @@ class AgentRuntime:
                     actual_provider_estimate.total_input_tokens
                 ),
             )
-            long_horizon_diagnostics = list(
-                long_horizon_context_diagnostics(
-                    measurement=long_horizon_budget,
-                    target_unreachable=input_manifest.projection_target_unreachable,
-                )
-            )
             state.model_tool_progress.current_context_id = compiled_context.context_id
             state.model_tool_progress.current_model_call_index = model_call_index
-            context_compiled_candidate = ContextCompiledEvent(
+            context_compiled_candidate = build_context_compiled_event(
                 **self._event_context(state).event_fields(),
                 context_id=compiled_context.context_id,
                 model_call_index=model_call_index,
@@ -4082,56 +4000,13 @@ class AgentRuntime:
                 context_retry_index=context_retry_index,
                 resolved_call=resolved_call.fact,
                 budget=compiled_context.budget.to_event_value(),
-                sections=[
-                    section.to_event_value() for section in compiled_context.sections
-                ],
-                tool_specs=[
-                    tool.to_event_value() for tool in compiled_context.tool_specs
-                ],
-                diagnostics=[
-                    diagnostic.to_event_value()
-                    for diagnostic in compiled_context.diagnostics
-                ]
-                + long_horizon_diagnostics,
-                lifecycle_decisions=[
-                    dict(decision) for decision in compiled_context.lifecycle_decisions
-                ],
-                tool_result_render_decisions=[
-                    dict(decision)
-                    for decision in compiled_context.tool_result_render_decisions
-                ],
-                tool_result_budget_report=dict(
-                    compiled_context.tool_result_budget_report
-                ),
-                tool_result_render_decision_facts=(
-                    compiled_context.tool_result_render_decision_facts
-                ),
-                tool_result_render_operational_facts=(
-                    compiled_context.tool_result_render_operational_facts
-                ),
                 long_horizon_context_budget_decision=(long_horizon_budget.decision),
                 long_horizon_projection_pressure_shadow=(
                     long_horizon_budget.pressure_shadow
                 ),
-                input_audit=input_audit,
-                provider_neutral_payload_fingerprint=(
-                    provider_neutral_payload_fingerprint(context)
-                ),
-                canonical_render_decisions_fingerprint=(
-                    canonical_render_decisions_fingerprint(
-                        compiled_context.tool_result_render_decision_facts
-                    )
-                ),
-                prepared_provider_input=(
-                    provider_input_start_bundle.prepared_candidate
-                ),
-                manifest_projection_reference=manifest_projection_reference,
-                prepared_provider_input_plan_fingerprint=(
-                    provider_input_start_bundle.prepared_plan.plan_fingerprint
-                ),
-                prepared_provider_input_candidate_fingerprint=(
-                    provider_input_start_bundle.prepared_candidate.candidate_fingerprint
-                ),
+                semantic_commit=semantic_commit,
+                provider_input_preparation_install=(provider_input_preparation_install),
+                audit_expectation=audit_expectation,
             )
             try:
                 stored_context_compiled = await self._run_ledger.commit_accepted_event(
@@ -5423,8 +5298,8 @@ class AgentRuntime:
                 deadline_monotonic=repair_deadline,
             )
             try:
-                compaction_result = (
-                    await self._maybe_compact_mid_turn_before_followup(state)
+                compaction_result = await self._maybe_compact_mid_turn_before_followup(
+                    state
                 )
             except ContextEventSliceError:
                 if not self._run_ledger.reconciliation_required:
@@ -6483,7 +6358,9 @@ class AgentRuntime:
         emitted_events: list[AgentEvent] = []
         try:
             for event in produced_events or ():
-                emitted_events.append(await self._run_ledger.commit_accepted_event(event))
+                emitted_events.append(
+                    await self._run_ledger.commit_accepted_event(event)
+                )
         except Exception as exc:
             emitted_events.append(
                 await self._mark_memory_hook_failed(state, hook_name, exc)
@@ -9313,6 +9190,334 @@ def _resolve_prepared_long_horizon_context_facts(*, prepared_context_input):
     )
 
 
+def _context_input_audit_capture_components(
+    *,
+    semantic_commit,
+    snapshot,
+    prepared_context_input,
+    prepared_transcript_projection,
+    provider_input_planning_bundle,
+    compiled_context,
+    active_window,
+    window_policy,
+    projection_state,
+    prepared_rollups,
+    rollout_state,
+    context_budget_decision,
+    projection_pressure_shadow,
+    projection_target_unreachable,
+) -> tuple[PreparedContextInputAuditCaptureComponent, ...]:
+    """Freeze references plus invocation-only detail without copying authority.
+
+    The former flat manifest embedded the complete snapshot, candidate set,
+    ordered transcript, provider projection, and transcript authority.  All of
+    those bodies already have canonical owners.  This extractor stores only
+    their bounded identities/references; pages are reserved for compiler detail
+    that has no other durable owner.
+    """
+
+    ordered = compiled_context.prepared_ordered_transcript_projection
+    if ordered is None:
+        raise ValueError("audit source requires ordered transcript projection")
+    reference_values = (
+        (
+            ContextInputAuditComponentKind.SNAPSHOT,
+            freeze_json(
+                {
+                    "snapshot_semantic_fingerprint": (
+                        semantic_commit.snapshot_semantic_fingerprint
+                    ),
+                    "source_reference_set_fingerprint": (
+                        semantic_commit.source_references.reference_set_fingerprint
+                    ),
+                    "source_through_sequence": semantic_commit.source_through_sequence,
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.SUBAGENT_GRAPH_SEMANTIC_SOURCE,
+            snapshot.subagent_graph_semantic_source,
+        ),
+        (
+            ContextInputAuditComponentKind.ORDERED_TRANSCRIPT_PROJECTION_IDENTITY,
+            ordered.identity,
+        ),
+        (
+            ContextInputAuditComponentKind.PREPARED_PROVIDER_INPUT_PLAN,
+            freeze_json(
+                {
+                    "plan_fingerprint": (
+                        provider_input_planning_bundle.prepared_plan.plan_fingerprint
+                    ),
+                    "target_generation_id": (
+                        provider_input_planning_bundle.prepared_plan.target_generation_id
+                    ),
+                    "resulting_unit_vector_root_fingerprint": (
+                        provider_input_planning_bundle.prepared_plan.resulting_unit_vector_root_fingerprint
+                    ),
+                    "ordered_projection_identity_fingerprint": (
+                        ordered.identity.identity_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.CANONICAL_PROVIDER_INPUT_PLAN,
+            freeze_json(
+                {
+                    "plan_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.plan_fingerprint
+                    ),
+                    "generation_root_reference_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.generation_root_reference.reference_fingerprint
+                    ),
+                    "unit_vector_root_reference_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.unit_vector_root.reference_fingerprint
+                    ),
+                    "authority_horizon_set_reference_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.authority_horizon_set.reference_fingerprint
+                    ),
+                    "replay_binding_set_reference_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.replay_binding_set.reference_fingerprint
+                    ),
+                    "provider_input_semantic_fingerprint": (
+                        provider_input_planning_bundle.canonical_plan.provider_input_semantic_identity.semantic_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.TRANSCRIPT_PROVIDER_PROJECTION,
+            prepared_transcript_projection.provider_projection.projection_fact.semantic_identity,
+        ),
+        (
+            ContextInputAuditComponentKind.TRANSCRIPT_AUTHORITY,
+            prepared_transcript_projection.authority.provider_semantic_identity,
+        ),
+        (
+            ContextInputAuditComponentKind.SUBAGENT_GRAPH_ACCELERATION,
+            freeze_json(
+                {
+                    "acceleration_fingerprint": (
+                        snapshot.subagent_graph_acceleration.acceleration_fingerprint
+                    ),
+                    "checkpoint_id": (
+                        snapshot.subagent_graph_acceleration.checkpoint_id
+                    ),
+                    "checkpoint_through_sequence": (
+                        snapshot.subagent_graph_acceleration.checkpoint_through_sequence
+                    ),
+                    "ledger_through_sequence": (
+                        snapshot.subagent_graph_acceleration.ledger_through_sequence
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.TOOL_RESULT_RENDER_POLICY,
+            freeze_json(
+                {
+                    "policy_fingerprint": (
+                        prepared_context_input.prepared_tool_results.resolved_policy.policy_fingerprint
+                    ),
+                    "basis_fingerprint": (
+                        prepared_context_input.prepared_tool_results.resolved_policy.basis.basis_fingerprint
+                    ),
+                    "unit_order_fingerprint": (
+                        prepared_context_input.prepared_tool_results.resolved_policy.unit_order_fingerprint
+                    ),
+                    "protection_fingerprint": (
+                        prepared_context_input.prepared_tool_results.resolved_policy.protection_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.ACTIVE_WINDOW,
+            freeze_json(
+                {
+                    "window_id": active_window.window_id,
+                    "window_generation": active_window.generation,
+                    "window_semantic_fingerprint": (
+                        active_window.window_semantic_fingerprint
+                    ),
+                    "window_fact_fingerprint": active_window.window_fact_fingerprint,
+                    "source_through_sequence_at_open": (
+                        active_window.source_through_sequence_at_open
+                    ),
+                    "source_summary_artifact_id": (
+                        active_window.source_summary_artifact_id
+                    ),
+                    "source_summary_fingerprint": (
+                        active_window.source_summary_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.WINDOW_POLICY,
+            freeze_json(
+                {
+                    "schema_version": window_policy.schema_version,
+                    "policy_fingerprint": window_policy.policy_fingerprint,
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.PROJECTION_STATE,
+            freeze_json(
+                {
+                    "window_id": projection_state.window_id,
+                    "window_generation": projection_state.window_generation,
+                    "projection_generation": projection_state.projection_generation,
+                    "through_sequence": projection_state.through_sequence,
+                    "unit_projection_count": len(projection_state.unit_projections),
+                    "rollup_count": len(projection_state.rollups),
+                    "state_semantic_fingerprint": (
+                        projection_state.state_semantic_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.PROJECTED_TOOL_RESULT_REFS,
+            freeze_json(
+                {
+                    "projection_state_fingerprint": (
+                        projection_state.state_semantic_fingerprint
+                    ),
+                    "projected_unit_count": len(projection_state.unit_projections),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.PREPARED_ROLLUP_UNITS,
+            freeze_json(
+                {
+                    "projection_state_fingerprint": (
+                        projection_state.state_semantic_fingerprint
+                    ),
+                    "prepared_rollup_count": len(prepared_rollups),
+                    "ordered_prepared_rollup_accumulator": context_fingerprint(
+                        "context-input-audit-prepared-rollup-set:v1",
+                        tuple(item.prepared_fingerprint for item in prepared_rollups),
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.ROLLOUT_STATE,
+            freeze_json(
+                {
+                    "account_id": rollout_state.account_id,
+                    "phase": rollout_state.phase.value,
+                    "through_sequence": rollout_state.through_sequence,
+                    "active_reservation_count": len(rollout_state.active_reservations),
+                    "state_fingerprint": rollout_state.state_fingerprint,
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.CONTEXT_BUDGET_DECISION,
+            freeze_json(
+                {
+                    "window_id": context_budget_decision.window_id,
+                    "source_through_sequence": (
+                        context_budget_decision.source_through_sequence
+                    ),
+                    "decision": context_budget_decision.decision,
+                    "decision_fingerprint": (
+                        context_budget_decision.decision_fingerprint
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.PROJECTION_PRESSURE_SHADOW,
+            freeze_json(
+                {
+                    "present": projection_pressure_shadow is not None,
+                    "operational_fingerprint": (
+                        projection_pressure_shadow.operational_fingerprint
+                        if projection_pressure_shadow is not None
+                        else None
+                    ),
+                }
+            ),
+        ),
+        (
+            ContextInputAuditComponentKind.PROJECTION_TARGET_UNREACHABLE,
+            freeze_json(
+                {
+                    "present": projection_target_unreachable is not None,
+                    "audit_fingerprint": (
+                        projection_target_unreachable.audit_fingerprint
+                        if projection_target_unreachable is not None
+                        else None
+                    ),
+                }
+            ),
+        ),
+    )
+    detail_values = (
+        (
+            ContextInputAuditComponentKind.PREPARED_CANDIDATE_SET,
+            prepared_context_input.prepared_candidates,
+        ),
+        (
+            ContextInputAuditComponentKind.COMPILED_SECTIONS,
+            compiled_context.sections,
+        ),
+        (
+            ContextInputAuditComponentKind.COMPILED_TOOL_SPECS,
+            compiled_context.tool_specs,
+        ),
+        (
+            ContextInputAuditComponentKind.COMPILED_DIAGNOSTICS,
+            compiled_context.diagnostics,
+        ),
+        (
+            ContextInputAuditComponentKind.COMPILED_LIFECYCLE_DECISIONS,
+            compiled_context.lifecycle_decisions,
+        ),
+        (
+            ContextInputAuditComponentKind.TOOL_RESULT_RENDER_DECISIONS,
+            compiled_context.tool_result_render_decisions,
+        ),
+        (
+            ContextInputAuditComponentKind.TOOL_RESULT_BUDGET_REPORT,
+            compiled_context.tool_result_budget_report,
+        ),
+        (
+            ContextInputAuditComponentKind.TOOL_RESULT_RENDER_DECISION_FACTS,
+            compiled_context.tool_result_render_decision_facts,
+        ),
+        (
+            ContextInputAuditComponentKind.TOOL_RESULT_RENDER_OPERATIONAL_FACTS,
+            compiled_context.tool_result_render_operational_facts,
+        ),
+    )
+    references = tuple(
+        PreparedContextInputAuditCaptureComponent(
+            kind=kind,
+            source=value,
+            ownership=(
+                ContextInputAuditComponentOwnership.EXISTING_AUTHORITY_REFERENCE
+            ),
+        )
+        for kind, value in reference_values
+    )
+    details = tuple(
+        PreparedContextInputAuditCaptureComponent(
+            kind=kind,
+            source=value,
+            ownership=ContextInputAuditComponentOwnership.PAGE_OWNED_DETAIL,
+        )
+        for kind, value in detail_values
+    )
+    return (*references, *details)
+
+
 def _empty_context_budget_report(resolved_call) -> ContextBudgetReportEvent:
     target = resolved_call.target
     return ContextBudgetReportEvent(
@@ -9329,65 +9534,7 @@ def _empty_context_budget_report(resolved_call) -> ContextBudgetReportEvent:
     )
 
 
-def _context_manifest_input_failure(
-    *,
-    snapshot,
-    manifest,
-    candidate,
-    error: BaseException,
-) -> ContextCompileInputFailureFact:
-    if isinstance(error, ContextInputManifestConfirmedAbsent):
-        outcome = "confirmed_absent"
-        reason = ContextInputFailureReasonCode.MANIFEST_CONFIRMED_ABSENT
-    elif isinstance(error, ContextInputManifestWriteConflict):
-        outcome = "conflict"
-        reason = ContextInputFailureReasonCode.MANIFEST_CONFLICT
-    elif isinstance(error, ContextInputManifestWriteDeadlineExceeded):
-        outcome = "deadline_exceeded"
-        reason = ContextInputFailureReasonCode.MANIFEST_DEADLINE_EXCEEDED
-    else:
-        outcome = "outcome_unknown"
-        reason = ContextInputFailureReasonCode.MANIFEST_OUTCOME_UNKNOWN
-    fact = snapshot.invocation.fact
-    available = tuple(
-        sorted(
-            (
-                (
-                    "prepared_candidate_set",
-                    snapshot.prepared_candidates.candidate_set_fingerprint,
-                ),
-                ("snapshot_fact", fact.snapshot_fact_fingerprint),
-                (
-                    "tool_result_render_input",
-                    snapshot.prepared_tool_results.render_input_fingerprint,
-                ),
-                (
-                    "transcript",
-                    snapshot.normalized_transcript.transcript.transcript_fingerprint,
-                ),
-            )
-        )
-    )
-    return ContextCompileInputFailureFact(
-        failure_stage="input_manifest_write",
-        context_id=fact.identity.context_id,
-        resolved_model_call_id=fact.resolved_model_call.resolved_model_call_id,
-        model_call_index=fact.identity.model_call_index,
-        compile_attempt_index=fact.identity.compile_attempt_index,
-        context_retry_index=fact.identity.context_retry_index,
-        snapshot_id=fact.identity.snapshot_id,
-        source_through_sequence=fact.identity.source_through_sequence,
-        available_component_fingerprints=available,
-        input_aggregate_fingerprint=manifest.input_aggregate_fingerprint,
-        manifest_candidate_artifact_id=candidate.artifact_id,
-        manifest_candidate_content_fingerprint=candidate.content_fingerprint,
-        manifest_candidate_metadata_fingerprint=candidate.metadata_fingerprint,
-        manifest_write_outcome=outcome,
-        reason_code=reason,
-    )
-
-
-def _context_pre_manifest_input_failure(
+def _context_pre_commit_input_failure(
     *,
     error: ContextInputPreparationError,
     context_id: str,
@@ -9407,15 +9554,11 @@ def _context_pre_manifest_input_failure(
         source_through_sequence=error.source_through_sequence,
         available_component_fingerprints=(error.available_component_fingerprints),
         input_aggregate_fingerprint=None,
-        manifest_candidate_artifact_id=None,
-        manifest_candidate_content_fingerprint=None,
-        manifest_candidate_metadata_fingerprint=None,
-        manifest_write_outcome="not_attempted",
         reason_code=error.reason_code,
     )
 
 
-def _context_manifest_preparation_error(
+def _context_commit_preparation_error(
     prepared_context_input,
     *,
     cause: Exception,
@@ -9441,7 +9584,7 @@ def _context_manifest_preparation_error(
         )
     )
     return ContextInputPreparationError(
-        failure_stage="candidate_materialization",
+        failure_stage="context_compile",
         reason_code=ContextInputFailureReasonCode.CANDIDATE_INVALID,
         snapshot_id=fact.identity.snapshot_id,
         source_through_sequence=fact.identity.source_through_sequence,
@@ -9554,7 +9697,7 @@ def _context_budget_input_failure(
         reason_code=ContextInputFailureReasonCode.CONTEXT_BUDGET_EXCEEDED,
         cause=RuntimeError("resolved context input exceeds its model budget"),
     )
-    return _context_pre_manifest_input_failure(
+    return _context_pre_commit_input_failure(
         error=error,
         context_id=context_id,
         resolved_model_call_id=resolved_model_call_id,

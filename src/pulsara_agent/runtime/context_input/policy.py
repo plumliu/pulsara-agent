@@ -66,7 +66,6 @@ def resolve_context_compile_policy(budget: LoopBudget) -> ContextCompilePolicyFa
         ),
         "max_candidate_source_refs": 1_024,
         "max_candidate_artifact_refs": 512,
-        "max_input_manifest_chars": 1_048_576,
     }
     candidate = ContextCandidateCollectionPolicyFact(
         **candidate_payload,

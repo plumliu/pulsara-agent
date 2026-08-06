@@ -110,9 +110,6 @@ from pulsara_agent.runtime.context_input.candidate import InMemoryContextLifecyc
 from pulsara_agent.runtime.context_input.event_slice import (
     InMemoryContextAuthoritySliceCache,
 )
-from pulsara_agent.runtime.context_input.manifest import (
-    ContextInputManifestWriteService,
-)
 from pulsara_agent.runtime.context_input.io_service import ContextInputIoService
 from pulsara_agent.runtime.event_write_service import (
     PendingRuntimeEventWriteError,
@@ -193,6 +190,11 @@ from pulsara_agent.ports.event_write import (
     business_accounting_partition_fingerprint,
     classify_committed_event_settlement,
     event_batch_commit_outcome_from_error as _base_event_batch_commit_outcome,
+)
+from pulsara_agent.ports.runtime_session_teardown import (
+    NonHostRuntimeSessionTeardownPurpose,
+    NonHostRuntimeSessionTeardownReconciliationRequired,
+    NonHostRuntimeSessionTeardownRetryableError,
 )
 from pulsara_agent.ports.mcp import McpContinuationTransactionAuthority
 from pulsara_agent.ports.stored_event import (
@@ -333,10 +335,6 @@ class RuntimeSession:
     )
     terminal_sessions: TerminalSessionManager = field(init=False)
     artifact_service: ToolResultArtifactService = field(init=False)
-    context_input_manifest_service: ContextInputManifestWriteService = field(
-        init=False,
-        repr=False,
-    )
     context_input_io_service: ContextInputIoService = field(
         init=False,
         repr=False,
@@ -624,10 +622,6 @@ class RuntimeSession:
             index=self.tool_result_artifacts,
             runtime_session_id=self.runtime_session_id,
         )
-        self.context_input_manifest_service = ContextInputManifestWriteService(
-            archive=self.archive,
-            on_consistency_failure=self.latch_context_input_reconciliation_required,
-        )
         self.context_input_io_service = ContextInputIoService()
         self.event_write_service = RuntimeEventWriteService()
         self.committed_reducer_repair_service = CommittedReducerRepairService(
@@ -911,6 +905,9 @@ class RuntimeSession:
             through_sequence=self.provider_input_generation_store.through_sequence,
             ingress=GroupingIndependentOwnedEventReducerAdapter(
                 apply_owned_events=self.provider_input_generation_store.apply_committed,
+                fold_restored_owned_events=(
+                    self.provider_input_generation_store.fold_restored
+                ),
                 reset_owned_events=lambda: self.provider_input_generation_store.rebuild(
                     ()
                 ),
@@ -4497,10 +4494,10 @@ class RuntimeSession:
                 if (
                     isinstance(event, ContextCompiledEvent)
                     and event.status == "compiled"
-                    and event.prepared_provider_input is None
+                    and event.provider_input_preparation_install is None
                 ):
                     raise ValueError(
-                        "production compiled context requires prepared provider input"
+                        "production compiled context requires provider-input installation"
                     )
                 if (
                     isinstance(event, ModelCallStartEvent)
@@ -6719,64 +6716,74 @@ class RuntimeSession:
             )
         self.provider_input_generation_coordinator.close_owned_attempts_after_recovery()
 
-    async def teardown_temporary_recovery_session(
+    async def teardown_non_host_runtime_session(
         self,
         *,
+        purpose: NonHostRuntimeSessionTeardownPurpose,
         deadline_monotonic: float,
     ) -> None:
-        """Drain a resume-recovery RuntimeSession before synchronous close.
+        """Drain a RuntimeSession that has no HostSession close owner.
 
-        A temporary recovery session is a real durable writer: repairing a run
-        may dirty runtime-projection and transcript checkpoint owners.  It has
-        no HostSession to execute the normal teardown graph, so this narrow
-        owner supplies the corresponding bounded subset.  No error is ignored
-        and no owner is force-cleared.
+        Resume repair and child terminalization share the same physical graph;
+        the closed purpose is attribution only and cannot select a weaker path.
         """
-
-        await self.quiesce_provider_input_event_producers_for_close(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.mandatory_runtime_audit_owner.drain(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.drain_open_committed_reducer_barrier(
-            deadline_monotonic=deadline_monotonic
-        )
-        self.require_mutation_allowed()
-
-        # Runtime-projection maintenance consumes reducer fold receipts.  Stop
-        # and physically drain it only after the writer/repair/post-fold fixed
-        # point, while its dependencies are still alive.
-        await self.runtime_projection_checkpoint_maintenance_service.stop_admission_and_drain(
-            deadline_monotonic=deadline_monotonic
-        )
-
-        if self.window_compaction_service is not None:
-            await self.window_compaction_service.drain_pending(
+        if not isinstance(purpose, NonHostRuntimeSessionTeardownPurpose):
+            raise TypeError("non-Host RuntimeSession teardown purpose is invalid")
+        try:
+            await self.quiesce_provider_input_event_producers_for_close(
                 deadline_monotonic=deadline_monotonic
             )
-        await self.context_input_manifest_service.drain_pending(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.transcript_projection_checkpoint_service.request_close_cancellation()
-        await self.subagent_graph_checkpoint_service.drain_pending(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.transcript_projection_checkpoint_service.drain_pending(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.prompt_queue_checkpoint_service.drain_pending(
-            deadline_monotonic=deadline_monotonic
-        )
-        await self.terminal_presentation_foundation_service.stop_admission_and_drain(
-            deadline_monotonic=deadline_monotonic
-        )
-        # Every owner above can use the shared blocking I/O service.  This is
-        # the final physical-operation join before close_if_idle() assertions.
-        await self.context_input_io_service.drain_pending(
-            deadline_monotonic=deadline_monotonic
-        )
-        self.close()
+            await self.mandatory_runtime_audit_owner.drain(
+                deadline_monotonic=deadline_monotonic
+            )
+            await self.drain_open_committed_reducer_barrier(
+                deadline_monotonic=deadline_monotonic
+            )
+            self.require_mutation_allowed()
+
+            # Runtime-projection maintenance consumes reducer fold receipts.
+            await self.runtime_projection_checkpoint_maintenance_service.stop_admission_and_drain(
+                deadline_monotonic=deadline_monotonic
+            )
+
+            if self.window_compaction_service is not None:
+                await self.window_compaction_service.drain_pending(
+                    deadline_monotonic=deadline_monotonic
+                )
+            await self.transcript_projection_checkpoint_service.request_close_cancellation()
+            await self.subagent_graph_checkpoint_service.drain_pending(
+                deadline_monotonic=deadline_monotonic
+            )
+            await self.transcript_projection_checkpoint_service.drain_pending(
+                deadline_monotonic=deadline_monotonic
+            )
+            await self.prompt_queue_checkpoint_service.drain_pending(
+                deadline_monotonic=deadline_monotonic
+            )
+            await (
+                self.terminal_presentation_foundation_service.stop_admission_and_drain(
+                    deadline_monotonic=deadline_monotonic
+                )
+            )
+            # Every owner above can use the shared blocking I/O service.
+            await self.context_input_io_service.drain_pending(
+                deadline_monotonic=deadline_monotonic
+            )
+            self.close()
+        except asyncio.CancelledError as exc:
+            raise NonHostRuntimeSessionTeardownRetryableError(
+                f"{purpose.value} RuntimeSession teardown was cancelled"
+            ) from exc
+        except TimeoutError as exc:
+            raise NonHostRuntimeSessionTeardownRetryableError(
+                f"{purpose.value} RuntimeSession teardown deadline expired"
+            ) from exc
+        except NonHostRuntimeSessionTeardownReconciliationRequired:
+            raise
+        except Exception as exc:
+            raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                f"{purpose.value} RuntimeSession teardown requires reconciliation"
+            ) from exc
 
     def close(self) -> None:
         # Owned-local: we shut the manager down. Borrowed (HostCore path): we do
@@ -6795,7 +6802,6 @@ class RuntimeSession:
         self.terminal_presentation_foundation_service.close()
         self.terminal_monitor_coordinator.close()
         self._terminal_notification_listener = None
-        self.context_input_manifest_service.close_if_idle()
         self.context_input_io_service.close_if_idle()
         self.event_write_service.close_if_idle()
         self.committed_reducer_post_fold_service.close_if_idle()

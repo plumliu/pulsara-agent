@@ -1,1858 +1,697 @@
-"""Exact historical reconstruction of a durable context-input manifest."""
+"""Required provider replay and optional compiler-audit resolution.
+
+Provider-visible payload authority is independent from optional compiler audit
+artifacts.  This module deliberately has no decoder for the removed v8 flat
+manifest.
+"""
 
 from __future__ import annotations
 
-from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
-
 from dataclasses import dataclass
 from enum import StrEnum
-import hashlib
 import json
 from time import monotonic
 
 from pulsara_agent.event import (
-    CapabilityExposureResolvedEvent,
-    ContextCompactionCompletedEvent,
     ContextCompiledEvent,
-    ContextProjectionRewritePageEvent,
-    ContextWindowCompactionCompletedEvent,
-    ContextWindowClosedEvent,
-    ContextWindowOpenedEvent,
-    EventType,
-    RolloutBudgetAccountOpenedEvent,
-    RunStartEvent,
-    SubagentRunCompletedEvent,
+    ModelCallStartEvent,
+    ProviderInputAppendCommittedEvent,
 )
-from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log.historical_decoder import (
+    decode_raw_stored_event_envelope,
+)
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.llm.models import ModelProfile, ModelRole
-from pulsara_agent.llm.provider import ModelIdentityPolicy, ProviderProfile
-from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
-from pulsara_agent.primitives.context import (
-    ContextArtifactToolSchemaFact,
-    ContextCompileInputAuditFact,
-    ContextCompileInputManifestFact,
-    ContextInlineToolSchemaFact,
-    ContextMaterializedToolSpecInput,
-    FrozenJsonObjectFact,
-    PreparedContextCandidateSet,
-    WindowCompactionSourceDocumentFact,
+from pulsara_agent.event_log.serialization import stable_event_identity
+from pulsara_agent.llm.provider_input_materialization import (
+    RecursivelyImmutableProviderInputCarrier,
+    hydrate_carrier,
+    message_semantic_fingerprint,
+    tool_fragment_semantic_fingerprint,
+)
+from pulsara_agent.primitives._context_base import (
+    ContextEventReferenceFact,
+    canonical_json_bytes,
     context_fingerprint,
-    freeze_json,
 )
-from pulsara_agent.primitives.context_source import (
-    ContextArtifactReferenceFact,
-    LedgerAuthorityHorizonFact,
+from pulsara_agent.primitives.context_input_audit_storage import (
+    ContextInputAuditComponentKind,
+    ContextInputAuditMaterializationPlanFact,
+    ContextInputAuditPageFact,
+    ContextInputAuditRootFact,
 )
-from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.primitives.long_horizon import (
-    SubagentGraphAccelerationFact,
-    default_subagent_graph_checkpoint_policy,
-)
-from pulsara_agent.primitives.tool_result import PreparedToolResultRenderInput
-from pulsara_agent.primitives.transcript_projection import (
-    TranscriptProjectionLeafEntryFact,
+from pulsara_agent.primitives.context_input_commit import (
+    ContextCompileInputCommitFact,
 )
 from pulsara_agent.primitives.provider_input import (
+    CommittedProviderInputReferenceFact,
+    ProviderInputSemanticIdentityFact,
     ProviderInputReplayBindingIdentityFact,
     ProviderInputUnitMaterializationFact,
 )
-from pulsara_agent.runtime.context_input.event_slice import (
-    ContextEventAuthorityView,
-    ContextEventSlice,
-    FrozenStoredEvent,
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.context_source import LedgerAuthorityHorizonFact
+from pulsara_agent.runtime.context_input.audit_materializer import (
+    hydrate_context_input_audit_components,
 )
-from pulsara_agent.runtime.context_input.event_slice import ContextEventSliceError
-from pulsara_agent.runtime.context_input.render import prepare_tool_result_render_input
-from pulsara_agent.runtime.context_input.render import (
-    apply_tool_observation_projection,
-    render_prepared_tool_result_units,
+from pulsara_agent.runtime.context_input.audit_storage import (
+    ContextInputAuditArtifactIntegrityError,
+    ContextInputAuditArtifactMissing,
+    ContextInputAuditArtifactRepository,
+    validate_context_input_audit_plan_reference,
 )
-from pulsara_agent.runtime.context_input.manifest import (
-    build_projected_tool_result_compile_refs,
+from pulsara_agent.runtime.context_input.commit import (
+    context_input_audit_component_ownership,
 )
-from pulsara_agent.runtime.context_input.snapshot import (
-    ContextCandidateSelectionMismatch,
-    ContextFactSnapshot,
-    ContextSnapshotBuildInput,
-    build_context_snapshot,
-    collect_replay_context_inputs,
-)
-from pulsara_agent.runtime.context_input.compiler import (
-    canonical_render_decisions_fingerprint,
-    compile_context_from_facts,
-    provider_neutral_payload_fingerprint,
-)
-from pulsara_agent.runtime.context_engine.types import (
-    bind_compiled_context_to_provider_carrier,
-)
-from pulsara_agent.runtime.context_input.transcript import (
-    NormalizedContextTranscript,
-)
-from pulsara_agent.runtime.context_input.stable_transcript import (
-    project_stable_context_transcript,
-    required_terminal_content_artifacts,
-)
-from pulsara_agent.runtime.context_input.candidate import (
-    collect_context_candidates,
-)
-from pulsara_agent.runtime.context_input.sources.builder import (
-    ContextSourceArtifactMetadata,
-    HydratedContextSourceArtifact,
-    build_context_sources,
-    default_context_source_registry,
-    hydrate_context_source_content_sidecar,
-)
-from pulsara_agent.runtime.context_input.live import (
-    collect_context_projection_references,
-)
-from pulsara_agent.runtime.long_horizon.context_budget import (
-    long_horizon_context_diagnostics,
-    measure_long_horizon_context_budget,
-)
-from pulsara_agent.runtime.long_horizon.rollup import (
-    default_observation_rollup_renderer_registry,
-    prepare_observation_rollup_artifact,
-)
-from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
-from pulsara_agent.runtime.long_horizon.projection_reducer import (
-    ContextWindowProjectionReducer,
-)
-from pulsara_agent.runtime.long_horizon.status import (
-    derive_rollout_status_candidate_from_state,
-    fold_sparse_rollout_state,
-)
-from pulsara_agent.llm.provider_input_materialization import (
-    hydrate_carrier,
-    validate_carrier_against_plan,
-)
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.provider_input.vector import (
     load_ledger_horizon_set,
     load_provider_input_vector,
     load_replay_binding_set,
 )
-from pulsara_agent.runtime.authority_materialization import (
-    build_default_authority_materialization_contract_bundle,
-    build_default_transcript_projection_materialization_contracts,
-    restore_transcript_projection_from_base,
-)
-from pulsara_agent.runtime.authority_materialization.contracts import (
-    materialize_transcript_sparse_read_proof,
-)
+
+
+_READ_DEADLINE_SECONDS = 30.0
 
 
 class ContextInputReplayStatus(StrEnum):
-    EXACT_REPLAY = "exact_replay"
-    FACT_REPLAY_ONLY = "fact_replay_only"
-    ARTIFACT_MISSING = "artifact_missing"
-    CONTRACT_MISMATCH = "contract_mismatch"
-    LEDGER_UNTRUSTED = "ledger_untrusted"
+    EXACT_AUDIT = "exact_audit"
+    RECONSTRUCTED_AUDIT = "reconstructed_audit"
+    AUDIT_UNAVAILABLE = "audit_unavailable"
+    AUDIT_INTEGRITY_FAILURE = "audit_integrity_failure"
 
 
 class ContextInputReplayError(RuntimeError):
-    def __init__(
-        self,
-        status: ContextInputReplayStatus,
-        reason_code: str,
-        message: str,
-    ) -> None:
+    def __init__(self, status: ContextInputReplayStatus, reason_code: str) -> None:
         self.status = status
         self.reason_code = reason_code
-        super().__init__(message)
+        super().__init__(reason_code)
 
 
 @dataclass(frozen=True, slots=True)
-class ReplayedContextInput:
-    manifest: ContextCompileInputManifestFact
-    snapshot_build_input: ContextSnapshotBuildInput
-    normalized_transcript: NormalizedContextTranscript
-    transcript_stable_entries: tuple[TranscriptProjectionLeafEntryFact, ...]
-    prepared_tool_results: PreparedToolResultRenderInput
-    prepared_candidates: PreparedContextCandidateSet
-    context_source_hydrated_contents: tuple[tuple[str, str], ...]
-    subagent_graph_acceleration: SubagentGraphAccelerationFact
+class ExactCommittedProviderPayload:
+    model_start: ModelCallStartEvent
+    append: ProviderInputAppendCommittedEvent
+    committed_reference: CommittedProviderInputReferenceFact
+    units: tuple[ProviderInputUnitMaterializationFact, ...]
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
+    replay_bindings: tuple[ProviderInputReplayBindingIdentityFact, ...]
+    carrier: RecursivelyImmutableProviderInputCarrier
+    proof_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
-class ReplayedCompiledContext:
-    inputs: ReplayedContextInput
-    compiled_context: object
-    status: ContextInputReplayStatus = ContextInputReplayStatus.EXACT_REPLAY
+class ExactAuditArtifact:
+    status: ContextInputReplayStatus
+    semantic_commit: ContextCompileInputCommitFact
+    root: ContextInputAuditRootFact
+    plan: ContextInputAuditMaterializationPlanFact
+    pages: tuple[ContextInputAuditPageFact, ...]
+    components: tuple[tuple[object, object], ...]
+    proof_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
-class _ReplayOnlyTransport:
-    api: str
-    binding_id: str
-    contract_version: str
+class ReconstructedAudit:
+    status: ContextInputReplayStatus
+    semantic_commit: ContextCompileInputCommitFact
+    provider_payload: ExactCommittedProviderPayload
+    reconstructed_component_kinds: tuple[str, ...]
+    omitted_component_kinds: tuple[str, ...]
+    artifact_diagnostic_code: str | None
+    proof_fingerprint: str
 
-    async def stream(self, **_kwargs):  # pragma: no cover - compile-only guard
-        raise RuntimeError("replay-only transport cannot perform network I/O")
+
+@dataclass(frozen=True, slots=True)
+class AuditUnavailable:
+    status: ContextInputReplayStatus
+    reason: str
 
 
-def load_context_input_manifest(
+@dataclass(frozen=True, slots=True)
+class AuditIntegrityFailure:
+    status: ContextInputReplayStatus
+    reason: str
+
+
+ContextInputAuditLoadOutcome = (
+    ExactAuditArtifact | ReconstructedAudit | AuditUnavailable | AuditIntegrityFailure
+)
+
+
+def _decode_exact_events(event_log, event_ids: tuple[str, ...], *, deadline: float):
+    rows = event_log.read_raw_events_by_id(
+        event_ids,
+        deadline_monotonic=deadline,
+    )
+    if tuple(row.event_id for row in rows) != event_ids:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.AUDIT_UNAVAILABLE,
+            "required_event_missing",
+        )
+    return tuple(
+        decode_raw_stored_event_envelope(row, DEFAULT_EVENT_SCHEMA_REGISTRY)
+        for row in rows
+    )
+
+
+def load_committed_provider_payload_for_model_start(
     *,
-    audit: ContextCompileInputAuditFact,
-    archive,
-) -> ContextCompileInputManifestFact:
-    """Load one manifest while preserving a stable replay failure class."""
+    model_start_reference: ContextEventReferenceFact,
+    event_log,
+    provider_input_store,
+    artifact_store,
+    deadline_monotonic: float | None = None,
+) -> ExactCommittedProviderPayload:
+    """Rebuild exact provider-visible content without compiler audit artifacts."""
 
-    try:
-        raw = archive.get_text(
-            audit.input_manifest_artifact_id,
-            session_id=audit.source_runtime_session_id,
-        )
-        info = archive.get_info(
-            audit.input_manifest_artifact_id,
-            session_id=audit.source_runtime_session_id,
-        )
-    except Exception as exc:
+    del provider_input_store  # live cache is never authority for this proof
+    deadline = (
+        monotonic() + _READ_DEADLINE_SECONDS
+        if deadline_monotonic is None
+        else deadline_monotonic
+    )
+    (decoded_start,) = _decode_exact_events(
+        event_log,
+        (model_start_reference.event_id,),
+        deadline=deadline,
+    )
+    if not isinstance(decoded_start, ModelCallStartEvent):
         raise ContextInputReplayError(
-            ContextInputReplayStatus.ARTIFACT_MISSING,
-            "context_input_manifest_missing",
-            "context input manifest is unavailable",
-        ) from exc
-    content_fingerprint = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    try:
-        manifest = ContextCompileInputManifestFact.model_validate(json.loads(raw))
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_manifest_invalid",
-            "context input manifest is invalid",
-        ) from exc
+            ContextInputReplayStatus.AUDIT_INTEGRITY_FAILURE,
+            "model_start_reference_type_mismatch",
+        )
     if (
-        manifest.manifest_fingerprint != audit.input_manifest_fingerprint
-        or manifest.input_aggregate_fingerprint != audit.input_aggregate_fingerprint
-        or manifest.snapshot.snapshot_fact_fingerprint
-        != audit.snapshot_fact_fingerprint
-        or manifest.snapshot.snapshot_semantic_fingerprint
-        != audit.snapshot_semantic_fingerprint
-        or manifest.snapshot.long_horizon_attribution.attribution_fingerprint
-        != audit.long_horizon_attribution_fingerprint
+        event_reference_from_stored(
+            decoded_start,
+            runtime_session_id=model_start_reference.runtime_session_id,
+        )
+        != model_start_reference
+        or decoded_start.provider_input_reference is None
     ):
         raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_manifest_audit_mismatch",
-            "context input manifest/audit identity mismatch",
+            ContextInputReplayStatus.AUDIT_INTEGRITY_FAILURE,
+            "model_start_reference_identity_mismatch",
         )
-    metadata = info.metadata or {}
-    if metadata.get("content_fingerprint") != content_fingerprint:
+    reference = decoded_start.provider_input_reference
+    (decoded_append,) = _decode_exact_events(
+        event_log,
+        (reference.append_committed_event_identity.event_id,),
+        deadline=deadline,
+    )
+    if not isinstance(decoded_append, ProviderInputAppendCommittedEvent):
         raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_manifest_content_hash_mismatch",
-            "context input manifest content hash mismatch",
+            ContextInputReplayStatus.AUDIT_INTEGRITY_FAILURE,
+            "provider_append_reference_type_mismatch",
         )
-    return manifest
-
-
-def _validate_replayed_transcript_authority(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    archive,
-    event_log: EventLog,
-    event_slice: ContextEventSlice,
-    named_slices: tuple[ContextEventSlice, ...],
-) -> None:
-    authority = manifest.transcript_authority
-    base = authority.projection_base
-    base_sequence = (
-        base.common.run_seed_reference.source_ledger_through_sequence
-        if base.base_kind == "run_seed"
-        else base.checkpoint_acceleration.checkpoint_candidate_ledger_through_sequence
-    )
-    contracts = build_default_authority_materialization_contract_bundle()
-    deadline = monotonic() + contracts.limits.operation_timeout_seconds
-    try:
-        delta = event_log.read_transcript_domain_delta(
-            after_sequence=base_sequence,
-            through_sequence=manifest.snapshot.identity.source_through_sequence,
-            max_events=contracts.limits.max_unreclaimable_ledger_events,
-            max_payload_bytes=(
-                contracts.limits.max_unreclaimable_charged_payload_bytes
-            ),
-            registry_contract_fingerprint=(
-                contracts.event_domain.contract.registry_contract_fingerprint
-            ),
-            deadline_monotonic=deadline,
-        )
-        proof = materialize_transcript_sparse_read_proof(
-            delta,
-            binding=contracts.event_domain,
-        )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_transcript_domain_proof_untrusted",
-            "transcript semantic delta cannot be proven from the ledger",
-        ) from exc
-    expected_refs = tuple(
-        (
-            item.runtime_session_id,
-            item.sequence,
-            item.event_id,
-            item.event_type,
-            item.payload_fingerprint,
-        )
-        for item in authority.transcript_domain_delta_refs
-    )
-    actual_refs = tuple(
-        (
-            item.runtime_session_id,
-            item.sequence,
-            item.event_id,
-            item.event_type,
-            item.payload_fingerprint,
-        )
-        for item in delta.semantic_events
-    )
-    source = authority.semantic_source
     if (
-        proof != authority.domain_completeness_proof
-        or actual_refs != expected_refs
-        or source.semantic_source_event_count != delta.after.semantic_event_count
-        or source.semantic_source_accumulator != delta.after.semantic_accumulator
+        stable_event_identity(
+            decoded_append,
+            runtime_session_id=model_start_reference.runtime_session_id,
+        )
+        != reference.append_committed_event_identity
+        or decoded_append.resulting_core_state.unit_vector_root
+        != reference.resulting_unit_vector_root
+        or decoded_append.resulting_core_state.committed_authority_horizon_set
+        != reference.authority_horizon_set
+        or decoded_append.resulting_core_state.replay_binding_set
+        != reference.replay_binding_set
+        or decoded_append.generation_id != reference.generation_id
+        or decoded_append.resulting_revision != reference.committed_generation_revision
+        or decoded_append.resulting_core_state_fingerprint
+        != reference.resulting_generation_core_state_fingerprint
+        or decoded_append.semantic_commit_fingerprint
+        != reference.semantic_commit_fingerprint
+        or decoded_append.ordered_projection_identity_fingerprint
+        != reference.ordered_projection_identity_fingerprint
     ):
         raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_transcript_authority_mismatch",
-            "ledger-derived transcript authority differs from the manifest",
+            ContextInputReplayStatus.AUDIT_INTEGRITY_FAILURE,
+            "provider_append_reference_identity_mismatch",
         )
-
-    all_slices = (event_slice, *named_slices)
-    supplied = {
-        (slice_.runtime_session_id, event.event_id): event
-        for slice_ in all_slices
-        for event in slice_.events
-    }
-    named_refs = tuple(
-        ref
-        for entry in authority.named_fact_selection.entries
-        for ref in entry.source_refs
+    units, _reachable = load_provider_input_vector(
+        archive=artifact_store,
+        runtime_session_id=model_start_reference.runtime_session_id,
+        root=reference.resulting_unit_vector_root,
+        deadline_monotonic=deadline,
     )
-    local_ids = tuple(
-        sorted(
-            {
-                ref.event_id
-                for ref in named_refs
-                if ref.runtime_session_id
-                == manifest.snapshot.identity.runtime_session_id
-            }
-        )
+    authority_horizons, _horizon_reachable = load_ledger_horizon_set(
+        archive=artifact_store,
+        runtime_session_id=model_start_reference.runtime_session_id,
+        reference=reference.authority_horizon_set,
+        deadline_monotonic=deadline,
     )
-    try:
-        local_rows = event_log.read_raw_events_by_id(
-            local_ids,
-            deadline_monotonic=deadline,
-        )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_named_authority_untrusted",
-            "named-fact authority events cannot be read",
-        ) from exc
-    local = {row.event_id: row for row in local_rows}
-    for ref in named_refs:
-        if ref.runtime_session_id == manifest.snapshot.identity.runtime_session_id:
-            row = local.get(ref.event_id)
-            actual = (
-                (
-                    row.sequence,
-                    row.event_type,
-                    row.payload_fingerprint,
-                )
-                if row is not None
-                else None
-            )
-        else:
-            event = supplied.get((ref.runtime_session_id, ref.event_id))
-            actual = (
-                (
-                    event.sequence,
-                    event.event_type,
-                    event.payload_fingerprint,
-                )
-                if event is not None
-                else None
-            )
-        if actual != (ref.sequence, ref.event_type, ref.payload_fingerprint):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_input_named_authority_event_mismatch",
-                "named-fact authority event differs from the manifest",
-            )
-
-    artifact_refs = tuple(
-        ref
-        for entry in authority.named_fact_selection.entries
-        for ref in entry.source_artifact_refs
+    replay_bindings, _binding_reachable = load_replay_binding_set(
+        archive=artifact_store,
+        runtime_session_id=model_start_reference.runtime_session_id,
+        reference=reference.replay_binding_set,
+        deadline_monotonic=deadline,
     )
-    for ref in artifact_refs:
-        try:
-            info = archive.get_info(
-                ref.artifact_id,
-                session_id=manifest.snapshot.identity.runtime_session_id,
-            )
-            content = (
-                archive.get_text(
-                    ref.artifact_id,
-                    session_id=manifest.snapshot.identity.runtime_session_id,
-                ).encode("utf-8")
-                if info.media_type.startswith("text/")
-                or info.media_type in {"application/json", "application/xml"}
-                else archive.get_bytes(
-                    ref.artifact_id,
-                    session_id=manifest.snapshot.identity.runtime_session_id,
-                )
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "context_input_named_authority_artifact_missing",
-                "named-fact authority artifact is unavailable",
-            ) from exc
-        digest = "sha256:" + hashlib.sha256(content).hexdigest()
-        metadata = info.metadata or {}
-        contract = metadata.get("artifact_contract_fingerprint")
-        if not isinstance(contract, str) or not contract.startswith("sha256:"):
-            contract = context_fingerprint(
-                "model-visible-named-fact-artifact-contract:v1",
-                {"media_type": info.media_type},
-            )
-        if (
-            ref.artifact_sha256 != digest
-            or ref.artifact_byte_count != len(content)
-            or ref.semantic_content_fingerprint != digest
-            or ref.artifact_contract_fingerprint != contract
-        ):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_input_named_authority_artifact_mismatch",
-                "named-fact authority artifact differs from the manifest",
-            )
-
-
-def replay_context_input(
-    *,
-    audit: ContextCompileInputAuditFact,
-    archive,
-    event_log: EventLog,
-    event_slice: ContextEventSlice,
-    named_slices: tuple[ContextEventSlice, ...] = (),
-) -> ReplayedContextInput:
-    """Load and revalidate every event-safe component referenced by an audit."""
-
-    manifest = load_context_input_manifest(audit=audit, archive=archive)
-    _validate_replayed_transcript_authority(
-        manifest=manifest,
-        archive=archive,
-        event_log=event_log,
-        event_slice=event_slice,
-        named_slices=named_slices,
-    )
-    local_named_slices = tuple(
-        item
-        for item in named_slices
-        if item.runtime_session_id == event_slice.runtime_session_id
-    )
-    authority_view: ContextEventSlice | ContextEventAuthorityView = (
-        ContextEventAuthorityView(
-            primary_slice=event_slice,
-            named_slices=local_named_slices,
-        )
-        if local_named_slices
-        else event_slice
-    )
-    (
-        subagent_graph,
-        subagent_graph_semantic_source,
-        replay_acceleration,
-        subagent_authority_events,
-    ) = _restore_replay_subagent_graph(
-        manifest=manifest,
-        event_log=event_log,
-        archive=archive,
-    )
-    try:
-        build_input = collect_replay_context_inputs(
-            input_manifest=manifest,
-            event_slice=event_slice,
-            named_slices=named_slices,
-            subagent_graph=subagent_graph,
-            subagent_graph_semantic_source=subagent_graph_semantic_source,
-        )
-    except ContextCandidateSelectionMismatch as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_candidate_selection_mismatch",
-            "ledger-derived candidate selection differs from manifest",
-        ) from exc
-    except ContextEventSliceError as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_event_slice_untrusted",
-            "context input event slice is not the audited authority range",
-        ) from exc
-    if (
-        build_context_snapshot(
-            build_input,
-            long_horizon_attribution=manifest.snapshot.long_horizon_attribution,
-        )
-        != manifest.snapshot
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_snapshot_mismatch",
-            "replayed context snapshot differs from manifest",
-        )
-    context_source_hydrated_contents = _validate_replayed_candidates(
-        manifest=manifest,
-        archive=archive,
-        event_slice=authority_view,
-        named_slices=named_slices,
-        subagent_authority_events=subagent_authority_events,
-    )
-    summary_id = manifest.snapshot.authority_slice_plan.transcript_window.compaction_summary_artifact_id
-    summary_text = None
-    if summary_id is not None:
-        try:
-            summary_text = archive.get_text(
-                summary_id,
-                session_id=audit.source_runtime_session_id,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "context_compaction_summary_missing",
-                "context compaction summary artifact is unavailable",
-            ) from exc
-    source_document = None
-    source_id = manifest.snapshot.authority_slice_plan.transcript_window.window_compaction_source_document_artifact_id
-    if source_id is not None:
-        try:
-            source_document = WindowCompactionSourceDocumentFact.model_validate(
-                json.loads(
-                    archive.get_text(
-                        source_id,
-                        session_id=audit.source_runtime_session_id,
-                    )
-                )
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "context_window_compaction_source_missing",
-                "window compaction source document artifact is unavailable",
-            ) from exc
-        expected_source_fingerprint = manifest.snapshot.authority_slice_plan.transcript_window.window_compaction_source_document_fingerprint
-        if source_document.document_fingerprint != expected_source_fingerprint:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_window_compaction_source_mismatch",
-                "window compaction source document fingerprint differs from manifest",
-            )
-    try:
-        authority_contracts = build_default_authority_materialization_contract_bundle()
-        restored_transcript = restore_transcript_projection_from_base(
-            event_log=event_log,
-            archive=archive,
-            runtime_session_id=audit.source_runtime_session_id,
-            requested_through_sequence=audit.source_through_sequence,
-            projection_base=manifest.transcript_authority.projection_base,
-            event_domain_binding=authority_contracts.event_domain,
-            materialization_contracts=(
-                build_default_transcript_projection_materialization_contracts(
-                    authority_contracts.limits
-                )
-            ),
-            limits=authority_contracts.limits,
-            deadline_monotonic=(
-                monotonic() + authority_contracts.limits.operation_timeout_seconds
-            ),
-        )
-        if (
-            restored_transcript.projection_base
-            != manifest.transcript_authority.projection_base
-            or restored_transcript.semantic_source
-            != manifest.transcript_authority.semantic_source
-            or restored_transcript.domain_completeness_proof
-            != manifest.transcript_authority.domain_completeness_proof
-        ):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_input_transcript_projection_base_mismatch",
-                "manifest-owned transcript projection base cannot be restored exactly",
-            )
-        stable_entries = restored_transcript.state_store.stable_entries()
-        terminal_content_texts = _hydrate_replay_terminal_content(
-            runtime_session_id=audit.source_runtime_session_id,
-            archive=archive,
-            projection_window=(
-                manifest.snapshot.authority_slice_plan.transcript_window
-            ),
-            stable_entries=stable_entries,
-            documents=restored_transcript.document_registry,
-        )
-        compaction_terminal = _read_replay_compaction_terminal(
-            event_log=event_log,
-            terminal_ref=(
-                manifest.snapshot.authority_slice_plan.transcript_window.compaction_terminal_ref
-            ),
-        )
-        normalized = project_stable_context_transcript(
-            runtime_session_id=audit.source_runtime_session_id,
-            through_sequence=audit.source_through_sequence,
-            current_user_anchor=manifest.snapshot.current_user_message.message_id,
-            projection_window=(
-                manifest.snapshot.authority_slice_plan.transcript_window
-            ),
-            stable_entries=stable_entries,
-            documents=restored_transcript.document_registry,
-            hydrated_message_contents=(restored_transcript.hydrated_message_contents),
-            terminal_content_text_by_artifact_id=terminal_content_texts,
-            compaction_summary_text=summary_text,
-            compaction_terminal_event=compaction_terminal,
-            window_compaction_source_document=source_document,
-        )
-    except ContextInputReplayError:
-        raise
-    except (ContextEventSliceError, ValueError) as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_transcript_untrusted",
-            "context input transcript cannot be restored from its durable projection",
-        ) from exc
-    if normalized.transcript.transcript_fingerprint != manifest.transcript_fingerprint:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_transcript_mismatch",
-            "replayed transcript fingerprint mismatch",
-        )
-    units_fingerprint = context_fingerprint(
-        "tool-result-units:v1",
-        tuple(unit.unit_fingerprint for unit in normalized.tool_result_units),
-    )
-    if units_fingerprint != manifest.tool_result_units_fingerprint:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_tool_units_mismatch",
-            "replayed tool-result units fingerprint mismatch",
-        )
-    prepared = prepare_tool_result_render_input(
-        units=normalized.tool_result_units,
-        transcript=normalized.transcript,
-        policy_basis=manifest.snapshot.compile_policy.tool_result_basis,
-        cache=None,
-    )
-    if (
-        prepared.resolved_policy != manifest.tool_result_render_policy
-        or prepared.render_input_fingerprint
-        != manifest.tool_result_render_input_fingerprint
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_render_contract_mismatch",
-            "replayed tool-result render input mismatch",
-        )
-    _validate_replayed_long_horizon_facts(
-        manifest=manifest,
-        event_slice=event_slice,
-        named_slices=named_slices,
-    )
-    return ReplayedContextInput(
-        manifest=manifest,
-        snapshot_build_input=build_input,
-        normalized_transcript=normalized,
-        transcript_stable_entries=stable_entries,
-        prepared_tool_results=prepared,
-        prepared_candidates=manifest.prepared_candidate_set,
-        context_source_hydrated_contents=context_source_hydrated_contents,
-        subagent_graph_acceleration=replay_acceleration,
-    )
-
-
-def _hydrate_replay_terminal_content(
-    *,
-    runtime_session_id: str,
-    archive,
-    projection_window,
-    stable_entries,
-    documents,
-) -> dict[str, str]:
-    references = required_terminal_content_artifacts(
-        stable_entries=stable_entries,
-        projection_window=projection_window,
-        documents=documents,
-    )
-    hydrated: dict[str, str] = {}
-    for reference in references:
-        try:
-            text = archive.get_text(
-                reference.artifact_id,
-                session_id=runtime_session_id,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "context_terminal_projection_content_missing",
-                "terminal projection content artifact is unavailable",
-            ) from exc
-        previous = hydrated.get(reference.artifact_id)
-        if previous is not None and previous != text:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_terminal_projection_content_conflict",
-                "terminal projection content artifact identity is ambiguous",
-            )
-        hydrated[reference.artifact_id] = text
-    return hydrated
-
-
-def _read_replay_compaction_terminal(*, event_log: EventLog, terminal_ref):
-    if terminal_ref is None:
-        return None
-    rows = event_log.read_raw_events_by_id((terminal_ref.event_id,))
-    if len(rows) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_compaction_terminal_missing",
-            "context compaction terminal event is unavailable",
-        )
-    raw = rows[0]
-    if raw.sequence != terminal_ref.sequence:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_compaction_terminal_identity_mismatch",
-            "context compaction terminal event identity differs from the manifest",
-        )
-    event = decode_raw_stored_event_envelope(raw, DEFAULT_EVENT_SCHEMA_REGISTRY)
-    if not isinstance(
-        event,
-        ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent,
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_compaction_terminal_type_mismatch",
-            "context compaction terminal event has the wrong schema",
-        )
-    return event
-
-
-def _validate_replayed_long_horizon_facts(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    event_slice: ContextEventSlice,
-    named_slices: tuple[ContextEventSlice, ...],
-) -> None:
-    local_named = tuple(
-        item
-        for item in named_slices
-        if item.runtime_session_id == event_slice.runtime_session_id
-    )
-    if manifest.active_window.generation > 1:
-        authority = ContextEventAuthorityView(
-            primary_slice=event_slice,
-            named_slices=local_named,
-        )
-        _validate_compacted_window_replay(
-            manifest=manifest,
-            authority=authority,
-        )
-        return
-    try:
-        decoded = tuple(
-            decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
-            for frozen in event_slice.events
-        )
-        store = LongHorizonStateStore(
-            decoded,
-            initial_through_sequence=event_slice.from_sequence - 1,
-        )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "long_horizon_event_slice_untrusted",
-            "long-horizon facts cannot be folded from the audited ledger slice",
-        ) from exc
-    snapshot = manifest.snapshot
-    run_id = snapshot.identity.run_id
-    chain = store.window_state(run_id)
-    if chain is None or chain.active_window_id is None:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_active_window_missing",
-            "manifest active context window cannot be reconstructed",
-        )
-    window = chain.windows[chain.active_window_id]
-    projection = store.projection_state(window.window_id)
-    rollout_owner = (
-        snapshot.long_horizon_attribution.rollout_account_owner_runtime_session_id
-    )
-    if rollout_owner == event_slice.runtime_session_id:
-        rollout = store.rollout_state(manifest.rollout_state.account_id)
-    else:
-        rollout_slices = tuple(
-            item for item in named_slices if item.runtime_session_id == rollout_owner
-        )
-        if not rollout_slices:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "long_horizon_rollout_authority_slice_missing",
-                "manifest rollout account owner lacks audited named authority",
-            )
-        try:
-            primary_rollout_slice = max(
-                rollout_slices,
-                key=lambda item: item.through_sequence,
-            )
-            rollout_authority = (
-                primary_rollout_slice
-                if len(rollout_slices) == 1
-                else ContextEventAuthorityView(
-                    primary_slice=primary_rollout_slice,
-                    named_slices=tuple(
-                        item
-                        for item in rollout_slices
-                        if item is not primary_rollout_slice
-                    ),
-                )
-            )
-            _account, rollout = fold_sparse_rollout_state(
-                event_slice=rollout_authority,
-                account_id=manifest.rollout_state.account_id,
-                through_sequence=manifest.rollout_state.through_sequence,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.LEDGER_UNTRUSTED,
-                "long_horizon_rollout_authority_slice_untrusted",
-                "rollout facts cannot be folded from the audited named slice",
-            ) from exc
-    if (
-        window != manifest.active_window
-        or projection != manifest.projection_state
-        or rollout != manifest.rollout_state
-    ):
-        mismatched = ",".join(
-            name
-            for name, differs in (
-                ("window", window != manifest.active_window),
-                ("projection", projection != manifest.projection_state),
-                ("rollout", rollout != manifest.rollout_state),
-            )
-            if differs
-        )
-        if rollout is not None and rollout != manifest.rollout_state:
-            actual_payload = rollout.model_dump(mode="json")
-            expected_payload = manifest.rollout_state.model_dump(mode="json")
-            rollout_fields = ",".join(
-                key
-                for key, value in actual_payload.items()
-                if value != expected_payload.get(key)
-            )
-            mismatched += (
-                f"[{rollout_fields};"
-                f"actual_through={rollout.through_sequence};"
-                f"expected_through={manifest.rollout_state.through_sequence}]"
-            )
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_state_mismatch",
-            f"replayed long-horizon state differs from manifest: {mismatched}",
-        )
-    rewrite_refs = tuple(
-        frozen.to_reference(event_slice.runtime_session_id)
-        for frozen in event_slice.events
-        if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (
-            event := decode_raw_stored_event_envelope(
-                frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-            )
-        ).window_id
-        == window.window_id
-        and event.to_projection_generation <= projection.projection_generation
-    )
-    if rewrite_refs != snapshot.long_horizon_attribution.projection_rewrite_event_refs:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_projection_rewrite_refs_mismatch",
+    carrier = hydrate_carrier(units)
+    return ExactCommittedProviderPayload(
+        model_start=decoded_start,
+        append=decoded_append,
+        committed_reference=reference,
+        units=units,
+        authority_horizons=authority_horizons,
+        replay_bindings=replay_bindings,
+        carrier=carrier,
+        proof_fingerprint=context_fingerprint(
+            "exact-committed-provider-payload:v1",
             (
-                "replayed projection rewrite references differ from manifest: "
-                f"actual_sequences={tuple(item.sequence for item in rewrite_refs[:32])};"
-                "expected_sequences="
-                f"{tuple(item.sequence for item in snapshot.long_horizon_attribution.projection_rewrite_event_refs[:32])}"
+                model_start_reference,
+                reference.reference_fingerprint,
+                tuple(item.materialization_fingerprint for item in units),
+                tuple(item.horizon_fingerprint for item in authority_horizons),
+                tuple(item.identity_fingerprint for item in replay_bindings),
+                carrier.carrier_fingerprint,
             ),
-        )
-
-
-def _validate_compacted_window_replay(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    authority: ContextEventAuthorityView,
-) -> None:
-    decoded = tuple(
-        decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
-        for frozen in authority.events
-    )
-    active_window = manifest.active_window
-    opens = tuple(
-        event
-        for event in decoded
-        if isinstance(event, ContextWindowOpenedEvent)
-        and event.window.window_id == active_window.window_id
-    )
-    if len(opens) != 1 or opens[0].window != active_window:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_active_window_mismatch",
-            "compacted active window differs from its durable opening",
-        )
-    if any(
-        isinstance(event, ContextWindowClosedEvent)
-        and event.window_id == active_window.window_id
-        for event in decoded
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_active_window_closed",
-            "manifest names a closed context window as active",
-        )
-    projection_events = (
-        opens[0],
-        *(
-            event
-            for event in decoded
-            if isinstance(event, ContextProjectionRewritePageEvent)
-            and event.window_id == active_window.window_id
         ),
     )
-    try:
-        projection_reducer = ContextWindowProjectionReducer()
-        projection_reducer.apply_committed(projection_events)
-        projection = projection_reducer.state(active_window.window_id)
-        _account, rollout = fold_sparse_rollout_state(
-            event_slice=authority,
-            account_id=manifest.rollout_state.account_id,
-            through_sequence=manifest.rollout_state.through_sequence,
-        )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "long_horizon_sparse_authority_untrusted",
-            "compacted long-horizon facts cannot be reconstructed",
-        ) from exc
-    if projection != manifest.projection_state or rollout != manifest.rollout_state:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_state_mismatch",
-            "compacted projection or rollout state differs from manifest",
-        )
-    rewrite_refs = tuple(
-        frozen.to_reference(authority.runtime_session_id)
-        for frozen in authority.events
-        if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (
-            event := decode_raw_stored_event_envelope(
-                frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-            )
-        ).window_id
-        == active_window.window_id
-        and event.to_projection_generation
-        <= manifest.projection_state.projection_generation
-    )
-    if (
-        rewrite_refs
-        != manifest.snapshot.long_horizon_attribution.projection_rewrite_event_refs
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_projection_rewrite_refs_mismatch",
-            "compacted projection rewrite references differ from manifest",
-        )
 
 
-def _restore_replay_subagent_graph(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    event_log: EventLog,
-    archive,
-):
-    from pulsara_agent.runtime.long_horizon.checkpoint import (
-        SubagentGraphCheckpointContractMismatch,
-        SubagentGraphCheckpointLedgerUntrusted,
-        SubagentGraphCheckpointReadUnavailable,
-        restore_subagent_graph_from_checkpoint,
-    )
-    from pulsara_agent.runtime.long_horizon.checkpoint_store import (
-        EventLogSubagentGraphCheckpointReadPort,
-    )
-    from pulsara_agent.runtime.long_horizon.reducer_contract import (
-        DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY,
-        SubagentGraphReducerContractMismatch,
-    )
-
-    semantic = manifest.subagent_graph_semantic_source
-    try:
-        binding = DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY.resolve_binding(
-            reducer_id=semantic.graph_reducer_id,
-            reducer_version=semantic.graph_reducer_version,
-            reducer_contract_fingerprint=(semantic.graph_reducer_contract_fingerprint),
-        )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "subagent_graph_reducer_contract_unavailable",
-            "historical subagent graph reducer contract is unavailable",
-        ) from exc
-    run_start_ref = manifest.snapshot.run_entry.run_start
-    run_start_rows = event_log.read_raw_events_by_id((run_start_ref.event_id,))
-    if len(run_start_rows) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_run_start_missing",
-            "historical context RunStart is unavailable",
-        )
-    run_start_raw = run_start_rows[0]
-    run_start = decode_raw_stored_event_envelope(
-        run_start_raw, DEFAULT_EVENT_SCHEMA_REGISTRY
-    )
-    if (
-        not isinstance(run_start, RunStartEvent)
-        or run_start_raw.sequence != run_start_ref.sequence
-        or run_start_raw.payload_fingerprint != run_start_ref.payload_fingerprint
-        or run_start.subagent_graph_reducer_contract != binding.contract
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "subagent_graph_run_contract_mismatch",
-            "historical RunStart reducer contract differs from replay binding",
-        )
-    from pulsara_agent.runtime.authority_materialization import (
-        build_default_authority_materialization_contract_bundle,
-    )
-
-    authority_limits = build_default_authority_materialization_contract_bundle().limits
-    policy = default_subagent_graph_checkpoint_policy(
-        max_unreclaimable_ledger_events=(
-            authority_limits.max_unreclaimable_ledger_events
-        ),
-        max_unreclaimable_charged_payload_bytes=(
-            authority_limits.max_unreclaimable_charged_payload_bytes
-        ),
-    )
-    read = EventLogSubagentGraphCheckpointReadPort(
-        event_log=event_log,
-        archive=archive,
-        runtime_session_id=manifest.snapshot.identity.runtime_session_id,
-    ).read_checkpoint_and_delta_snapshot(
-        requested_through_sequence=(
-            manifest.subagent_graph_acceleration.ledger_through_sequence
-        ),
-        reducer_contract=binding.contract,
-        preferred_checkpoint_id=(manifest.subagent_graph_acceleration.checkpoint_id),
-        max_delta_events=policy.checkpoint_max_delta_events,
-        max_delta_bytes=policy.checkpoint_max_delta_bytes,
-        max_checkpoint_candidates=policy.rebase_max_checkpoint_candidates,
-    )
-    if isinstance(read, SubagentGraphCheckpointReadUnavailable):
-        status = (
-            ContextInputReplayStatus.CONTRACT_MISMATCH
-            if read.reason_code == "reducer_contract_mismatch"
-            else ContextInputReplayStatus.ARTIFACT_MISSING
-        )
-        raise ContextInputReplayError(
-            status,
-            f"subagent_checkpoint_{read.reason_code}",
-            "subagent graph checkpoint acceleration is unavailable",
-        )
-    try:
-        graph, replay_semantic, acceleration = restore_subagent_graph_from_checkpoint(
-            snapshot=read,
-            reducer_binding=binding,
-        )
-    except SubagentGraphCheckpointLedgerUntrusted as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "subagent_checkpoint_ledger_untrusted",
-            "subagent graph checkpoint delta is not a trusted ledger prefix",
-        ) from exc
-    except SubagentGraphCheckpointContractMismatch as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "subagent_checkpoint_contract_mismatch",
-            "subagent graph checkpoint differs from its durable contract",
-        ) from exc
-    except SubagentGraphReducerContractMismatch as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "subagent_graph_reducer_contract_mismatch",
-            "historical graph event is unsupported by the frozen reducer contract",
-        ) from exc
-    if replay_semantic != semantic:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "subagent_graph_semantic_source_mismatch",
-            "replayed subagent graph semantic source differs from manifest",
-        )
-    selection = manifest.snapshot.candidate_source_selections[0]
-    results = tuple(
-        graph.results[result_id] for result_id in selection.selected_source_ids
-    )
-    event_ids = tuple(result.provenance.terminal_event_id or "" for result in results)
-    if any(not event_id for event_id in event_ids):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "subagent_result_terminal_attribution_missing",
-            "selected subagent result lacks terminal event attribution",
-        )
-    raw_events = event_log.read_raw_events_by_id(event_ids)
-    if len(raw_events) != len(event_ids):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "subagent_result_terminal_event_missing",
-            "selected subagent result terminal event is unavailable",
-        )
-    frozen_events = tuple(
-        FrozenStoredEvent.from_raw_envelope(raw) for raw in raw_events
-    )
-    for result, frozen in zip(results, frozen_events, strict=True):
-        event = decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
-        if (
-            not isinstance(event, SubagentRunCompletedEvent)
-            or event.result_id != result.result_id
-            or event.subagent_run_id != result.subagent_run_id
-            or event.summary != result.summary
-            or event.result_artifact_id != result.final_message_artifact_id
-            or tuple(event.artifact_ids) != result.artifact_ids
-        ):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "subagent_result_terminal_event_mismatch",
-                "selected subagent result differs from restored graph",
-            )
-    return graph, replay_semantic, acceleration, frozen_events
-
-
-def _validate_replayed_candidates(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    archive,
-    event_slice: ContextEventSlice | ContextEventAuthorityView,
-    named_slices: tuple[ContextEventSlice, ...],
-    subagent_authority_events: tuple[FrozenStoredEvent, ...],
-) -> tuple[tuple[str, str], ...]:
-    snapshot = manifest.snapshot
-    capability_matches = [
-        (frozen, event)
-        for frozen in event_slice.events
-        if isinstance(
-            (
-                event := decode_raw_stored_event_envelope(
-                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-                )
-            ),
-            CapabilityExposureResolvedEvent,
-        )
-        and event.run_id == snapshot.identity.run_id
-        and event.exposure == snapshot.capability_snapshot
-    ]
-    if len(capability_matches) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_candidate_capability_mismatch",
-            "candidate replay lacks one exact capability exposure",
-        )
-    capability_frozen, _capability_event = capability_matches[0]
-    selection = snapshot.candidate_source_selections[0]
-    try:
-        projections = collect_context_projection_references(
-            event_slice=event_slice,
-            capability_ref=capability_frozen.to_reference(
-                event_slice.runtime_session_id
-            ),
-            capability=snapshot.capability_snapshot,
-            explicit=(),
-            run_id=snapshot.identity.run_id,
-            projection_token_budget=(
-                snapshot.compile_policy.candidate_collection.projection_token_budget
-            ),
-            subagent_result_ids=selection.selected_source_ids,
-            subagent_authority_events=subagent_authority_events,
-        )
-        hydrated_source_artifacts = _replay_context_source_artifacts(
-            snapshot=snapshot,
-            archive=archive,
-        )
-        run_starts = tuple(
-            event
-            for frozen in event_slice.events
-            if frozen.run_id == snapshot.identity.run_id
-            if isinstance(
-                (
-                    event := decode_raw_stored_event_envelope(
-                        frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-                    )
-                ),
-                RunStartEvent,
-            )
-        )
-        if len(run_starts) != 1:
-            raise ContextEventSliceError(
-                "context replay requires one matching RunStart event"
-            )
-        run_start = run_starts[0]
-        rollout_owner_runtime_session_id = (
-            snapshot.long_horizon_attribution.rollout_account_owner_runtime_session_id
-        )
-        if rollout_owner_runtime_session_id == event_slice.runtime_session_id:
-            rollout_event_slice = event_slice
-        else:
-            rollout_slices = tuple(
-                item
-                for item in named_slices
-                if item.runtime_session_id == rollout_owner_runtime_session_id
-            )
-            if not rollout_slices:
-                raise ContextEventSliceError(
-                    "context replay requires frozen rollout-account authority"
-                )
-            primary_rollout_slice = max(
-                rollout_slices,
-                key=lambda item: item.through_sequence,
-            )
-            rollout_event_slice = (
-                primary_rollout_slice
-                if len(rollout_slices) == 1
-                else ContextEventAuthorityView(
-                    primary_slice=primary_rollout_slice,
-                    named_slices=tuple(
-                        item
-                        for item in rollout_slices
-                        if item is not primary_rollout_slice
-                    ),
-                )
-            )
-        openings = tuple(
-            event.account
-            for frozen in rollout_event_slice.events
-            if isinstance(
-                (
-                    event := decode_raw_stored_event_envelope(
-                        frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-                    )
-                ),
-                RolloutBudgetAccountOpenedEvent,
-            )
-            and event.account.account_id
-            == snapshot.long_horizon_attribution.rollout_account_id
-        )
-        if len(openings) != 1:
-            raise ContextEventSliceError(
-                "context replay lacks one rollout account opening"
-            )
-        rollout_status_override = derive_rollout_status_candidate_from_state(
-            event_slice=rollout_event_slice,
-            account=openings[0],
-            state=manifest.rollout_state,
-            policy=run_start.long_horizon.rollout_status_hint_policy,
-        )
-        source_build = build_context_sources(
-            registry=default_context_source_registry(),
-            static_instructions=snapshot.static_instructions,
-            artifact_metadata={
-                artifact_id: ContextSourceArtifactMetadata(
-                    reference=artifact.reference,
-                    expected_chars=artifact.expected_chars,
-                )
-                for artifact_id, artifact in hydrated_source_artifacts.items()
-            },
-            projections=projections,
-            capability_snapshot=snapshot.capability_snapshot,
-            plan_snapshot=snapshot.plan_snapshot,
-            event_slice=event_slice,
-            runtime_environment=snapshot.runtime_environment,
-            compile_timing=snapshot.timing,
-            resolved_model_call=snapshot.resolved_model_call,
-            source_selections=snapshot.candidate_source_selections,
-            external_authority_events={
-                event.event_id: event for event in subagent_authority_events
-            },
-            rollout_status=rollout_status_override,
-            tool_specs=snapshot.tool_specs,
-            authority_horizons=(
-                snapshot.capability_tool_catalog_root.authority_horizons
-            ),
-        )
-    except ContextInputReplayError:
-        raise
-    except ContextEventSliceError as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_candidate_ledger_untrusted",
-            "candidate authority cannot be reconstructed from the ledger",
-        ) from exc
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_candidate_authority_invalid",
-            "candidate authority cannot be reconstructed from durable sources",
-        ) from exc
-    if projections != snapshot.projections:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_candidate_projection_mismatch",
-            "replayed candidate projections differ from manifest",
-        )
-    if source_build.candidates != snapshot.context_source_candidates:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_candidate_authority_mismatch",
-            "replayed ContextSource candidates differ from manifest",
-        )
-    if source_build.source_dispositions != snapshot.context_source_dispositions:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_source_disposition_mismatch",
-            "replayed ContextSource dispositions differ from manifest",
-        )
-    if (
-        source_build.tool_catalog_root != snapshot.capability_tool_catalog_root
-        or source_build.physical_input_policy
-        != snapshot.context_source_physical_input_policy
-        or source_build.registry_fingerprint
-        != snapshot.context_source_registry_fingerprint
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_source_contract_mismatch",
-            "replayed ContextSource contract/root differs from manifest",
-        )
-    try:
-        hydrated_contents = hydrate_context_source_content_sidecar(
-            candidates=source_build.candidates,
-            hydrated_artifacts=hydrated_source_artifacts,
-        )
-        replayed = collect_context_candidates(
-            snapshot=snapshot,
-            cache=None,
-            hydrated_contents=dict(hydrated_contents),
-        ).prepared
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_prepared_candidate_invalid",
-            "prepared candidates cannot be reconstructed from durable authority",
-        ) from exc
-    manifest_candidates = manifest.prepared_candidate_set
-    if (
-        tuple(entry.candidate for entry in replayed.entries)
-        != tuple(entry.candidate for entry in manifest_candidates.entries)
-        or replayed.collection_decisions != manifest_candidates.collection_decisions
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_prepared_candidate_mismatch",
-            "replayed prepared candidate facts differ from manifest",
-        )
-    return hydrated_contents
-
-
-def _replay_context_source_artifacts(
-    *, snapshot, archive
-) -> dict[str, HydratedContextSourceArtifact]:
-    artifact_ids = {item.content_artifact_id for item in snapshot.static_instructions}
-    for projection in (
-        snapshot.capability_snapshot.semantic.catalog_projection,
-        snapshot.capability_snapshot.semantic.active_skill_projection,
-    ):
-        if projection.rendered_prompt_artifact_id is not None:
-            artifact_ids.add(projection.rendered_prompt_artifact_id)
-    hydrated: dict[str, HydratedContextSourceArtifact] = {}
-    for artifact_id in sorted(artifact_ids):
-        try:
-            record = archive.get_info(
-                artifact_id,
-                session_id=snapshot.identity.runtime_session_id,
-            )
-            text = archive.get_text(
-                artifact_id,
-                session_id=snapshot.identity.runtime_session_id,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "context_input_source_artifact_missing",
-                f"ContextSource artifact is unavailable: {artifact_id}",
-            ) from exc
-        reference = build_frozen_fact(
-            ContextArtifactReferenceFact,
-            schema_version="context_artifact_reference.v1",
-            artifact_id=record.id,
-            media_type=record.media_type,
-            content_sha256=record.digest,
-            content_bytes=record.size_bytes,
-            artifact_contract_fingerprint=context_fingerprint(
-                "context-source-artifact-contract:v1", record.media_type
-            ),
-        )
-        hydrated[artifact_id] = HydratedContextSourceArtifact(
-            reference=reference,
-            expected_chars=len(text),
-            text=text,
-        )
-    return hydrated
-
-
-def replay_compiled_context(
+def _matching_model_start_reference(
     *,
     event: ContextCompiledEvent,
-    archive,
-    event_log: EventLog,
-    event_slice: ContextEventSlice,
-    named_slices: tuple[ContextEventSlice, ...] = (),
-) -> ReplayedCompiledContext:
-    """Rebuild and compare one complete provider-neutral compiled payload."""
-
-    if event.status != "compiled" or event.input_audit is None:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.FACT_REPLAY_ONLY,
-            "context_compiled_payload_not_available",
-            "only a successful compiled context has an exact payload",
-        )
-    inputs = replay_context_input(
-        audit=event.input_audit,
-        archive=archive,
-        event_log=event_log,
-        event_slice=event_slice,
-        named_slices=named_slices,
+    event_log,
+    deadline: float,
+) -> ContextEventReferenceFact | None:
+    install = event.provider_input_preparation_install
+    commit = event.semantic_commit
+    if install is None or commit is None:
+        return None
+    # ModelStart is deliberately *not* one of the provider preparation's
+    # companion events.  Its ID is frozen by the model lifecycle contract and
+    # is therefore the only bounded lookup that can distinguish an abandoned
+    # ContextCompiled preparation from a committed Start without scanning the
+    # model-call stream.
+    rows = event_log.read_raw_events_by_id(
+        (f"model_call_start:{commit.resolved_model_call_id}",),
+        deadline_monotonic=deadline,
     )
-    manifest = inputs.manifest
-    if manifest.compiler_contract_version != "context-compiler-input:v2":
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.FACT_REPLAY_ONLY,
-            "context_compiler_contract_unavailable",
-            "the historical compiler contract is unavailable in this process",
-        )
-    invocation = _rebind_replay_invocation(manifest=manifest, archive=archive)
-    base_rendered = render_prepared_tool_result_units(
-        prepared=inputs.prepared_tool_results,
-        transcript=inputs.normalized_transcript.transcript,
-        token_estimator=invocation.resolved_call.target.token_estimator,
-    )
-    rendered = apply_tool_observation_projection(
-        units=inputs.normalized_transcript.tool_result_units,
-        rendered=base_rendered,
-        projection_state=manifest.projection_state,
-        policy=inputs.prepared_tool_results.resolved_policy,
-        token_estimator=invocation.resolved_call.target.token_estimator,
-    )
-    projected_refs = build_projected_tool_result_compile_refs(
-        transcript=inputs.normalized_transcript.transcript,
-        rendered_tool_results=rendered,
-        projection_state=manifest.projection_state,
-    )
-    if projected_refs != manifest.projected_tool_result_refs:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_projected_tool_result_refs_mismatch",
-            "replayed projected tool-result refs differ from manifest",
-        )
-    prepared_rollups = _replay_prepared_rollups(
-        manifest=manifest,
-        normalized=inputs.normalized_transcript,
-        archive=archive,
-        estimator=invocation.resolved_call.target.token_estimator,
-    )
-    compiled = compile_context_from_facts(
-        facts=invocation,
-        transcript=inputs.normalized_transcript.transcript,
-        rendered_tool_results=rendered,
-        prepared_rollups=prepared_rollups,
-        section_candidates=inputs.prepared_candidates,
-        transcript_provider_projection=(manifest.transcript_provider_projection),
-        transcript_stable_entries=inputs.transcript_stable_entries,
-        context_source_hydrated_contents=(inputs.context_source_hydrated_contents),
-    )
-    if (
-        compiled.model_visible_named_fact_semantic_selection
-        != manifest.transcript_authority.named_fact_selection.semantic_selection
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_named_fact_semantics_mismatch",
-            "replayed named provider facts differ from manifest authority",
-        )
-    try:
-        prepared_provider_input = event.prepared_provider_input
-        manifest_reference = event.manifest_projection_reference
-        if prepared_provider_input is None or manifest_reference is None:
-            raise ValueError("compiled context lacks provider manifest carrier")
+    for row in rows:
+        candidate = decode_raw_stored_event_envelope(row, DEFAULT_EVENT_SCHEMA_REGISTRY)
         if (
-            prepared_provider_input.manifest_projection_reference != manifest_reference
-            or manifest_reference.input_manifest_artifact_id
-            != event.input_audit.input_manifest_artifact_id
-            or manifest_reference.input_manifest_fact_fingerprint
-            != manifest.manifest_fingerprint
-            or manifest_reference.projection_identity
-            != manifest.ordered_transcript_projection_identity
-            or prepared_provider_input.prepared_plan
-            != manifest.prepared_provider_input_plan
+            isinstance(candidate, ModelCallStartEvent)
+            and candidate.resolved_call.resolved_model_call_id
+            == event.resolved_call.resolved_model_call_id
+            and candidate.context_id == event.context_id
+            and candidate.model_call_index == event.model_call_index
+            and candidate.provider_input_reference is not None
+            and candidate.provider_input_reference.semantic_commit_fingerprint
+            == commit.commit_fingerprint
+            and candidate.provider_input_reference.provider_input_plan_fingerprint
+            == commit.canonical_provider_input_plan_fingerprint
+            and candidate.provider_input_reference.provider_input_plan_fingerprint
+            == install.canonical_provider_input_plan_fingerprint
         ):
-            raise ValueError("compiled provider manifest reference mismatch")
-        provider_plan = prepared_provider_input.provider_input_plan
-        provider_deadline = monotonic() + 30.0
-        provider_units, _ = load_provider_input_vector(
-            archive=archive,
-            runtime_session_id=event.input_audit.source_runtime_session_id,
-            root=provider_plan.unit_vector_root,
-            deadline_monotonic=provider_deadline,
-        )
-        provider_horizons, _ = load_ledger_horizon_set(
-            archive=archive,
-            runtime_session_id=event.input_audit.source_runtime_session_id,
-            reference=provider_plan.authority_horizon_set,
-            deadline_monotonic=provider_deadline,
-        )
-        provider_bindings, _ = load_replay_binding_set(
-            archive=archive,
-            runtime_session_id=event.input_audit.source_runtime_session_id,
-            reference=provider_plan.replay_binding_set,
-            deadline_monotonic=provider_deadline,
-        )
-        _validate_provider_input_authority_roots(
-            units=provider_units,
-            horizons=provider_horizons,
-            bindings=provider_bindings,
-        )
-        provider_carrier = hydrate_carrier(provider_units)
-        validate_carrier_against_plan(
-            carrier=provider_carrier,
-            plan=provider_plan,
-        )
-    except KeyError as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.ARTIFACT_MISSING,
-            "provider_input_plan_artifact_missing",
-            "canonical provider-input plan artifact is unavailable",
-        ) from exc
-    except ContextInputReplayError:
-        raise
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "provider_input_plan_materialization_mismatch",
-            "canonical provider-input plan cannot be materialized exactly",
-        ) from exc
-    canonical_provider_context = provider_carrier.to_llm_context(compiled.llm_context)
-    provider_estimate = (
-        invocation.resolved_call.target.token_estimator.estimate_context(
-            canonical_provider_context
-        )
-    )
-    provider_scopes = tuple(
-        "transcript"
-        if unit.attribution.semantic.unit_kind == "transcript_message"
-        else "non_transcript"
-        for unit in provider_units
-        if unit.attribution.semantic.unit_kind != "tool_catalog"
-        and not (
-            unit.attribution.semantic.unit_kind == "context_source"
-            and getattr(unit.canonical_provider_fragment, "role", None) == "system"
-        )
-    )
-    compiled = bind_compiled_context_to_provider_carrier(
-        compiled_context=compiled,
-        provider_context=canonical_provider_context,
-        token_estimate=provider_estimate,
-        message_budget_scopes=provider_scopes,
-    )
-    expected_payload_fp = provider_neutral_payload_fingerprint(
-        canonical_provider_context
-    )
-    expected_decisions_fp = canonical_render_decisions_fingerprint(
-        compiled.tool_result_render_decision_facts
-    )
-    measured = measure_long_horizon_context_budget(
-        call=invocation.resolved_call,
-        context=compiled.llm_context,
-        estimate=compiled.final_token_estimate,
-        window=manifest.active_window,
-        projection_state=manifest.projection_state,
-        policy=manifest.window_policy,
-    )
+            return event_reference_from_stored(
+                candidate,
+                runtime_session_id=commit.runtime_session_id,
+            )
+    return None
+
+
+def _validate_exact_audit_join(
+    *,
+    event: ContextCompiledEvent,
+    root: ContextInputAuditRootFact,
+    plan: ContextInputAuditMaterializationPlanFact,
+    pages: tuple[ContextInputAuditPageFact, ...],
+) -> None:
+    commit = event.semantic_commit
+    expectation = event.audit_expectation
+    assert commit is not None and expectation is not None
     if (
-        measured.decision != manifest.context_budget_decision
-        or measured.pressure_shadow != manifest.projection_pressure_shadow
+        root.source_runtime_session_id != commit.runtime_session_id
+        or root.source_run_id != commit.run_id
+        or root.source_context_id != commit.context_id
+        or root.source_resolved_model_call_id != commit.resolved_model_call_id
+        or root.semantic_commit_fingerprint != commit.commit_fingerprint
+        or root.materialization_key != expectation.materialization_key
+        or root.materialization_contract_fingerprint
+        != expectation.audit_contract_fingerprint
+        or root.root_semantic_fingerprint
+        != expectation.expected_root_semantic_fingerprint
     ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_context_budget_decision_mismatch",
-            "replayed long-horizon budget decision differs from manifest",
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit root semantic join mismatch"
         )
     if (
-        event.long_horizon_context_budget_decision != manifest.context_budget_decision
-        or event.long_horizon_projection_pressure_shadow
-        != manifest.projection_pressure_shadow
+        plan.source_runtime_session_id != commit.runtime_session_id
+        or plan.source_run_id != commit.run_id
+        or plan.source_context_id != commit.context_id
+        or plan.source_resolved_model_call_id != commit.resolved_model_call_id
+        or plan.semantic_commit_fingerprint != commit.commit_fingerprint
+        or plan.expectation_fingerprint != expectation.expectation_fingerprint
+        or plan.materialization_key != expectation.materialization_key
+        or plan.expected_root_artifact_id != expectation.expected_root_artifact_id
+        or plan.expected_root_semantic_fingerprint
+        != expectation.expected_root_semantic_fingerprint
+        or plan.audit_contract_fingerprint != expectation.audit_contract_fingerprint
+        or root.component_count != plan.component_count
+        or root.page_count != plan.page_count
+        or root.ordered_component_accumulator != plan.ordered_component_accumulator
+        or root.ordered_page_accumulator != plan.ordered_page_accumulator
     ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "long_horizon_context_event_attribution_mismatch",
-            "ContextCompiledEvent long-horizon facts differ from manifest",
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit plan/root join mismatch"
         )
-    event_shape = {
-        "budget": event.budget,
-        "sections": event.sections,
-        "tool_specs": event.tool_specs,
-        "diagnostics": event.diagnostics,
-        "lifecycle_decisions": event.lifecycle_decisions,
-        "canonical_decisions": event.tool_result_render_decision_facts,
-        "provider_neutral_payload_fingerprint": (
-            event.provider_neutral_payload_fingerprint
+    if tuple(page.page_ordinal for page in pages) != tuple(range(plan.page_count)):
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit page ordinal set mismatch"
+        )
+    for page, reference in zip(pages, plan.page_references, strict=True):
+        if (
+            page.source_runtime_session_id != commit.runtime_session_id
+            or page.source_run_id != commit.run_id
+            or page.materialization_key != expectation.materialization_key
+            or page.page_ordinal >= plan.page_count
+            or reference.storage_fact_fingerprint != page.page_storage_fingerprint
+        ):
+            raise ContextInputAuditArtifactIntegrityError(
+                "context input audit page/plan join mismatch"
+            )
+
+
+def _validate_exact_reference_components(
+    *,
+    commit: ContextCompileInputCommitFact,
+    provider: ExactCommittedProviderPayload,
+    plan: ContextInputAuditMaterializationPlanFact,
+    components: tuple[tuple[object, object], ...],
+) -> None:
+    """Bind audit references back to their canonical durable authorities."""
+
+    for component in plan.components:
+        if component.component_ownership is not context_input_audit_component_ownership(
+            component.component_kind
+        ):
+            raise ContextInputAuditArtifactIntegrityError(
+                "context input audit component ownership registry mismatch"
+            )
+    by_kind = {kind: value for kind, value in components}
+
+    expected_snapshot = {
+        "snapshot_semantic_fingerprint": commit.snapshot_semantic_fingerprint,
+        "source_reference_set_fingerprint": (
+            commit.source_references.reference_set_fingerprint
         ),
-        "canonical_render_decisions_fingerprint": (
-            event.canonical_render_decisions_fingerprint
+        "source_through_sequence": commit.source_through_sequence,
+    }
+    if by_kind.get(ContextInputAuditComponentKind.SNAPSHOT) != expected_snapshot:
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit snapshot reference mismatch"
+        )
+
+    expected_projection_identity = json.loads(
+        canonical_json_bytes(commit.ordered_projection_identity)
+    )
+    if (
+        by_kind.get(
+            ContextInputAuditComponentKind.ORDERED_TRANSCRIPT_PROJECTION_IDENTITY
+        )
+        != expected_projection_identity
+    ):
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit ordered projection reference mismatch"
+        )
+
+    reference = provider.committed_reference
+    expected_prepared_plan = {
+        "plan_fingerprint": commit.prepared_provider_input_plan_fingerprint,
+        "target_generation_id": reference.generation_id,
+        "resulting_unit_vector_root_fingerprint": (
+            reference.resulting_unit_vector_root.reference_fingerprint
+        ),
+        "ordered_projection_identity_fingerprint": (
+            commit.ordered_projection_identity.identity_fingerprint
         ),
     }
-    replay_shape = {
-        "budget": compiled.budget.to_event_value(),
-        "sections": [item.to_event_value() for item in compiled.sections],
-        "tool_specs": [item.to_event_value() for item in compiled.tool_specs],
-        "diagnostics": [item.to_event_value() for item in compiled.diagnostics]
-        + list(
-            long_horizon_context_diagnostics(
-                measurement=measured,
-                target_unreachable=manifest.projection_target_unreachable,
-            )
-        ),
-        "lifecycle_decisions": [dict(item) for item in compiled.lifecycle_decisions],
-        "canonical_decisions": compiled.tool_result_render_decision_facts,
-        "provider_neutral_payload_fingerprint": expected_payload_fp,
-        "canonical_render_decisions_fingerprint": expected_decisions_fp,
-    }
-    if event_shape != replay_shape:
-        mismatched_fields = tuple(
-            key for key in event_shape if event_shape[key] != replay_shape[key]
+    if (
+        by_kind.get(ContextInputAuditComponentKind.PREPARED_PROVIDER_INPUT_PLAN)
+        != expected_prepared_plan
+    ):
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit prepared provider-plan reference mismatch"
         )
-        diagnostic_detail = ""
-        if "diagnostics" in mismatched_fields:
-            diagnostic_detail = (
-                ";event_diagnostics="
-                f"{tuple(item.get('code') for item in event_shape['diagnostics'][:32])}"
-                ";replay_diagnostics="
-                f"{tuple(item.get('code') for item in replay_shape['diagnostics'][:32])}"
+
+    provider_identity = build_frozen_fact(
+        ProviderInputSemanticIdentityFact,
+        schema_version="provider_input_semantic_identity.v1",
+        input_unit_count=reference.resulting_unit_vector_root.unit_count,
+        ordered_unit_accumulator=(
+            reference.resulting_unit_vector_root.ordered_unit_accumulator
+        ),
+        unit_vector_semantic_fingerprint=(
+            reference.resulting_unit_vector_root.vector_semantic_fingerprint
+        ),
+        system_instruction_fingerprint=context_fingerprint(
+            "provider-input-system-prompt:v1", provider.carrier.system_prompt
+        ),
+        tool_catalog_fingerprint=context_fingerprint(
+            "provider-input-tool-catalog:v1",
+            tuple(
+                tool_fragment_semantic_fingerprint(item)
+                for item in provider.carrier.ordered_tool_fragments
+            ),
+        ),
+        provider_message_sequence_fingerprint=context_fingerprint(
+            "provider-input-message-sequence:v1",
+            tuple(
+                message_semantic_fingerprint(item)
+                for item in provider.carrier.ordered_messages
+            ),
+        ),
+    )
+    expected_canonical_plan = {
+        "plan_fingerprint": commit.canonical_provider_input_plan_fingerprint,
+        "generation_root_reference_fingerprint": (
+            provider.append.resulting_core_state.root_reference.reference_fingerprint
+        ),
+        "unit_vector_root_reference_fingerprint": (
+            reference.resulting_unit_vector_root.reference_fingerprint
+        ),
+        "authority_horizon_set_reference_fingerprint": (
+            reference.authority_horizon_set.reference_fingerprint
+        ),
+        "replay_binding_set_reference_fingerprint": (
+            reference.replay_binding_set.reference_fingerprint
+        ),
+        "provider_input_semantic_fingerprint": (provider_identity.semantic_fingerprint),
+    }
+    if (
+        by_kind.get(ContextInputAuditComponentKind.CANONICAL_PROVIDER_INPUT_PLAN)
+        != expected_canonical_plan
+    ):
+        raise ContextInputAuditArtifactIntegrityError(
+            "context input audit canonical provider-plan reference mismatch"
+        )
+
+
+def load_context_input_audit(
+    *,
+    event: ContextCompiledEvent,
+    event_log,
+    provider_input_store,
+    artifact_store,
+    require_exact: bool = False,
+    deadline_monotonic: float | None = None,
+) -> ContextInputAuditLoadOutcome:
+    """Resolve optional audit detail without changing canonical authority."""
+
+    commit = event.semantic_commit
+    expectation = event.audit_expectation
+    if event.status != "compiled" or commit is None or expectation is None:
+        return AuditUnavailable(
+            ContextInputReplayStatus.AUDIT_UNAVAILABLE,
+            "context_not_compiled",
+        )
+    deadline = (
+        monotonic() + _READ_DEADLINE_SECONDS
+        if deadline_monotonic is None
+        else deadline_monotonic
+    )
+    start_reference = _matching_model_start_reference(
+        event=event,
+        event_log=event_log,
+        deadline=deadline,
+    )
+    if start_reference is None:
+        outcome: ContextInputAuditLoadOutcome = AuditUnavailable(
+            ContextInputReplayStatus.AUDIT_UNAVAILABLE,
+            "model_start_not_committed",
+        )
+        if require_exact:
+            raise ContextInputReplayError(outcome.status, outcome.reason)
+        return outcome
+
+    provider: ExactCommittedProviderPayload | None = None
+    provider_error: BaseException | None = None
+    try:
+        provider = load_committed_provider_payload_for_model_start(
+            model_start_reference=start_reference,
+            event_log=event_log,
+            provider_input_store=provider_input_store,
+            artifact_store=artifact_store,
+            deadline_monotonic=deadline,
+        )
+    except BaseException as exc:
+        provider_error = exc
+
+    repository = ContextInputAuditArtifactRepository(artifact_store)
+    artifact_error: str | None = None
+    try:
+        root, root_reference = repository.get_expected_root(
+            artifact_id=expectation.expected_root_artifact_id,
+            source_runtime_session_id=commit.runtime_session_id,
+            source_run_id=commit.run_id,
+            deadline_monotonic=deadline,
+        )
+        if (
+            root.semantic_commit_fingerprint != commit.commit_fingerprint
+            or root.materialization_key != expectation.materialization_key
+            or root.root_semantic_fingerprint
+            != expectation.expected_root_semantic_fingerprint
+        ):
+            raise ContextInputAuditArtifactIntegrityError(
+                "audit root semantic identity mismatch"
             )
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "compiled_context_payload_mismatch",
-            (
-                "replayed provider-neutral context differs from "
-                f"ContextCompiledEvent: fields={mismatched_fields}"
-                f"{diagnostic_detail}"
+        plan = repository.get_exact(
+            reference=root.plan_artifact_reference,
+            source_runtime_session_id=commit.runtime_session_id,
+            source_run_id=commit.run_id,
+            fact_type=ContextInputAuditMaterializationPlanFact,
+            deadline_monotonic=deadline,
+        )
+        validate_context_input_audit_plan_reference(
+            root=root,
+            plan=plan,
+            expected_plan_artifact_id=expectation.expected_plan_artifact_id,
+        )
+        pages = tuple(
+            repository.get_exact(
+                reference=reference,
+                source_runtime_session_id=commit.runtime_session_id,
+                source_run_id=commit.run_id,
+                fact_type=ContextInputAuditPageFact,
+                deadline_monotonic=deadline,
+            )
+            for reference in plan.page_references
+        )
+        _validate_exact_audit_join(
+            event=event,
+            root=root,
+            plan=plan,
+            pages=pages,
+        )
+        components = hydrate_context_input_audit_components(plan=plan, pages=pages)
+        if provider is None:
+            raise ContextInputAuditArtifactIntegrityError(
+                "audit Start attribution cannot bind canonical provider authority"
+            ) from provider_error
+        _validate_exact_reference_components(
+            commit=commit,
+            provider=provider,
+            plan=plan,
+            components=components,
+        )
+        start_components = tuple(
+            value
+            for kind, value in components
+            if kind is ContextInputAuditComponentKind.MODEL_START_ATTRIBUTION
+        )
+        expected_start_attribution = json.loads(
+            canonical_json_bytes(
+                (
+                    start_reference,
+                    event_reference_from_stored(
+                        provider.append,
+                        runtime_session_id=commit.runtime_session_id,
+                    ),
+                )
+            )
+        )
+        if (
+            len(start_components) != 1
+            or start_components[0] != expected_start_attribution
+        ):
+            raise ContextInputAuditArtifactIntegrityError(
+                "context input audit ModelStart attribution mismatch"
+            )
+        return ExactAuditArtifact(
+            ContextInputReplayStatus.EXACT_AUDIT,
+            commit,
+            root,
+            plan,
+            pages,
+            components,
+            context_fingerprint(
+                "exact-context-input-audit:v1",
+                (
+                    root_reference.reference_fingerprint,
+                    plan.plan_fingerprint,
+                    tuple(page.page_storage_fingerprint for page in pages),
+                ),
             ),
         )
-    return ReplayedCompiledContext(inputs=inputs, compiled_context=compiled)
+    except (KeyError, FileNotFoundError, ContextInputAuditArtifactMissing):
+        artifact_error = "audit_root_missing"
+    except ContextInputAuditArtifactIntegrityError:
+        artifact_error = "audit_artifact_integrity_failure"
+    except Exception:
+        # Storage availability, checkout deadline, or cancellation is not proof
+        # that immutable audit bytes are corrupt.  Canonical provider replay may
+        # still supply the reconstructable semantic view.
+        artifact_error = "audit_artifact_unavailable"
 
-
-def _replay_prepared_rollups(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    normalized: NormalizedContextTranscript,
-    archive,
-    estimator,
-):
-    registry = default_observation_rollup_renderer_registry()
-    units = {item.unit_id: item for item in normalized.tool_result_units}
-    policy = manifest.window_policy
-    replayed = []
-    for prepared in manifest.prepared_rollup_units:
-        try:
-            source_units = tuple(
-                units[unit_id] for unit_id in prepared.ordered_member_unit_ids
+    if provider is None:
+        if artifact_error == "audit_artifact_integrity_failure":
+            outcome = AuditIntegrityFailure(
+                ContextInputReplayStatus.AUDIT_INTEGRITY_FAILURE,
+                "audit_integrity_and_reconstruction_failure",
             )
-        except KeyError as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "observation_rollup_member_missing",
-                "manifest rollup member is absent from normalized tool results",
-            ) from exc
-        try:
-            derived = prepare_observation_rollup_artifact(
-                window_id=manifest.active_window.window_id,
-                member_units=source_units,
-                transcript=normalized.transcript,
-                policy=policy,
-                token_estimator=estimator,
-                registry=registry,
+        else:
+            outcome = AuditUnavailable(
+                ContextInputReplayStatus.AUDIT_UNAVAILABLE,
+                "bounded_canonical_reconstruction_unavailable",
             )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "observation_rollup_contract_mismatch",
-                "historical observation rollup cannot be rederived",
-            ) from exc
-        try:
-            stored_text = archive.get_text(
-                prepared.artifact_id,
-                session_id=manifest.snapshot.identity.runtime_session_id,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "observation_rollup_artifact_missing",
-                "historical observation rollup artifact is unavailable",
-            ) from exc
-        if (
-            derived.fact != prepared.rollup
-            or derived.anchor != prepared.compile_unit.placement_anchor
-            or derived.rendered.text != stored_text
-            or prepared.compile_unit.inline_text != stored_text
-            or prepared.compile_unit.inline_content_sha256
-            != derived.rendered.content_sha256
-        ):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "observation_rollup_payload_mismatch",
-                "historical observation rollup differs from durable semantics",
-            )
-        replayed.append(prepared)
-    return tuple(replayed)
-
-
-def _rebind_replay_invocation(
-    *,
-    manifest: ContextCompileInputManifestFact,
-    archive,
-) -> ContextFactSnapshot:
-    call_fact = manifest.snapshot.resolved_model_call
-    target_fact = call_fact.target
-    estimator = PulsaraHeuristicTokenEstimatorV1()
-    if estimator.fact != target_fact.token_estimator:
+    else:
+        outcome = ReconstructedAudit(
+            ContextInputReplayStatus.RECONSTRUCTED_AUDIT,
+            commit,
+            provider,
+            (
+                "semantic_commit",
+                "provider_input_plan",
+                "ordered_transcript_projection_identity",
+            ),
+            (
+                "invocation_timing",
+                "compiler_diagnostics",
+                "render_operational_facts",
+            ),
+            artifact_error,
+            context_fingerprint(
+                "reconstructed-context-input-audit:v1",
+                (commit.commit_fingerprint, provider.proof_fingerprint),
+            ),
+        )
+    if require_exact and not isinstance(outcome, ExactAuditArtifact):
         raise ContextInputReplayError(
-            ContextInputReplayStatus.FACT_REPLAY_ONLY,
-            "token_estimator_contract_unavailable",
-            "the historical token estimator contract is unavailable",
+            outcome.status, getattr(outcome, "reason", "not_exact")
         )
-    profile = ProviderProfile(
-        id=target_fact.provider_profile_id,
-        wire_api=target_fact.api,
-        supports_tools=target_fact.supports_tools,
-        supports_reasoning=target_fact.supports_reasoning,
-        model_identity_policy=ModelIdentityPolicy(target_fact.model_identity_policy),
-    )
-    target = ResolvedModelTarget(
-        model_profile=ModelProfile(
-            id=target_fact.model_id,
-            role=ModelRole(target_fact.model_role),
-            api=target_fact.api,
-            provider=target_fact.provider,
-            base_url=target_fact.endpoint_origin,
-            provider_profile=profile,
-            supports_tools=target_fact.supports_tools,
-            supports_reasoning=target_fact.supports_reasoning,
-        ),
-        transport=_ReplayOnlyTransport(
-            api=target_fact.api,
-            binding_id=target_fact.transport_binding_id,
-            contract_version=target_fact.transport_contract_version,
-        ),
-        effective_options=LLMOptions(
-            reasoning_effort=target_fact.effective_options.reasoning_effort
-        ),
-        limits=target_fact.limits,
-        context_budget=target_fact.context_budget,
-        token_estimator=estimator,
-        fact=target_fact,
-    )
-    materialized = tuple(
-        _materialize_tool_spec(
-            fact=fact,
-            archive=archive,
-            runtime_session_id=manifest.snapshot.identity.runtime_session_id,
-        )
-        for fact in manifest.snapshot.tool_specs
-    )
-    return ContextFactSnapshot(
-        fact=manifest.snapshot,
-        resolved_call=ResolvedModelCall(target=target, fact=call_fact),
-        materialized_tool_specs=materialized,
-    )
-
-
-def _validate_provider_input_authority_roots(
-    *,
-    units: tuple[ProviderInputUnitMaterializationFact, ...],
-    horizons: tuple[LedgerAuthorityHorizonFact, ...],
-    bindings: tuple[ProviderInputReplayBindingIdentityFact, ...],
-) -> None:
-    horizon_by_ledger = {item.runtime_session_id: item for item in horizons}
-    binding_by_identity = {item.identity_fingerprint: item for item in bindings}
-    if len(horizon_by_ledger) != len(horizons):
-        raise ValueError("provider authority root contains duplicate ledgers")
-    if len(binding_by_identity) != len(bindings):
-        raise ValueError("provider replay root contains duplicate bindings")
-    for unit in units:
-        for unit_horizon in unit.attribution.authority_horizons:
-            aggregate = horizon_by_ledger.get(unit_horizon.runtime_session_id)
-            if (
-                aggregate is None
-                or aggregate.through_sequence < unit_horizon.through_sequence
-                or aggregate.ledger_event_count_through
-                < unit_horizon.ledger_event_count_through
-            ):
-                raise ValueError(
-                    "provider authority root does not cover a unit horizon"
-                )
-        for required in unit.attribution.required_replay_bindings:
-            if binding_by_identity.get(required.identity_fingerprint) != required:
-                raise ValueError("provider replay root does not cover a unit binding")
-
-
-def _materialize_tool_spec(*, fact, archive, runtime_session_id: str):
-    schema_fact = fact.input_schema
-    if isinstance(schema_fact, ContextInlineToolSchemaFact):
-        schema = schema_fact.schema_value
-    elif isinstance(schema_fact, ContextArtifactToolSchemaFact):
-        try:
-            raw = archive.get_text(
-                schema_fact.schema_artifact_id,
-                session_id=runtime_session_id,
-            )
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.ARTIFACT_MISSING,
-                "tool_schema_artifact_missing",
-                "a tool schema artifact is unavailable",
-            ) from exc
-        try:
-            schema = freeze_json(json.loads(raw))
-        except Exception as exc:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "tool_schema_artifact_invalid",
-                "a tool schema artifact is invalid",
-            ) from exc
-        if not isinstance(schema, FrozenJsonObjectFact):
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "tool_schema_artifact_not_object",
-                "a tool schema artifact is not a JSON object",
-            )
-    else:  # pragma: no cover - closed union
-        raise TypeError("unknown context tool schema fact")
-    return ContextMaterializedToolSpecInput(
-        fact=fact,
-        materialized_schema=schema,
-    )
+    return outcome
 
 
 __all__ = [
+    "AuditIntegrityFailure",
+    "AuditUnavailable",
+    "ContextInputAuditLoadOutcome",
     "ContextInputReplayError",
     "ContextInputReplayStatus",
-    "ReplayedContextInput",
-    "ReplayedCompiledContext",
-    "load_context_input_manifest",
-    "replay_context_input",
-    "replay_compiled_context",
+    "ExactAuditArtifact",
+    "ExactCommittedProviderPayload",
+    "ReconstructedAudit",
+    "load_committed_provider_payload_for_model_start",
+    "load_context_input_audit",
 ]

@@ -401,7 +401,10 @@ class TerminalMonitorStore:
         if not isinstance(prepared, TerminalMonitorStore):
             raise TypeError("terminal monitor prepared state has wrong owner")
         with self._lock:
-            if canonical_json_object_carrier(self.checkpoint_payload()) != expected_base:
+            if (
+                canonical_json_object_carrier(self.checkpoint_payload())
+                != expected_base
+            ):
                 raise TerminalMonitorContractError(
                     "terminal monitor semantic base changed during fold"
                 )

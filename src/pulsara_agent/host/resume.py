@@ -45,6 +45,10 @@ from pulsara_agent.runtime.mcp.continuation_store import (
 from pulsara_agent.ports.run_terminalization import (
     RunFinalOutputMaterializationFull,
 )
+from pulsara_agent.ports.runtime_session_teardown import (
+    NonHostRuntimeSessionTeardownPurpose,
+    bind_non_host_runtime_session_teardown_capability,
+)
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.run_execution.final_output import RunFinalOutputMaterializer
 from pulsara_agent.runtime.run_execution.recovery import (
@@ -142,6 +146,10 @@ async def repair_dangling_runs_for_resume(
         archive=archive,
         tool_result_artifacts=PostgresToolResultArtifactIndex(connection_provider),
         reopen_deadline_monotonic=deadline_monotonic,
+    )
+    teardown_capability = bind_non_host_runtime_session_teardown_capability(
+        runtime_session,
+        purpose=NonHostRuntimeSessionTeardownPurpose.RESUME_RECOVERY,
     )
     continuation_repository = PostgresMcpContinuationSecretStore(connection_provider)
     state_store = runtime_session.long_horizon_state_store
@@ -336,8 +344,8 @@ async def repair_dangling_runs_for_resume(
                 raise RuntimeError("dangling run recovery publication is unavailable")
             repaired.append(run_id)
     finally:
-        await runtime_session.teardown_temporary_recovery_session(
-            deadline_monotonic=deadline_monotonic
+        await teardown_capability.teardown(
+            deadline_monotonic=deadline_monotonic,
         )
 
     return DanglingRunRepairResult(

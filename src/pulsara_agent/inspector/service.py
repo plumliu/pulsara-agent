@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
 
 import json
 from dataclasses import asdict, dataclass
@@ -75,7 +74,6 @@ from pulsara_agent.event import (
     TranscriptProjectionCheckpointRecoveredInterruptedEvent,
 )
 from pulsara_agent.event_log import (
-    DEFAULT_EVENT_SCHEMA_REGISTRY,
     PostgresEventLog,
     dump_agent_event,
 )
@@ -104,15 +102,18 @@ from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 from pulsara_agent.replay.message_reducer import MessageReducer
 from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
 from pulsara_agent.runtime.context_input.replay import (
+    AuditIntegrityFailure,
+    AuditUnavailable,
+    ExactAuditArtifact,
+    ReconstructedAudit,
     ContextInputReplayError,
-    ContextInputReplayStatus,
-    load_context_input_manifest,
-    replay_compiled_context,
-    replay_context_input,
+    load_committed_provider_payload_for_model_start,
+    load_context_input_audit,
 )
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventSliceError,
     FrozenStoredEvent,
+    event_reference_from_stored,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.compaction import (
@@ -127,7 +128,6 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalProjectionDocumentFact,
 )
 from pulsara_agent.runtime.long_horizon.status import (
-    derive_rollout_status_candidate,
     derive_rollout_status_shadow,
 )
 from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
@@ -200,6 +200,7 @@ class InspectorService:
         *,
         limit_events: int = 200,
         include_payload: bool = False,
+        require_exact_audit: bool = False,
     ) -> dict[str, Any]:
         session = self.store.session(session_id)
         if session is None:
@@ -232,6 +233,7 @@ class InspectorService:
         context_compilations = _context_compilation_projection(
             events,
             store=self.store,
+            require_exact_audit=require_exact_audit,
         )
         long_horizon = _long_horizon_run_projection(
             events,
@@ -323,6 +325,7 @@ class InspectorService:
         *,
         limit_events: int = 200,
         include_payload: bool = False,
+        require_exact_audit: bool = False,
     ) -> dict[str, Any]:
         run = self.store.run(run_id)
         if run is None:
@@ -417,6 +420,7 @@ class InspectorService:
         context_compilations = _context_compilation_projection(
             run_events,
             store=self.store,
+            require_exact_audit=require_exact_audit,
         )
         long_horizon = _long_horizon_run_projection(
             session_events,
@@ -3131,10 +3135,10 @@ def _provider_input_generation_projection(
 
     for event in events:
         if isinstance(event, ContextCompiledEvent):
-            prepared = event.prepared_provider_input
-            if prepared is None:
+            installation = event.provider_input_preparation_install
+            if installation is None:
                 continue
-            owner = prepared.preparation_ownership
+            owner = installation.preparation_ownership
             entry_for(owner.generation_id)["preparations"].append(
                 {
                     "status": "prepared",
@@ -3144,7 +3148,13 @@ def _provider_input_generation_projection(
                     "preparation_id": owner.preparation_id,
                     "ownership_kind": owner.ownership_kind,
                     "ownership_fingerprint": owner.ownership_fingerprint,
-                    "candidate_fingerprint": prepared.candidate_fingerprint,
+                    "candidate_fingerprint": (
+                        installation.prepared_candidate_fingerprint
+                    ),
+                    "semantic_commit_fingerprint": (
+                        installation.semantic_commit_fingerprint
+                    ),
+                    "install_fingerprint": installation.install_fingerprint,
                 }
             )
             continue
@@ -3431,8 +3441,9 @@ def _referenced_provider_input_generation_ids(
     generation_ids: set[str] = set()
     for event in events:
         if isinstance(event, ContextCompiledEvent):
-            if event.prepared_provider_input is not None:
-                generation_ids.add(event.prepared_provider_input.generation_id)
+            installation = event.provider_input_preparation_install
+            if installation is not None:
+                generation_ids.add(installation.preparation_ownership.generation_id)
         elif isinstance(event, ProviderInputGenerationStartedEvent):
             generation_ids.add(event.generation.generation_id)
         elif isinstance(event, ProviderInputAppendCommittedEvent):
@@ -3553,6 +3564,7 @@ def _context_compilation_projection(
     events: Iterable[AgentEvent],
     *,
     store: PostgresInspectorStore | None = None,
+    require_exact_audit: bool = False,
 ) -> dict[str, Any]:
     context_events: list[ContextCompiledEvent] = []
     model_starts: list[ModelCallStartEvent] = []
@@ -3637,7 +3649,18 @@ def _context_compilation_projection(
         _context_compiled_to_dict(
             event,
             input_replay=(
-                _context_input_replay_projection(event, store)
+                _context_input_replay_projection(
+                    event,
+                    store,
+                    matching_model_starts=tuple(
+                        start
+                        for start in model_starts
+                        if start.context_id == event.context_id
+                        and start.resolved_call.resolved_model_call_id
+                        == event.resolved_call.resolved_model_call_id
+                    ),
+                    require_exact_audit=require_exact_audit,
+                )
                 if store is not None
                 else None
             ),
@@ -3657,12 +3680,6 @@ def _context_compiled_to_dict(
     *,
     input_replay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    sections = [_json_safe(section) for section in event.sections]
-    omitted = [
-        section
-        for section in sections
-        if isinstance(section, dict) and section.get("included") is False
-    ]
     return {
         "sequence": event.sequence,
         "context_id": event.context_id,
@@ -3680,31 +3697,6 @@ def _context_compiled_to_dict(
         "effective_output_tokens": event.budget.effective_output_tokens,
         "tools_estimated_tokens": event.budget.tools_estimated_tokens,
         "budget": event.budget.model_dump(mode="json"),
-        "section_count": len(event.sections),
-        "included_section_count": len(event.sections) - len(omitted),
-        "omitted_section_count": len(omitted),
-        "sections": sections,
-        "section_timings": _section_timing_projection(sections),
-        "tool_specs": [_json_safe(tool) for tool in event.tool_specs],
-        "diagnostics": [_json_safe(diagnostic) for diagnostic in event.diagnostics],
-        "lifecycle_decisions": [
-            _json_safe(decision) for decision in event.lifecycle_decisions
-        ],
-        "tool_result_render_decisions": [
-            _json_safe(decision) for decision in event.tool_result_render_decisions
-        ],
-        "canonical_tool_result_render_decisions": [
-            decision.model_dump(mode="json")
-            for decision in event.tool_result_render_decision_facts
-        ],
-        "tool_result_render_operational": [
-            item.model_dump(mode="json")
-            for item in event.tool_result_render_operational_facts
-        ],
-        "tool_result_timings": _tool_result_timing_projection(
-            event.tool_result_render_decisions
-        ),
-        "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
         "long_horizon_context_budget_decision": (
             event.long_horizon_context_budget_decision.model_dump(mode="json")
             if event.long_horizon_context_budget_decision is not None
@@ -3715,24 +3707,26 @@ def _context_compiled_to_dict(
             if event.long_horizon_projection_pressure_shadow is not None
             else None
         ),
-        "input_status": (
-            "audited" if event.input_audit is not None else "input_failed"
+        "input_status": event.status,
+        "semantic_commit": (
+            event.semantic_commit.model_dump(mode="json")
+            if event.semantic_commit is not None
+            else None
         ),
-        "input_audit": (
-            event.input_audit.model_dump(mode="json")
-            if event.input_audit is not None
+        "provider_input_preparation_install": (
+            event.provider_input_preparation_install.model_dump(mode="json")
+            if event.provider_input_preparation_install is not None
+            else None
+        ),
+        "audit_expectation": (
+            event.audit_expectation.model_dump(mode="json")
+            if event.audit_expectation is not None
             else None
         ),
         "input_failure": (
             event.input_failure.model_dump(mode="json")
             if event.input_failure is not None
             else None
-        ),
-        "provider_neutral_payload_fingerprint": (
-            event.provider_neutral_payload_fingerprint
-        ),
-        "canonical_render_decisions_fingerprint": (
-            event.canonical_render_decisions_fingerprint
         ),
         "input_replay": input_replay,
     }
@@ -3741,401 +3735,146 @@ def _context_compiled_to_dict(
 def _context_input_replay_projection(
     event: ContextCompiledEvent,
     store: PostgresInspectorStore,
-) -> dict[str, Any]:
-    if event.input_audit is None:
-        failure = event.input_failure
-        reason = (
-            failure.reason_code.value
-            if failure is not None
-            else "missing_input_carrier"
-        )
-        status = (
-            ContextInputReplayStatus.LEDGER_UNTRUSTED
-            if reason == "ledger_untrusted"
-            else ContextInputReplayStatus.ARTIFACT_MISSING
-            if reason == "manifest_confirmed_absent"
-            else ContextInputReplayStatus.CONTRACT_MISMATCH
-        )
-        return {
-            "status": status.value,
-            "diagnostics": [
-                {
-                    "code": reason,
-                    "message": "Context compilation did not confirm a replay manifest.",
-                }
-            ],
-            "manifest": None,
-        }
-
-    audit = event.input_audit
-    archive = PostgresArtifactStore(store.connection_provider)
-    try:
-        manifest = load_context_input_manifest(audit=audit, archive=archive)
-        primary = _context_event_slice_for_range(
-            store=store,
-            runtime_session_id=manifest.snapshot.primary_event_range.runtime_session_id,
-            first_sequence=manifest.snapshot.primary_event_range.first_sequence,
-            through_sequence=manifest.snapshot.primary_event_range.through_sequence,
-        )
-        named = tuple(
-            _context_event_slice_for_range(
-                store=store,
-                runtime_session_id=item.runtime_session_id,
-                first_sequence=item.first_sequence,
-                through_sequence=item.through_sequence,
-            )
-            for item in manifest.snapshot.named_event_ranges
-        )
-        replay_event_log = PostgresEventLog(
-            connection_provider=store.connection_provider,
-            runtime_session_id=audit.source_runtime_session_id,
-        )
-        replayed = replay_context_input(
-            audit=audit,
-            archive=archive,
-            event_log=replay_event_log,
-            event_slice=primary,
-            named_slices=named,
-        )
-        try:
-            exact = replay_compiled_context(
-                event=event,
-                archive=archive,
-                event_log=replay_event_log,
-                event_slice=primary,
-                named_slices=named,
-            )
-        except ContextInputReplayError as exc:
-            if exc.status is not ContextInputReplayStatus.FACT_REPLAY_ONLY:
-                raise
-            replay_status = exc.status
-            replay_diagnostics = [{"code": exc.reason_code, "message": str(exc)}]
-        else:
-            replayed = exact.inputs
-            replay_status = ContextInputReplayStatus.EXACT_REPLAY
-            replay_diagnostics = []
-    except ContextInputReplayError as exc:
-        return {
-            "status": exc.status.value,
-            "diagnostics": [{"code": exc.reason_code, "message": str(exc)}],
-            "manifest": {
-                "artifact_id": audit.input_manifest_artifact_id,
-                "fingerprint": audit.input_manifest_fingerprint,
-                "write_outcome": audit.input_manifest_write_outcome,
-            },
-        }
-    except ContextEventSliceError as exc:
-        return {
-            "status": ContextInputReplayStatus.LEDGER_UNTRUSTED.value,
-            "diagnostics": [
-                {
-                    "code": "context_input_event_slice_untrusted",
-                    "message": str(exc),
-                }
-            ],
-            "manifest": {
-                "artifact_id": audit.input_manifest_artifact_id,
-                "fingerprint": audit.input_manifest_fingerprint,
-                "write_outcome": audit.input_manifest_write_outcome,
-            },
-        }
-
-    snapshot = replayed.manifest.snapshot
-    transcript_provider_projection = replayed.manifest.transcript_provider_projection
-    transcript_authority = replayed.manifest.transcript_authority
-    units = replayed.normalized_transcript.tool_result_units
-    candidates = replayed.prepared_candidates
-    profile_counts: dict[str, int] = {}
-    builder_contracts: dict[tuple[str, str, str], dict[str, str]] = {}
-    for unit in units:
-        variant = unit.render_profile.selected_variant.variant_code.value
-        profile_counts[variant] = profile_counts.get(variant, 0) + 1
-        contract = unit.render_profile.render_contract.semantics_builder_contract
-        key = (
-            contract.builder_id,
-            contract.builder_version,
-            contract.contract_fingerprint,
-        )
-        builder_contracts[key] = {
-            "builder_id": contract.builder_id,
-            "builder_version": contract.builder_version,
-            "contract_fingerprint": contract.contract_fingerprint,
-        }
-    source_counts: dict[str, int] = {}
-    lifecycle_counts: dict[str, int] = {}
-    for entry in candidates.entries:
-        source = entry.candidate.source_kind
-        source_counts[source] = source_counts.get(source, 0) + 1
-        lifecycle = entry.lifecycle.status
-        lifecycle_counts[lifecycle] = lifecycle_counts.get(lifecycle, 0) + 1
-    source_selections = [
-        item.model_dump(mode="json")
-        for item in snapshot.candidate_source_selections[:64]
-    ]
-    collection_decisions = [
-        item.model_dump(mode="json") for item in candidates.collection_decisions[:128]
-    ]
-    window = snapshot.authority_slice_plan.transcript_window
-    try:
-        rollout_status_hint = _replayed_rollout_status_hint(
-            event=event,
-            snapshot=snapshot,
-            primary=primary,
-            named=named,
-        )
-    except ContextInputReplayError as exc:
-        return {
-            "status": exc.status.value,
-            "diagnostics": [{"code": exc.reason_code, "message": str(exc)}],
-            "manifest": {
-                "artifact_id": audit.input_manifest_artifact_id,
-                "fingerprint": replayed.manifest.manifest_fingerprint,
-                "write_outcome": audit.input_manifest_write_outcome,
-            },
-        }
-    return {
-        "status": replay_status.value,
-        "diagnostics": replay_diagnostics,
-        "manifest": {
-            "artifact_id": audit.input_manifest_artifact_id,
-            "fingerprint": replayed.manifest.manifest_fingerprint,
-            "write_outcome": audit.input_manifest_write_outcome,
-            "aggregate_fingerprint": replayed.manifest.input_aggregate_fingerprint,
-        },
-        "subagent_graph": {
-            "semantic_source": (
-                replayed.manifest.subagent_graph_semantic_source.model_dump(mode="json")
-            ),
-            "preferred_checkpoint_id": (
-                replayed.manifest.subagent_graph_acceleration.checkpoint_id
-            ),
-            "actual_checkpoint_id": (
-                replayed.subagent_graph_acceleration.checkpoint_id
-            ),
-            "rebased": (
-                replayed.manifest.subagent_graph_acceleration.checkpoint_id
-                != replayed.subagent_graph_acceleration.checkpoint_id
-            ),
-            "checkpoint_through_sequence": (
-                replayed.subagent_graph_acceleration.checkpoint_through_sequence
-            ),
-            "delta_from_sequence": (
-                replayed.subagent_graph_acceleration.delta_from_sequence
-            ),
-            "delta_through_sequence": (
-                replayed.subagent_graph_acceleration.delta_through_sequence
-            ),
-            "delta_count": replayed.subagent_graph_acceleration.delta_count,
-            "delta_byte_count": (replayed.subagent_graph_acceleration.delta_byte_count),
-            "ledger_through_sequence": (
-                replayed.subagent_graph_acceleration.ledger_through_sequence
-            ),
-            "ledger_continuity_accumulator": (
-                replayed.subagent_graph_acceleration.ledger_continuity_accumulator
-            ),
-        },
-        "snapshot": {
-            "snapshot_id": snapshot.identity.snapshot_id,
-            "schema_version": snapshot.identity.schema_version,
-            "semantic_fingerprint": snapshot.snapshot_semantic_fingerprint,
-            "fact_fingerprint": snapshot.snapshot_fact_fingerprint,
-            "compiler_contract_version": snapshot.identity.compiler_contract_version,
-            "run_entry_kind": snapshot.run_entry.run_entry_kind,
-            "run_start": snapshot.run_entry.run_start.model_dump(mode="json"),
-            "continuation": (
-                snapshot.continuation.model_dump(mode="json")
-                if snapshot.continuation is not None
-                else None
-            ),
-            "primary_range": snapshot.primary_event_range.model_dump(mode="json"),
-            "named_ranges": [
-                item.model_dump(mode="json") for item in snapshot.named_event_ranges
-            ],
-            "authority_plan_fingerprint": snapshot.authority_slice_plan.plan_fingerprint,
-            "transcript_window": window.model_dump(mode="json"),
-            "resolved_model_call_id": snapshot.resolved_model_call.resolved_model_call_id,
-            "target_fingerprint": snapshot.resolved_model_call.target.target_fingerprint,
-        },
-        "invocation_provider_projection": {
-            "context_id": transcript_provider_projection.context_id,
-            "model_call_index": transcript_provider_projection.model_call_index,
-            "compile_attempt_index": (
-                transcript_provider_projection.compile_attempt_index
-            ),
-            "stable_normalized_transcript_fingerprint": (
-                transcript_provider_projection.semantic_identity.stable_normalized_transcript_fingerprint
-            ),
-            "provider_projection_semantic_fingerprint": (
-                transcript_provider_projection.semantic_identity.semantic_fingerprint
-            ),
-            "rendering_contract": (
-                transcript_provider_projection.rendering_contract.model_dump(
-                    mode="json"
-                )
-            ),
-            "section_count": len(transcript_provider_projection.sections),
-            "rendered_timing_header_count": sum(
-                item.semantic_identity.timing_semantic.rendered_timing_header
-                is not None
-                for item in transcript_provider_projection.sections
-            ),
-            "section_timing_semantics": [
-                item.semantic_identity.timing_semantic.model_dump(mode="json")
-                for item in transcript_provider_projection.sections
-            ],
-            "lowered_provider_messages_fingerprint": (
-                transcript_provider_projection.semantic_identity.lowered_provider_messages_fingerprint
-            ),
-            "stable_root_unchanged": (
-                transcript_provider_projection.semantic_identity.stable_normalized_transcript_fingerprint
-                == transcript_authority.final_normalized_transcript_fingerprint
-            ),
-        },
-        "transcript_authority": {
-            "provider_semantic_identity": (
-                transcript_authority.provider_semantic_identity.model_dump(mode="json")
-            ),
-            "semantic_source": transcript_authority.semantic_source.model_dump(
-                mode="json"
-            ),
-            "projection_base_kind": transcript_authority.projection_base.base_kind,
-            "projection_base_semantic_identity": (
-                transcript_authority.projection_base.common.semantic_identity.model_dump(
-                    mode="json"
-                )
-            ),
-            "final_normalized_transcript_fingerprint": (
-                transcript_authority.final_normalized_transcript_fingerprint
-            ),
-            "domain_completeness_proof": (
-                transcript_authority.domain_completeness_proof.model_dump(mode="json")
-            ),
-            "named_fact_selection": (
-                transcript_authority.named_fact_selection.model_dump(mode="json")
-            ),
-            "fact_fingerprint": transcript_authority.fact_fingerprint,
-        },
-        "transcript": {
-            "fingerprint": replayed.normalized_transcript.transcript.transcript_fingerprint,
-            "message_count": len(replayed.normalized_transcript.transcript.messages),
-            "pair_count": len(replayed.normalized_transcript.transcript.tool_pairs),
-            "stripped_unfinished_call_ids": list(
-                replayed.normalized_transcript.transcript.stripped_unfinished_call_ids
-            ),
-        },
-        "tool_results": {
-            "unit_count": len(units),
-            "profile_counts": profile_counts,
-            "builder_contracts": list(builder_contracts.values()),
-            "render_policy_fingerprint": (
-                replayed.prepared_tool_results.resolved_policy.policy_fingerprint
-            ),
-            "protected_unit_ids": list(
-                replayed.prepared_tool_results.resolved_policy.protected_unit_ids
-            ),
-        },
-        "candidates": {
-            "count": len(candidates.entries),
-            "source_counts": source_counts,
-            "lifecycle_counts": lifecycle_counts,
-            "source_selections": source_selections,
-            "source_selections_truncated": (
-                len(snapshot.candidate_source_selections) > len(source_selections)
-            ),
-            "collection_decisions": collection_decisions,
-            "collection_decisions_truncated": (
-                len(candidates.collection_decisions) > len(collection_decisions)
-            ),
-            "invalidation_count": len(candidates.invalidations),
-            "fingerprint": candidates.candidate_set_fingerprint,
-        },
-        "rollout_status_hint": rollout_status_hint,
-        "current_process_diagnostics": {
-            "semantics_builder_implementation_build_fingerprints": None,
-            "historical_fact": False,
-        },
-    }
-
-
-def _replayed_rollout_status_hint(
     *,
-    event: ContextCompiledEvent,
-    snapshot,
-    primary: ContextEventSlice,
-    named: tuple[ContextEventSlice, ...],
-) -> dict[str, Any] | None:
-    included = tuple(
-        section
-        for section in event.sections
-        if isinstance(section, dict)
-        and section.get("id") == "rollout:status"
-        and section.get("included") is True
+    matching_model_starts: tuple[ModelCallStartEvent, ...] = (),
+    require_exact_audit: bool = False,
+) -> dict[str, Any]:
+    if event.status != "compiled":
+        failure = event.input_failure
+        return {
+            "status": "audit_unavailable",
+            "diagnostics": [
+                {
+                    "code": (
+                        failure.reason_code.value
+                        if failure is not None
+                        else "context_not_compiled"
+                    ),
+                    "message": "Context compilation did not produce a semantic commit.",
+                }
+            ],
+            "provider_payload": {
+                "status": "not_applicable",
+                "reason_code": "context_not_compiled",
+            },
+            "audit": None,
+        }
+    commit = event.semantic_commit
+    if commit is None:
+        return {
+            "status": "audit_integrity_failure",
+            "diagnostics": [{"code": "compiled_semantic_commit_missing"}],
+            "provider_payload": {
+                "status": "integrity_failure",
+                "reason_code": "compiled_semantic_commit_missing",
+            },
+            "audit": None,
+        }
+    archive = PostgresArtifactStore(store.connection_provider)
+    replay_event_log = PostgresEventLog(
+        connection_provider=store.connection_provider,
+        runtime_session_id=commit.runtime_session_id,
     )
-    if not included:
-        return None
-    if len(included) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_rollout_status_section_ambiguous",
-            "compiled context contains multiple included rollout status sections",
-        )
-    owner_id = (
-        snapshot.long_horizon_attribution.rollout_account_owner_runtime_session_id
-    )
-    owner_slices = tuple(
-        item for item in (primary, *named) if item.runtime_session_id == owner_id
-    )
-    if len(owner_slices) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_rollout_status_owner_slice_missing",
-            "rollout status replay requires one frozen account-owner slice",
-        )
-    starts = tuple(
-        decoded
-        for frozen in primary.events
-        if frozen.run_id == snapshot.identity.run_id
-        if isinstance(
-            (
-                decoded := decode_raw_stored_event_envelope(
-                    frozen, DEFAULT_EVENT_SCHEMA_REGISTRY
-                )
+    provider_payload: dict[str, Any]
+    if len(matching_model_starts) != 1:
+        provider_payload = {
+            "status": "unavailable"
+            if not matching_model_starts
+            else "integrity_failure",
+            "reason_code": (
+                "model_start_not_committed"
+                if not matching_model_starts
+                else "multiple_matching_model_starts"
             ),
-            RunStartEvent,
-        )
+        }
+    else:
+        model_start = matching_model_starts[0]
+        if model_start.provider_input_reference is None:
+            provider_payload = {
+                "status": "unavailable",
+                "reason_code": "provider_input_reference_missing",
+            }
+        else:
+            try:
+                exact_provider = load_committed_provider_payload_for_model_start(
+                    model_start_reference=event_reference_from_stored(
+                        model_start,
+                        runtime_session_id=commit.runtime_session_id,
+                    ),
+                    event_log=replay_event_log,
+                    provider_input_store=None,
+                    artifact_store=archive,
+                )
+            except ContextInputReplayError as exc:
+                provider_payload = {
+                    "status": "integrity_failure",
+                    "reason_code": exc.reason_code,
+                }
+            except Exception as exc:
+                provider_payload = {
+                    "status": "unavailable",
+                    "reason_code": f"provider_replay_{type(exc).__name__}",
+                }
+            else:
+                provider_payload = {
+                    "status": "exact",
+                    "reason_code": None,
+                    "generation_id": exact_provider.committed_reference.generation_id,
+                    "committed_generation_revision": (
+                        exact_provider.committed_reference.committed_generation_revision
+                    ),
+                    "unit_count": len(exact_provider.units),
+                    "authority_horizon_count": len(exact_provider.authority_horizons),
+                    "replay_binding_count": len(exact_provider.replay_bindings),
+                    "proof_fingerprint": exact_provider.proof_fingerprint,
+                }
+    outcome = load_context_input_audit(
+        event=event,
+        event_log=replay_event_log,
+        provider_input_store=None,
+        artifact_store=archive,
+        require_exact=require_exact_audit,
     )
-    if len(starts) != 1:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.LEDGER_UNTRUSTED,
-            "context_input_rollout_status_run_start_missing",
-            "rollout status replay requires one matching RunStart",
-        )
-    candidate = derive_rollout_status_candidate(
-        event_slice=owner_slices[0],
-        account_id=snapshot.long_horizon_attribution.rollout_account_id,
-        policy=starts[0].long_horizon.rollout_status_hint_policy,
-    )
-    source_candidates = tuple(
-        item
-        for item in snapshot.context_source_candidates
-        if item.source_id.value == "rollout_status"
-    )
-    if (
-        candidate is None
-        or len(source_candidates) != 1
-        or getattr(
-            source_candidates[0].attribution.semantic.payload,
-            "rollout_account_semantic_fingerprint",
-            None,
-        )
-        != candidate.semantic_fingerprint
-    ):
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.CONTRACT_MISMATCH,
-            "context_input_rollout_status_hint_mismatch",
-            "included rollout status differs from the frozen ledger derivation",
-        )
-    return candidate.model_dump(mode="json")
+    if isinstance(outcome, ExactAuditArtifact):
+        return {
+            "status": outcome.status.value,
+            "diagnostics": [],
+            "provider_payload": provider_payload,
+            "audit": {
+                "root": outcome.root.model_dump(mode="json"),
+                "plan": outcome.plan.model_dump(mode="json"),
+                "page_count": len(outcome.pages),
+                "component_kinds": [item[0].value for item in outcome.components],
+                "proof_fingerprint": outcome.proof_fingerprint,
+            },
+        }
+    if isinstance(outcome, ReconstructedAudit):
+        return {
+            "status": outcome.status.value,
+            "diagnostics": (
+                [{"code": outcome.artifact_diagnostic_code}]
+                if outcome.artifact_diagnostic_code is not None
+                else []
+            ),
+            "provider_payload": provider_payload,
+            "audit": {
+                "reconstructed_component_kinds": list(
+                    outcome.reconstructed_component_kinds
+                ),
+                "omitted_component_kinds": list(outcome.omitted_component_kinds),
+                "provider_payload_proof_fingerprint": (
+                    outcome.provider_payload.proof_fingerprint
+                ),
+                "proof_fingerprint": outcome.proof_fingerprint,
+            },
+        }
+    assert isinstance(outcome, (AuditUnavailable, AuditIntegrityFailure))
+    return {
+        "status": outcome.status.value,
+        "diagnostics": [{"code": outcome.reason}],
+        "provider_payload": provider_payload,
+        "audit": None,
+    }
 
 
 def _subagent_graph_checkpoint_projection(

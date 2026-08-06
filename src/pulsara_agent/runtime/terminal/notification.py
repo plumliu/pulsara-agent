@@ -379,7 +379,10 @@ class HostIngressNotificationProjectionStore:
         if not isinstance(prepared, HostIngressNotificationProjectionStore):
             raise TypeError("terminal notification prepared state has wrong owner")
         with self._lock:
-            if canonical_json_object_carrier(self.checkpoint_payload()) != expected_base:
+            if (
+                canonical_json_object_carrier(self.checkpoint_payload())
+                != expected_base
+            ):
                 raise TerminalNotificationContractError(
                     "terminal notification semantic base changed during fold"
                 )
@@ -408,9 +411,7 @@ class HostIngressNotificationProjectionStore:
         self._automatic_delivery_deferred_source_ids = set(
             candidate._automatic_delivery_deferred_source_ids
         )
-        self._autonomy_chain_attributions = dict(
-            candidate._autonomy_chain_attributions
-        )
+        self._autonomy_chain_attributions = dict(candidate._autonomy_chain_attributions)
         self._autonomy_chain_states = dict(candidate._autonomy_chain_states)
 
     def _validate_checkpoint_references(self) -> None:

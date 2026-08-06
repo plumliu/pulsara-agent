@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import RLock
+from time import monotonic
 from typing import Any
 
 from pulsara_agent.memory.foundation.records import (
@@ -263,9 +264,12 @@ class InMemoryArchiveStore:
         digest: str,
         media_type: str,
         semantic_metadata_fingerprint: str,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         """Privileged maintenance deletion guarded by immutable identity."""
 
+        if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+            raise TimeoutError("artifact deletion deadline exceeded")
         with self._lock:
             existing = self.blobs.get(blob_id)
             if existing is None:

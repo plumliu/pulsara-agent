@@ -329,10 +329,11 @@ Prompt feasibility必须用冻结 target的实际 estimator验证完整 system p
 
 ## 17. Provider input causal order 与 ModelStart join
 
-主agent的transport输入只能来自已确认的`CommittedProviderInputReferenceFact`。Context compiler先在
-`ContextInputManifest` artifact内冻结唯一ordered provider projection；ProviderInput planner不得重新
+主agent的transport输入只能来自已确认的`CommittedProviderInputReferenceFact`。Context compiler先冻结
+compact `ContextCompileInputCommitFact`与唯一ordered projection identity；ProviderInput planner不得重新
 按`current_user | prior_history | current_run_tail`分类、插入pending continuation或二次排序，只能验证
-causal edges并计算相对于committed frontier的strict suffix。
+causal edges并计算相对于committed frontier的strict suffix。Optional context-input audit plan/page/root不参与
+ModelStart admission、provider payload replay或recovery。
 
 `current_user | prior_history`属于invocation attribution，不进入provider unit continuity semantic。一个
 generation中已提交unit的wire fragment、causal predecessor、projection-local ordinal与semantic fingerprint

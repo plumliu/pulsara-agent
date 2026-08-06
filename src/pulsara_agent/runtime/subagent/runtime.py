@@ -172,6 +172,14 @@ class SubagentNotReady(SubagentRuntimeError):
     """Raised when a result is requested before it is available."""
 
 
+class ChildExecutionBudgetExpired(SubagentRuntimeError):
+    """The dedicated owner of a configured child execution-budget expiry."""
+
+
+class ChildSessionTeardownWaitExpired(SubagentRuntimeError):
+    """A caller detached while the registry-owned teardown lineage continues."""
+
+
 ChildEventLogFactory = Callable[[str], EventLog]
 SubagentRolloutAdmission = Callable[
     [tuple[SubagentRunStartedEvent, ...]], tuple[AgentEvent, ...]
@@ -366,6 +374,39 @@ class SubagentRuntime:
         port = self._child_activation_port
         if port is not None:
             port.retire_child_activation(subagent_run_id)
+
+    async def teardown_child_session_for_terminal_handoff(
+        self,
+        subagent_run_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Drain a terminal child RuntimeSession before parent capacity release.
+
+        Child execution has no HostSession to run the normal close graph.  Once
+        its common RunOwner is retired, the existing bounded non-Host teardown
+        closes provider generations, writers, reducer/checkpoint owners and
+        optional audit I/O before the parent graph is allowed to release the
+        composition lease.
+        """
+
+        task = self._admission_registry.install_or_get_child_session_teardown_task(
+            subagent_run_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if task is None:
+            return
+        remaining = deadline_monotonic - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise ChildSessionTeardownWaitExpired(
+                "child session teardown waiter deadline expired"
+            )
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except TimeoutError as exc:
+            raise ChildSessionTeardownWaitExpired(
+                "child session teardown waiter deadline expired"
+            ) from exc
 
     async def hydrate_child_activation_run(
         self,
@@ -2436,6 +2477,28 @@ class SubagentRuntime:
             await self._activation_operations.cancel(
                 subagent_run_id, timeout_seconds=drain_timeout_seconds
             )
+            # Test adapters and any future non-native activation owner do not
+            # own the RuntimeSession teardown performed by the production
+            # child activation service.  Parent graph FULL and activation exit
+            # are therefore only two of the three release conditions: the
+            # admission registry must still install/join the exact physical
+            # child-session teardown before capacity can be released.
+            if (
+                owner is not None
+                and owner.child_composition_lease.child_session is not None
+            ):
+                teardown_deadline = deadline_monotonic
+                if teardown_deadline is None:
+                    teardown_deadline = (
+                        float("inf")
+                        if drain_timeout_seconds is None
+                        else asyncio.get_running_loop().time()
+                        + max(0.0, drain_timeout_seconds)
+                    )
+                await self.teardown_child_session_for_terminal_handoff(
+                    subagent_run_id,
+                    deadline_monotonic=teardown_deadline,
+                )
         return self._require_run(subagent_run_id)
 
     async def cancel_active_children(
@@ -3371,6 +3434,24 @@ class SubagentRuntime:
                 for run_id in active_run_ids:
                     if self._terminal_commit_is_fully_applied(run_id):
                         self._confirm_parent_graph_terminal_full(run_id)
+                # A child that was cancelled before the production activation
+                # delegate installed its composition still owns a live
+                # RuntimeSession.  Close every remaining attached session via
+                # the same registry-owned physical task used by the normal
+                # activation/terminalization paths.  This also covers the
+                # durable-FULL/awaiter-cancelled window without introducing a
+                # second teardown owner.
+                teardown_deadline = asyncio.get_running_loop().time() + 5.0
+                for run_id in active_run_ids:
+                    owner = self._admission_registry.get(run_id)
+                    if (
+                        owner is not None
+                        and owner.child_composition_lease.child_session is not None
+                    ):
+                        await self.teardown_child_session_for_terminal_handoff(
+                            run_id,
+                            deadline_monotonic=teardown_deadline,
+                        )
         if self._rollout_terminal_augmenter is None:
             await self._activation_operations.drain_run_ids(
                 tuple(active_run_ids),
@@ -3861,14 +3942,22 @@ class SubagentRuntime:
                     deadline_monotonic=deadline,
                 )
             else:
-                await asyncio.wait_for(
-                    port.activate_committed_child(
-                        run.subagent_run_id,
-                        deadline_monotonic=deadline,
-                    ),
-                    timeout=max(0.0, run.budget.child_timeout_seconds),
+                timeout_owner = asyncio.timeout(
+                    max(0.0, run.budget.child_timeout_seconds)
                 )
-        except TimeoutError:
+                try:
+                    async with timeout_owner:
+                        await port.activate_committed_child(
+                            run.subagent_run_id,
+                            deadline_monotonic=deadline,
+                        )
+                except TimeoutError as exc:
+                    if not timeout_owner.expired():
+                        raise
+                    raise ChildExecutionBudgetExpired(
+                        "child execution budget expired"
+                    ) from exc
+        except ChildExecutionBudgetExpired:
             current = self._graph_store.state.runs.get(run.subagent_run_id)
             if current is not None and current.status in {"running", "suspended"}:
                 # The activation waiter is shielded by design; its timeout does

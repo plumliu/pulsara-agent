@@ -48,7 +48,6 @@ from pulsara_agent.primitives.provider_input import (
     CommittedRuntimeObservationSemanticHeadFact,
     CommittedProviderInputGenerationCoreStateFact,
     CommittedProviderInputReferenceFact,
-    ContextInputManifestProjectionReferenceFact,
     InitialGenerationCommitGuardFact,
     OneShotGenerationScopeFact,
     ProviderInputAppendBatchReferenceFact,
@@ -195,6 +194,7 @@ class PreparedProviderInputStartBundle:
     resident: ProviderInputResidentGeneration
     artifacts: tuple[PreparedProviderInputArtifact, ...]
     prepared_plan: PreparedProviderInputPlanFact | None = None
+    prepared_context_input_audit_source_basis: object | None = None
 
     @property
     def resulting_core_state(self) -> CommittedProviderInputGenerationCoreStateFact:
@@ -215,7 +215,7 @@ class PreparedProviderInputStartBundle:
 
 @dataclass(frozen=True, slots=True)
 class PreparedProviderInputPlanningBundle:
-    """Generation-neutral physical plan created before manifest persistence."""
+    """Generation-neutral physical plan created before compact commit."""
 
     prepared_plan: PreparedProviderInputPlanFact
     canonical_plan: CanonicalProviderInputPlanFact
@@ -687,7 +687,7 @@ def plan_one_shot_provider_input(
     )
     prepared_candidate = build_frozen_fact(
         PreparedProviderInputAppendCandidateFact,
-        schema_version="prepared_provider_input_append_candidate.v2",
+        schema_version="prepared_provider_input_append_candidate.v3",
         candidate_kind="one_shot",
         generation_id=generation_id,
         preparation_ownership=ownership,
@@ -695,7 +695,8 @@ def plan_one_shot_provider_input(
         append_batch_reference=append_reference,
         provider_input_plan=plan,
         prepared_plan=None,
-        manifest_projection_reference=None,
+        semantic_commit_fingerprint=None,
+        ordered_projection_identity_fingerprint=None,
         rollover_request=None,
         stable_companion_event_ids=companion_ids,
         generation_commit_guard=guard,
@@ -713,7 +714,8 @@ def plan_one_shot_provider_input(
         consumed_preparation_ownership_fingerprint=ownership.ownership_fingerprint,
         consumed_pending_continuation_fingerprint=None,
         continuation_consumption_proof=None,
-        manifest_projection_reference=None,
+        semantic_commit_fingerprint=None,
+        ordered_projection_identity_fingerprint=None,
         causal_validation=None,
         frame_placement=None,
         transcript_delta_proof=None,
@@ -744,7 +746,7 @@ def plan_one_shot_provider_input(
     )
     reference = build_frozen_fact(
         CommittedProviderInputReferenceFact,
-        schema_version="committed_provider_input_reference.v2",
+        schema_version="committed_provider_input_reference.v3",
         reference_kind="one_shot",
         generation_id=generation_id,
         committed_generation_revision=1,
@@ -757,7 +759,8 @@ def plan_one_shot_provider_input(
         authority_horizon_set=horizon_set.reference,
         replay_binding_set=replay_set.reference,
         provider_input_plan_fingerprint=plan.plan_fingerprint,
-        manifest_projection_reference_fingerprint=None,
+        semantic_commit_fingerprint=None,
+        ordered_projection_identity_fingerprint=None,
         causal_validation_fingerprint=None,
         transcript_frontier_fingerprint=None,
     )
@@ -804,9 +807,7 @@ def plan_provider_input_append(
     pending_continuation_materialization: (
         PreparedProviderInputContinuationMaterialization | None
     ) = None,
-    manifest_projection_reference: (
-        ContextInputManifestProjectionReferenceFact | None
-    ) = None,
+    semantic_commit_fingerprint: str | None = None,
 ) -> PreparedProviderInputStartBundle | PreparedProviderInputPlanningBundle:
     """Plan one initial or ordinary append without storage or mutable state."""
 
@@ -1623,28 +1624,26 @@ def plan_provider_input_append(
         resident=resident,
         artifacts=artifacts,
     )
-    if manifest_projection_reference is None:
+    if semantic_commit_fingerprint is None:
         return planning_bundle
-    if (
-        manifest_projection_reference.projection_identity != ordered_projection.identity
-        or manifest_projection_reference.context_id != compiled_context.context_id
-    ):
-        raise ValueError("provider plan manifest projection reference drifted")
+    ordered_projection_identity = ordered_projection.identity
     rollover_request = None
     if rollover_intent is not None:
         request_id = "provider-input-rollover-request:" + context_fingerprint(
             "provider-input-rollover-request-id:v1",
             (
                 rollover_intent.intent_fingerprint,
-                manifest_projection_reference.reference_fingerprint,
+                semantic_commit_fingerprint,
+                ordered_projection_identity.identity_fingerprint,
             ),
         ).removeprefix("sha256:")
         rollover_request = build_frozen_fact(
             ProviderInputRolloverRequestFact,
-            schema_version="provider_input_rollover_request.v1",
+            schema_version="provider_input_rollover_request.v2",
             rollover_request_id=request_id,
             intent=rollover_intent,
-            manifest_projection_reference=manifest_projection_reference,
+            semantic_commit_fingerprint=semantic_commit_fingerprint,
+            ordered_projection_identity=ordered_projection_identity,
         )
 
     preparation_id = _preparation_id(
@@ -1838,8 +1837,8 @@ def plan_provider_input_append(
         )
     prepared_candidate = build_frozen_fact(
         PreparedProviderInputAppendCandidateFact,
-        schema_version="prepared_provider_input_append_candidate.v2",
-        candidate_kind="compiled_manifest",
+        schema_version="prepared_provider_input_append_candidate.v3",
+        candidate_kind="compiled_context",
         generation_id=generation_id,
         preparation_ownership=ownership,
         expected_committed_core_state_fingerprint=(
@@ -1852,7 +1851,10 @@ def plan_provider_input_append(
         append_batch_reference=append_reference,
         provider_input_plan=plan,
         prepared_plan=prepared_plan,
-        manifest_projection_reference=manifest_projection_reference,
+        semantic_commit_fingerprint=semantic_commit_fingerprint,
+        ordered_projection_identity_fingerprint=(
+            ordered_projection_identity.identity_fingerprint
+        ),
         rollover_request=rollover_request,
         stable_companion_event_ids=companion_ids,
         generation_commit_guard=guard,
@@ -1861,7 +1863,7 @@ def plan_provider_input_append(
     append_event = ProviderInputAppendCommittedEvent(
         id=append_event_id,
         **event_context.event_fields(),
-        append_kind="compiled_manifest",
+        append_kind="compiled_context",
         generation_id=generation_id,
         generation_fingerprint=generation.generation_fingerprint,
         expected_revision=expected_revision,
@@ -1875,7 +1877,10 @@ def plan_provider_input_append(
             else None
         ),
         continuation_consumption_proof=continuation_proof,
-        manifest_projection_reference=manifest_projection_reference,
+        semantic_commit_fingerprint=semantic_commit_fingerprint,
+        ordered_projection_identity_fingerprint=(
+            ordered_projection_identity.identity_fingerprint
+        ),
         causal_validation=causal_validation,
         frame_placement=frame_placement,
         transcript_delta_proof=transcript_delta_proof,
@@ -1987,8 +1992,8 @@ def plan_provider_input_append(
         companions = (append_event,)
     reference = build_frozen_fact(
         CommittedProviderInputReferenceFact,
-        schema_version="committed_provider_input_reference.v2",
-        reference_kind="compiled_manifest",
+        schema_version="committed_provider_input_reference.v3",
+        reference_kind="compiled_context",
         generation_id=generation_id,
         committed_generation_revision=expected_revision + 1,
         resulting_generation_core_state_fingerprint=(
@@ -2002,8 +2007,9 @@ def plan_provider_input_append(
         authority_horizon_set=horizon_set.reference,
         replay_binding_set=replay_set.reference,
         provider_input_plan_fingerprint=plan.plan_fingerprint,
-        manifest_projection_reference_fingerprint=(
-            manifest_projection_reference.reference_fingerprint
+        semantic_commit_fingerprint=semantic_commit_fingerprint,
+        ordered_projection_identity_fingerprint=(
+            ordered_projection_identity.identity_fingerprint
         ),
         causal_validation_fingerprint=causal_validation.result_fingerprint,
         transcript_frontier_fingerprint=(
@@ -2042,7 +2048,7 @@ class ProviderInputSourceDispositionRequired(RuntimeError):
 
 
 class ProviderInputRolloverRequired(RuntimeError):
-    """Post-manifest dispatch signal carrying one fully joined request."""
+    """Post-commit dispatch signal carrying one fully joined request."""
 
     def __init__(self, request: ProviderInputRolloverRequestFact) -> None:
         super().__init__(request.intent.reason.value)

@@ -165,9 +165,7 @@ class RunActivationService:
             return None
         return self._host_view(owner)
 
-    def run_finalization_diagnostics(
-        self, run_id: str
-    ) -> dict[str, object] | None:
+    def run_finalization_diagnostics(self, run_id: str) -> dict[str, object] | None:
         """Expose the stable finalization owner without leaking working state."""
 
         from pulsara_agent.runtime.run_execution.owner import RunFinalizationOwner
@@ -192,12 +190,8 @@ class RunActivationService:
                 if finalization.confirmed_run_end_event_reference is None
                 else finalization.confirmed_run_end_event_reference.sequence
             ),
-            "physical_attempt_generation": (
-                finalization.physical_attempt_generation
-            ),
-            "retry_not_before_monotonic": (
-                finalization.retry_not_before_monotonic
-            ),
+            "physical_attempt_generation": (finalization.physical_attempt_generation),
+            "retry_not_before_monotonic": (finalization.retry_not_before_monotonic),
             "first_failure_monotonic": finalization.first_failure_monotonic,
             "last_failure_monotonic": finalization.last_failure_monotonic,
             "last_failure_code": finalization.last_failure_code,
@@ -207,9 +201,7 @@ class RunActivationService:
                     "target_high_water": getattr(
                         handle, "target_ledger_high_water", None
                     ),
-                    "plan_fingerprint": getattr(
-                        handle, "plan_fingerprint", None
-                    ),
+                    "plan_fingerprint": getattr(handle, "plan_fingerprint", None),
                 }
                 for handle in finalization.reducer_repair_handles
             ),

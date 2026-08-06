@@ -2441,13 +2441,10 @@ def test_auto_context_compaction_can_use_context_compiled_estimate() -> None:
                     non_transcript_baseline_tokens=100,
                     resolved_call=compiled_call.fact,
                     context_id="context:compiled-estimate",
+                    run_id=ctx.run_id,
                 ),
                 context_id="context:compiled-estimate",
                 model_call_index=1,
-                sections=[],
-                tool_specs=[],
-                diagnostics=[],
-                lifecycle_decisions=[],
             ),
             *_accepted_reply_events(ctx, "ok" + ("x" * 10_000)),
         ]
@@ -2510,13 +2507,10 @@ def test_auto_context_compaction_uses_recorded_compiled_baseline_without_reestim
                     non_transcript_baseline_tokens=1_200,
                     resolved_call=compiled_call.fact,
                     context_id="context:compiled-margin",
+                    run_id=ctx.run_id,
                 ),
                 context_id="context:compiled-margin",
                 model_call_index=1,
-                sections=[],
-                tool_specs=[],
-                diagnostics=[],
-                lifecycle_decisions=[],
             ),
             *_accepted_reply_events(ctx, "ok"),
         ]
@@ -2568,13 +2562,10 @@ def test_auto_context_compaction_compiled_estimate_includes_post_model_output() 
                     non_transcript_baseline_tokens=100,
                     resolved_call=compiled_call.fact,
                     context_id="context:compiled-post-output",
+                    run_id=ctx.run_id,
                 ),
                 context_id="context:compiled-post-output",
                 model_call_index=1,
-                sections=[],
-                tool_specs=[],
-                diagnostics=[],
-                lifecycle_decisions=[],
             ),
             *_accepted_reply_events(
                 ctx, "POST_COMPILED_OUTPUT_SENTINEL " + ("x" * 10_000)
@@ -3076,8 +3067,8 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
         and event.run_id == second_start.run_id
         and event.status == "compiled"
     )
-    assert compiled.input_audit is not None
-    assert compiled.input_audit.authority_from_sequence > 1
+    assert compiled.semantic_commit is not None
+    assert compiled.semantic_commit.source_through_sequence > 1
 
 
 def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> None:
@@ -3410,6 +3401,7 @@ def _append_compiled_baseline(
                 non_transcript_baseline_tokens=baseline_tokens,
                 resolved_call=call.fact,
                 context_id=f"context:{label}",
+                run_id=ctx.run_id,
             ),
             context_id=f"context:{label}",
             model_call_index=1,

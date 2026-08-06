@@ -55,7 +55,7 @@ Session inspection 必须展示：
 - event counts；
 - current working context summaries；
 - capability surface as seen；
-- context input manifest/replay status as seen；
+- required provider payload replay与optional context-input audit状态；
 - compaction windows；
 - event summaries；
 - diagnostics。
@@ -81,8 +81,9 @@ Run inspection 必须展示：
 - outbox rows；
 - diagnostics。
 
-Context compile projection必须区分full `input_audit`与pre-manifest `input_failure`，展示stable `failure_stage`、reason code、
-已经形成的component fingerprints、manifest acknowledgement（若已尝试）及outer context/call/index join状态。不得把
+Context compile projection必须区分compact `semantic_commit`、`provider_input_preparation_install`、
+`audit_expectation`与typed `input_failure`，展示stable `failure_stage`、reason code、已经形成的component
+fingerprints及outer context/call/index join状态。不得把
 “没有ContextCompiledEvent”当成普通compile failure；该情况只允许由ledger untrusted/latch解释并显示为reconciliation blocker。
 Render cache hit/miss属于本次process operational fact，不得伪装成historical semantic truth。
 
@@ -94,7 +95,7 @@ runtime diagnostics，不回填历史compile fact。
 
 Candidate source timing必须来自authority本身并能回指source event wrapper；memory/subagent的observed time/sequence分别对应
 ProjectionReady/SubagentRunCompleted，而不是current-user observation。Runtime diagnostics可展示cache read/write error与
-oversized-skip count，但同一compile的historical candidate-set/manifest不得因cache可用性不同而变化。
+oversized-skip count，但同一compile的historical semantic commit不得因cache可用性不同而变化。
 
 `prior_messages_as_seen` 必须用同一条 `rebuild_prior_messages()` 路径重建，不能另写 transcript reducer。
 
@@ -118,13 +119,16 @@ retry、artifact write或任何repair。
 
 ### 4.2 Context input replay attribution
 
-每个`ContextCompiledEvent`必须投影`input_audit`或`input_failure`二选一。存在confirmed manifest时，Inspector从artifact、
-named event ranges与durable descriptor/tool-result semantics重建snapshot、transcript、tool-result units、prepared candidates，
-并报告`exact_replay|fact_replay_only|artifact_missing|contract_mismatch|ledger_untrusted`五种typed status；
-不得保留`partial`、`missing_artifact`或`untrusted_slice`兼容别名。
+每个compiled `ContextCompiledEvent`必须并列投影两种互不替代的状态：
+
+- required provider payload：只沿ModelStart -> ProviderInput append -> committed vector/root与replay bindings验证；
+- optional compiler audit：`exact_audit | reconstructed_audit | audit_unavailable | audit_integrity_failure`。
+
+`--require-exact-audit`只适用于显式Inspector/doctor；live run、resume与provider recovery禁止使用。Reconstructed
+结果必须列出reconstructed与omitted component kinds，不得把invocation-only detail伪装为exact。
 
 Inspector不得读取live `RunActivationWorkingState`、`RunOwner`、process-local cache、当前capability exposure、当前capture policy或当前tool-result JSON来补造历史
-input。Manifest缺失或fingerprint不一致必须显示diagnostic，不能退回旧message renderer。当前进程的builder build fingerprint只
+input。Audit artifact缺失或fingerprint不一致必须显示diagnostic，但不能否定required provider replay。当前进程的builder build fingerprint只
 能作为诊断值显示，不得伪装成historical durable fact。
 
 `input_replay.candidates`必须bounded投影`source_selections`与`collection_decisions`，而不只展示最终entry count。
@@ -307,15 +311,12 @@ Session/run Inspector 必须从 typed `SubagentGraphCheckpointCommittedEvent` �
 - through sequence、reducer ID/version/contract fingerprint；
 - graph event count 与 graph-state semantic fingerprint。
 
-Context input exact replay projection 必须分开：
+Context input projection必须分开compact semantic commit中的ledger/source references、required provider vector replay，
+以及optional audit中可用的subagent semantic/acceleration detail。Audit缺失时不得从当前graph state补造历史compiler
+snapshot；bounded canonical reconstruction只能声明实际恢复的component kinds与omissions。
 
-- manifest 冻结的 `SubagentGraphSemanticSourceFact`；
-- preferred checkpoint ID；
-- 本次 replay 实际使用的 checkpoint ID；
-- `rebased`、checkpoint through sequence、delta range/count/bytes 与 ledger high-water。
-
-Replay status 仍只有 `exact_replay | fact_replay_only | artifact_missing | contract_mismatch | ledger_untrusted`。原 artifact 缺失但
-compatible rebase 恢复出同一 semantic source/payload 时仍是 `exact_replay`，只在 acceleration 中标记 `rebased=true`。Inspector 不得
+Provider replay status与audit status保持两套closed vocabulary。原audit artifact缺失但provider vector仍可exact hydrate时，
+provider replay继续可信，而audit显示`reconstructed_audit`或`audit_unavailable`。Inspector不得
 从 current runtime graph/cache 猜测历史 source。
 
 ---
@@ -376,10 +377,10 @@ Inspector不得把ContextSource frame伪装成user/assistant trajectory，也不
 canonical transcript。它应显示causal predecessor、projection-local ordinal、tool result leaf + pair leaf + terminal
 projection三方join、pending continuation exact join，以及相邻revision的strict-prefix验证结果。
 
-只有generation start/root、每次append proof、committed frontier、ModelStart reference、manifest nested projection和
+只有generation start/root、每次append proof、committed frontier、ModelStart reference、ordered projection identity和
 hydrated vector全部一致时才报告`exact_replay`。缺少generation start、artifact、causal validation、frame range或
 continuation proof时输出稳定diagnostic；不得从live compiler/cache补造缺失事实。Attribution-only drift可显示为
-manifest-local audit，但不得表现为durable append、rollover或provider semantic变化。
+optional compiler audit，但不得表现为durable append、rollover或provider semantic变化。
 
 Provider-input projection还必须展示唯一root privileged identity、每次append中的human/runtime-request/runtime-observation internal owner与user-wire kind、kind/producer/codec contract、
 runtime-observation no-op count、replacement semantic head及hydration/placement状态。Source semantic head与event/artifact/horizon attribution必须分栏，不能折成一个fingerprint。

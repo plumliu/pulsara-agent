@@ -10,13 +10,11 @@ from typing import TYPE_CHECKING
 from pydantic import model_validator
 
 from pulsara_agent.event.events import (
-    CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
     ContextWindowClosedEvent,
     ContextWindowCompactionCompletedEvent,
     ContextWindowCompactionStartedEvent,
     ContextWindowOpenedEvent,
-    RunInteractionResumeBoundaryEvent,
     RunStartEvent,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
@@ -24,7 +22,6 @@ from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.context import (
     ContextAuthoritySlicePlan,
     ContextCandidateSourceSelectionFact,
-    ContextCompileInputManifestFact,
     ContextCompilePolicyFact,
     ContextCompileTimingFact,
     ContextContinuationReferenceFact,
@@ -45,7 +42,6 @@ from pulsara_agent.primitives.context import (
     RunPermissionSnapshotFact,
     TranscriptProjectionWindowFact,
     context_fingerprint,
-    freeze_json,
 )
 from pulsara_agent.primitives.context_source import (
     CapabilityToolCatalogRootFact,
@@ -65,16 +61,13 @@ from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventSliceError,
     FrozenStoredEvent,
 )
-from pulsara_agent.runtime.context_input.candidate import (
-    build_context_candidate_source_selections,
-)
 
 if TYPE_CHECKING:
-    from pulsara_agent.runtime.subagent.facts import SubagentGraphState
+    pass
 
 
 class ContextCandidateSelectionMismatch(RuntimeError):
-    """The manifest selection differs from a valid ledger-derived selection."""
+    """The snapshot selection differs from a valid ledger-derived selection."""
 
 
 class ContextSnapshotBuildInput(FrozenContextFact):
@@ -475,136 +468,6 @@ def bind_context_draft(
     )
 
 
-def collect_replay_context_inputs(
-    *,
-    input_manifest: ContextCompileInputManifestFact,
-    event_slice: ContextEventSlice,
-    named_slices: tuple[ContextEventSlice, ...],
-    subagent_graph: "SubagentGraphState",
-    subagent_graph_semantic_source: SubagentGraphSemanticSourceFact,
-) -> ContextSnapshotBuildInput:
-    snapshot = input_manifest.snapshot
-    if event_slice.to_range_fact() != snapshot.primary_event_range:
-        raise ContextEventSliceError("replay primary event slice mismatch")
-    named_ranges = tuple(item.to_range_fact() for item in named_slices)
-    if named_ranges != snapshot.named_event_ranges:
-        raise ContextEventSliceError("replay named event slices mismatch")
-    local_named_slices = tuple(
-        item
-        for item in named_slices
-        if item.runtime_session_id == event_slice.runtime_session_id
-    )
-    authority_view: ContextEventSlice | ContextEventAuthorityView = (
-        ContextEventAuthorityView(
-            primary_slice=event_slice,
-            named_slices=local_named_slices,
-        )
-        if local_named_slices
-        else event_slice
-    )
-    _validate_replay_durable_joins(
-        snapshot=snapshot,
-        event_slice=authority_view,
-        subagent_graph=subagent_graph,
-        subagent_graph_semantic_source=subagent_graph_semantic_source,
-    )
-    payload = snapshot.model_dump(
-        mode="python",
-        exclude={
-            "continuation_count",
-            "long_horizon_attribution",
-            "snapshot_semantic_fingerprint",
-            "snapshot_fact_fingerprint",
-        },
-    )
-    return ContextSnapshotBuildInput.model_validate(payload)
-
-
-def _validate_replay_durable_joins(
-    *,
-    snapshot: ContextFactSnapshotFact,
-    event_slice: ContextEventSlice | ContextEventAuthorityView,
-    subagent_graph: "SubagentGraphState",
-    subagent_graph_semantic_source: SubagentGraphSemanticSourceFact,
-) -> None:
-    start_stored = event_slice.event_by_id(snapshot.run_entry.run_start.event_id)
-    start_ref = start_stored.to_reference(event_slice.runtime_session_id)
-    if start_ref != snapshot.run_entry.run_start:
-        raise ContextEventSliceError("replay RunStart reference mismatch")
-    start = decode_raw_stored_event_envelope(
-        start_stored, DEFAULT_EVENT_SCHEMA_REGISTRY
-    )
-    if not isinstance(start, RunStartEvent):
-        raise ContextEventSliceError("replay run entry is not RunStart")
-    entry = start.new_run_boundary or start.subagent_run_entry
-    if (
-        entry != snapshot.run_entry.run_entry
-        or start.current_user_message != snapshot.current_user_message
-        or start.terminal_run_end_event_id
-        != snapshot.run_entry.stable_terminal_event_id
-    ):
-        raise ContextEventSliceError("replay RunStart payload differs from snapshot")
-    permission = snapshot.permission_snapshot
-    if (
-        start.permission_snapshot_id != permission.snapshot_id
-        or start.permission_mode != permission.mode.value
-        or freeze_json(start.permission_policy) != permission.expanded_policy
-        or start.permission_snapshot_source != permission.source
-        or start.model_target != snapshot.resolved_model_call.target
-    ):
-        raise ContextEventSliceError("replay RunStart contract differs from snapshot")
-
-    durable_continuations: list[tuple[ContextEventReferenceFact, object]] = []
-    exposures: list[CapabilityExposureResolvedEvent] = []
-    for frozen in event_slice.events:
-        event = decode_raw_stored_event_envelope(frozen, DEFAULT_EVENT_SCHEMA_REGISTRY)
-        if (
-            isinstance(event, RunInteractionResumeBoundaryEvent)
-            and event.run_id == start.run_id
-        ):
-            durable_continuations.append(
-                (frozen.to_reference(event_slice.runtime_session_id), event.boundary)
-            )
-        elif (
-            isinstance(event, CapabilityExposureResolvedEvent)
-            and event.run_id == start.run_id
-            and event.exposure == snapshot.capability_snapshot
-        ):
-            exposures.append(event)
-    durable_continuations.sort(key=lambda item: item[0].sequence)
-    if tuple(item[0] for item in durable_continuations) != snapshot.continuation_refs:
-        raise ContextEventSliceError(
-            "replay continuation history differs from snapshot"
-        )
-    if snapshot.continuation is not None:
-        latest_ref, latest_boundary = durable_continuations[-1]
-        if (
-            latest_ref != snapshot.continuation.resume_boundary
-            or latest_boundary != snapshot.continuation.boundary
-        ):
-            raise ContextEventSliceError(
-                "replay latest continuation differs from snapshot"
-            )
-    if len(exposures) != 1:
-        raise ContextEventSliceError(
-            "replay snapshot requires one exact capability exposure fact"
-        )
-    try:
-        replayed_selections = build_context_candidate_source_selections(
-            subagent_graph=subagent_graph,
-            semantic_source=subagent_graph_semantic_source,
-            policy=snapshot.compile_policy.candidate_collection,
-        )
-    except ValueError as exc:
-        raise ContextEventSliceError(
-            "replay candidate source selection cannot be derived"
-        ) from exc
-    if replayed_selections != snapshot.candidate_source_selections:
-        raise ContextCandidateSelectionMismatch(
-            "replayed candidate source selection differs from manifest"
-        )
-
-
 def bind_context_invocation(
     *,
     fact: ContextFactSnapshotFact,
@@ -625,6 +488,5 @@ __all__ = [
     "bind_context_invocation",
     "bind_context_draft",
     "build_context_snapshot",
-    "collect_replay_context_inputs",
     "finalize_context_authority_slice_plan",
 ]

@@ -52,9 +52,9 @@ class TerminalExecutionOwner:
     origin_runtime_session_id: str | None = None
     origin_run_entry_kind: str | None = None
     output_callback: Callable[[str], None] | None = None
-    record_event: Callable[
-        [AgentEvent], RuntimeThreadEventSettlementReceipt
-    ] | None = None
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = (
+        None
+    )
     require_completion_notification_reservation: bool = False
 
     def __post_init__(self) -> None:

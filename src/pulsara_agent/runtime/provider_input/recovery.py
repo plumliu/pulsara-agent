@@ -264,10 +264,8 @@ class ProviderInputPreparationRecoveryService:
             raise ProviderInputPreparationRecoveryError(
                 "provider preparation ContextCompiled carrier is missing"
             )
-        if (
-            compiled.prepared_provider_input is None
-            or compiled.prepared_provider_input.preparation_ownership != owner
-        ):
+        install = compiled.provider_input_preparation_install
+        if install is None or install.preparation_ownership != owner:
             self._runtime_session.latch_event_commit_outcome_unknown()
             raise ProviderInputPreparationRecoveryError(
                 "provider preparation carrier identity drifted"
@@ -320,9 +318,9 @@ def _build_abandonment_candidate(*, snapshot, compiled, reason):
         "predecessor_scope_binding_fingerprint": binding.binding_fingerprint,
         "resulting_scope_binding_fingerprint": resulting.binding_fingerprint,
     }
-    prepared = compiled.prepared_provider_input
-    assert prepared is not None
-    guard = prepared.generation_commit_guard
+    install = compiled.provider_input_preparation_install
+    assert install is not None
+    guard = install.generation_commit_guard
     if owner.ownership_kind == "existing_append":
         return ExistingGenerationPreparationAbandonedEvent(
             **common,

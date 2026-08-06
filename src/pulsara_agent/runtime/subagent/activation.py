@@ -485,6 +485,10 @@ class SubagentChildActivationService:
         ):
             child_run_id = outcome.owner_identity.run_id
             self._retire_common_run_owner(composition, child_run_id)
+            await subagent_runtime.teardown_child_session_for_terminal_handoff(
+                run.subagent_run_id,
+                deadline_monotonic=asyncio.get_running_loop().time() + 30.0,
+            )
             submitted = subagent_runtime.submitted_result(run.subagent_run_id)
             if submitted is not None:
                 await subagent_runtime.complete_submitted_result(
@@ -508,6 +512,10 @@ class SubagentChildActivationService:
             )
             terminal = await dispatch.run_handle.wait_run_completion()
             self._retire_common_run_owner(composition, terminal.owner_identity.run_id)
+            await subagent_runtime.teardown_child_session_for_terminal_handoff(
+                run.subagent_run_id,
+                deadline_monotonic=asyncio.get_running_loop().time() + 30.0,
+            )
             await subagent_runtime.fail_from_native_child_terminal(
                 run.subagent_run_id,
                 child_run_id=terminal.owner_identity.run_id,
@@ -530,6 +538,10 @@ class SubagentChildActivationService:
         elif isinstance(outcome, RunTerminalOutcome):
             child_run_id = outcome.owner_identity.run_id
             self._retire_common_run_owner(composition, child_run_id)
+            await subagent_runtime.teardown_child_session_for_terminal_handoff(
+                run.subagent_run_id,
+                deadline_monotonic=asyncio.get_running_loop().time() + 30.0,
+            )
             status = outcome.output.status
             await subagent_runtime.fail_from_native_child_terminal(
                 run.subagent_run_id,
@@ -603,6 +615,10 @@ class SubagentChildActivationService:
         if composition is None:
             raise RuntimeError("child terminalization lost its activation composition")
         self._retire_common_run_owner(composition, terminal.owner_identity.run_id)
+        await self._subagent_runtime.teardown_child_session_for_terminal_handoff(
+            subagent_run_id,
+            deadline_monotonic=deadline_monotonic,
+        )
         return terminal
 
     def retire_child_activation(self, subagent_run_id: str) -> None:

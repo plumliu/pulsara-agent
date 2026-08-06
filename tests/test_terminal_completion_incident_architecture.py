@@ -225,10 +225,12 @@ def test_resume_recovery_session_drains_checkpoint_owner_before_sync_close() -> 
     repair_start = resume.index("async def repair_dangling_runs_for_resume")
     repair_end = resume.index("\ndef _can_defer_stateless_mcp_recovery", repair_start)
     repair_body = resume[repair_start:repair_end]
-    assert "await runtime_session.teardown_temporary_recovery_session(" in repair_body
+    assert "await teardown_capability.teardown(" in repair_body
+    assert "bind_non_host_runtime_session_teardown_capability(" in repair_body
+    assert "purpose=NonHostRuntimeSessionTeardownPurpose.RESUME_RECOVERY" in repair_body
     assert "runtime_session.close()" not in repair_body
 
-    teardown_start = runtime.index("async def teardown_temporary_recovery_session")
+    teardown_start = runtime.index("async def teardown_non_host_runtime_session")
     teardown_end = runtime.index("\n    def close(self)", teardown_start)
     teardown = runtime[teardown_start:teardown_end]
     provider_input = teardown.index("quiesce_provider_input_event_producers_for_close")
@@ -251,18 +253,42 @@ def test_resume_recovery_session_drains_checkpoint_owner_before_sync_close() -> 
         < sync_close
     )
 
-    production_callers: list[str] = []
+    capability_binders: list[tuple[str, str]] = []
+    direct_teardown_callers: list[str] = []
     for path in SRC.rglob("*.py"):
         relative = path.relative_to(SRC).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "teardown_temporary_recovery_session"
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "bind_non_host_runtime_session_teardown_capability"
             ):
-                production_callers.append(relative)
-    assert production_callers == ["host/resume.py"]
+                purpose = next(
+                    (
+                        keyword.value
+                        for keyword in node.keywords
+                        if keyword.arg == "purpose"
+                    ),
+                    None,
+                )
+                assert isinstance(purpose, ast.Attribute)
+                capability_binders.append((relative, purpose.attr))
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "teardown_non_host_runtime_session"
+            ):
+                direct_teardown_callers.append(relative)
+    assert sorted(capability_binders) == [
+        ("host/resume.py", "RESUME_RECOVERY"),
+        ("runtime/subagent/execution.py", "CHILD_TERMINAL"),
+    ]
+    assert direct_teardown_callers == ["ports/runtime_session_teardown.py"]
+    for path in SRC.rglob("*.py"):
+        assert "teardown_temporary_recovery_session" not in path.read_text(
+            encoding="utf-8"
+        )
 
 
 def test_checkpoint_mutation_has_one_session_owned_production_owner() -> None:

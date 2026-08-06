@@ -180,7 +180,9 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
             model_call_index=1,
         )
         start_fields["provider_input_reference"] = provider_input.committed_reference
-        await runtime.commit_accepted_event(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
+        await runtime.commit_accepted_event(
+            ReplyStartEvent(**CTX.event_fields(), name="assistant")
+        )
         await runtime.write_events(
             (
                 *provider_input.companion_events,
@@ -398,7 +400,9 @@ def test_run_timeline_preserves_non_success_run_end_status(
 
     async def run() -> None:
         await runtime.commit_accepted_event(_run_start())
-        await runtime.commit_accepted_event(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
+        await runtime.commit_accepted_event(
+            ReplyStartEvent(**CTX.event_fields(), name="assistant")
+        )
         await runtime.commit_accepted_event(
             RunEndEvent(
                 **run_end_contract_fields(

@@ -61,8 +61,7 @@ def read_bounded_runtime_projection_recovery_delta(
             )
         page_end = min(
             through_sequence,
-            current
-            + min(CHECKPOINT_RECOVERY_PAGE_EVENTS, remaining_events),
+            current + min(CHECKPOINT_RECOVERY_PAGE_EVENTS, remaining_events),
         )
         try:
             proof = event_log.read_joined_raw_range(
@@ -86,13 +85,10 @@ def read_bounded_runtime_projection_recovery_delta(
             )
         page_events = proof.owned_stored_events
         if len(page_events) != page_end - current:
-            raise RuntimeError(
-                "runtime projection recovery proof is not contiguous"
-            )
+            raise RuntimeError("runtime projection recovery proof is not contiguous")
         events.extend(page_events)
         payload_bytes += sum(
-            len(item.canonical_payload_bytes)
-            for item in proof.raw_stored_envelopes
+            len(item.canonical_payload_bytes) for item in proof.raw_stored_envelopes
         )
         current = page_end
     return tuple(events), len(events), payload_bytes
@@ -138,7 +134,10 @@ class CommittedReducerFoldReceipt:
             raise ValueError("committed reducer fold identity is invalid")
         if self.resulting_through_sequence < self.base_through_sequence:
             raise ValueError("committed reducer fold moved backwards")
-        if self.checkpoint_delta_event_count < 0 or self.checkpoint_delta_payload_bytes < 0:
+        if (
+            self.checkpoint_delta_event_count < 0
+            or self.checkpoint_delta_payload_bytes < 0
+        ):
             raise ValueError("committed reducer checkpoint delta bounds are invalid")
         if self.checkpoint_requested and self.checkpoint_state is None:
             raise ValueError("checkpoint request lacks its semantic state")
@@ -165,9 +164,7 @@ class CommittedReducerFoldReceipt:
                 ),
                 "checkpoint_requested": self.checkpoint_requested,
                 "checkpoint_delta_event_count": self.checkpoint_delta_event_count,
-                "checkpoint_delta_payload_bytes": (
-                    self.checkpoint_delta_payload_bytes
-                ),
+                "checkpoint_delta_payload_bytes": (self.checkpoint_delta_payload_bytes),
             },
         )
         if self.fold_receipt_fingerprint != expected:
@@ -201,9 +198,7 @@ def build_committed_reducer_fold_receipt(
         "resulting_through_sequence": resulting_through_sequence,
         "source_kind": source_kind,
         "source_ordered_join_fingerprint": source_ordered_join_fingerprint,
-        "base_semantic_state_fingerprint": (
-            base_state.canonical_payload_fingerprint
-        ),
+        "base_semantic_state_fingerprint": (base_state.canonical_payload_fingerprint),
         "resulting_semantic_state_fingerprint": (
             resulting_state.canonical_payload_fingerprint
         ),
@@ -367,9 +362,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                     source_ordered_join_fingerprint=source,
                     base_state=confirmed_state,
                     resulting_state=current_state,
-                    checkpoint_delta_event_count=(
-                        owner.pending_recovery_event_count
-                    ),
+                    checkpoint_delta_event_count=(owner.pending_recovery_event_count),
                     checkpoint_delta_payload_bytes=(
                         owner.pending_recovery_payload_bytes
                     ),
@@ -381,9 +374,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
         with self._lock:
             if self._loop is not None and self._loop is not loop:
                 if not self._loop.is_closed():
-                    raise RuntimeError(
-                        "runtime checkpoint owner loop identity changed"
-                    )
+                    raise RuntimeError("runtime checkpoint owner loop identity changed")
                 if self._worker is not None and not self._worker.done():
                     raise RuntimeError(
                         "closed runtime checkpoint loop still owns a live worker"
@@ -394,17 +385,12 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 # stable candidate and physical outcome remain exact and can
                 # be confirmed by a successor worker.
                 for owner in self._owners.values():
-                    if (
-                        owner.state
-                        is RuntimeProjectionCheckpointOwnerState.WRITING
-                    ):
+                    if owner.state is RuntimeProjectionCheckpointOwnerState.WRITING:
                         if owner.active_candidate is None:
                             raise RuntimeError(
                                 "interrupted checkpoint write lacks its stable candidate"
                             )
-                        owner.state = (
-                            RuntimeProjectionCheckpointOwnerState.CONFIRMING
-                        )
+                        owner.state = RuntimeProjectionCheckpointOwnerState.CONFIRMING
                 self._wakeup = None
                 self._worker = None
             self._loop = loop
@@ -431,7 +417,10 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 raise ValueError("runtime checkpoint reducer is not registered")
             prior = owner.latest_fold
             if prior is not None:
-                if receipt.resulting_through_sequence < prior.resulting_through_sequence:
+                if (
+                    receipt.resulting_through_sequence
+                    < prior.resulting_through_sequence
+                ):
                     raise ValueError("runtime checkpoint fold offer moved backwards")
                 if (
                     receipt.resulting_through_sequence
@@ -476,8 +465,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 )
             if (
                 owner.pending_recovery_event_count > CHECKPOINT_RECOVERY_HARD_EVENTS
-                or owner.pending_recovery_payload_bytes
-                > CHECKPOINT_RECOVERY_HARD_BYTES
+                or owner.pending_recovery_payload_bytes > CHECKPOINT_RECOVERY_HARD_BYTES
             ):
                 owner.state = (
                     RuntimeProjectionCheckpointOwnerState.RECONCILIATION_REQUIRED
@@ -492,8 +480,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 owner.last_failure_monotonic = now
                 return
             pressure_requires_checkpoint = (
-                owner.pending_recovery_event_count
-                >= CHECKPOINT_RECOVERY_SOFT_EVENTS
+                owner.pending_recovery_event_count >= CHECKPOINT_RECOVERY_SOFT_EVENTS
                 or owner.pending_recovery_payload_bytes
                 >= CHECKPOINT_RECOVERY_SOFT_BYTES
             )
@@ -513,7 +500,9 @@ class RuntimeProjectionCheckpointMaintenanceService:
         ):
             loop.call_soon_threadsafe(wakeup.set)
 
-    def checkpoint_handoff_accepted(self, reducer_id: str, through_sequence: int) -> bool:
+    def checkpoint_handoff_accepted(
+        self, reducer_id: str, through_sequence: int
+    ) -> bool:
         with self._lock:
             owner = self._owners.get(reducer_id)
             return bool(
@@ -561,9 +550,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 "last_error_code": owner.last_error_code,
                 "first_failure_monotonic": owner.first_failure_monotonic,
                 "last_failure_monotonic": owner.last_failure_monotonic,
-                "pending_recovery_event_count": (
-                    owner.pending_recovery_event_count
-                ),
+                "pending_recovery_event_count": (owner.pending_recovery_event_count),
                 "pending_recovery_payload_bytes": (
                     owner.pending_recovery_payload_bytes
                 ),
@@ -605,11 +592,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 ):
                     loop = self._loop
                     wakeup = self._wakeup
-                    if (
-                        loop is not None
-                        and not loop.is_closed()
-                        and wakeup is not None
-                    ):
+                    if loop is not None and not loop.is_closed() and wakeup is not None:
                         loop.call_soon_threadsafe(wakeup.set)
 
     async def _run(self) -> None:
@@ -689,9 +672,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                     current = self._owners[owner.reducer_id]
                     now = monotonic()
                     current.physical_generation += 1
-                    current.last_error_code = (
-                        f"PREPARE_{type(exc).__name__.upper()}"
-                    )
+                    current.last_error_code = f"PREPARE_{type(exc).__name__.upper()}"
                     current.retry_not_before = monotonic() + self._retry_delay(
                         current.physical_generation
                     )
@@ -750,8 +731,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 physical_generation=confirmation.physical_generation,
                 observed_checkpoint=confirmation.observed_checkpoint,
                 error_code=(
-                    confirmation.error_code
-                    or type(write_error).__name__.upper()
+                    confirmation.error_code or type(write_error).__name__.upper()
                 ),
             )
         return self._confirm_candidate(
@@ -893,8 +873,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 owner.confirmed_head = observed
                 owner.pending_recovery_event_count = max(
                     0,
-                    owner.pending_recovery_event_count
-                    - candidate.recovery_event_count,
+                    owner.pending_recovery_event_count - candidate.recovery_event_count,
                 )
                 owner.pending_recovery_payload_bytes = max(
                     0,
@@ -906,8 +885,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 latest = owner.latest_fold
                 if (
                     latest is not None
-                    and latest.resulting_through_sequence
-                    > observed.through_sequence
+                    and latest.resulting_through_sequence > observed.through_sequence
                 ):
                     owner.state = (
                         RuntimeProjectionCheckpointOwnerState.DIRTY
@@ -941,8 +919,7 @@ class RuntimeProjectionCheckpointMaintenanceService:
             now = monotonic()
             owner.state = (
                 RuntimeProjectionCheckpointOwnerState.CONFIRMING
-                if receipt.disposition
-                is RuntimeProjectionCheckpointDisposition.UNKNOWN
+                if receipt.disposition is RuntimeProjectionCheckpointDisposition.UNKNOWN
                 else RuntimeProjectionCheckpointOwnerState.RETRY_WAIT
             )
             owner.last_error_code = receipt.error_code
@@ -1006,7 +983,9 @@ class RuntimeProjectionCheckpointMaintenanceService:
             with self._lock:
                 for owner in self._owners.values():
                     if owner.state is not RuntimeProjectionCheckpointOwnerState.CLOSED:
-                        owner.state = RuntimeProjectionCheckpointOwnerState.CLOSE_BLOCKED
+                        owner.state = (
+                            RuntimeProjectionCheckpointOwnerState.CLOSE_BLOCKED
+                        )
             raise TimeoutError("runtime checkpoint maintenance close blocked") from None
 
     def close_if_idle(self) -> None:
@@ -1043,9 +1022,7 @@ class CheckpointedCommittedReducerIngress:
         [tuple[AgentEvent, ...]],
         tuple[CanonicalJsonObjectCarrier, CanonicalJsonObjectCarrier, object],
     ]
-    install_prepared_owned_events: Callable[
-        [object, CanonicalJsonObjectCarrier], None
-    ]
+    install_prepared_owned_events: Callable[[object, CanonicalJsonObjectCarrier], None]
     reset_owned_events: Callable[[], None]
     checkpoint_relevant: Callable[[tuple[AgentEvent, ...]], bool]
 
@@ -1055,9 +1032,7 @@ class CheckpointedCommittedReducerIngress:
         base, resulting, prepared = self.prepare_owned_events(
             receipt.owned_stored_events
         )
-        checkpoint_requested = self.checkpoint_relevant(
-            receipt.owned_stored_events
-        )
+        checkpoint_requested = self.checkpoint_relevant(receipt.owned_stored_events)
         fold_receipt = build_committed_reducer_fold_receipt(
             reducer_id=self.reducer_id,
             base_through_sequence=receipt.raw_stored_envelopes[0].sequence - 1,
@@ -1087,9 +1062,7 @@ class CheckpointedCommittedReducerIngress:
         base, resulting, prepared = self.prepare_owned_events(
             range_proof.owned_stored_events
         )
-        checkpoint_requested = self.checkpoint_relevant(
-            range_proof.owned_stored_events
-        )
+        checkpoint_requested = self.checkpoint_relevant(range_proof.owned_stored_events)
         fold_receipt = build_committed_reducer_fold_receipt(
             reducer_id=self.reducer_id,
             base_through_sequence=range_proof.from_sequence_exclusive,

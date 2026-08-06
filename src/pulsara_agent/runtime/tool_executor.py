@@ -89,9 +89,9 @@ def _cancelled_execution_result(
 @dataclass(slots=True)
 class ToolExecutor:
     registry: ToolRegistry
-    record_event: Callable[
-        [AgentEvent], RuntimeThreadEventSettlementReceipt
-    ] | None = None
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = (
+        None
+    )
     artifact_service: ToolResultArtifactProcessingPort | None = None
     artifact_policies: Mapping[str, ToolResultArtifactProcessingPolicy] = field(
         default_factory=dict

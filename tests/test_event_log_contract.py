@@ -197,13 +197,13 @@ def test_model_call_start_requires_provider_input_reference() -> None:
         ModelCallStartEvent(**_ctx("missing-provider-input").event_fields(), **fields)
 
 
-def test_compiled_context_requires_prepared_provider_input() -> None:
+def test_compiled_context_requires_provider_input_preparation_install() -> None:
     fields = context_compiled_contract_fields(
         status="compiled", context_id="context:missing-provider-input"
     )
-    fields.pop("prepared_provider_input")
+    fields.pop("provider_input_preparation_install")
 
-    with pytest.raises(ValueError, match="prepared provider input"):
+    with pytest.raises(ValueError, match="compact authority carriers"):
         ContextCompiledEvent(
             **_ctx("missing-prepared-provider-input").event_fields(),
             **fields,
@@ -265,9 +265,7 @@ def test_runtime_projection_checkpoint_round_trips_and_cannot_exceed_ledger(
         validation_base_state=canonical_json_object_carrier(
             {"revision": 0, "active_refs": []}
         ),
-        state=canonical_json_object_carrier(
-            {"revision": 1, "active_refs": []}
-        ),
+        state=canonical_json_object_carrier({"revision": 1, "active_refs": []}),
         payload_fingerprint="sha256:" + "a" * 64,
     )
 
@@ -345,16 +343,11 @@ def test_postgres_runtime_projection_checkpoint_accepts_three_jsonb_successors(
 
     schema_version = "incident_terminal_notification_projection_state.v1"
     base_sequence = 0
-    base_state = canonical_json_object_carrier(
-        {"revision": 0, "process_heads": ()}
-    )
+    base_state = canonical_json_object_carrier({"revision": 0, "process_heads": ()})
     for revision in range(1, 4):
         stored = event_log.extend(
             _reply_events(
-                _ctx(
-                    "incident:jsonb-successor:"
-                    f"{projection_kind}:{revision}"
-                )
+                _ctx(f"incident:jsonb-successor:{projection_kind}:{revision}")
             )
         )
         through_sequence = int(stored[-1].sequence or 0)
@@ -874,39 +867,9 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
 def test_context_compiled_event_round_trips_through_agent_event_serialization() -> None:
     event = ContextCompiledEvent(
         **_ctx("contract:context-compiled").event_fields(),
-        **context_compiled_contract_fields(status="failed"),
+        **context_compiled_contract_fields(status="failed", context_id="context:1"),
         context_id="context:1",
         model_call_index=1,
-        sections=[
-            {
-                "id": "transcript:current_user",
-                "source_id": "current_user",
-                "channel": "current_user",
-                "included": True,
-            }
-        ],
-        tool_specs=[{"name": "read_file", "estimated_tokens": 10, "included": True}],
-        diagnostics=[],
-        lifecycle_decisions=[
-            {
-                "source_id": "transcript",
-                "section_id": "transcript:prior_history",
-                "decision": "invalidated",
-                "reason": "dependency_fingerprint_changed",
-            }
-        ],
-        tool_result_render_decisions=[
-            {
-                "tool_call_id": "call:terminal",
-                "segment": "current_run_tail",
-                "latest_reserved_applied": True,
-                "body_policy": "full_visible",
-            }
-        ],
-        tool_result_budget_report={
-            "caps": {"tool_result_total_context_chars": 36_000},
-            "used_by_scope": {"current_run_tail": {"body": 128}},
-        },
     )
 
     assert load_agent_event(dump_agent_event(event)) == event
@@ -922,28 +885,10 @@ def test_context_compiled_pressure_event_round_trips_through_agent_event_seriali
             estimated_tokens=0,
             tools_estimated_tokens=0,
             model_call_index=2,
+            context_id="context:pressure",
         ),
         context_id="context:pressure",
         model_call_index=2,
-        diagnostics=[
-            {
-                "severity": "error",
-                "code": "tool_result_total_budget_unsatisfied",
-                "message": "context pressure",
-            }
-        ],
-        tool_result_render_decisions=[
-            {
-                "tool_call_id": "call:terminal",
-                "unit_fingerprint": "sha256:abc",
-                "body_policy": "metadata_only",
-            }
-        ],
-        tool_result_budget_report={
-            "caps": {"tool_result_total_context_chars": 36_000},
-            "used": {"total": 37_000},
-            "diagnostics": [{"code": "tool_result_total_budget_unsatisfied"}],
-        },
     )
 
     assert load_agent_event(dump_agent_event(event)) == event
@@ -1747,6 +1692,8 @@ def test_postgres_model_call_facts_round_trip(event_log: EventLog) -> None:
                     estimated_tokens=22,
                     tools_estimated_tokens=0,
                     context_id="context:postgres:model-facts",
+                    run_id=ctx.run_id,
+                    runtime_session_id=event_log.runtime_session_id,
                 ),
                 context_id="context:postgres:model-facts",
                 model_call_index=1,

@@ -140,9 +140,7 @@ class CommittedReducerPostFoldService:
             for event in events:
                 existing = owner.pending_by_id.get(event.id)
                 if existing is not None and existing != event:
-                    owner.state = (
-                        CommittedReducerPostFoldState.RECONCILIATION_REQUIRED
-                    )
+                    owner.state = CommittedReducerPostFoldState.RECONCILIATION_REQUIRED
                     raise RuntimeError("post-fold event identity conflicts")
                 owner.pending_by_id[event.id] = event
             if len(owner.pending_by_id) > POST_FOLD_MAX_PENDING_EVENTS:

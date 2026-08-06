@@ -27,7 +27,7 @@ from pulsara_agent.ports.mcp_secret import assert_not_mcp_secret
 
 # This is a catalog migration version only.  Per-row decoder identity is the
 # event type/version/schema/domain tuple below.
-AGENT_EVENT_SCHEMA_VERSION = 9
+AGENT_EVENT_SCHEMA_VERSION = 11
 
 
 class EventSchemaRegistryConflict(RuntimeError):

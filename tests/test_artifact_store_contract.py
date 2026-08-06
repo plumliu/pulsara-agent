@@ -6,6 +6,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -97,6 +98,58 @@ def test_artifact_store_puts_and_gets_text(artifact_store: ArtifactStore) -> Non
         assert artifact_store.get_text(blob_id) == content
     finally:
         _delete_artifact(StorageConfig.from_env().postgres_dsn, blob_id)
+
+
+def test_postgres_artifact_exact_delete_physically_honors_absolute_deadline(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    session_id, _ctx = _seed_runtime_parent_rows(dsn, tmp_path)
+    blob_id = f"artifact:test:deadline:{uuid4().hex}"
+    semantic_metadata_fingerprint = "sha256:" + "a" * 64
+    store = PostgresArtifactStore(connection_provider=verified_postgres_provider(dsn))
+    store.put_text(
+        blob_id,
+        "deadline-bound artifact",
+        session_id=session_id,
+        metadata={
+            "semantic_metadata_fingerprint": semantic_metadata_fingerprint,
+        },
+    )
+    info = store.get_info(blob_id, session_id=session_id)
+
+    try:
+        with guarded_postgres_test_connection(dsn) as blocking_connection:
+            with blocking_connection.cursor() as cursor:
+                cursor.execute(
+                    "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"artifact:{blob_id}",),
+                )
+            started = monotonic()
+            with pytest.raises(TimeoutError, match="absolute deadline"):
+                store.delete_if_identity(
+                    blob_id,
+                    session_id=session_id,
+                    digest=info.digest,
+                    media_type=info.media_type,
+                    semantic_metadata_fingerprint=(semantic_metadata_fingerprint),
+                    deadline_monotonic=started + 0.2,
+                )
+            assert monotonic() - started < 1.0
+            assert _artifact_count(dsn, blob_id) == 1
+
+        assert store.delete_if_identity(
+            blob_id,
+            session_id=session_id,
+            digest=info.digest,
+            media_type=info.media_type,
+            semantic_metadata_fingerprint=semantic_metadata_fingerprint,
+            deadline_monotonic=monotonic() + 5.0,
+        )
+        assert _artifact_count(dsn, blob_id) == 0
+    finally:
+        _delete_artifact(dsn, blob_id)
+        _delete_session(dsn, session_id)
 
 
 def test_artifact_store_put_text_is_idempotent_for_same_content(

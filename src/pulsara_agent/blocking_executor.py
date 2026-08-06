@@ -11,9 +11,11 @@ _EXECUTOR_LOCK = Lock()
 _CRITICAL_LEDGER_EXECUTOR: ThreadPoolExecutor | None = None
 _AUXILIARY_IO_EXECUTOR: ThreadPoolExecutor | None = None
 _PROJECTION_MAINTENANCE_EXECUTOR: ThreadPoolExecutor | None = None
+_BEST_EFFORT_AUDIT_EXECUTOR: ThreadPoolExecutor | None = None
 _MAX_CRITICAL_LEDGER_WORKERS = 4
 _MAX_AUXILIARY_IO_WORKERS = 12
 _MAX_PROJECTION_MAINTENANCE_WORKERS = 9
+_MAX_BEST_EFFORT_AUDIT_WORKERS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,7 @@ class BlockingExecutorCapacity:
     critical_ledger_workers: int
     auxiliary_io_workers: int
     projection_maintenance_workers: int
+    best_effort_audit_workers: int
 
 
 def blocking_executor_capacity() -> BlockingExecutorCapacity:
@@ -30,6 +33,7 @@ def blocking_executor_capacity() -> BlockingExecutorCapacity:
         critical_ledger_workers=_MAX_CRITICAL_LEDGER_WORKERS,
         auxiliary_io_workers=_MAX_AUXILIARY_IO_WORKERS,
         projection_maintenance_workers=_MAX_PROJECTION_MAINTENANCE_WORKERS,
+        best_effort_audit_workers=_MAX_BEST_EFFORT_AUDIT_WORKERS,
     )
 
 
@@ -72,9 +76,23 @@ def projection_maintenance_executor() -> ThreadPoolExecutor:
         return _PROJECTION_MAINTENANCE_EXECUTOR
 
 
+def best_effort_audit_executor() -> ThreadPoolExecutor:
+    """Return the isolated lane for optional compiler-audit materialization."""
+
+    global _BEST_EFFORT_AUDIT_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _BEST_EFFORT_AUDIT_EXECUTOR is None:
+            _BEST_EFFORT_AUDIT_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_MAX_BEST_EFFORT_AUDIT_WORKERS,
+                thread_name_prefix="pulsara-best-effort-audit",
+            )
+        return _BEST_EFFORT_AUDIT_EXECUTOR
+
+
 __all__ = [
     "BlockingExecutorCapacity",
     "auxiliary_io_executor",
+    "best_effort_audit_executor",
     "blocking_executor_capacity",
     "critical_ledger_executor",
     "projection_maintenance_executor",

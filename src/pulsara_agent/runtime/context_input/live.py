@@ -141,6 +141,7 @@ class PreparedLiveContextSnapshot:
     authority_slice: ContextEventSlice | ContextEventAuthorityView
     named_slices: tuple[ContextEventSlice, ...]
     exact_named_authority_events: tuple[FrozenStoredEvent, ...]
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
     prepared_candidates: PreparedContextCandidateSet
@@ -1307,6 +1308,10 @@ async def prepare_live_context_snapshot(
             runtime_session=runtime_session,
             expected_chars_by_artifact_id=source_artifact_expected_chars,
         )
+        authority_horizons = _merge_authority_horizons(
+            authority_read.authority_horizons,
+            child_authority.authority_horizons,
+        )
         build_input = collect_live_context_inputs(
             working_set=working_set,
             resolved_call=resolved_call,
@@ -1322,10 +1327,7 @@ async def prepare_live_context_snapshot(
             subagent_graph_acceleration=subagent_graph_acceleration,
             subagent_authority_events=subagent_authority_events,
             source_artifact_metadata=source_artifact_metadata,
-            authority_horizons=_merge_authority_horizons(
-                authority_read.authority_horizons,
-                child_authority.authority_horizons,
-            ),
+            authority_horizons=authority_horizons,
             named_slices=child_named_slices,
             raw_suspended_state_token_for_validation=(
                 raw_suspended_state_token_for_validation
@@ -1461,6 +1463,7 @@ async def prepare_live_context_snapshot(
         authority_slice=authority_slice,
         named_slices=named_slices,
         exact_named_authority_events=subagent_authority_events,
+        authority_horizons=authority_horizons,
         normalized_transcript=normalized,
         prepared_tool_results=prepared_tool_results,
         prepared_candidates=prepared_candidates.prepared,

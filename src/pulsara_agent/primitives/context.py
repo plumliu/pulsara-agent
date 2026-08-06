@@ -6,10 +6,9 @@ schema layers.  It contains only serializable facts and pure validators.
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -41,14 +40,7 @@ from pulsara_agent.primitives.context_source import (
 )
 from pulsara_agent.primitives.model_call import ResolvedModelCallFact
 from pulsara_agent.primitives.long_horizon import (
-    ContextWindowFact,
-    ContextWindowProjectionState,
     LongHorizonContextBudgetDecisionFact,
-    LongHorizonContextAllocationPolicyFact,
-    LongHorizonProjectionPressureShadowFact,
-    PreparedObservationRollupUnit,
-    ProjectionTargetUnreachableAuditFact,
-    RolloutBudgetStateFact,
     RolloutPhase,
     SubagentGraphAccelerationFact,
     SubagentGraphSemanticSourceFact,
@@ -66,23 +58,6 @@ from pulsara_agent.primitives.run_boundary import (
 from pulsara_agent.primitives.run_entry import (
     CurrentUserMessageFact,
     SubagentRunEntryFact,
-)
-
-if TYPE_CHECKING:
-    from pulsara_agent.primitives.provider_input import (
-        PreparedProviderInputPlanFact,
-        ProviderOrderedTranscriptProjectionFact,
-        ProviderOrderedTranscriptProjectionIdentityFact,
-    )
-    from pulsara_agent.primitives.transcript_projection import (
-        ContextTranscriptAuthorityFact,
-        TranscriptProviderProjectionFact,
-    )
-
-
-_TRUSTED_MANIFEST_FINGERPRINT: ContextVar[str | None] = ContextVar(
-    "trusted_context_input_manifest_fingerprint",
-    default=None,
 )
 
 
@@ -288,7 +263,6 @@ class ContextCandidateCollectionPolicyFact(FrozenContextFact):
     max_subagent_results_per_parent_compile: int = Field(ge=0)
     max_candidate_source_refs: int = Field(ge=0)
     max_candidate_artifact_refs: int = Field(ge=0)
-    max_input_manifest_chars: int = Field(ge=1)
     policy_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -1828,10 +1802,6 @@ class ContextInputFailureReasonCode(StrEnum):
     OBSERVATION_ROLLUP_FAILED = "observation_rollup_failed"
     WINDOW_COMPACTION_PLANNING_FAILED = "window_compaction_planning_failed"
     PAYLOAD_CONSISTENCY_FAILED = "payload_consistency_failed"
-    MANIFEST_CONFIRMED_ABSENT = "manifest_confirmed_absent"
-    MANIFEST_CONFLICT = "manifest_conflict"
-    MANIFEST_OUTCOME_UNKNOWN = "manifest_outcome_unknown"
-    MANIFEST_DEADLINE_EXCEEDED = "manifest_deadline_exceeded"
 
 
 class ContextCompileFailureStage(StrEnum):
@@ -1840,11 +1810,9 @@ class ContextCompileFailureStage(StrEnum):
     TRANSCRIPT_NORMALIZATION = "transcript_normalization"
     TOOL_RESULT_NORMALIZATION = "tool_result_normalization"
     CANDIDATE_COLLECTION = "candidate_collection"
-    CANDIDATE_MATERIALIZATION = "candidate_materialization"
     TOOL_RESULT_POLICY_RESOLUTION = "tool_result_policy_resolution"
     RENDER_CACHE_PREPARE = "render_cache_prepare"
     CANDIDATE_LIFECYCLE_PREPARE = "candidate_lifecycle_prepare"
-    INPUT_MANIFEST_WRITE = "input_manifest_write"
     TOOL_RESULT_RENDER = "tool_result_render"
     CONTEXT_COMPILE = "context_compile"
     CONTEXT_BUDGET = "context_budget"
@@ -1854,61 +1822,6 @@ class ContextCompileFailureStage(StrEnum):
     OBSERVATION_ROLLUP = "observation_rollup"
     WINDOW_COMPACTION_PLANNING = "window_compaction_planning"
     PAYLOAD_CONSISTENCY = "payload_consistency"
-
-
-class ContextCompileInputAuditFact(FrozenContextFact):
-    snapshot_id: str
-    snapshot_semantic_fingerprint: str
-    snapshot_fact_fingerprint: str
-    snapshot_schema_version: str
-    compiler_contract_version: str
-    source_runtime_session_id: str
-    authority_from_sequence: int = Field(ge=1)
-    source_through_sequence: int = Field(ge=1)
-    authority_slice_plan_fingerprint: str
-    transcript_projection_window_fingerprint: str
-    run_start_event_id: str
-    run_start_sequence: int = Field(ge=1)
-    continuation_event_id: str | None
-    continuation_sequence: int | None = Field(default=None, ge=1)
-    continuation_count: int = Field(ge=0)
-    resolved_model_call_id: str
-    model_call_index: int = Field(ge=1)
-    compile_attempt_index: int = Field(ge=1)
-    context_retry_index: int = Field(ge=0)
-    transcript_fingerprint: str
-    transcript_message_count: int = Field(ge=0)
-    transcript_pair_count: int = Field(ge=0)
-    tool_result_units_fingerprint: str
-    tool_result_unit_count: int = Field(ge=0)
-    tool_result_render_policy_fingerprint: str
-    tool_result_render_input_fingerprint: str
-    prepared_candidate_set_fingerprint: str
-    section_candidate_count: int = Field(ge=0)
-    input_aggregate_fingerprint: str
-    input_manifest_artifact_id: str
-    input_manifest_fingerprint: str
-    long_horizon_attribution_fingerprint: str = Field(min_length=1)
-    input_manifest_schema_version: Literal["context-input-manifest:v8"] = (
-        "context-input-manifest:v8"
-    )
-    input_manifest_write_outcome: Literal["stored", "confirmed_existing"]
-
-    @model_validator(mode="after")
-    def _audit(self) -> "ContextCompileInputAuditFact":
-        continuation_pair = (
-            self.continuation_event_id,
-            self.continuation_sequence,
-        )
-        if (continuation_pair[0] is None) != (continuation_pair[1] is None):
-            raise ValueError("continuation audit attribution must be all-or-none")
-        if self.continuation_count == 0 and continuation_pair[0] is not None:
-            raise ValueError("zero continuation count cannot carry latest continuation")
-        if self.continuation_count > 0 and continuation_pair[0] is None:
-            raise ValueError("continuation audit requires latest continuation")
-        if self.authority_from_sequence > self.source_through_sequence:
-            raise ValueError("input audit authority range is reversed")
-        return self
 
 
 class ContextCompileInputFailureFact(FrozenContextFact):
@@ -1922,16 +1835,6 @@ class ContextCompileInputFailureFact(FrozenContextFact):
     source_through_sequence: int | None = Field(default=None, ge=1)
     available_component_fingerprints: tuple[tuple[str, str], ...]
     input_aggregate_fingerprint: str | None
-    manifest_candidate_artifact_id: str | None
-    manifest_candidate_content_fingerprint: str | None
-    manifest_candidate_metadata_fingerprint: str | None
-    manifest_write_outcome: Literal[
-        "not_attempted",
-        "confirmed_absent",
-        "conflict",
-        "outcome_unknown",
-        "deadline_exceeded",
-    ]
     reason_code: ContextInputFailureReasonCode
 
     @model_validator(mode="after")
@@ -1939,219 +1842,8 @@ class ContextCompileInputFailureFact(FrozenContextFact):
         keys = tuple(item[0] for item in self.available_component_fingerprints)
         if keys != tuple(sorted(set(keys))):
             raise ValueError("available component fingerprints must be key-sorted")
-        candidates = (
-            self.manifest_candidate_artifact_id,
-            self.manifest_candidate_content_fingerprint,
-            self.manifest_candidate_metadata_fingerprint,
-        )
-        manifest_stage = self.failure_stage == "input_manifest_write"
-        if manifest_stage:
-            if any(item is None for item in candidates):
-                raise ValueError("manifest write failure requires stable candidate")
-            if self.manifest_write_outcome == "not_attempted":
-                raise ValueError("manifest write failure requires write outcome")
-        elif (
-            any(item is not None for item in candidates)
-            or self.manifest_write_outcome != "not_attempted"
-        ):
-            raise ValueError("pre-manifest failure cannot carry manifest outcome")
-        return self
-
-
-class ContextCompileInputManifestFact(FrozenContextFact):
-    schema_version: Literal["context-input-manifest:v8"] = "context-input-manifest:v8"
-    input_aggregate_fingerprint: str
-    snapshot: ContextFactSnapshotFact
-    subagent_graph_semantic_source: SubagentGraphSemanticSourceFact
-    subagent_graph_acceleration: SubagentGraphAccelerationFact
-    prepared_candidate_set: PreparedContextCandidateSet
-    ordered_transcript_projection: "ProviderOrderedTranscriptProjectionFact"
-    ordered_transcript_projection_identity: (
-        "ProviderOrderedTranscriptProjectionIdentityFact"
-    )
-    prepared_provider_input_plan: "PreparedProviderInputPlanFact"
-    transcript_fingerprint: str
-    transcript_provider_projection: "TranscriptProviderProjectionFact"
-    transcript_authority: "ContextTranscriptAuthorityFact"
-    tool_result_units_fingerprint: str
-    tool_result_render_policy: ResolvedToolResultRenderPolicyFact
-    tool_result_render_input_fingerprint: str
-    active_window: ContextWindowFact
-    window_policy: LongHorizonContextAllocationPolicyFact
-    projection_state: ContextWindowProjectionState
-    projected_tool_result_refs: tuple[ProjectedToolResultCompileRefFact, ...]
-    prepared_rollup_units: tuple[PreparedObservationRollupUnit, ...]
-    rollout_state: RolloutBudgetStateFact
-    context_budget_decision: LongHorizonContextBudgetDecisionFact
-    projection_pressure_shadow: LongHorizonProjectionPressureShadowFact
-    projection_target_unreachable: ProjectionTargetUnreachableAuditFact | None
-    safe_point_revision: int = Field(ge=0)
-    compiler_contract_version: str
-    manifest_fingerprint: str
-
-    @classmethod
-    def from_trusted_factory_payload(
-        cls,
-        payload: dict[str, object],
-    ) -> "ContextCompileInputManifestFact":
-        """Validate a factory-owned payload without hashing it a second time."""
-
-        fingerprint = context_fingerprint("context-compile-input-manifest:v8", payload)
-        token = _TRUSTED_MANIFEST_FINGERPRINT.set(fingerprint)
-        try:
-            return cls(**payload, manifest_fingerprint=fingerprint)
-        finally:
-            _TRUSTED_MANIFEST_FINGERPRINT.reset(token)
-
-    @model_validator(mode="after")
-    def _manifest(self) -> "ContextCompileInputManifestFact":
-        if (
-            self.subagent_graph_semantic_source
-            != self.snapshot.subagent_graph_semantic_source
-            or self.subagent_graph_acceleration
-            != self.snapshot.subagent_graph_acceleration
-        ):
-            raise ValueError("manifest subagent graph attribution mismatch")
-        snapshot_policy = self.snapshot.compile_policy
-        if self.tool_result_render_policy.basis != snapshot_policy.tool_result_basis:
-            raise ValueError("manifest tool-result policy basis mismatch")
-        if self.prepared_candidate_set.policy != snapshot_policy.candidate_collection:
-            raise ValueError("manifest candidate policy mismatch")
-        if (
-            self.prepared_provider_input_plan.resolved_model_call_id
-            != self.snapshot.resolved_model_call.resolved_model_call_id
-        ):
-            raise ValueError("manifest provider-input resolved call mismatch")
-        ordered = self.ordered_transcript_projection
-        ordered_identity = self.ordered_transcript_projection_identity
-        if (
-            self.prepared_provider_input_plan.ordered_transcript_projection_identity
-            != ordered_identity
-            or ordered.projection_semantic_fingerprint
-            != ordered_identity.projection_semantic_fingerprint
-            or len(ordered.ordered_units) != ordered_identity.unit_count
-            or ordered.ordered_wire_semantic_accumulator
-            != ordered_identity.ordered_wire_semantic_accumulator
-            or ordered.ordered_causal_semantic_accumulator
-            != ordered_identity.ordered_causal_semantic_accumulator
-        ):
-            raise ValueError("manifest ordered provider projection mismatch")
-        transcript_projection = self.transcript_provider_projection
-        if (
-            transcript_projection.context_id != self.snapshot.identity.context_id
-            or transcript_projection.model_call_index
-            != self.snapshot.identity.model_call_index
-            or transcript_projection.compile_attempt_index
-            != self.snapshot.identity.compile_attempt_index
-            or transcript_projection.semantic_identity.stable_normalized_transcript_fingerprint
-            != self.transcript_fingerprint
-        ):
-            raise ValueError("manifest transcript provider projection mismatch")
-        if (
-            self.transcript_authority.provider_projection != transcript_projection
-            or self.transcript_authority.final_normalized_transcript_fingerprint
-            != self.transcript_fingerprint
-        ):
-            raise ValueError("manifest transcript authority mismatch")
-        for section in transcript_projection.sections:
-            timing = section.semantic_identity.timing_semantic
-            if (
-                timing.rendered_timing_header is not None
-                or timing.age_seconds is not None
-            ):
-                raise ValueError("manifest cannot render dynamic transcript timing")
-        if (
-            self.compiler_contract_version
-            != self.snapshot.identity.compiler_contract_version
-        ):
-            raise ValueError("manifest compiler contract mismatch")
-        attribution = self.snapshot.long_horizon_attribution
-        if (
-            self.active_window.window_id != attribution.window_id
-            or self.active_window.generation != attribution.window_generation
-            or self.active_window.window_semantic_fingerprint
-            != attribution.window_semantic_fingerprint
-            or self.projection_state.window_id != attribution.window_id
-            or self.projection_state.projection_generation
-            != attribution.projection_generation
-            or self.projection_state.state_semantic_fingerprint
-            != attribution.projection_state_fingerprint
-            or self.rollout_state.account_id != attribution.rollout_account_id
-            or self.rollout_state.through_sequence
-            != attribution.rollout_state_through_sequence
-            or self.rollout_state.phase != attribution.rollout_phase
-            or self.rollout_state.state_fingerprint
-            != attribution.rollout_state_fingerprint
-            or self.context_budget_decision != attribution.budget_decision
-            or self.window_policy.policy_fingerprint
-            != self.active_window.window_policy_fingerprint
-        ):
-            raise ValueError("manifest long-horizon attribution mismatch")
-        projection_ids = tuple(
-            item.unit_id for item in self.projection_state.unit_projections
-        )
-        ref_ids = tuple(
-            item.tool_result_unit_id for item in self.projected_tool_result_refs
-        )
-        if (
-            len(ref_ids) != len(set(ref_ids))
-            or len(projection_ids) != len(set(projection_ids))
-            or set(ref_ids) != set(projection_ids)
-        ):
-            raise ValueError("manifest projected tool-result refs are incomplete")
-        rollup_ids = tuple(item.rollup.rollup_id for item in self.prepared_rollup_units)
-        if rollup_ids != tuple(
-            item.rollup_id for item in self.projection_state.rollups
-        ):
-            raise ValueError("manifest prepared rollups differ from projection state")
-        if (
-            self.projection_pressure_shadow.window_id != attribution.window_id
-            or self.projection_pressure_shadow.source_through_sequence
-            != self.context_budget_decision.source_through_sequence
-        ):
-            raise ValueError("manifest projection pressure shadow mismatch")
-        unreachable = self.projection_target_unreachable
-        if unreachable is not None and (
-            unreachable.source_projection_generation
-            > self.projection_state.projection_generation
-            or unreachable.target_projected_tokens
-            != self.context_budget_decision.post_rewrite_target_tokens
-            or unreachable.minimum_projected_tokens
-            != self.projection_state.total_projected_tokens
-        ):
-            raise ValueError("manifest projection-unreachable audit mismatch")
-        expected_aggregate = context_fingerprint(
-            "context-compile-input-aggregate:v8",
-            [
-                self.snapshot.snapshot_semantic_fingerprint,
-                self.transcript_fingerprint,
-                self.transcript_provider_projection.semantic_identity.semantic_fingerprint,
-                self.transcript_authority.provider_semantic_identity.provider_semantic_fingerprint,
-                self.tool_result_render_input_fingerprint,
-                self.prepared_candidate_set.candidate_set_fingerprint,
-                self.ordered_transcript_projection.fact_fingerprint,
-                self.ordered_transcript_projection_identity.identity_fingerprint,
-                self.prepared_provider_input_plan.plan_fingerprint,
-                self.active_window.window_semantic_fingerprint,
-                self.window_policy.policy_fingerprint,
-                self.projection_state.state_semantic_fingerprint,
-                tuple(item.prepared_fingerprint for item in self.prepared_rollup_units),
-                self.rollout_state.state_fingerprint,
-                self.context_budget_decision.decision_fingerprint,
-                (
-                    self.projection_target_unreachable.audit_fingerprint
-                    if self.projection_target_unreachable is not None
-                    else None
-                ),
-                self.compiler_contract_version,
-            ],
-        )
-        if self.input_aggregate_fingerprint != expected_aggregate:
-            raise ValueError("manifest aggregate input fingerprint mismatch")
-        if _TRUSTED_MANIFEST_FINGERPRINT.get() != self.manifest_fingerprint:
-            _validate_fingerprint(
-                self, "context-compile-input-manifest:v8", "manifest_fingerprint"
-            )
+        if len(self.available_component_fingerprints) > 64:
+            raise ValueError("available component fingerprint set exceeds bound")
         return self
 
 
@@ -2196,33 +1888,6 @@ def _validate_fingerprint(
         raise ValueError(f"{field_name} mismatch")
 
 
-# Late binding keeps the low-level transcript projection schemas free to use
-# the public context argument enum without creating a module import cycle.
-from pulsara_agent.primitives.transcript_projection import (  # noqa: E402
-    ContextTranscriptAuthorityFact as _ContextTranscriptAuthorityFact,
-    TranscriptProviderProjectionFact as _TranscriptProviderProjectionFact,
-)
-from pulsara_agent.primitives.provider_input import (  # noqa: E402
-    PreparedProviderInputPlanFact as _PreparedProviderInputPlanFact,
-    ProviderOrderedTranscriptProjectionFact as _ProviderOrderedTranscriptProjectionFact,
-    ProviderOrderedTranscriptProjectionIdentityFact as _ProviderOrderedTranscriptProjectionIdentityFact,
-)
-
-ContextCompileInputManifestFact.model_rebuild(
-    _types_namespace={
-        "TranscriptProviderProjectionFact": _TranscriptProviderProjectionFact,
-        "ContextTranscriptAuthorityFact": _ContextTranscriptAuthorityFact,
-        "PreparedProviderInputPlanFact": _PreparedProviderInputPlanFact,
-        "ProviderOrderedTranscriptProjectionFact": (
-            _ProviderOrderedTranscriptProjectionFact
-        ),
-        "ProviderOrderedTranscriptProjectionIdentityFact": (
-            _ProviderOrderedTranscriptProjectionIdentityFact
-        ),
-    }
-)
-
-
 __all__ = [
     "CapabilityDescriptorRenderAttributionFact",
     "CompactedWindowReferenceFact",
@@ -2240,9 +1905,7 @@ __all__ = [
     "ContextCandidateLifecycleKeyFact",
     "ContextChannelFact",
     "ContextCompilePolicyFact",
-    "ContextCompileInputAuditFact",
     "ContextCompileInputFailureFact",
-    "ContextCompileInputManifestFact",
     "ContextCompileTimingFact",
     "ContextContinuationReferenceFact",
     "ContextEventRangeFact",

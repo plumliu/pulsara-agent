@@ -273,14 +273,18 @@ def classify_committed_event_settlement(
         raise EventCommitError("event settlement lacks durable FULL receipt")
     requested = tuple(requested_event_ids)
     by_id = {event.id: event for event in result.committed_events}
-    if len(requested) != len(set(requested)) or any(item not in by_id for item in requested):
+    if len(requested) != len(set(requested)) or any(
+        item not in by_id for item in requested
+    ):
         raise EventReconciliationRequired(
             "event settlement requested identity is absent or ambiguous"
         )
     target = max(int(by_id[item].sequence or 0) for item in requested)
     required = tuple(dict.fromkeys(required_reducer_ids))
     failed = {
-        error.reducer_id for error in result.reducer_errors if error.reducer_id in required
+        error.reducer_id
+        for error in result.reducer_errors
+        if error.reducer_id in required
     }
     repair_owned = False
     for reducer_id in required:

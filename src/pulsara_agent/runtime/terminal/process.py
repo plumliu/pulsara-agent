@@ -136,16 +136,14 @@ class TerminalProcessState:
         default=None,
         repr=False,
     )
-    completion_semantic_settlement: TerminalCompletionSemanticSettlement | None = (
-        None
-    )
+    completion_semantic_settlement: TerminalCompletionSemanticSettlement | None = None
     completion_record_attempts: int = 0
     completion_retry_timer: Timer | None = field(default=None, repr=False)
     completion_notification_reservation_required: bool = False
     completion_notification_reservation_confirmed: bool = False
     completion_reason: TerminalKillReason | None = None
-    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = field(
-        default=None, repr=False
+    record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt] | None = (
+        field(default=None, repr=False)
     )
     reader_thread: Thread | None = None
     lifetime_watchdog: Thread | None = None
@@ -210,9 +208,7 @@ class ProcessRegistry:
         origin_tool_call_id: str | None = None,
         origin_runtime_session_id: str | None = None,
         origin_run_entry_kind: str | None = None,
-        record_event: Callable[
-            [AgentEvent], RuntimeThreadEventSettlementReceipt
-        ]
+        record_event: Callable[[AgentEvent], RuntimeThreadEventSettlementReceipt]
         | None = None,
         require_completion_notification_reservation: bool = False,
     ) -> tuple[TerminalProcessState, bool]:

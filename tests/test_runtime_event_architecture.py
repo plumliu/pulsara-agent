@@ -36,6 +36,10 @@ from pulsara_agent.runtime.authority_materialization.dispatch_barrier import (
     CheckpointDispatchGateClosed,
 )
 from pulsara_agent.runtime.context_input.io_service import ContextInputIoService
+from pulsara_agent.primitives.frozen import DURABLE_FACT_FINGERPRINT_REGISTRY
+from pulsara_agent.primitives.storage_frozen import (
+    DURABLE_STORAGE_FACT_FINGERPRINT_REGISTRY,
+)
 from pulsara_agent.runtime.event_write_service import (
     PendingRuntimeEventWriteError,
     RuntimeEventWriteService,
@@ -349,7 +353,7 @@ def test_model_stream_segments_are_non_transcript_events() -> None:
 
 
 def test_typed_runtime_vocabulary_hard_cut_is_physically_complete() -> None:
-    assert AGENT_EVENT_SCHEMA_VERSION == 9
+    assert AGENT_EVENT_SCHEMA_VERSION == 11
     assert "CUSTOM" not in EventType.__members__
     assert all(
         getattr(event_type, "__name__", "") != "CustomEvent"
@@ -388,12 +392,109 @@ def test_typed_runtime_audit_events_are_explicit_non_transcript() -> None:
         EventType.TOOL_RESULT_EVIDENCE_PROJECTION_FAILED.value,
     }
     assert EXPLICIT_NON_TRANSCRIPT_EVENT_TYPES == expected
-
     registry = build_default_transcript_event_domain_registry_binding().contract
     by_type = {entry.event_type: entry for entry in registry.supported_events}
     assert {
         event_type: by_type[event_type].event_domain for event_type in sorted(expected)
     } == {event_type: "non_transcript" for event_type in sorted(expected)}
+
+
+def test_context_input_manifest_hard_cut_has_no_dual_authority() -> None:
+    removed_paths = (SOURCE_ROOT / "runtime" / "context_input" / "manifest.py",)
+    assert not [path for path in removed_paths if path.exists()]
+    forbidden = (
+        "ContextCompileInputManifestFact",
+        "ContextCompileInputAuditFact",
+        "ContextInputManifestProjectionReferenceFact",
+        "ContextInputManifestWriteService",
+        "max_input_manifest_chars",
+        "manifest_projection_reference_fingerprint",
+        "compiled_manifest",
+    )
+    offenders: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in forbidden:
+            if marker in source:
+                offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{marker}")
+    assert offenders == []
+
+
+def test_context_input_audit_storage_vocabulary_cannot_enter_event_log() -> None:
+    storage_versions = {
+        "context_input_audit_page.v1",
+        "context_input_audit_materialization_plan.v1",
+        "context_input_audit_root.v1",
+    }
+    assert all(
+        DURABLE_STORAGE_FACT_FINGERPRINT_REGISTRY.resolve(version)
+        for version in storage_versions
+    )
+    for version in storage_versions:
+        with pytest.raises(ValueError):
+            DURABLE_FACT_FINGERPRINT_REGISTRY.resolve(version)
+
+    events_source = (SOURCE_ROOT / "event" / "events.py").read_text(encoding="utf-8")
+    assert not any(version in events_source for version in storage_versions)
+
+
+def test_context_input_audit_plane_cannot_latch_or_fail_live_runtime() -> None:
+    audit_root = SOURCE_ROOT / "runtime" / "context_input"
+    paths = tuple(sorted(audit_root.glob("audit_*.py")))
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    assert "latch_context_input_reconciliation_required" not in combined
+    assert "RunErrorEvent" not in combined
+    assert "ContextInputIoLane.CRITICAL" not in combined
+    assert "ContextInputAuditRecoveryService" not in combined
+    assert "materialize_context_input_audit" not in (
+        SOURCE_ROOT / "runtime" / "agent.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_context_input_audit_pages_do_not_duplicate_canonical_context_authority() -> (
+    None
+):
+    source = (SOURCE_ROOT / "runtime" / "agent.py").read_text(encoding="utf-8")
+    extractor = source.split("def _context_input_audit_capture_components(", 1)[
+        1
+    ].split("def _empty_context_budget_report(", 1)[0]
+    for forbidden in (
+        "ordered.projection",
+        "provider_projection.projection_fact,",
+        "prepared_transcript_projection.authority,",
+    ):
+        assert forbidden not in extractor
+    page_owned_detail = extractor.split("detail_values = (", 1)[1].split(
+        "references =", 1
+    )[0]
+    for forbidden in (
+        "active_window,",
+        "projection_state,",
+        "prepared_rollups,",
+        "rollout_state,",
+        "normalized_transcript.transcript",
+        "authority_slice",
+    ):
+        assert forbidden not in page_owned_detail
+    for eager_copy in ("freeze_json(", ".model_dump(", ".to_event_value("):
+        assert eager_copy not in page_owned_detail
+    capture_install = source.split(
+        "audit_capture = PreparedContextInputAuditSourceCapture(", 1
+    )[1].split("compiled_context = final_compiled_context", 1)[0]
+    assert "components=_context_input_audit_capture_components(" in capture_install
+    assert "capture_components=" not in source
+    assert "partial(" not in capture_install
+    assert "_known_context_input_audit_detail_bytes" not in source
+    materializer = (
+        SOURCE_ROOT / "runtime" / "context_input" / "audit_materializer.py"
+    ).read_text(encoding="utf-8")
+    assert "Callable" not in materializer
+    assert ".to_event_value()" not in materializer
+    assert "assert_not_mcp_secret(component.source" not in materializer
+    assert "def _iter_candidate_set_json(" in materializer
+    assert "def _write_component_to_spool(" in materializer
+    assert "TemporaryFile(" in materializer
+    assert "_MAX_STREAMED_MAPPING_ENTRIES" in materializer
 
 
 def test_runtime_wiring_imports_in_clean_interpreter() -> None:
@@ -870,14 +971,15 @@ def test_compacted_authority_and_rollup_cache_do_not_rebind_full_transcript() ->
 
 
 def test_runtime_blocking_services_reserve_a_critical_ledger_lane() -> None:
-    for relative in (
-        "src/pulsara_agent/runtime/context_input/io_service.py",
-        "src/pulsara_agent/runtime/context_input/manifest.py",
-    ):
-        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        assert "auxiliary_io_executor()" in text, relative
-        assert "critical_ledger_executor()" not in text, relative
-        assert "ThreadPoolExecutor(" not in text, relative
+    relative = "src/pulsara_agent/runtime/context_input/io_service.py"
+    text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    assert "auxiliary_io_executor()" in text
+    assert "best_effort_audit_executor()" in text
+    assert "critical_ledger_executor()" not in text
+    assert "ThreadPoolExecutor(" not in text
+    assert not (
+        REPO_ROOT / "src/pulsara_agent/runtime/context_input/manifest.py"
+    ).exists()
     writer = (REPO_ROOT / "src/pulsara_agent/runtime/event_write_service.py").read_text(
         encoding="utf-8"
     )

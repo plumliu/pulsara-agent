@@ -81,6 +81,13 @@ from pulsara_agent.runtime.long_horizon.checkpoint_gc import (
 from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
     PostgresCheckpointMaintenanceAuthority,
 )
+from pulsara_agent.runtime.context_input.audit_doctor import (
+    inspect_context_input_audits,
+)
+from pulsara_agent.runtime.context_input.audit_gc import (
+    ContextInputAuditGcEligibility,
+    garbage_collect_incomplete_context_input_audits,
+)
 from pulsara_agent.runtime.long_horizon.feasibility import (
     check_production_rollout_budget_configuration,
 )
@@ -507,10 +514,20 @@ def build_parser() -> argparse.ArgumentParser:
         inspect_subcommands.add_parser("run", help="Inspect a durable run.")
     )
     inspect_run.add_argument("run_id")
+    inspect_run.add_argument(
+        "--require-exact-audit",
+        action="store_true",
+        help="Fail unless every compiled context has an exact audit root.",
+    )
     inspect_session = _add_inspect_common_args(
         inspect_subcommands.add_parser("session", help="Inspect a durable session.")
     )
     inspect_session.add_argument("session_id")
+    inspect_session.add_argument(
+        "--require-exact-audit",
+        action="store_true",
+        help="Fail unless every compiled context has an exact audit root.",
+    )
     inspect_artifact = _add_inspect_common_args(
         inspect_subcommands.add_parser("artifact", help="Inspect an artifact.")
     )
@@ -543,7 +560,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     checkpoint_doctor.add_argument(
         "--domain",
-        choices=("subagent_graph", "transcript"),
+        choices=("subagent_graph", "transcript", "context_input_audit"),
         default="subagent_graph",
         help="Checkpoint domain to verify or rebuild.",
     )
@@ -553,6 +570,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-payload-bytes", type=int, default=1024 * 1024 * 1024
     )
     checkpoint_doctor.add_argument("--timeout-seconds", type=float, default=120.0)
+    checkpoint_doctor.add_argument(
+        "--require-exact-audit",
+        action="store_true",
+        help="For context_input_audit, fail unless every compile has an exact root.",
+    )
     checkpoint_gc = _add_checkpoint_common_args(
         checkpoint_subcommands.add_parser(
             "gc",
@@ -560,8 +582,20 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     checkpoint_gc.add_argument("runtime_session_id")
+    checkpoint_gc.add_argument(
+        "--domain",
+        choices=("subagent_graph", "context_input_audit"),
+        default="subagent_graph",
+    )
     checkpoint_gc.add_argument("--retain", type=int, default=2)
     checkpoint_gc.add_argument("--max-catalog-events", type=int, default=10_000)
+    checkpoint_gc.add_argument("--through-sequence", type=int, default=None)
+    checkpoint_gc.add_argument("--timeout-seconds", type=float, default=30.0)
+    checkpoint_gc.add_argument(
+        "--apply",
+        action="store_true",
+        help="Delete eligible incomplete audit artifacts; default is dry-run.",
+    )
     return parser
 
 
@@ -1366,12 +1400,14 @@ def _inspect(args) -> dict[str, object]:
                 args.run_id,
                 limit_events=args.limit_events,
                 include_payload=args.include_payload,
+                require_exact_audit=args.require_exact_audit,
             )
         if args.inspect_command == "session":
             return service.inspect_session(
                 args.session_id,
                 limit_events=args.limit_events,
                 include_payload=args.include_payload,
+                require_exact_audit=args.require_exact_audit,
             )
         if args.inspect_command == "artifact":
             return service.inspect_artifact(
@@ -1420,6 +1456,22 @@ def _checkpoint_command_with_access(
         access_lease.connection_provider
     )
     if args.checkpoint_command == "doctor":
+        if args.domain == "context_input_audit":
+            if args.mode != "verify":
+                raise ValueError(
+                    "context-input audit doctor is read-only; rebuild is unsupported"
+                )
+            report = inspect_context_input_audits(
+                runtime_session_id=runtime_session_id,
+                event_log=event_log,
+                artifact_store=archive,
+                require_exact_audit=args.require_exact_audit,
+                through_sequence=args.through_sequence,
+                max_events=args.max_events,
+                max_payload_bytes=args.max_payload_bytes,
+                operation_timeout_seconds=args.timeout_seconds,
+            )
+            return report.model_dump(mode="json")
         if args.domain == "transcript":
             authority_contracts = (
                 build_default_authority_materialization_contract_bundle()
@@ -1459,6 +1511,23 @@ def _checkpoint_command_with_access(
         )
         return report.model_dump(mode="json")
     if args.checkpoint_command == "gc":
+        if args.domain == "context_input_audit":
+            report = garbage_collect_incomplete_context_input_audits(
+                runtime_session_id=runtime_session_id,
+                event_log=event_log,
+                archive=archive,
+                maintenance_authority=maintenance,
+                eligibility=ContextInputAuditGcEligibility(
+                    runtime_session_id=runtime_session_id,
+                    session_close_confirmed=True,
+                    run_owners_drained=True,
+                    context_input_io_drained=True,
+                ),
+                dry_run=not args.apply,
+                through_sequence=args.through_sequence,
+                operation_timeout_seconds=args.timeout_seconds,
+            )
+            return report.model_dump(mode="json")
         report = garbage_collect_subagent_graph_checkpoint_artifacts(
             runtime_session_id=runtime_session_id,
             event_log=event_log,

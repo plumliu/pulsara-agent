@@ -42,6 +42,7 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputPendingContinuationFact,
     ProviderInputPreparationOwnershipFact,
     ProviderInputPreparationOwnershipAttributionFact,
+    PreparedProviderInputAppendCandidateFact,
     ProviderInputReplayBindingIdentityFact,
     ProviderTranscriptFrontierFact,
     InitialGenerationCommitGuardFact,
@@ -303,6 +304,9 @@ class ProviderInputGenerationStore:
             resident_manager or DEFAULT_PROVIDER_INPUT_RESIDENT_MANAGER
         )
         self._staged_ownerships: dict[str, ProviderInputPreparationOwnershipFact] = {}
+        self._staged_candidates: dict[
+            str, PreparedProviderInputAppendCandidateFact
+        ] = {}
         if events:
             self._apply_committed(events, require_staged_resident=False)
         if through_sequence < self._through_sequence:
@@ -577,9 +581,10 @@ class ProviderInputGenerationStore:
 
     def stage_prepared_resident(
         self,
-        ownership: ProviderInputPreparationOwnershipFact,
+        candidate: PreparedProviderInputAppendCandidateFact,
         resident: ProviderInputResidentGeneration,
     ) -> None:
+        ownership = candidate.preparation_ownership
         preparation_id = ownership.preparation_id
         key = self._resident_key("preparation", preparation_id)
         with self._lock:
@@ -604,6 +609,14 @@ class ProviderInputGenerationStore:
                     "provider preparation resident identity conflict"
                 )
             self._staged_ownerships[ownership.ownership_fingerprint] = ownership
+            existing_candidate = self._staged_candidates.get(
+                ownership.ownership_fingerprint
+            )
+            if existing_candidate is not None and existing_candidate != candidate:
+                raise ProviderInputGenerationReducerError(
+                    "provider preparation candidate identity conflict"
+                )
+            self._staged_candidates[ownership.ownership_fingerprint] = candidate
             self._resident_manager.admit(key, resident)
 
     def has_staged_preparation_for_scope(self, scope_fingerprint: str) -> bool:
@@ -615,11 +628,12 @@ class ProviderInputGenerationStore:
 
     def stage_ephemeral_preparation(
         self,
-        ownership: ProviderInputPreparationOwnershipFact,
+        candidate: PreparedProviderInputAppendCandidateFact,
         resident: ProviderInputResidentGeneration,
     ) -> None:
         """Own a one-shot candidate until its atomic Start batch is committed."""
 
+        ownership = candidate.preparation_ownership
         with self._lock:
             existing = self._staged_ownerships.get(ownership.ownership_fingerprint)
             if existing is not None and existing != ownership:
@@ -635,6 +649,14 @@ class ProviderInputGenerationStore:
                     "provider ephemeral scope already has a staged owner"
                 )
             self._staged_ownerships[ownership.ownership_fingerprint] = ownership
+            existing_candidate = self._staged_candidates.get(
+                ownership.ownership_fingerprint
+            )
+            if existing_candidate is not None and existing_candidate != candidate:
+                raise ProviderInputGenerationReducerError(
+                    "provider ephemeral candidate identity conflict"
+                )
+            self._staged_candidates[ownership.ownership_fingerprint] = candidate
             key = self._resident_key("preparation", ownership.preparation_id)
             current = self._resident_manager.get(key)
             if current is not None and current != resident:
@@ -704,6 +726,11 @@ class ProviderInputGenerationStore:
                     fingerprint: owner
                     for fingerprint, owner in self._staged_ownerships.items()
                     if owner.preparation_id != preparation_id
+                }
+                self._staged_candidates = {
+                    fingerprint: candidate
+                    for fingerprint, candidate in self._staged_candidates.items()
+                    if candidate.preparation_ownership.preparation_id != preparation_id
                 }
 
     def resident_cache_stats(self):
@@ -851,6 +878,11 @@ class ProviderInputGenerationStore:
 
         self._apply_committed(events, require_staged_resident=True)
 
+    def fold_restored(self, events: tuple[AgentEvent, ...]) -> None:
+        """Fold decoder-validated durable authority without process-local state."""
+
+        self._apply_committed(events, require_staged_resident=False)
+
     def _apply_committed(
         self,
         events: tuple[AgentEvent, ...],
@@ -882,6 +914,7 @@ class ProviderInputGenerationStore:
             )
             append_events = dict(self._append_events)
             staged_ownerships = dict(self._staged_ownerships)
+            staged_candidates = dict(self._staged_candidates)
             resident_actions: list[
                 tuple[
                     str,
@@ -902,31 +935,57 @@ class ProviderInputGenerationStore:
 
             for index, event in enumerate(events):
                 if isinstance(event, ContextCompiledEvent):
-                    prepared = event.prepared_provider_input
-                    if prepared is None:
+                    install = event.provider_input_preparation_install
+                    if install is None:
                         continue
-                    owner = prepared.preparation_ownership
+                    owner = install.preparation_ownership
+                    staged_candidate = staged_candidates.get(
+                        owner.ownership_fingerprint
+                    )
+                    if require_staged_resident and (
+                        staged_candidate is None
+                        or staged_candidate.candidate_fingerprint
+                        != install.prepared_candidate_fingerprint
+                        or staged_candidate.prepared_plan is None
+                        or staged_candidate.prepared_plan.plan_fingerprint
+                        != install.prepared_plan_fingerprint
+                        or staged_candidate.provider_input_plan.plan_fingerprint
+                        != install.canonical_provider_input_plan_fingerprint
+                        or staged_candidate.semantic_commit_fingerprint
+                        != install.semantic_commit_fingerprint
+                        or staged_candidate.ordered_projection_identity_fingerprint
+                        != install.ordered_projection_identity_fingerprint
+                        or staged_candidate.generation_commit_guard
+                        != install.generation_commit_guard
+                    ):
+                        raise ProviderInputGenerationReducerError(
+                            "provider preparation installation lacks exact staged candidate"
+                        )
                     existing = preparations.get(owner.preparation_id)
                     attribution = build_frozen_fact(
                         ProviderInputPreparationOwnershipAttributionFact,
                         schema_version=(
-                            "provider_input_preparation_ownership_attribution.v2"
+                            "provider_input_preparation_ownership_attribution.v4"
                         ),
                         ownership=owner,
                         context_compiled_event_ref=_event_ref(
                             event, runtime_session_id=self._runtime_session_id
                         ),
-                        prepared_candidate_fingerprint=(prepared.candidate_fingerprint),
-                        prepared_plan_fingerprint=(
-                            prepared.prepared_plan.plan_fingerprint
+                        prepared_candidate_fingerprint=(
+                            install.prepared_candidate_fingerprint
                         ),
-                        manifest_projection_reference_fingerprint=(
-                            prepared.manifest_projection_reference.reference_fingerprint
+                        prepared_plan_fingerprint=install.prepared_plan_fingerprint,
+                        canonical_provider_input_plan_fingerprint=(
+                            install.canonical_provider_input_plan_fingerprint
+                        ),
+                        semantic_commit_fingerprint=(
+                            install.semantic_commit_fingerprint
+                        ),
+                        ordered_projection_identity_fingerprint=(
+                            install.ordered_projection_identity_fingerprint
                         ),
                         rollover_request_fingerprint=(
-                            prepared.rollover_request.request_fingerprint
-                            if prepared.rollover_request is not None
-                            else None
+                            install.rollover_request_fingerprint
                         ),
                     )
                     if existing is not None and existing != attribution:
@@ -1022,15 +1081,16 @@ class ProviderInputGenerationStore:
                             "provider append lacks its prepared owner"
                         )
                     if owner_attribution is not None and (
-                        event.append_kind != "compiled_manifest"
+                        event.append_kind != "compiled_context"
                         or event.prepared_provider_input_candidate_fingerprint
                         != owner_attribution.prepared_candidate_fingerprint
-                        or event.manifest_projection_reference is None
-                        or event.manifest_projection_reference.reference_fingerprint
-                        != owner_attribution.manifest_projection_reference_fingerprint
+                        or event.semantic_commit_fingerprint
+                        != owner_attribution.semantic_commit_fingerprint
+                        or event.ordered_projection_identity_fingerprint
+                        != owner_attribution.ordered_projection_identity_fingerprint
                     ):
                         raise ProviderInputGenerationReducerError(
-                            "provider append manifest/preparation join failed"
+                            "provider append semantic/preparation join failed"
                         )
                     if (
                         predecessor.core_state_fingerprint
@@ -1217,6 +1277,9 @@ class ProviderInputGenerationStore:
                     staged_ownerships.pop(
                         event.consumed_preparation_ownership_fingerprint, None
                     )
+                    staged_candidates.pop(
+                        event.consumed_preparation_ownership_fingerprint, None
+                    )
                     scope_fingerprint = (
                         predecessor.generation.scope.scope_fingerprint
                         if recovered_one_shot
@@ -1307,25 +1370,25 @@ class ProviderInputGenerationStore:
                             "ModelStart provider append identity drifted"
                         )
                     if append is not None:
-                        compiled = append.append_kind == "compiled_manifest"
-                        if compiled != (
-                            reference.reference_kind == "compiled_manifest"
-                        ):
+                        compiled = append.append_kind == "compiled_context"
+                        if compiled != (reference.reference_kind == "compiled_context"):
                             raise ProviderInputGenerationReducerError(
                                 "ModelStart provider reference kind drifted"
                             )
                         if compiled and (
-                            append.manifest_projection_reference is None
+                            append.semantic_commit_fingerprint is None
                             or append.causal_validation is None
-                            or reference.manifest_projection_reference_fingerprint
-                            != append.manifest_projection_reference.reference_fingerprint
+                            or reference.semantic_commit_fingerprint
+                            != append.semantic_commit_fingerprint
+                            or reference.ordered_projection_identity_fingerprint
+                            != append.ordered_projection_identity_fingerprint
                             or reference.causal_validation_fingerprint
                             != append.causal_validation.result_fingerprint
                             or reference.transcript_frontier_fingerprint
                             != append.resulting_core_state.transcript_frontier.provider_semantic_frontier_fingerprint
                         ):
                             raise ProviderInputGenerationReducerError(
-                                "ModelStart provider manifest proof drifted"
+                                "ModelStart provider semantic proof drifted"
                             )
                     if append is not None and (
                         append.resolved_model_call_id
@@ -1574,8 +1637,10 @@ class ProviderInputGenerationStore:
                         != event.old_generation_id
                         or request.intent.reason != event.new_generation.rollover_reason
                         or initial_append is None
-                        or initial_append.manifest_projection_reference
-                        != request.manifest_projection_reference
+                        or initial_append.semantic_commit_fingerprint
+                        != request.semantic_commit_fingerprint
+                        or initial_append.ordered_projection_identity_fingerprint
+                        != request.ordered_projection_identity.identity_fingerprint
                     ):
                         raise ProviderInputGenerationReducerError(
                             "provider rollover semantic join failed"
@@ -1621,7 +1686,7 @@ class ProviderInputGenerationStore:
                             source_rewrite_authority.predecessor_core_state_fingerprint
                             != source_core.core_state_fingerprint
                             or source_rewrite_authority.ordered_projection_identity_fingerprint
-                            != request.manifest_projection_reference.projection_identity.identity_fingerprint
+                            != request.ordered_projection_identity.identity_fingerprint
                             or source_rewrite_authority.rewrite_dispositions
                             != tuple(
                                 item
@@ -1769,6 +1834,7 @@ class ProviderInputGenerationStore:
                         )
                     )
                     staged_ownerships.pop(owner.ownership_fingerprint, None)
+                    staged_candidates.pop(owner.ownership_fingerprint, None)
                     scope_fingerprint = owner.scope_fingerprint
                     binding = bindings[scope_fingerprint]
                     if (
@@ -1865,6 +1931,7 @@ class ProviderInputGenerationStore:
             )
             self._append_events = append_events
             self._staged_ownerships = staged_ownerships
+            self._staged_candidates = staged_candidates
             self._through_sequence = events[-1].sequence or self._through_sequence
 
             # Resident state is disposable memoization. Apply cache actions only
@@ -1881,6 +1948,7 @@ class ProviderInputGenerationStore:
     def rebuild(self, events: tuple[AgentEvent, ...]) -> None:
         with self._lock:
             staged_ownerships = dict(self._staged_ownerships)
+            staged_candidates = dict(self._staged_candidates)
             self._through_sequence = 0
             self._cores = {}
             self._attributions = {}
@@ -1894,6 +1962,7 @@ class ProviderInputGenerationStore:
             self._runtime_observation_lifecycle_states = {}
             self._append_events = {}
             self._staged_ownerships = staged_ownerships
+            self._staged_candidates = staged_candidates
             self._resident_manager.discard_runtime_session(self._runtime_session_id)
         if events:
             self._apply_committed(events, require_staged_resident=False)

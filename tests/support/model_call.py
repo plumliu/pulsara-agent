@@ -37,8 +37,14 @@ from pulsara_agent.primitives.model_call import (
     sha256_fingerprint,
 )
 from pulsara_agent.primitives.context import (
-    ContextCompileInputAuditFact,
+    ContextCompileInputFailureFact,
+    ContextInputFailureReasonCode,
     context_fingerprint,
+)
+from pulsara_agent.primitives.context_input_commit import (
+    ContextCompileInputCommitFact,
+    ContextCompileSourceReferenceSetFact,
+    RunSeedProjectionBaseReferenceFact,
 )
 from pulsara_agent.primitives.run_boundary import (
     ModelStreamRecoveryPlanFact,
@@ -157,6 +163,8 @@ def context_compiled_contract_fields(
     resolved_call: ResolvedModelCallFact | None = None,
     model_call_index: int = 1,
     context_id: str = "context:test",
+    run_id: str = "run:test",
+    runtime_session_id: str = "runtime:test",
 ) -> dict[str, object]:
     call = resolved_call or test_resolved_call_fact()
     target = call.target
@@ -189,94 +197,74 @@ def context_compiled_contract_fields(
         estimator=target.token_estimator,
     )
     prepared_candidate = None
-    manifest_reference = None
-    prepared_plan_fingerprint = None
-    prepared_candidate_fingerprint = None
+    semantic_commit = None
+    preparation_install = None
+    audit_expectation = None
     if status == "compiled":
-        prepared_candidate, manifest_reference = (
-            _compiled_provider_input_candidate_fixture(
-                call,
-                context_id=context_id,
-                model_call_index=model_call_index,
-            )
+        (
+            prepared_candidate,
+            semantic_commit,
+            preparation_install,
+            audit_expectation,
+        ) = _compiled_provider_input_candidate_fixture(
+            call,
+            budget=budget,
+            context_id=context_id,
+            model_call_index=model_call_index,
+            run_id=run_id,
+            runtime_session_id=runtime_session_id,
         )
-        assert prepared_candidate.prepared_plan is not None
-        prepared_plan_fingerprint = prepared_candidate.prepared_plan.plan_fingerprint
-        prepared_candidate_fingerprint = prepared_candidate.candidate_fingerprint
-    return {
-        "status": status,
-        "failure_stage": "context_compile" if status == "failed" else None,
-        "compile_attempt_index": 1,
-        "context_retry_index": 0,
-        "resolved_call": call,
-        "budget": budget,
-        "input_audit": ContextCompileInputAuditFact(
-            snapshot_id="context_snapshot:test",
-            snapshot_semantic_fingerprint="sha256:" + "1" * 64,
-            snapshot_fact_fingerprint="sha256:" + "2" * 64,
-            snapshot_schema_version="context-snapshot:v1",
-            compiler_contract_version="context-compiler-input:v1",
-            source_runtime_session_id="runtime:test",
-            authority_from_sequence=1,
-            source_through_sequence=1,
-            authority_slice_plan_fingerprint="sha256:" + "3" * 64,
-            transcript_projection_window_fingerprint="sha256:" + "4" * 64,
-            run_start_event_id="run-start:test",
-            run_start_sequence=1,
-            continuation_event_id=None,
-            continuation_sequence=None,
-            continuation_count=0,
+    failure_stage = None
+    input_failure = None
+    if status != "compiled":
+        failure_stage = "context_budget" if status == "pressure" else "context_compile"
+        input_failure = ContextCompileInputFailureFact(
+            failure_stage=failure_stage,
+            context_id=context_id,
             resolved_model_call_id=call.resolved_model_call_id,
             model_call_index=model_call_index,
             compile_attempt_index=1,
             context_retry_index=0,
-            transcript_fingerprint="sha256:" + "5" * 64,
-            transcript_message_count=1,
-            transcript_pair_count=0,
-            tool_result_units_fingerprint="sha256:" + "6" * 64,
-            tool_result_unit_count=0,
-            tool_result_render_policy_fingerprint="sha256:" + "7" * 64,
-            tool_result_render_input_fingerprint="sha256:" + "8" * 64,
-            prepared_candidate_set_fingerprint="sha256:" + "9" * 64,
-            section_candidate_count=1,
-            input_aggregate_fingerprint="sha256:" + "a" * 64,
-            input_manifest_artifact_id=(
-                manifest_reference.input_manifest_artifact_id
-                if manifest_reference is not None
-                else "context-input-manifest:test"
+            snapshot_id=None,
+            source_through_sequence=None,
+            available_component_fingerprints=(),
+            input_aggregate_fingerprint=None,
+            reason_code=(
+                ContextInputFailureReasonCode.CONTEXT_BUDGET_EXCEEDED
+                if status == "pressure"
+                else ContextInputFailureReasonCode.CANDIDATE_INVALID
             ),
-            input_manifest_fingerprint="sha256:" + "b" * 64,
-            long_horizon_attribution_fingerprint="sha256:" + "e" * 64,
-            input_manifest_write_outcome="stored",
-        ),
-        "provider_neutral_payload_fingerprint": (
-            "sha256:" + "c" * 64 if status == "compiled" else None
-        ),
-        "canonical_render_decisions_fingerprint": (
-            "sha256:" + "d" * 64 if status == "compiled" else None
-        ),
-        "prepared_provider_input": prepared_candidate,
-        "manifest_projection_reference": manifest_reference,
-        "prepared_provider_input_plan_fingerprint": prepared_plan_fingerprint,
-        "prepared_provider_input_candidate_fingerprint": (
-            prepared_candidate_fingerprint
-        ),
+        )
+    return {
+        "status": status,
+        "failure_stage": failure_stage,
+        "compile_attempt_index": 1,
+        "context_retry_index": 0,
+        "resolved_call": call,
+        "budget": budget,
+        "semantic_commit": semantic_commit,
+        "provider_input_preparation_install": preparation_install,
+        "audit_expectation": audit_expectation,
+        "input_failure": input_failure,
     }
 
 
 def _compiled_provider_input_candidate_fixture(
     call: ResolvedModelCallFact,
     *,
+    budget: ContextBudgetReportEvent,
     context_id: str,
     model_call_index: int,
+    run_id: str,
+    runtime_session_id: str,
 ):
-    """Wrap the one-shot physical fixture in the compiled manifest contract."""
+    """Wrap the one-shot physical fixture in the compact compiled contract."""
 
     from pulsara_agent.primitives.context import context_fingerprint
     from pulsara_agent.primitives.provider_input import (
-        ContextInputManifestProjectionReferenceFact,
         PreparedProviderInputAppendCandidateFact,
         PreparedProviderInputPlanFact,
+        ProviderInputPreparationInstallFact,
         ProviderInputCausalValidationResult,
         ProviderOrderedTranscriptProjectionIdentityFact,
         ProviderTranscriptDeltaCommitProofFact,
@@ -355,18 +343,118 @@ def _compiled_provider_input_candidate_fixture(
         ),
         resolved_causal_physical_policy_fingerprint=policy.policy_fingerprint,
     )
-    manifest_reference = build_frozen_fact(
-        ContextInputManifestProjectionReferenceFact,
-        schema_version="context_input_manifest_projection_reference.v1",
+    from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+    from pulsara_agent.primitives.context_source import LedgerAuthorityHorizonFact
+    from pulsara_agent.primitives.transcript_projection import (
+        RunTranscriptSeedReferenceFact,
+    )
+    from pulsara_agent.runtime.context_input.commit import (
+        build_context_input_audit_expectation_for_commit,
+    )
+
+    primary_horizon = build_frozen_fact(
+        LedgerAuthorityHorizonFact,
+        schema_version="ledger_authority_horizon.v1",
+        runtime_session_id=runtime_session_id,
+        through_sequence=1,
+        ledger_event_count_through=1,
+        ledger_continuity_accumulator_through=context_fingerprint(
+            "test-ledger-continuity:v1", 1
+        ),
+    )
+    seed_reference = build_frozen_fact(
+        RunTranscriptSeedReferenceFact,
+        schema_version="run_transcript_seed_ref.v1",
+        seed_artifact_id="artifact:run-transcript-seed:test",
+        seed_artifact_sha256=context_fingerprint("test-run-seed-bytes:v1", context_id),
+        seed_artifact_bytes=1,
+        seed_semantic_fingerprint=context_fingerprint(
+            "test-run-seed-semantic:v1", context_id
+        ),
+        root_materialization_fingerprint=context_fingerprint(
+            "test-run-seed-root:v1", context_id
+        ),
+        seed_artifact_contract_fingerprint=context_fingerprint(
+            "test-run-seed-contract:v1", 1
+        ),
+        source_runtime_session_id=runtime_session_id,
+        source_ledger_through_sequence=1,
+        source_ledger_continuity_accumulator=primary_horizon.ledger_continuity_accumulator_through,
+        source_checkpoint_id=None,
+    )
+    base_reference = build_frozen_fact(
+        RunSeedProjectionBaseReferenceFact,
+        schema_version="run_seed_projection_base_reference.v1",
+        base_kind="run_seed",
+        run_seed_reference=seed_reference,
+        stable_semantic_state_fingerprint=context_fingerprint(
+            "test-stable-transcript-state:v1", context_id
+        ),
+        source_base_fingerprint=context_fingerprint(
+            "test-projection-base:v1", context_id
+        ),
+    )
+    run_start_reference = ContextEventReferenceFact(
+        runtime_session_id=runtime_session_id,
+        event_id="run-start:test",
+        sequence=1,
+        event_type="RUN_START",
+        payload_fingerprint=context_fingerprint("test-run-start:v1", context_id),
+    )
+    source_references = build_frozen_fact(
+        ContextCompileSourceReferenceSetFact,
+        schema_version="context_compile_authority_reference_set.v1",
+        run_start_event_reference=run_start_reference,
+        continuation_event_reference=None,
+        primary_ledger_horizon=primary_horizon,
+        authority_horizon_set_reference=(
+            candidate.provider_input_plan.authority_horizon_set
+        ),
+        transcript_projection_base_reference=base_reference,
+    )
+    budget_decision_fingerprint = context_fingerprint(
+        "context-compile-budget-decision:v1",
+        {
+            "resolved_model_target_fingerprint": call.target.target_fingerprint,
+            "token_estimator_fingerprint": call.target.token_estimator.estimator_fingerprint,
+            "input_budget_tokens": budget.input_budget_tokens,
+            "final_payload_estimated_tokens": budget.final_payload_estimated_tokens,
+        },
+    )
+    semantic_commit = build_frozen_fact(
+        ContextCompileInputCommitFact,
+        schema_version="context_compile_input_commit.v1",
+        runtime_session_id=runtime_session_id,
+        run_id=run_id,
         context_id=context_id,
-        input_manifest_artifact_id=f"context-input-manifest:test:{context_id}",
-        input_manifest_content_fingerprint=context_fingerprint(
-            "test-context-input-manifest-content:v1", context_id
+        resolved_model_call_id=call.resolved_model_call_id,
+        resolved_model_target_fingerprint=call.target.target_fingerprint,
+        model_call_index=model_call_index,
+        compile_attempt_index=1,
+        context_retry_index=0,
+        source_through_sequence=1,
+        source_references=source_references,
+        snapshot_semantic_fingerprint=context_fingerprint(
+            "test-context-snapshot:v1", context_id
         ),
-        input_manifest_fact_fingerprint=context_fingerprint(
-            "test-context-input-manifest-fact:v1", context_id
+        ordered_projection_identity=projection_identity,
+        prepared_provider_input_plan_fingerprint=prepared_plan.plan_fingerprint,
+        canonical_provider_input_plan_fingerprint=(
+            candidate.provider_input_plan.plan_fingerprint
         ),
-        projection_identity=projection_identity,
+        provider_neutral_payload_fingerprint=context_fingerprint(
+            "test-provider-neutral-payload:v1", context_id
+        ),
+        input_aggregate_fingerprint=context_fingerprint(
+            "test-context-input-aggregate:v1", context_id
+        ),
+        canonical_render_decisions_fingerprint=context_fingerprint(
+            "test-render-decisions:v1", context_id
+        ),
+        token_estimator_fingerprint=call.target.token_estimator.estimator_fingerprint,
+        input_budget_tokens=budget.input_budget_tokens,
+        final_payload_estimated_tokens=budget.final_payload_estimated_tokens,
+        budget_decision_fingerprint=budget_decision_fingerprint,
     )
     payload = {
         name: getattr(candidate, name)
@@ -374,19 +462,33 @@ def _compiled_provider_input_candidate_fixture(
         if name not in {"schema_version", "candidate_fingerprint"}
     }
     payload.update(
-        candidate_kind="compiled_manifest",
+        candidate_kind="compiled_context",
         prepared_plan=prepared_plan,
-        manifest_projection_reference=manifest_reference,
+        semantic_commit_fingerprint=semantic_commit.commit_fingerprint,
+        ordered_projection_identity_fingerprint=projection_identity.identity_fingerprint,
         rollover_request=None,
     )
-    return (
-        build_frozen_fact(
-            PreparedProviderInputAppendCandidateFact,
-            schema_version="prepared_provider_input_append_candidate.v2",
-            **payload,
-        ),
-        manifest_reference,
+    compiled_candidate = build_frozen_fact(
+        PreparedProviderInputAppendCandidateFact,
+        schema_version="prepared_provider_input_append_candidate.v3",
+        **payload,
     )
+    preparation_install = build_frozen_fact(
+        ProviderInputPreparationInstallFact,
+        schema_version="provider_input_preparation_install.v2",
+        semantic_commit_fingerprint=semantic_commit.commit_fingerprint,
+        preparation_ownership=compiled_candidate.preparation_ownership,
+        prepared_candidate_fingerprint=compiled_candidate.candidate_fingerprint,
+        prepared_plan_fingerprint=prepared_plan.plan_fingerprint,
+        canonical_provider_input_plan_fingerprint=(
+            compiled_candidate.provider_input_plan.plan_fingerprint
+        ),
+        ordered_projection_identity_fingerprint=projection_identity.identity_fingerprint,
+        generation_commit_guard=compiled_candidate.generation_commit_guard,
+        rollover_request_fingerprint=None,
+    )
+    expectation = build_context_input_audit_expectation_for_commit(semantic_commit)
+    return compiled_candidate, semantic_commit, preparation_install, expectation
 
 
 def model_call_start_fields(

@@ -124,9 +124,7 @@ class RuntimeSessionRunLedgerPort:
     def pending_committed_reducer_repair_handles(self):
         return self.__session.pending_committed_reducer_repair_handles()
 
-    async def wait_committed_reducer_repair(
-        self, handle, *, deadline_monotonic: float
-    ):
+    async def wait_committed_reducer_repair(self, handle, *, deadline_monotonic: float):
         return await self.__session.wait_committed_reducer_repair(
             handle,
             deadline_monotonic=deadline_monotonic,
@@ -273,10 +271,6 @@ class RuntimeSessionRunContextPort:
     @property
     def prepared_observation_rollup_cache(self):
         return self.__session.prepared_observation_rollup_cache
-
-    @property
-    def context_input_manifest_service(self):
-        return self.__session.context_input_manifest_service
 
     @property
     def transcript_projection_checkpoint_service(self):

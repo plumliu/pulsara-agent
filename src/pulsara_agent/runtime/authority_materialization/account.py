@@ -588,9 +588,9 @@ class LedgerMaterializationCoordinator:
         self.charge_contract = charge_contract
         self.limits = limits
         self._prepare_event = prepare_event or (lambda event: event)
-        self._pre_commit_admission: (
-            Callable[[tuple[AgentEvent, ...]], None] | None
-        ) = None
+        self._pre_commit_admission: Callable[[tuple[AgentEvent, ...]], None] | None = (
+            None
+        )
         self._lock = RLock()
 
     def bind_pre_commit_admission(

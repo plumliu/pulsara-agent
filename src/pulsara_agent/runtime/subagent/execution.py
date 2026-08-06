@@ -10,6 +10,13 @@ from typing import TYPE_CHECKING, Callable, Literal
 from uuid import uuid4
 
 from pulsara_agent.ports.run_execution import LedgerHorizonFact
+from pulsara_agent.ports.runtime_session_teardown import (
+    NonHostRuntimeSessionTeardownCapability,
+    NonHostRuntimeSessionTeardownPurpose,
+    NonHostRuntimeSessionTeardownReconciliationRequired,
+    NonHostRuntimeSessionTeardownRetryableError,
+    bind_non_host_runtime_session_teardown_capability,
+)
 from pulsara_agent.ports.subagent import (
     ChildCapacitySlot,
     LiveChildCapacityReservationSlot,
@@ -24,6 +31,21 @@ from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.run_execution.factory import RunActivationComposition
+
+
+_CHILD_TEARDOWN_MAX_PHYSICAL_ATTEMPTS = 3
+_CHILD_TEARDOWN_RETRY_BACKOFF_SECONDS = (0.05, 0.10)
+
+
+def _bind_child_teardown_capability(
+    session: RuntimeSession | None,
+) -> NonHostRuntimeSessionTeardownCapability | None:
+    if session is None:
+        return None
+    return bind_non_host_runtime_session_teardown_capability(
+        session,
+        purpose=NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL,
+    )
 
 
 @dataclass(slots=True)
@@ -80,6 +102,17 @@ class ChildRuntimeCompositionLease:
     generation: int
     state: Literal["active", "closing", "released"]
     child_session: RuntimeSession | None
+    physical_teardown_capability: NonHostRuntimeSessionTeardownCapability | None
+    physical_teardown_state: Literal[
+        "active",
+        "closing",
+        "retry_wait",
+        "closed",
+        "reconciliation_required",
+    ] = "active"
+    physical_teardown_generation: int = 0
+    physical_teardown_task: asyncio.Task[None] | None = None
+    physical_teardown_failure_code: str | None = None
     composition: RunActivationComposition | None = None
 
 
@@ -338,6 +371,9 @@ class ChildAdmissionSessionRegistry:
                     generation=1,
                     state="active",
                     child_session=child_session,
+                    physical_teardown_capability=(
+                        _bind_child_teardown_capability(child_session)
+                    ),
                 ),
                 settlement_state="active",
                 activation_operation_state="not_started",
@@ -398,6 +434,9 @@ class ChildAdmissionSessionRegistry:
                     generation=1,
                     state="active",
                     child_session=child_session,
+                    physical_teardown_capability=(
+                        _bind_child_teardown_capability(child_session)
+                    ),
                 ),
                 settlement_state="active",
                 activation_operation_state="not_started",
@@ -430,6 +469,13 @@ class ChildAdmissionSessionRegistry:
             if lease.state != "active":
                 raise RuntimeError("child composition lease is not active")
             lease.child_session = session
+            lease.physical_teardown_capability = _bind_child_teardown_capability(
+                session
+            )
+            lease.physical_teardown_state = "active"
+            lease.physical_teardown_generation = 0
+            lease.physical_teardown_task = None
+            lease.physical_teardown_failure_code = None
 
     def attach_activation_composition(
         self,
@@ -559,6 +605,258 @@ class ChildAdmissionSessionRegistry:
             owner.parent_graph_slot.state = "reconciliation_required"
             owner.settlement_state = "reconciliation_required"
 
+    def install_or_get_child_session_teardown_task(
+        self,
+        subagent_run_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> asyncio.Task[None] | None:
+        """Install the sole teardown lineage owner or return its exact winner."""
+
+        with self._lock:
+            owner = self._owners.get(subagent_run_id)
+            if owner is None:
+                raise RuntimeError("child session owner disappeared before teardown")
+            lease = owner.child_composition_lease
+            if lease.physical_teardown_state == "closed":
+                if lease.physical_teardown_task is not None:
+                    raise RuntimeError("closed child teardown retained its task")
+                return None
+            if lease.physical_teardown_state in {"closing", "retry_wait"}:
+                task = lease.physical_teardown_task
+                if task is None:
+                    raise RuntimeError("active child teardown lineage lost its task")
+                if task.done():
+                    raise RuntimeError(
+                        "active child teardown lineage retained an exited task"
+                    )
+                return task
+            if lease.physical_teardown_state == "reconciliation_required":
+                raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                    lease.physical_teardown_failure_code
+                    or "child RuntimeSession teardown requires reconciliation"
+                )
+            if lease.physical_teardown_task is not None:
+                raise RuntimeError("settled child teardown unexpectedly owns a task")
+            if lease.physical_teardown_state != "active":
+                raise RuntimeError("child teardown state is unsupported")
+            capability = lease.physical_teardown_capability
+            if capability is None:
+                raise RuntimeError("child teardown capability is unavailable")
+            if capability.runtime_session_id != lease.child_runtime_session_id:
+                raise RuntimeError("child teardown capability identity drifted")
+            if (
+                capability.purpose
+                is not NonHostRuntimeSessionTeardownPurpose.CHILD_TERMINAL
+            ):
+                raise RuntimeError("child teardown capability purpose drifted")
+            lease.physical_teardown_generation += 1
+            generation = lease.physical_teardown_generation
+            lease.physical_teardown_failure_code = None
+
+            async def run_teardown_lineage() -> None:
+                attempt_generation = generation
+                for attempt_index in range(_CHILD_TEARDOWN_MAX_PHYSICAL_ATTEMPTS):
+                    loop = asyncio.get_running_loop()
+                    attempt_deadline = deadline_monotonic
+                    retryable_error: BaseException | None = None
+                    try:
+                        if attempt_deadline <= loop.time():
+                            raise NonHostRuntimeSessionTeardownRetryableError(
+                                "child RuntimeSession teardown lineage deadline expired"
+                            )
+                        await capability.teardown(
+                            deadline_monotonic=attempt_deadline,
+                        )
+                    except NonHostRuntimeSessionTeardownRetryableError as exc:
+                        retryable_error = exc
+                    except NonHostRuntimeSessionTeardownReconciliationRequired:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code=(
+                                "child_runtime_session_teardown_reconciliation_required"
+                            ),
+                        )
+                        raise
+                    except asyncio.CancelledError:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code="child_runtime_session_teardown_owner_cancelled",
+                        )
+                        raise
+                    except BaseException as exc:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code=(
+                                "child_runtime_session_teardown_reconciliation_required"
+                            ),
+                        )
+                        raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                            "child RuntimeSession teardown failed physically"
+                        ) from exc
+                    else:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="closed",
+                            failure_code=None,
+                        )
+                        self._try_release(subagent_run_id)
+                        return
+
+                    if retryable_error is None:
+                        raise RuntimeError(
+                            "child teardown retry classification drifted"
+                        )
+                    retry_ordinal = attempt_index + 1
+                    if retry_ordinal >= _CHILD_TEARDOWN_MAX_PHYSICAL_ATTEMPTS:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code=(
+                                "child_runtime_session_teardown_retry_exhausted"
+                            ),
+                        )
+                        raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                            "child RuntimeSession teardown retry budget was exhausted"
+                        ) from retryable_error
+                    backoff = _CHILD_TEARDOWN_RETRY_BACKOFF_SECONDS[retry_ordinal - 1]
+                    if loop.time() + backoff >= deadline_monotonic:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code=(
+                                "child_runtime_session_teardown_deadline_exhausted"
+                            ),
+                        )
+                        raise NonHostRuntimeSessionTeardownReconciliationRequired(
+                            "child RuntimeSession teardown lineage deadline was exhausted"
+                        ) from retryable_error
+                    self._mark_child_teardown_retry_wait(
+                        subagent_run_id,
+                        lease=lease,
+                        generation=attempt_generation,
+                    )
+                    try:
+                        await asyncio.sleep(backoff)
+                    except asyncio.CancelledError:
+                        self._settle_child_teardown_task(
+                            subagent_run_id,
+                            lease=lease,
+                            generation=attempt_generation,
+                            resulting_state="reconciliation_required",
+                            failure_code="child_runtime_session_teardown_owner_cancelled",
+                        )
+                        raise
+                    attempt_generation = self._advance_child_teardown_retry(
+                        subagent_run_id,
+                        lease=lease,
+                        generation=attempt_generation,
+                    )
+
+            task = asyncio.create_task(
+                run_teardown_lineage(),
+                name=f"child-session-teardown-lineage:{subagent_run_id}:{generation}",
+            )
+            lease.physical_teardown_state = "closing"
+            lease.physical_teardown_task = task
+            return task
+
+    def _settle_child_teardown_task(
+        self,
+        subagent_run_id: str,
+        *,
+        lease: ChildRuntimeCompositionLease,
+        generation: int,
+        resulting_state: Literal["closed", "reconciliation_required"],
+        failure_code: str | None,
+    ) -> None:
+        with self._lock:
+            current = self._owners.get(subagent_run_id)
+            if current is None:
+                raise RuntimeError("child session owner disappeared during teardown")
+            current_lease = current.child_composition_lease
+            if (
+                current_lease is not lease
+                or current_lease.physical_teardown_generation != generation
+                or current_lease.physical_teardown_task is not asyncio.current_task()
+            ):
+                raise RuntimeError("child teardown winner identity drifted")
+            current_lease.physical_teardown_state = resulting_state
+            current_lease.physical_teardown_task = None
+            current_lease.physical_teardown_failure_code = failure_code
+            if resulting_state == "reconciliation_required":
+                current.settlement_state = "reconciliation_required"
+
+    def _mark_child_teardown_retry_wait(
+        self,
+        subagent_run_id: str,
+        *,
+        lease: ChildRuntimeCompositionLease,
+        generation: int,
+    ) -> None:
+        with self._lock:
+            current = self._owners.get(subagent_run_id)
+            if current is None:
+                raise RuntimeError("child session owner disappeared during retry")
+            current_lease = current.child_composition_lease
+            if (
+                current_lease is not lease
+                or current_lease.physical_teardown_generation != generation
+                or current_lease.physical_teardown_task is not asyncio.current_task()
+                or current_lease.physical_teardown_state != "closing"
+            ):
+                raise RuntimeError("child teardown retry owner identity drifted")
+            current_lease.physical_teardown_state = "retry_wait"
+            current_lease.physical_teardown_failure_code = (
+                "child_runtime_session_teardown_retryable"
+            )
+
+    def _advance_child_teardown_retry(
+        self,
+        subagent_run_id: str,
+        *,
+        lease: ChildRuntimeCompositionLease,
+        generation: int,
+    ) -> int:
+        with self._lock:
+            current = self._owners.get(subagent_run_id)
+            if current is None:
+                raise RuntimeError("child session owner disappeared during retry")
+            current_lease = current.child_composition_lease
+            if (
+                current_lease is not lease
+                or current_lease.physical_teardown_generation != generation
+                or current_lease.physical_teardown_task is not asyncio.current_task()
+                or current_lease.physical_teardown_state != "retry_wait"
+            ):
+                raise RuntimeError("child teardown retry generation drifted")
+            current_lease.physical_teardown_generation += 1
+            current_lease.physical_teardown_state = "closing"
+            current_lease.physical_teardown_failure_code = None
+            return current_lease.physical_teardown_generation
+
+    def child_session_is_physically_closed(self, subagent_run_id: str) -> bool:
+        with self._lock:
+            owner = self._owners.get(subagent_run_id)
+            if owner is None:
+                raise RuntimeError("child session owner is unavailable")
+            return owner.child_composition_lease.physical_teardown_state == "closed"
+
     def reconcile(
         self,
         graph: SubagentGraphState,
@@ -608,15 +906,24 @@ class ChildAdmissionSessionRegistry:
             owner = self._owners.get(subagent_run_id)
             if owner is None:
                 return
+            lease = owner.child_composition_lease
+            if lease.physical_teardown_state == "reconciliation_required":
+                owner.settlement_state = "reconciliation_required"
+                return
             if owner.parent_graph_slot.state != "terminal_settlement_full":
                 owner.settlement_state = "parent_graph_pending"
                 return
             if owner.activation_operation_state != "exited":
                 owner.settlement_state = "composition_closing"
                 return
-            lease = owner.child_composition_lease
             composition = lease.composition
             if composition is not None and composition.registry.owner_count != 0:
+                owner.settlement_state = "composition_closing"
+                return
+            if (
+                lease.child_session is not None
+                and lease.physical_teardown_state != "closed"
+            ):
                 owner.settlement_state = "composition_closing"
                 return
             lease.state = "closing"
