@@ -9,7 +9,7 @@ _Created: 2026-07-04_
 - [src/pulsara_agent/settings.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/settings.py)
 - [src/pulsara_agent/cli.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/cli.py)
 - [src/pulsara_agent/repl.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/repl.py)
-- [src/pulsara_agent/host/identity.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/identity.py)
+- [src/pulsara_agent/workspace_identity.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/workspace_identity.py)
 - [src/pulsara_agent/bundled_skills/](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/bundled_skills)
 - [tests/test_settings.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_settings.py)
 - [tests/test_cli_host.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_cli_host.py)

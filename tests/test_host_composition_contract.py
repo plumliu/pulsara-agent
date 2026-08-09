@@ -8,7 +8,7 @@ import pytest
 
 from pulsara_agent.host.composition_contract import build_host_runtime_admission
 from pulsara_agent.host.core import HostCore
-from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
+from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.production_composition import ProductionHostComposition
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions

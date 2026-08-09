@@ -1,6 +1,7 @@
 from pulsara_agent.storage import RUNTIME_TRUTH_TABLES
 from pulsara_agent.storage.migrations.manifest import (
     POSTGRES_LATEST_SCHEMA_MANIFEST,
+    POSTGRES_SCHEMA_MANIFESTS,
 )
 
 
@@ -40,9 +41,15 @@ def test_runtime_schema_preserves_tool_call_and_parent_contracts() -> None:
     )
 
 
-def test_working_context_remains_runtime_operational_state() -> None:
+def test_working_context_legacy_shape_remains_but_stage2_revokes_runtime_write() -> None:
     relation = _relation("working_context_summaries")
-    assert relation["runtime_writable"] is True
+    assert relation["runtime_writable"] is False
+    legacy_relation = next(
+        item
+        for item in POSTGRES_SCHEMA_MANIFESTS[12].owned_relations
+        if item["relation_name"] == "working_context_summaries"
+    )
+    assert legacy_relation["runtime_writable"] is True
     assert "UNIQUE (memory_domain_id)" in _constraint_definitions(
         "working_context_summaries"
     )

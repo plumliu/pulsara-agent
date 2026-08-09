@@ -106,22 +106,51 @@ class PostgresRuntimeGrantRequirementFact:
 class PostgresRuntimeGrantPolicyFact:
     through_version: int
     requirements: tuple[PostgresRuntimeGrantRequirementFact, ...]
+    revocations: tuple["PostgresRuntimePrivilegeRevocationFact", ...]
     policy_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.through_version < 0:
             raise ValueError("grant policy through_version must be non-negative")
+        fingerprint_payload: dict[str, object] = {
+            "through_version": self.through_version,
+            "requirement_fingerprints": tuple(
+                item.requirement_fingerprint for item in self.requirements
+            ),
+        }
+        if self.through_version >= 13:
+            fingerprint_payload["revocation_fingerprints"] = tuple(
+                item.revocation_fingerprint for item in self.revocations
+            )
         expected = postgres_schema_fingerprint(
             "pulsara:postgres-runtime-grant-policy:v1",
-            {
-                "through_version": self.through_version,
-                "requirement_fingerprints": tuple(
-                    item.requirement_fingerprint for item in self.requirements
-                ),
-            },
+            fingerprint_payload,
         )
         if self.policy_fingerprint != expected:
             raise ValueError("grant policy fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresRuntimePrivilegeRevocationFact:
+    target: PostgresGrantTargetFact
+    ordered_revoked_privileges: tuple[str, ...]
+    revocation_fingerprint: str
+
+    def __post_init__(self) -> None:
+        _validate_target_privileges(
+            self.target,
+            self.ordered_revoked_privileges,
+            operation="revocation",
+        )
+        expected = postgres_schema_fingerprint(
+            "pulsara:postgres-runtime-privilege-revocation:v1",
+            {
+                "target": self.target,
+                "ordered_revoked_privileges": self.ordered_revoked_privileges,
+            },
+        )
+        if self.revocation_fingerprint != expected:
+            raise ValueError("privilege revocation fingerprint mismatch")
 
 
 def _requirement(
@@ -140,15 +169,64 @@ def _requirement(
     )
 
 
+def _revocation(
+    target: PostgresGrantTargetFact,
+    privileges: tuple[str, ...],
+) -> PostgresRuntimePrivilegeRevocationFact:
+    _validate_target_privileges(target, privileges, operation="revocation")
+    payload = {"target": target, "ordered_revoked_privileges": privileges}
+    return PostgresRuntimePrivilegeRevocationFact(
+        target=target,
+        ordered_revoked_privileges=privileges,
+        revocation_fingerprint=postgres_schema_fingerprint(
+            "pulsara:postgres-runtime-privilege-revocation:v1", payload
+        ),
+    )
+
+
+def _validate_target_privileges(
+    target: PostgresGrantTargetFact,
+    privileges: tuple[str, ...],
+    *,
+    operation: str,
+) -> None:
+    if not privileges or len(privileges) != len(set(privileges)):
+        raise ValueError(f"{operation} privileges must be non-empty and unique")
+    if isinstance(target, PostgresSchemaGrantTargetFact):
+        allowed = {item.value for item in PostgresSchemaPrivilege}
+    elif isinstance(target, PostgresRelationGrantTargetFact):
+        allowed = {item.value for item in PostgresRelationPrivilege}
+    elif isinstance(target, PostgresFunctionGrantTargetFact):
+        allowed = {item.value for item in PostgresFunctionPrivilege}
+    elif isinstance(target, PostgresTypeGrantTargetFact):
+        allowed = {item.value for item in PostgresTypePrivilege}
+    else:  # pragma: no cover - closed union
+        raise TypeError("unknown privilege target")
+    if not set(privileges) <= allowed:
+        raise ValueError(f"{operation} privilege is invalid for its target kind")
+
+
 def build_postgres_runtime_grant_policy(
     through_version: int,
 ) -> PostgresRuntimeGrantPolicyFact:
     manifest = build_postgres_schema_manifest(through_version)
+    schema_names = tuple(
+        sorted(
+            {"public"}
+            | {
+                str(relation["schema_name"])
+                for relation in manifest.owned_relations
+            }
+        )
+    )
     requirements: list[PostgresRuntimeGrantRequirementFact] = [
         _requirement(
-            PostgresSchemaGrantTargetFact(target_kind="schema", schema_name="public"),
+            PostgresSchemaGrantTargetFact(
+                target_kind="schema", schema_name=schema_name
+            ),
             (PostgresSchemaPrivilege.USAGE.value,),
         )
+        for schema_name in schema_names
     ]
     for relation in manifest.owned_relations:
         declared_privileges = relation.get("runtime_privileges")
@@ -205,18 +283,40 @@ def build_postgres_runtime_grant_policy(
             )
         )
     ordered = tuple(requirements)
+    revocations: tuple[PostgresRuntimePrivilegeRevocationFact, ...] = ()
+    if through_version >= 13:
+        legacy_manifest = build_postgres_schema_manifest(12)
+        revocations = tuple(
+            _revocation(
+                PostgresRelationGrantTargetFact(
+                    target_kind="relation",
+                    schema_name="public",
+                    relation_name=str(relation["relation_name"]),
+                    relation_kind="table",
+                ),
+                tuple(item.value for item in PostgresRelationPrivilege),
+            )
+            for relation in legacy_manifest.owned_relations
+            if str(relation["schema_name"]) == "public"
+            and str(relation["relation_name"]) != "pulsara_schema_migrations"
+        )
+    fingerprint_payload: dict[str, object] = {
+        "through_version": through_version,
+        "requirement_fingerprints": tuple(
+            requirement.requirement_fingerprint for requirement in ordered
+        ),
+    }
+    if through_version >= 13:
+        fingerprint_payload["revocation_fingerprints"] = tuple(
+            item.revocation_fingerprint for item in revocations
+        )
     fingerprint = postgres_schema_fingerprint(
-        "pulsara:postgres-runtime-grant-policy:v1",
-        {
-            "through_version": through_version,
-            "requirement_fingerprints": tuple(
-                requirement.requirement_fingerprint for requirement in ordered
-            ),
-        },
+        "pulsara:postgres-runtime-grant-policy:v1", fingerprint_payload
     )
     return PostgresRuntimeGrantPolicyFact(
         through_version=through_version,
         requirements=ordered,
+        revocations=revocations,
         policy_fingerprint=fingerprint,
     )
 
@@ -270,6 +370,53 @@ class PostgresRuntimeGrantExecutor:
             raise TypeError("unsupported grant target")
         connection.execute(statement)
 
+    def apply_revocation(
+        self,
+        connection: Connection,
+        *,
+        runtime_role: str,
+        revocation: PostgresRuntimePrivilegeRevocationFact,
+    ) -> None:
+        target = revocation.target
+        privileges = sql.SQL(", ").join(
+            sql.SQL(privilege)
+            for privilege in revocation.ordered_revoked_privileges
+        )
+        if isinstance(target, PostgresSchemaGrantTargetFact):
+            statement = sql.SQL("REVOKE {} ON SCHEMA {} FROM {}").format(
+                privileges,
+                sql.Identifier(target.schema_name),
+                sql.Identifier(runtime_role),
+            )
+        elif isinstance(target, PostgresRelationGrantTargetFact):
+            statement = sql.SQL("REVOKE {} ON TABLE {}.{} FROM {}").format(
+                privileges,
+                sql.Identifier(target.schema_name),
+                sql.Identifier(target.relation_name),
+                sql.Identifier(runtime_role),
+            )
+        elif isinstance(target, PostgresFunctionGrantTargetFact):
+            arguments = sql.SQL(", ").join(
+                _qualified_type_sql(item) for item in target.ordered_argument_types
+            )
+            statement = sql.SQL("REVOKE {} ON FUNCTION {}.{}({}) FROM {}").format(
+                privileges,
+                sql.Identifier(target.schema_name),
+                sql.Identifier(target.function_name),
+                arguments,
+                sql.Identifier(runtime_role),
+            )
+        elif isinstance(target, PostgresTypeGrantTargetFact):
+            statement = sql.SQL("REVOKE {} ON TYPE {}.{} FROM {}").format(
+                privileges,
+                sql.Identifier(target.schema_name),
+                sql.Identifier(target.type_name),
+                sql.Identifier(runtime_role),
+            )
+        else:  # pragma: no cover - closed union
+            raise TypeError("unsupported privilege revocation target")
+        connection.execute(statement)
+
 
 def _qualified_type_sql(type_identity: str) -> sql.Composed:
     parts = type_identity.split(".")
@@ -285,6 +432,7 @@ __all__ = [
     "PostgresRuntimeGrantExecutor",
     "PostgresRuntimeGrantPolicyFact",
     "PostgresRuntimeGrantRequirementFact",
+    "PostgresRuntimePrivilegeRevocationFact",
     "PostgresSchemaGrantTargetFact",
     "PostgresTypeGrantTargetFact",
     "build_postgres_runtime_grant_policy",

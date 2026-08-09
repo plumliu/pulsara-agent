@@ -715,6 +715,9 @@ def test_checkpoint_close_reports_blocked_until_physical_io_exits() -> None:
 
 
 def test_checkpoint_conflict_is_terminal_for_candidate_and_blocks_close() -> None:
+    # Historical test ID retained.  Stage 1 narrows "blocks close" to an
+    # unfinished physical operation: the conflict still hard-fences runtime
+    # admission, but its completed derived attempt no longer blocks teardown.
     async def scenario() -> None:
         event_log = _ConflictingCheckpointEventLog()
         event_log.append(_event("conflict"))
@@ -759,10 +762,10 @@ def test_checkpoint_conflict_is_terminal_for_candidate_and_blocks_close() -> Non
         )
         await asyncio.sleep(0.05)
         assert event_log.write_calls == 1
-        with pytest.raises(TimeoutError, match="close blocked"):
-            await service.stop_admission_and_drain(
-                deadline_monotonic=monotonic() + 0.02
-            )
+        with pytest.raises(RuntimeProjectionCheckpointAdmissionBlocked):
+            service.assert_event_admission((_event("still-hard-fenced"),))
+        await service.stop_admission_and_drain(deadline_monotonic=monotonic() + 2)
+        assert service.diagnostics("reducer:conflict")["state"] == "closed"
 
     asyncio.run(scenario())
 
@@ -810,6 +813,7 @@ def test_checkpoint_lag_soft_pressure_and_hard_admission_cover_physical_suffix()
         )
     )
     assert service.diagnostics("reducer:lag")["soft_pressure"] is True
+    service.assert_event_admission((relevant_event, irrelevant_event))
 
     owner = service._owners["reducer:lag"]  # noqa: SLF001 - hard-bound fixture
     owner.pending_recovery_event_count = CHECKPOINT_RECOVERY_HARD_EVENTS

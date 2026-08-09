@@ -11,7 +11,11 @@ from tests.support.model_stream import (
 )
 
 from pulsara_agent.event import EventContext
-from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
+from pulsara_agent.runtime.publisher import (
+    RuntimeEventPublisher,
+    RuntimeEventSubscriberSemantics,
+    RuntimePublishedEvent,
+)
 
 
 CTX = EventContext(
@@ -274,6 +278,60 @@ def test_runtime_publisher_publish_raises_when_subscriber_fails_but_continues_de
 
     assert [event.event.sequence for event in recording.events] == [1]
     assert [type(error) for error in publisher.errors] == [RuntimeError]
+
+
+def test_runtime_publisher_quarantines_failed_derived_subscriber() -> None:
+    publisher = RuntimeEventPublisher(runtime_session_id="runtime:publisher")
+    recording = RecordingSubscriber()
+
+    class FailingDerivedSubscriber:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            self.calls += 1
+            raise RuntimeError(
+                f"derived subscriber failed at {published.event.sequence}"
+            )
+
+    failing = FailingDerivedSubscriber()
+    publisher.subscribe(
+        failing,
+        semantics=RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT,
+    )
+    publisher.subscribe(recording)
+
+    async def run() -> None:
+        for sequence in (1, 2):
+            await publisher.publish(
+                RuntimePublishedEvent(
+                    runtime_session_id="runtime:publisher",
+                    event=make_text_block_segment_event(
+                        **CTX.event_fields(),
+                        block_id=f"text:{sequence}",
+                        delta=str(sequence),
+                        sequence=sequence,
+                    ),
+                )
+            )
+
+    asyncio.run(run())
+
+    assert failing.calls == 1
+    assert [item.event.sequence for item in recording.events] == [1, 2]
+    assert [type(error) for error in publisher.errors] == [RuntimeError]
+
+
+def test_runtime_publisher_rejects_subscriber_semantics_drift() -> None:
+    publisher = RuntimeEventPublisher(runtime_session_id="runtime:publisher")
+    subscriber = RecordingSubscriber()
+    publisher.subscribe(
+        subscriber,
+        semantics=RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT,
+    )
+
+    with pytest.raises(ValueError, match="semantics cannot change"):
+        publisher.subscribe(subscriber)
 
 
 def test_runtime_publisher_can_resume_after_existing_history_sequence() -> None:

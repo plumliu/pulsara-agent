@@ -11,6 +11,7 @@ from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from threading import RLock
 from time import monotonic
@@ -121,6 +122,7 @@ from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.publisher import (
     PublisherEnqueueResult,
     RuntimeEventPublisher,
+    RuntimeEventSubscriberSemantics,
     RuntimePublishedEvent,
 )
 from pulsara_agent.runtime.terminal import (
@@ -283,12 +285,20 @@ class PublisherSequenceGapError(RuntimeError):
     """Committed publisher catch-up interval is unavailable or non-contiguous."""
 
 
+class CommittedReducerSemantics(StrEnum):
+    SEMANTIC_REQUIRED = "semantic_required"
+    DERIVED_BEST_EFFORT = "derived_best_effort"
+
+
 @dataclass(slots=True)
 class _CommittedReducerRegistration:
     reducer_id: str
     through_sequence: int
     ingress: CommittedReducerIngressPort
     rebuild_owner: CommittedReducerRebuildPort | None = None
+    semantics: CommittedReducerSemantics = CommittedReducerSemantics.SEMANTIC_REQUIRED
+    bounded_fallback: str | None = None
+    quarantined: bool = False
     reconciliation_required: bool = False
     last_error: str | None = None
     last_fold_receipt: CommittedReducerFoldReceipt | None = None
@@ -971,7 +981,10 @@ class RuntimeSession:
             runtime_session_id=self.runtime_session_id,
             next_sequence_to_publish=_next_publish_sequence(self.event_log),
         )
-        self.publisher.subscribe(self.hook_manager)
+        self.publisher.subscribe(
+            self.hook_manager,
+            semantics=RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT,
+        )
         from pulsara_agent.runtime.authority_materialization import (
             TranscriptProjectionCheckpointService,
         )
@@ -2827,7 +2840,16 @@ class RuntimeSession:
         ingress: CommittedReducerIngressPort,
         rebuild_owner: CommittedReducerRebuildPort | None = None,
         post_fold: Callable[[tuple[AgentEvent, ...]], None] | None = None,
+        semantics: CommittedReducerSemantics = (
+            CommittedReducerSemantics.SEMANTIC_REQUIRED
+        ),
+        bounded_fallback: str | None = None,
     ) -> None:
+        if (
+            semantics is CommittedReducerSemantics.DERIVED_BEST_EFFORT
+            and not bounded_fallback
+        ):
+            raise ValueError("derived committed reducer requires a bounded fallback")
         with self.write_coordinator.lock:
             if reducer_id in self._committed_reducers:
                 raise ValueError(f"Committed reducer already registered: {reducer_id}")
@@ -2843,6 +2865,8 @@ class RuntimeSession:
                     else None
                 ),
                 post_fold=post_fold,
+                semantics=semantics,
+                bounded_fallback=bounded_fallback,
             )
             # Registration is durable process state even when initial catch-up
             # fails. Keeping the failed registration is what makes an explicit
@@ -2857,8 +2881,14 @@ class RuntimeSession:
                     deadline_monotonic=self._runtime_open_deadline_monotonic,
                 )
             except Exception:
-                registration.reconciliation_required = True
                 registration.last_error = "initial committed reducer catch-up failed"
+                if (
+                    registration.semantics
+                    is CommittedReducerSemantics.DERIVED_BEST_EFFORT
+                ):
+                    registration.quarantined = True
+                    return
+                registration.reconciliation_required = True
                 self._reconciliation_required = True
                 raise
 
@@ -2886,6 +2916,7 @@ class RuntimeSession:
                 self._reconciliation_required = True
                 raise
             registration.reconciliation_required = False
+            registration.quarantined = False
             registration.last_error = None
             self._reconciliation_required = any(
                 item.reconciliation_required
@@ -2899,6 +2930,10 @@ class RuntimeSession:
         target_through_sequence: int,
         error: BaseException,
     ) -> None:
+        if registration.semantics is CommittedReducerSemantics.DERIVED_BEST_EFFORT:
+            registration.quarantined = True
+            registration.last_error = f"{type(error).__name__}: {_bounded_error(error)}"
+            return
         registration.reconciliation_required = True
         registration.last_error = f"{type(error).__name__}: {_bounded_error(error)}"
         self._reconciliation_required = True
@@ -5462,6 +5497,8 @@ class RuntimeSession:
             reducer_errors: list[CommittedReducerError] = []
             presentation_fold: LiveCommittedFoldResult | None = None
             for registration in self._committed_reducers.values():
+                if registration.quarantined:
+                    continue
                 try:
                     fold_result = self._apply_live_receipt_to_reducer(
                         registration,
@@ -6000,6 +6037,8 @@ class RuntimeSession:
     ) -> None:
         presentation_fold: LiveCommittedFoldResult | None = None
         for registration in self._committed_reducers.values():
+            if registration.quarantined:
+                continue
             if registration.through_sequence >= through_sequence:
                 continue
             try:
@@ -6349,7 +6388,11 @@ class RuntimeSession:
             default=0,
         )
         required = (
-            tuple(self._committed_reducers)
+            tuple(
+                reducer_id
+                for reducer_id, registration in self._committed_reducers.items()
+                if registration.semantics is CommittedReducerSemantics.SEMANTIC_REQUIRED
+            )
             if required_reducer_ids is None
             else tuple(dict.fromkeys(required_reducer_ids))
         )
@@ -6480,6 +6523,8 @@ class RuntimeSession:
                     "reducer_id": registration.reducer_id,
                     "through_sequence": registration.through_sequence,
                     "reconciliation_required": (registration.reconciliation_required),
+                    "semantics": registration.semantics.value,
+                    "quarantined": registration.quarantined,
                     "last_error_code": (
                         None
                         if registration.last_error is None

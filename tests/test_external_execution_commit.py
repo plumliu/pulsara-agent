@@ -31,7 +31,10 @@ from tests.conftest import (
     open_test_root_rollout_run,
 )
 from tests.support.model_call import test_resolved_target_fact
-from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.runtime_session import (
+    close_runtime_session_for_test,
+    in_memory_runtime_session,
+)
 
 
 def test_external_requirement_retains_physical_owner_until_exact_result(
@@ -375,13 +378,13 @@ def test_restart_restores_external_reservation_and_operation_owner(tmp_path) -> 
             restored_token
         )
         second._physical_reservation_facts.pop(key)
-        second.close()
+        close_runtime_session_for_test(second)
         original_token = first._physical_operation_admission_tokens.pop(key)
         first.checkpoint_dispatch_barrier_coordinator.release_write_admission(
             original_token
         )
         first._physical_reservation_facts.pop(key)
-        first.close()
+        close_runtime_session_for_test(first)
 
 
 def test_external_result_reference_mismatch_preserves_reservation(tmp_path) -> None:

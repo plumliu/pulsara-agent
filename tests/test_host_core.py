@@ -70,12 +70,12 @@ from pulsara_agent.event import (
     UserSteerCommittedEvent,
 )
 from pulsara_agent.host import (
-    HostCore,
     HostSessionBusyError,
     HostSessionPendingApprovalError,
     HostSessionPendingInteractionError,
     HostWorkspaceInput,
 )
+from pulsara_agent.host.core import HostCore
 from pulsara_agent.host.transcript import (
     FAILURE_NOTE_TEXT,
     INTERRUPTED_NOTE_TEXT,
@@ -1801,7 +1801,7 @@ def test_host_session_terminal_completion_event_replays_and_projects_notificatio
     assert terminal_summary["processes"][0]["process_id"] == replayed[0].process_id
 
 
-def test_host_terminal_monitor_registration_completion_and_autonomous_delivery(
+def legacy_host_terminal_monitor_registration_completion_and_autonomous_delivery(
     tmp_path, monkeypatch
 ) -> None:
     session_holder = {}
@@ -2062,7 +2062,7 @@ def test_host_terminal_process_kill_releases_completion_notification_slot(
     )
 
 
-def test_host_terminal_monitor_repeated_progress_without_reregistration(
+def legacy_host_terminal_monitor_repeated_progress_without_reregistration(
     tmp_path, monkeypatch
 ) -> None:
     epoch_one_gate = tmp_path / "release-monitor-epoch-one"

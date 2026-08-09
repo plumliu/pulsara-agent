@@ -16,7 +16,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.host.identity import HostWorkspaceInput, ResolvedWorkspace
+from pulsara_agent.workspace_identity import HostWorkspaceInput, ResolvedWorkspace
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,

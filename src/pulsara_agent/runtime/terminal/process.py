@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.event_log.serialization import build_raw_stored_event_envelope
-
 import os
 import pty
 import shlex
@@ -16,16 +14,10 @@ from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock, Thread, Timer
-from typing import Callable, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping
 from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, EventContext, TerminalProcessCompletedEvent
-from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.frozen import build_frozen_fact
-from pulsara_agent.ports.event_write import (
-    CommittedSemanticFoldSettlement,
-    RuntimeThreadEventSettlementReceipt,
-)
 from pulsara_agent.primitives.terminal_observation import (
     BoundedPreviewTerminalObservationCoverageFact,
     InlineTerminalObservationCoverageFact,
@@ -49,6 +41,15 @@ from pulsara_agent.runtime.terminal.shell import (
     TerminalShellConfig,
     detect_terminal_shell,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.event import (
+        AgentEvent,
+        EventContext,
+        TerminalProcessCompletedEvent,
+    )
+    from pulsara_agent.ports.event_write import RuntimeThreadEventSettlementReceipt
+    from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 
 
 _TIMEOUT_EXIT_CODE = 124
@@ -1079,7 +1080,11 @@ def _completion_event_reference(
         runtime_session_id = state.origin_runtime_session_id
     if event is None or event.sequence is None or runtime_session_id is None:
         return None
-    from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+    from pulsara_agent.event_log.serialization import (
+        DEFAULT_EVENT_SCHEMA_REGISTRY,
+        build_raw_stored_event_envelope,
+    )
+    from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 
     raw = build_raw_stored_event_envelope(
         event=event,
@@ -1282,10 +1287,14 @@ def _record_claimed_completion_event(
         TerminalProcessCompletedEvent | None,
     ],
 ) -> AgentEvent | None:
+    from pulsara_agent.ports.event_write import CommittedSemanticFoldSettlement
+
     record_event, fields, candidate = event_data
     try:
         event = candidate
         if event is None:
+            from pulsara_agent.event import TerminalProcessCompletedEvent
+
             processed = state.output.snapshot(max_chars=2000)
             fields["output_preview"] = processed.text
             fields["output_truncated"] = processed.truncated

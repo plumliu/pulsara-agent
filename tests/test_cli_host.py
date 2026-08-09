@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent import cli
-from pulsara_agent.capability import LocalSkillCapabilityProvider, LocalSkillProvider
 from pulsara_agent.capability.bundled_skills import (
     reset_bundled_skill as real_reset_bundled_skill,
     sync_bundled_skills as real_sync_bundled_skills,
@@ -36,7 +35,6 @@ from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
-from tests.support.runtime_session import in_memory_runtime_session
 from tests.support import (
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
@@ -557,20 +555,12 @@ def inspect_wiring(monkeypatch):
         lambda: _FakePostgresVerificationService(lease),
     )
 
-    def _build(_settings, workspace_root, **_kwargs):
-        return SimpleNamespace(
-            runtime_session=in_memory_runtime_session(workspace_root)
-        )
-
-    monkeypatch.setattr(cli, "build_durable_runtime_wiring", _build)
-
-
 def test_cli_host_run_uses_host_core_with_transient_workspace(
     monkeypatch, tmp_path
 ) -> None:
     FakeCore.instances.clear()
     sync_calls = []
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(
         cli, "_best_effort_sync_bundled_skills", lambda: sync_calls.append("sync")
     )
@@ -637,7 +627,7 @@ def test_cli_host_run_uses_production_host_core_without_backend_switch(
     monkeypatch, tmp_path
 ) -> None:
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -691,7 +681,7 @@ def test_cli_host_run_threads_explicit_permission_mode(monkeypatch, tmp_path) ->
             return self.session
 
     PolicyCapturingCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", PolicyCapturingCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PolicyCapturingCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -729,7 +719,7 @@ def test_cli_host_run_returns_pending_approval_summary_for_one_shot(
             self.session = PendingFakeSession()
 
     PendingCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -772,7 +762,7 @@ def test_cli_host_repl_approval_commands_show_and_resolve_pending(
 
     PendingCore.instances.clear()
     inputs = iter([":approval", ":approve", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -802,7 +792,7 @@ def test_cli_host_repl_plan_command_enters_plan_without_running_prompt(
 ) -> None:
     FakeCore.instances.clear()
     inputs = iter([":plan inspect first", "quit"])
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -832,7 +822,7 @@ def test_cli_host_repl_answers_pending_plan_question(
 
     PendingPlanCore.instances.clear()
     inputs = iter([":interaction", ":answer runtime", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -863,7 +853,7 @@ def test_cli_host_repl_approves_pending_plan_exit(monkeypatch, tmp_path) -> None
 
     PendingPlanCore.instances.clear()
     inputs = iter([":approve-plan", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -979,7 +969,7 @@ def test_cli_repl_formats_required_mcp_startup_failure_without_traceback(
             reason_code="mcp_required_generation_unavailable",
         )
 
-    monkeypatch.setattr(cli, "_host_repl", fail_required)
+    monkeypatch.setattr(cli, "_kernel_host_repl", fail_required)
     monkeypatch.setattr(
         "sys.argv",
         ["pulsara", "host", "repl", "--workspace", str(tmp_path)],
@@ -1064,7 +1054,7 @@ def test_cli_host_repl_revise_plan_prints_new_pending_exit(
 
     PendingPlanCore.instances.clear()
     inputs = iter([":revise-plan please update it", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1094,7 +1084,7 @@ def test_cli_host_repl_choose_plan_question_option_by_number(
 
     PendingPlanCore.instances.clear()
     inputs = iter([":choose 1", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1122,7 +1112,7 @@ def test_cli_host_repl_answers_pending_plan_question_with_bare_label(
 
     PendingPlanCore.instances.clear()
     inputs = iter(["host", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1152,7 +1142,7 @@ def test_cli_host_repl_rejects_free_text_when_plan_question_disallows_it(
 
     PendingPlanCore.instances.clear()
     inputs = iter(["something else", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1187,7 +1177,7 @@ def test_cli_host_repl_approves_pending_plan_exit_with_exact_tokens(
 
     PendingPlanCore.instances.clear()
     inputs = iter([token, "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1214,7 +1204,7 @@ def test_cli_host_repl_does_not_natural_language_approve_plan_exit(
 
     PendingPlanCore.instances.clear()
     inputs = iter(["我批准这个计划，直接执行即可", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1241,7 +1231,7 @@ def test_cli_host_repl_cancel_plan_exits_workflow(monkeypatch, tmp_path) -> None
 
     PendingPlanCore.instances.clear()
     inputs = iter([":cancel-plan", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingPlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1274,7 +1264,7 @@ def test_cli_host_repl_force_exit_plan_without_pending_exit(
 
     PlanCore.instances.clear()
     inputs = iter([":force-exit-plan", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PlanCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PlanCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1300,7 +1290,7 @@ def test_cli_host_repl_stop_aborts_pending_approval(
 
     PendingCore.instances.clear()
     inputs = iter([":stop", "quit"])
-    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", PendingCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1325,7 +1315,7 @@ def test_cli_host_repl_compact_command_invokes_session_compaction(
 ) -> None:
     FakeCore.instances.clear()
     inputs = iter([":compact", "quit"])
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1350,7 +1340,7 @@ def test_cli_host_repl_normal_turn_does_not_print_background_compaction_notice(
 ) -> None:
     FakeCore.instances.clear()
     inputs = iter(["hello", "quit"])
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1419,7 +1409,7 @@ def test_cli_host_repl_runs_bundled_sync_before_opening_session(
 ) -> None:
     FakeCore.instances.clear()
     sync_calls = []
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(
         cli, "_best_effort_sync_bundled_skills", lambda: sync_calls.append("sync")
     )
@@ -1449,7 +1439,7 @@ def test_cli_host_repl_resume_starts_from_existing_runtime_session(
     monkeypatch, tmp_path
 ) -> None:
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1484,7 +1474,7 @@ def test_cli_host_repl_resume_without_workspace_override_uses_manifest_workspace
     monkeypatch,
 ) -> None:
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1513,7 +1503,7 @@ def test_cli_host_repl_close_marks_durable_conversation_closed(
             return ":close"
 
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(cli, "build_repl_prompt", lambda **_kwargs: FakePrompt())
     monkeypatch.setattr(
@@ -1546,7 +1536,7 @@ def test_cli_host_repl_list_sessions_prints_resumable_sessions(
             ]
 
     ListingCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", ListingCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", ListingCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(
         cli.PulsaraSettings,
@@ -1568,18 +1558,10 @@ def test_cli_host_repl_list_sessions_prints_resumable_sessions(
 def test_cli_host_repl_continue_without_resumable_session_reports_friendly_error(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    class EmptyResumeCore(FakeCore):
-        async def resume_most_recent_session(self, workspace_input=None, **_kwargs):
-            raise KeyError("no resumable runtime session found")
+    async def fail_continue(_args):
+        raise KeyError("no resumable runtime session found")
 
-    EmptyResumeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", EmptyResumeCore)
-    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
-    monkeypatch.setattr(
-        cli.PulsaraSettings,
-        "from_env",
-        classmethod(lambda cls, prefix="PULSARA": object()),
-    )
+    monkeypatch.setattr(cli, "_kernel_host_repl", fail_continue)
     monkeypatch.setattr(
         "sys.argv",
         ["pulsara", "host", "repl", "--workspace", str(tmp_path), "--continue"],
@@ -1611,7 +1593,7 @@ def test_cli_host_repl_ctrl_c_clears_input_without_closing_session(
 
     FakeCore.instances.clear()
     prompt = FakePrompt()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
     monkeypatch.setattr(cli, "build_repl_prompt", lambda **_kwargs: prompt)
     monkeypatch.setattr(
@@ -1637,7 +1619,7 @@ def test_cli_host_run_continues_when_bundled_sync_fails(
     monkeypatch, tmp_path, capsys
 ) -> None:
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(
         cli.PulsaraSettings,
         "from_env",
@@ -1665,7 +1647,7 @@ def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(
 ) -> None:
     FakeCore.instances.clear()
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(
         cli,
         "_best_effort_sync_bundled_skills",
@@ -1675,61 +1657,32 @@ def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(
     )
     monkeypatch.setattr(
         cli,
-        "LocalSkillCapabilityProvider",
-        lambda **kwargs: LocalSkillCapabilityProvider(
-            provider=LocalSkillProvider(include_user_skills=False), **kwargs
+        "KernelCapabilityComposer",
+        lambda **_kwargs: SimpleNamespace(
+            compose=lambda **_compose_kwargs: SimpleNamespace(
+                catalog_skill_names=("review",),
+                active_skill_names=(),
+                diagnostic_codes=("skill_ready",),
+            )
         ),
     )
-    skill_dir = tmp_path / ".agents" / "skills" / "review-pr"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        """---
-name: review-pr
-description: Review pull requests.
-provides_tools:
-  - read_file
-  - not_a_tool
-suggested_tools:
-  - terminal
-required_binaries:
-  - firecrawl
-external_services:
-  - firecrawl
-network_required: true
-auth_required: required
-cli_usage_kind: read
----
-# Review PR
-""",
-        encoding="utf-8",
-    )
-
     parser = cli.build_parser()
     args = parser.parse_args(["host", "inspect", "--workspace", str(tmp_path)])
 
     snapshot = asyncio.run(cli._host_inspect(args))
 
-    assert snapshot["inspect_kind"] == "static_workspace_capability"
+    assert snapshot["inspect_kind"] == (
+        "canonical_kernel_static_workspace_capability.v3"
+    )
+    assert snapshot["conversation_authority"] == "pulsara_v3"
+    assert snapshot["protocol_major"] == 3
     assert "sessions" not in snapshot
     assert "workspace_supervisors" not in snapshot
     assert snapshot["recovery_scope"] == "host_process"
     assert snapshot["workspace"]["workspace_kind"] == "project"
     assert snapshot["workspace"]["workspace_root"] == str(tmp_path)
-    assert snapshot["skills"] == [
-        {
-            "name": "review-pr",
-            "description": "Review pull requests.",
-            "when_to_use": None,
-            "location": ".agents/skills/review-pr/SKILL.md",
-            "provides_tools": ["read_file"],
-            "suggested_tools": ["terminal"],
-            "required_binaries": ["firecrawl"],
-            "external_services": ["firecrawl"],
-            "network_required": True,
-            "auth_required": "required",
-            "cli_usage_kind": "read",
-        }
-    ]
+    assert snapshot["skills"] == ["review"]
+    assert snapshot["capability_diagnostics"] == ["skill_ready"]
     assert "read_file" in snapshot["tools"]
     # Visible-but-blocked: gate is the sole authority, so even under the
     # read-only inspect mode the tools stay registered/visible.
@@ -1738,7 +1691,16 @@ cli_usage_kind: read
     assert snapshot["current_mode"] == "read-only"
     assert snapshot["memory"] == {
         "graph_id": "graph:user/u_local",
-        "tools_enabled": [],
+        "tools_enabled": [
+            "memory_explain",
+            "memory_get",
+            "memory_search",
+            "remember_action_boundary",
+            "remember_claim",
+            "remember_decision",
+            "remember_observation",
+            "remember_preference",
+        ],
         "read_scopes": snapshot["workspace"]["read_scopes"],
         "allowed_write_scopes": snapshot["workspace"]["allowed_write_scopes"],
     }
@@ -1755,10 +1717,7 @@ cli_usage_kind: read
             "terminal": "off",
         },
     }
-    diagnostic_codes = [
-        diagnostic["code"] for diagnostic in snapshot["capability_diagnostics"]
-    ]
-    assert "skill_unknown_tool_reference" in diagnostic_codes
+    assert snapshot["capability_diagnostics"] == ["skill_ready"]
     assert "bundled_skills" in snapshot
     assert not (tmp_path / "pulsara-home" / "skills").exists()
     assert FakeCore.instances == []
@@ -1768,13 +1727,6 @@ def test_cli_host_inspect_can_report_bypass_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
-    monkeypatch.setattr(
-        cli,
-        "LocalSkillCapabilityProvider",
-        lambda **kwargs: LocalSkillCapabilityProvider(
-            provider=LocalSkillProvider(include_user_skills=False), **kwargs
-        ),
-    )
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -1802,13 +1754,6 @@ def test_cli_host_inspect_can_report_accept_edits_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
-    monkeypatch.setattr(
-        cli,
-        "LocalSkillCapabilityProvider",
-        lambda **kwargs: LocalSkillCapabilityProvider(
-            provider=LocalSkillProvider(include_user_skills=False), **kwargs
-        ),
-    )
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -1836,13 +1781,6 @@ def test_cli_host_inspect_can_report_ask_permissions_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
-    monkeypatch.setattr(
-        cli,
-        "LocalSkillCapabilityProvider",
-        lambda **kwargs: LocalSkillCapabilityProvider(
-            provider=LocalSkillProvider(include_user_skills=False), **kwargs
-        ),
-    )
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -1870,7 +1808,7 @@ def test_cli_host_run_accepts_resumable_on_request_policy(
 ) -> None:
     sync_calls = []
     FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "LegacyHostCore", FakeCore)
     monkeypatch.setattr(
         cli, "_best_effort_sync_bundled_skills", lambda: sync_calls.append("sync")
     )

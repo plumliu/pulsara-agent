@@ -10,7 +10,7 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
-from pulsara_agent.terminal_protocol.codec import (
+from pulsara_agent.terminal_protocol.v3_gateway import (
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
     PROTOCOL_SCHEMA_FINGERPRINT,

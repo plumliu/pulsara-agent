@@ -9,7 +9,8 @@ from uuid import uuid4
 import pytest
 
 from pulsara_agent.event import EventContext
-from pulsara_agent.host import HostCore, HostWorkspaceInput
+from pulsara_agent.host import HostWorkspaceInput
+from pulsara_agent.host.core import HostCore
 from pulsara_agent.inspector.store import PostgresInspectorStore
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.raw_provider import RawProviderStreamItem

@@ -16,7 +16,7 @@ from pulsara_agent.host.composition_contract import (
     build_host_wiring_outcome,
 )
 from pulsara_agent.host.core import HostCore
-from pulsara_agent.host.identity import ResolvedWorkspace
+from pulsara_agent.workspace_identity import ResolvedWorkspace
 from pulsara_agent.host.session_manifest import (
     ResumableSessionSummary,
     SessionManifest,

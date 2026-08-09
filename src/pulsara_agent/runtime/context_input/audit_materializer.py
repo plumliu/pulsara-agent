@@ -257,11 +257,10 @@ def prepare_context_input_audit_source_basis(
     known_canonical_bytes: int,
     maximum_canonical_bytes: int | None = None,
 ) -> PreparedContextInputAuditSource:
-    # This eager helper remains for deterministic tests/offline callers.  The
-    # production path uses ``PreparedContextInputAuditSourceCapture`` and takes
-    # the maximum resident permit before constructing or measuring any optional
-    # detail.  In both paths the worker performs the authoritative bounded
-    # canonical encode and skips on an underestimated quote.
+    # This eager helper remains for explicit legacy fixtures and offline
+    # callers. Normal model calls do not construct or materialize an audit
+    # source. Explicit callers still use the bounded canonical encoder and skip
+    # an underestimated quote.
     if known_canonical_bytes > MAX_PREPARED_AUDIT_SOURCE_CANONICAL_BYTES:
         return OversizedContextInputAuditSourceBasis(
             semantic_commit=semantic_commit,

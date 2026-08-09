@@ -1,4 +1,4 @@
-"""Workspace identity resolution for product hosts."""
+"""Workspace identity resolution shared by legacy and relational Hosts."""
 
 from __future__ import annotations
 
@@ -124,3 +124,12 @@ def _resolve_transient_root(
 def _display_label(value: str | None, *, default: str) -> str:
     label = (value or "").strip()
     return label or default
+
+
+__all__ = [
+    "HostWorkspaceInput",
+    "ResolvedWorkspace",
+    "WorkspaceKind",
+    "normalize_workspace_kind",
+    "resolve_workspace",
+]

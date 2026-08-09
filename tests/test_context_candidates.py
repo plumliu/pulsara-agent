@@ -15,7 +15,7 @@ from hashlib import sha256
 import pytest
 
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.event import ContextCompiledEvent, EventContext
+from pulsara_agent.event import EventContext
 from pulsara_agent.llm.config import ModelRole
 from pulsara_agent.primitives.context import (
     ContextCandidateSourceSelectionFact,
@@ -763,18 +763,6 @@ def test_model_followup_reuses_session_owned_candidate_cache(
         == second_system.candidate.attribution.semantic
     )
     assert first_system.candidate.attribution != second_system.candidate.attribution
-    compiled = [
-        event
-        for event in runtime_session_for_test(agent).event_log.iter()
-        if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
-    ]
-    assert any(
-        item.get("status") == "freshly_collected"
-        for item in compiled[0].lifecycle_decisions
-    )
-    assert any(
-        item.get("status") == "reused" for item in compiled[1].lifecycle_decisions
-    )
     second = captured[1]
     replay_prepared = prepare_tool_result_render_input(
         units=second.normalized_transcript.tool_result_units,

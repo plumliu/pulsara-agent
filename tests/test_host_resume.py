@@ -33,8 +33,9 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
-from pulsara_agent.host import HostCore, HostWorkspaceInput
-from pulsara_agent.host.identity import resolve_workspace
+from pulsara_agent.host import HostWorkspaceInput
+from pulsara_agent.host.core import HostCore
+from pulsara_agent.workspace_identity import resolve_workspace
 from pulsara_agent.host.session_manifest import (
     SessionManifest,
     SessionManifestStore,

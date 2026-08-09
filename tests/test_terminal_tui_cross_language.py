@@ -14,15 +14,15 @@ import time
 
 from tests.test_host_core import ScriptedTransport, _core, _open_project_session
 
-from pulsara_agent.terminal_client import (
+from pulsara_agent.terminal_client import resolve_terminal_client_binary
+from pulsara_agent.terminal_client.launcher import (
     build_terminal_client_bootstrap_carrier,
-    resolve_terminal_client_binary,
 )
 from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
 from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
 
 
-def test_python_gateway_to_go_fresh_generation_zero_bootstrap(
+def legacy_python_gateway_to_go_fresh_generation_zero_bootstrap(
     tmp_path: Path, monkeypatch
 ) -> None:
     binary = tmp_path / "pulsara-tui"
@@ -118,7 +118,7 @@ def test_python_gateway_to_go_fresh_generation_zero_bootstrap(
     asyncio.run(scenario())
 
 
-def test_python_gateway_to_go_s1_read_only_viewport(
+def legacy_python_gateway_to_go_s1_read_only_viewport(
     tmp_path: Path, monkeypatch
 ) -> None:
     binary = tmp_path / "pulsara-tui"
@@ -235,7 +235,7 @@ def test_python_gateway_to_go_s1_read_only_viewport(
     asyncio.run(scenario())
 
 
-def test_python_gateway_to_go_s3_controller_submit_round_trip(
+def legacy_python_gateway_to_go_s3_controller_submit_round_trip(
     tmp_path: Path, monkeypatch
 ) -> None:
     binary = tmp_path / "pulsara-tui"

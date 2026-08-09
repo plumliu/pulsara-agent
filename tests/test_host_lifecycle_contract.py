@@ -43,7 +43,6 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.host import (
     DuplicateHostSessionError,
-    HostCore,
     HostCoreLifecycle,
     HostSession,
     HostSessionBusyError,
@@ -52,6 +51,7 @@ from pulsara_agent.host import (
     HostWorkspaceInput,
     WorkspaceClosingError,
 )
+from pulsara_agent.host.core import HostCore
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
@@ -1748,7 +1748,7 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
     async def run():
         session = await _open(core, tmp_path, host_session_id="host:cancel-start")
         runtime = session.wiring.runtime_wiring.runtime_session
-        original = type(runtime).emit_many
+        original = type(runtime).write_events
         injected = False
 
         async def commit_then_cancel(
@@ -1783,7 +1783,7 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
                 transaction_companion=transaction_companion,
             )
 
-        monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
+        monkeypatch.setattr(type(runtime), "write_events", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
             await session.run_turn("cancel after commit")
         events = session.replay_events()
@@ -1829,7 +1829,7 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
         pending = session.get_pending_approval()
         assert pending is not None
         runtime = session.wiring.runtime_wiring.runtime_session
-        original = type(runtime).emit_many
+        original = type(runtime).write_events
         injected = False
 
         async def commit_then_cancel(
@@ -1864,7 +1864,7 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
                 transaction_companion=transaction_companion,
             )
 
-        monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
+        monkeypatch.setattr(type(runtime), "write_events", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
             await session.resolve_approval(
                 ApprovalResolution(

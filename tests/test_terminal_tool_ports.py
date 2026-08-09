@@ -32,6 +32,7 @@ from pulsara_agent.runtime.terminal.tool_port import (
     RuntimeTerminalProcessPort,
 )
 from tests.support.capability import tool_runtime_context
+from tests.support.events import settled_test_event
 
 
 CTX = EventContext(
@@ -61,9 +62,9 @@ def test_command_and_process_ports_share_exact_process_owner(tmp_path) -> None:
     stored = []
 
     def record_event(event):
-        committed = event.model_copy(update={"sequence": len(stored) + 1})
-        stored.append(committed)
-        return committed
+        receipt = settled_test_event(event, sequence=len(stored) + 1)
+        stored.append(receipt.committed_event)
+        return receipt
 
     command_port = RuntimeTerminalCommandPort(
         workspace_root=tmp_path,

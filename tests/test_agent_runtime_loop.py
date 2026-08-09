@@ -178,9 +178,7 @@ from pulsara_agent.runtime.context_input.event_slice import (
     event_reference_from_stored,
 )
 from pulsara_agent.runtime.context_input.replay import (
-    AuditIntegrityFailure,
     ContextInputReplayError,
-    ExactAuditArtifact,
     ReconstructedAudit,
     load_committed_provider_payload_for_model_start,
     load_context_input_audit,
@@ -204,10 +202,6 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import ContextEventReferenceFact
-from pulsara_agent.primitives.context_input_audit_storage import (
-    ContextInputAuditComponentKind,
-    ContextInputAuditComponentOwnership,
-)
 from pulsara_agent.primitives.tool_result import (
     TerminalCommandErrorEssentialFact,
     TerminalCommandDomainSubmissionFact,
@@ -409,18 +403,17 @@ def test_provider_replay_and_run_success_do_not_depend_on_optional_audit(
 ) -> None:
     import pulsara_agent.runtime.context_input.audit_materializer as audit_module
 
-    audit_results = []
-    real_materialize = audit_module.materialize_captured_context_input_audit
+    materialization_calls = 0
 
-    def record_materialization(**kwargs):
-        result = real_materialize(**kwargs)
-        audit_results.append(result)
-        return result
+    def forbid_automatic_materialization(**_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise AssertionError("normal model call must not materialize audit artifacts")
 
     monkeypatch.setattr(
         audit_module,
         "materialize_captured_context_input_audit",
-        record_materialization,
+        forbid_automatic_materialization,
     )
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport([{"text": "final answer"}])
@@ -430,16 +423,9 @@ def test_provider_replay_and_run_success_do_not_depend_on_optional_audit(
         llm_runtime=make_llm_runtime(transport),
     )
 
-    async def scenario():
-        result = await run_agent_task(agent, "hello")
-        await runtime_session.context_input_io_service.drain_pending(
-            deadline_monotonic=time.monotonic() + 10.0
-        )
-        return result
+    result = asyncio.run(run_agent_task(agent, "hello"))
 
-    result = asyncio.run(scenario())
-    assert len(audit_results) == 1
-    assert audit_results[0].diagnostic_code is None
+    assert materialization_calls == 0
     events = tuple(runtime_session.event_log.iter(run_id=result.run_id))
     compiled = next(
         item
@@ -459,83 +445,15 @@ def test_provider_replay_and_run_success_do_not_depend_on_optional_audit(
     )
     assert payload.carrier.ordered_messages
     assert compiled.audit_expectation is not None
-    assert compiled.audit_expectation.expected_root_artifact_id in (
-        runtime_session.archive.blobs
-    ), tuple(
-        item
-        for item in runtime_session.archive.blobs
-        if item.startswith("context-input-audit-")
+    assert (
+        compiled.audit_expectation.expected_root_artifact_id
+        not in runtime_session.archive.blobs
     )
-    exact = load_context_input_audit(
-        event=compiled,
-        event_log=runtime_session.event_log,
-        provider_input_store=None,
-        artifact_store=runtime_session.archive,
+    assert not any(
+        artifact_id.startswith("context-input-audit-")
+        for artifact_id in runtime_session.archive.blobs
     )
-    assert isinstance(exact, ExactAuditArtifact)
-    component_by_kind = {
-        component.component_kind: component for component in exact.plan.components
-    }
-    for kind in (
-        ContextInputAuditComponentKind.SNAPSHOT,
-        ContextInputAuditComponentKind.PROJECTION_STATE,
-        ContextInputAuditComponentKind.PREPARED_ROLLUP_UNITS,
-        ContextInputAuditComponentKind.ROLLOUT_STATE,
-        ContextInputAuditComponentKind.MODEL_START_ATTRIBUTION,
-    ):
-        component = component_by_kind[kind]
-        assert component.component_ownership is (
-            ContextInputAuditComponentOwnership.EXISTING_AUTHORITY_REFERENCE
-        )
-        assert component.storage_kind == "inline"
-        assert not component.page_ordinals
-    assert all(
-        page.component_kind
-        not in {
-            ContextInputAuditComponentKind.SNAPSHOT,
-            ContextInputAuditComponentKind.PROJECTION_STATE,
-            ContextInputAuditComponentKind.PREPARED_ROLLUP_UNITS,
-            ContextInputAuditComponentKind.ROLLOUT_STATE,
-            ContextInputAuditComponentKind.MODEL_START_ATTRIBUTION,
-        }
-        for page in exact.pages
-    )
-    doctor = inspect_context_input_audits(
-        runtime_session_id=runtime_session.runtime_session_id,
-        event_log=runtime_session.event_log,
-        artifact_store=runtime_session.archive,
-        require_exact_audit=True,
-    )
-    assert doctor.exact_count == 1
-    assert doctor.entries[0].status == "exact_audit"
 
-    page_id = next(
-        item
-        for item in runtime_session.archive.blobs
-        if item.startswith("context-input-audit-page:")
-    )
-    page_blob = runtime_session.archive.blobs[page_id]
-    original_page_text = page_blob.text_content
-    page_blob.text_content = "{}"
-    tampered = load_context_input_audit(
-        event=compiled,
-        event_log=runtime_session.event_log,
-        provider_input_store=None,
-        artifact_store=runtime_session.archive,
-    )
-    assert isinstance(tampered, ReconstructedAudit)
-    assert tampered.artifact_diagnostic_code == "audit_artifact_integrity_failure"
-    page_blob.text_content = original_page_text
-
-    root_id = compiled.audit_expectation.expected_root_artifact_id
-    root_blob = runtime_session.archive.blobs.pop(root_id)
-    replayed_without_audit = load_committed_provider_payload_for_model_start(
-        model_start_reference=start_reference,
-        event_log=runtime_session.event_log,
-        provider_input_store=None,
-        artifact_store=runtime_session.archive,
-    )
-    assert replayed_without_audit.proof_fingerprint == payload.proof_fingerprint
     reconstructed = load_context_input_audit(
         event=compiled,
         event_log=runtime_session.event_log,
@@ -553,20 +471,86 @@ def test_provider_replay_and_run_success_do_not_depend_on_optional_audit(
             require_exact=True,
         )
 
-    runtime_session.archive.blobs[root_id] = root_blob
-    root_blob.text_content = "{}"
-    vector_root = payload.committed_reference.resulting_unit_vector_root.root_node_ref
-    assert vector_root is not None
-    runtime_session.archive.blobs.pop(vector_root.artifact_reference.artifact_id)
-    integrity = load_context_input_audit(
-        event=compiled,
+    doctor = inspect_context_input_audits(
+        runtime_session_id=runtime_session.runtime_session_id,
         event_log=runtime_session.event_log,
-        provider_input_store=None,
         artifact_store=runtime_session.archive,
     )
-    assert isinstance(integrity, AuditIntegrityFailure)
+    assert doctor.exact_count == 0
+    assert doctor.reconstructed_count == 1
+    assert doctor.entries[0].status == "reconstructed_audit"
+    assert doctor.entries[0].reason_code == "audit_root_missing"
+    with pytest.raises(ContextInputReplayError):
+        inspect_context_input_audits(
+            runtime_session_id=runtime_session.runtime_session_id,
+            event_log=runtime_session.event_log,
+            artifact_store=runtime_session.archive,
+            require_exact_audit=True,
+        )
+
     run_end = next(item for item in events if isinstance(item, RunEndEvent))
     assert run_end.status == "finished"
+
+
+def test_tool_loop_does_not_materialize_automatic_audit_artifacts(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pulsara_agent.runtime.context_input.audit_materializer as audit_module
+
+    materialization_calls = 0
+
+    def forbid_automatic_materialization(**_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise AssertionError("tool loop must not materialize audit artifacts")
+
+    monkeypatch.setattr(
+        audit_module,
+        "materialize_captured_context_input_audit",
+        forbid_automatic_materialization,
+    )
+    runtime_session = in_memory_runtime_session(tmp_path)
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:audit-off", "name": "noop", "arguments": "{}"}
+                ]
+            },
+            {"text": "tool loop finished"},
+        ]
+    )
+    agent = build_test_agent_runtime(
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            StaticCapabilityProvider((_test_tool_descriptor("noop"),)),
+        ),
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("noop", calls=[]))
+    _install_test_tool_registry(
+        agent,
+        registry,
+        descriptors=(_test_tool_descriptor("noop"),),
+    )
+
+    result = asyncio.run(run_agent_task(agent, "use noop"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert materialization_calls == 0
+    compiled = tuple(
+        event
+        for event in runtime_session.event_log.iter(run_id=result.run_id)
+        if isinstance(event, ContextCompiledEvent)
+    )
+    assert len(compiled) == 2
+    assert all(event.audit_expectation is not None for event in compiled)
+    assert not any(
+        artifact_id.startswith("context-input-audit-")
+        for artifact_id in runtime_session.archive.blobs
+    )
 
 
 def test_optional_audit_operational_failure_never_fails_live_run(
@@ -575,39 +559,30 @@ def test_optional_audit_operational_failure_never_fails_live_run(
 ) -> None:
     import pulsara_agent.runtime.context_input.audit_materializer as audit_module
 
-    def fail_materialization(**_kwargs):
-        return audit_module.ContextInputAuditMaterializationResult(
-            disposition=(
-                audit_module.ContextInputAuditMaterializationDisposition.FAILED_OPERATIONALLY
-            ),
-            root_reference=None,
-            page_count=0,
-            total_page_canonical_bytes=0,
-            diagnostic_code="audit_materialization_failed",
-        )
+    materialization_calls = 0
+
+    def fail_if_called(**_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise RuntimeError("automatic audit operation must not be offered")
 
     monkeypatch.setattr(
         audit_module,
         "materialize_captured_context_input_audit",
-        fail_materialization,
+        fail_if_called,
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    transport = ScriptedTransport([{"text": "answer survives optional audit failure"}])
+    transport = ScriptedTransport([{"text": "answer without automatic audit"}])
     agent = build_test_agent_runtime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
     )
 
-    async def scenario():
-        result = await run_agent_task(agent, "hello")
-        await runtime_session.context_input_io_service.drain_pending(
-            deadline_monotonic=time.monotonic() + 10.0
-        )
-        return result
+    result = asyncio.run(run_agent_task(agent, "hello"))
 
-    result = asyncio.run(scenario())
     events = tuple(runtime_session.event_log.iter(run_id=result.run_id))
+    assert materialization_calls == 0
     assert next(item for item in events if isinstance(item, RunEndEvent)).status == (
         "finished"
     )
@@ -626,26 +601,19 @@ def test_optional_audit_source_capture_never_gates_model_admission(
     monkeypatch: pytest.MonkeyPatch,
     capture_failure: str,
 ) -> None:
-    import pulsara_agent.runtime.agent as agent_module
-    from pulsara_agent.runtime.context_input.audit_materializer import (
-        PreparedContextInputAuditCaptureComponent,
-    )
+    import pulsara_agent.runtime.context_input.audit_materializer as audit_module
 
-    def capture(**_kwargs):
-        if capture_failure == "exception":
-            raise RuntimeError("synthetic optional audit source failure")
-        return (
-            PreparedContextInputAuditCaptureComponent(
-                kind=ContextInputAuditComponentKind.COMPILED_DIAGNOSTICS,
-                source=("x" * (20 * 1024 * 1024),),
-                ownership=(ContextInputAuditComponentOwnership.PAGE_OWNED_DETAIL),
-            ),
-        )
+    capture_calls = 0
+
+    def forbidden_capture(*_args, **_kwargs):
+        nonlocal capture_calls
+        capture_calls += 1
+        raise RuntimeError(f"automatic audit capture is disabled: {capture_failure}")
 
     monkeypatch.setattr(
-        agent_module,
-        "_context_input_audit_capture_components",
-        capture,
+        audit_module,
+        "PreparedContextInputAuditSourceCapture",
+        forbidden_capture,
     )
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport([{"text": "normal model result"}])
@@ -655,16 +623,11 @@ def test_optional_audit_source_capture_never_gates_model_admission(
         llm_runtime=make_llm_runtime(transport),
     )
 
-    async def scenario():
-        result = await run_agent_task(agent, "hello")
-        await runtime_session.context_input_io_service.drain_pending(
-            deadline_monotonic=time.monotonic() + 10.0
-        )
-        return result
+    result = asyncio.run(run_agent_task(agent, "hello"))
 
-    result = asyncio.run(scenario())
     events = tuple(runtime_session.event_log.iter(run_id=result.run_id))
     compiled = next(item for item in events if isinstance(item, ContextCompiledEvent))
+    assert capture_calls == 0
     assert compiled.status == "compiled"
     assert not any(isinstance(item, RunErrorEvent) for item in events)
     assert next(item for item in events if isinstance(item, RunEndEvent)).status == (
@@ -2671,17 +2634,6 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
         text for msg in transport.contexts[1].messages for text in msg.content
     )
     assert "hello from file" in second_context_text
-    compiled = [
-        event
-        for event in runtime_session_for_test(agent).event_log.iter()
-        if isinstance(event, ContextCompiledEvent)
-    ]
-    assert compiled[0].tool_result_render_decision_facts == ()
-    assert len(compiled[1].tool_result_render_decision_facts) == 1
-    assert (
-        compiled[1].tool_result_render_decision_facts[0].unit_id
-        == compiled[1].tool_result_render_operational_facts[0].unit_id
-    )
     assert (
         runtime_session_for_test(
             agent

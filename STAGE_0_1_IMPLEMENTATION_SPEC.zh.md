@@ -6,7 +6,7 @@
 
 架构真源：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 
-本稿对应架构文档内容 SHA-256：`d308ebd68c8a8ca708a7f696e61612a4b2d133a73579fcb3cf34105eac1d909b`。
+本稿对应架构文档内容 SHA-256：`a86a6e43f592e9f3db40eddb787f9a67412334637cf892c8781c299a845672ff`。
 
 ---
 
@@ -431,7 +431,7 @@ runbook必须列出：
 
 ### 6.7 Stage 0 exit gate
 
-Stage 0 只有在以下全部成立时完成：
+Stage 0 只有在以下全部成立时才可声明完整完成：
 
 - production behavior和schema diff为0；
 - exact 151 inventory与39/25/16/71分类可重复；
@@ -442,6 +442,8 @@ Stage 0 只有在以下全部成立时完成：
 - baseline report不含secret或环境专属绝对路径；
 - complete-reset/quiesce runbook完成；
 - full test suite与ruff通过。
+
+本仓库不发布Stage 0/1中间版本，因此“Stage 0完整完成”不是进入Stage 2的前置条件。若full suite存在失败，必须完整运行并记录，但失败数量本身不构成Stage 2入口gate；handoff只要求每个失败至少被初步分类为retained-safety regression、待Stage 2删除/替换的legacy contract、过时测试契约或环境问题，并有明确disposition。尚未完成最终root-cause proof只阻止当前阶段的“完整完成”声明；已有初步分类和接管路径时，不阻止开始Stage 2规格与dormant implementation。
 
 ## 7. Stage 1 行为契约
 
@@ -636,6 +638,8 @@ Stage 1只强制：
 
 transaction、await、LOC其余数字只报告，不为了漂亮数字破坏当前physical safety。
 
+Stage 1允许形成明确标注的partial checkpoint。新增回归不按数量阻止Stage 2主路径，也不要求先修复即将在Stage 2删除的旧owner；但必须调查到足以完成分类。对允许悬挂的失败，gate report至少记录test ID、旧owner/root cause、`delete | replace | repair-in-stage2 | baseline-refresh | environment` disposition、接管它的新invariant/test，以及最迟清除该失败的authority-cut slice。`不修复`不得写成`已通过`，也不得用skip/xfail或删除测试隐藏。
+
 ## 9. 文件级改动地图
 
 | 文件/区域 | Stage 1预期 | 禁止事项 |
@@ -706,6 +710,8 @@ uv run pytest -q \
 uv run pytest -q
 ~~~
 
+完整pytest在Stage 0/1 partial checkpoint中是迁移观测，不是Stage 2入口的零失败gate。报告必须保留精确的passed/failed/skipped/collection error计数及失败node ID；Stage 2 retained-safety gate与各slice gate仍必须独立为绿。若测试无法collection、canonical transaction/confirmation被软化、physical effect safety fence失效或数据出现不可界定的损坏，不得仅以“后续会删除”为由忽略。
+
 若配置了PostgreSQL测试DSN，CI还必须运行全部`postgres` marker；本地缺少数据库可以skip，但Stage 1不能只凭in-memory test宣布完成：
 
 ~~~bash
@@ -771,6 +777,8 @@ git status --short
 - 主架构文档、target 26/23/13/2或complete-reset决策发生漂移；
 - dirty worktree与本工作包修改重叠且无法安全保留用户内容。
 
+单纯出现新增pytest失败不属于停止条件。coding agent应先分类而不是顺手修复；属于旧authority且已有Stage 2删除/替换路径的失败可以悬挂。只有无法继续安全构建或验证目标kernel的retained-safety failure，才阻止相关Stage 2 authority activation；它不阻止其他dormant Stage 2切片继续推进。
+
 ## 14. Definition of Done
 
 ### 14.1 Stage 0 DoD
@@ -783,6 +791,8 @@ git status --short
 - runbook完成但未执行；
 - production code/schema/behavior diff为0；
 - full tests、ruff、Markdown与link checks通过。
+
+以上是“Stage 0完整完成”的DoD，不是Stage 2入口条件。partial checkpoint必须诚实记录未满足项及其disposition。
 
 ### 14.2 Stage 1 DoD
 
@@ -801,9 +811,11 @@ git status --short
 - 所有targeted与full tests、PostgreSQL integration和ruff通过；
 - Stage 1 gate report明确列出未删除owner与仍保留await，供Stage 3处理。
 
+以上是“Stage 1完整完成”的DoD。由于本hard cut不发布Stage 0/1中间态，可以在未全部满足时冻结partial checkpoint并进入Stage 2；不得把partial写成complete，也不得让已分类的legacy red掩盖retained-safety gate结果。
+
 ## 15. Stage 2 handoff
 
-Stage 1完成后才能冻结`STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`的实际代码基线。handoff必须包含：
+Stage 1完整完成不是冻结`STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`的前置条件。Stage 0/1 partial checkpoint完成一次完整验证、所有失败已分类且retained-safety边界可独立验证后，即可冻结实际代码基线并进入Stage 2。handoff必须包含：
 
 - 新HEAD与clean/known dirty status；
 - Stage 0 exact manifest；
@@ -814,5 +826,19 @@ Stage 1完成后才能冻结`STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`的实�
 - text/one-tool transaction和event基线；
 - complete-reset/quiesce runbook；
 - 任何Stage 1 blocker及其为何必须由Stage 2 coherent authority cut解决。
+- full pytest精确计数、全部失败node ID与逐项disposition；
+- 每个悬挂legacy test将由哪个Stage 2 slice删除或用新契约测试替换。
 
-Stage 2不得假设Stage 1已经删除旧owner；它只能假设这些owner不再反向定义foreground semantic success，并且physical lifecycle已有可验证的stop/cancel/join边界。
+Stage 2不得假设Stage 1已经删除或de-gate旧owner，也不得假设full suite为绿。仍会反向定义foreground semantic success的legacy reducer/latch必须成为对应authority-cut slice的显式删除/替换义务；physical lifecycle已有的stop/cancel/join safety fence在替代实现通过测试前不得移除。
+
+### 15.1 2026-08-08 partial checkpoint实测
+
+在HEAD `5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`及当前已知dirty worktree上执行未带deselect/skip的`uv run pytest -q`：共2848项，`2843 passed, 3 failed, 2 skipped, 7 warnings`，collection error为0，耗时806.09秒。三个失败的disposition如下：
+
+| test ID | 分类与根因 | disposition | Stage 2接管义务 |
+|---|---|---|---|
+| `tests/test_durability_subtraction_stage0_architecture.py::test_stage0_frozen_documents_match_recorded_sha256` | 本规格在测试前被有意修订，冻结SHA尚未同步；不是Runtime回归 | `baseline-refresh` | 本次文档定稿后同步SHA并定向验证，不进入Stage 2 debt |
+| `tests/test_host_core.py::test_host_terminal_monitor_registration_completion_and_autonomous_delivery` | legacy durable `terminal_notification` reducer的checkpoint monitor account/head join失败，安装全局reconciliation latch并在Host close暴露 | `replace` | terminal authority-cut slice删除durable monitor registration/checkpoint/repair graph，以Host-scoped process-local monitor及physical stop/cancel/join契约测试替换 |
+| `tests/test_host_core.py::test_host_terminal_monitor_repeated_progress_without_reregistration` | 与上一项相同的旧owner/root cause；progress与delivery已发生，失败位于close时的reconciliation latch | `replace` | 与上一项在同一terminal authority-cut slice替换，不单独修复旧join协议 |
+
+因此本次完整运行观察到的Runtime失败为2个test、1个legacy failure family；相对上一轮handoff没有新增Runtime failure。文档SHA失败在本节定稿后刷新fixture并定向复核，不改变上述全量运行的原始计数。两个terminal test继续保留为可见red，直至Stage 2同一切片完成旧authority删除与新契约测试替换；它们不阻止Stage 2规格或dormant implementation。

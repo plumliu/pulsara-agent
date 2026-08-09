@@ -11,6 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pulsara_agent.terminal_client.binary import (
@@ -21,11 +22,9 @@ from pulsara_agent.terminal_client.supervision import (
     restore_foreground,
     transfer_foreground_to_child,
 )
-from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
-from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
-from pulsara_agent.terminal_protocol.generated.terminal_client_fingerprint import (
-    install_protobuf_fingerprint,
-)
+if TYPE_CHECKING:
+    from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
+    from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
 
 
 _BOOTSTRAP_MAXIMUM_BYTES = 16 * 1024
@@ -102,6 +101,8 @@ async def launch_terminal_client(
     """Serve one controller-preferred client until local quit; never close the conversation."""
 
     binary = await resolve_terminal_client_binary(binary_path)
+    from pulsara_agent.terminal_protocol.gateway import TerminalProtocolServer
+
     runtime_root = Path(tempfile.mkdtemp(prefix="pulsara-tui-", dir="/tmp"))
     os.chmod(runtime_root, 0o700)
     socket_path = runtime_root / "client.sock"
@@ -155,8 +156,18 @@ def build_terminal_client_bootstrap_carrier(
     client_instance_id: str,
     launch_id: str | None = None,
     launch_capability: bytes | None = None,
-    requested_attachment_role: int = wire.ATTACHMENT_ROLE_CONTROLLER,
+    requested_attachment_role: int | None = None,
 ) -> wire.TerminalClientBootstrapCarrier:
+    from pulsara_agent.terminal_protocol.generated import terminal_client_pb2 as wire
+    from pulsara_agent.terminal_protocol.generated.terminal_client_fingerprint import (
+        install_protobuf_fingerprint,
+    )
+
+    requested_attachment_role = (
+        wire.ATTACHMENT_ROLE_CONTROLLER
+        if requested_attachment_role is None
+        else requested_attachment_role
+    )
     if requested_attachment_role not in {
         wire.ATTACHMENT_ROLE_OBSERVER,
         wire.ATTACHMENT_ROLE_CONTROLLER,

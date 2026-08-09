@@ -7,7 +7,6 @@ from enum import StrEnum
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
-from pulsara_agent.event import EventContext
 from pulsara_agent.message.blocks import ToolResultState
 from pulsara_agent.primitives.context import (
     ContextEventReferenceFact,
@@ -32,6 +31,7 @@ from pulsara_agent.ports.run_execution import (
 )
 
 if TYPE_CHECKING:
+    from pulsara_agent.event import EventContext
     from pulsara_agent.ports.tool_result_semantics import (
         ToolResultSemanticsRuntimeInput,
     )

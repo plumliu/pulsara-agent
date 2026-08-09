@@ -621,13 +621,14 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 if receipt is not None:
                     self._install_attempt_receipt(owner.reducer_id, receipt)
             with self._lock:
-                if not self._accepting and self._all_clean_locked():
-                    for owner in self._owners.values():
-                        owner.state = RuntimeProjectionCheckpointOwnerState.CLOSED
+                if not self._accepting:
+                    self._discard_derived_work_for_close_locked()
                     return
 
     def _next_owner(self) -> _ProjectionOwner | None:
         with self._lock:
+            if not self._accepting:
+                return None
             for owner in self._owners.values():
                 if owner.state in {
                     RuntimeProjectionCheckpointOwnerState.DIRTY,
@@ -637,6 +638,17 @@ class RuntimeProjectionCheckpointMaintenanceService:
                 }:
                     return owner
         return None
+
+    def _discard_derived_work_for_close_locked(self) -> None:
+        """Retire idle acceleration intent after physical work has exited."""
+
+        for owner in self._owners.values():
+            owner.latest_fold = None
+            owner.active_candidate = None
+            owner.retry_not_before = 0.0
+            owner.pending_recovery_event_count = 0
+            owner.pending_recovery_payload_bytes = 0
+            owner.state = RuntimeProjectionCheckpointOwnerState.CLOSED
 
     def _drive_once(
         self, owner: _ProjectionOwner

@@ -34,7 +34,10 @@ from tests.conftest import (
 )
 from tests.support.postgres import verified_postgres_provider
 from tests.support.postgres_database import MigratedPostgresTestDatabase
-from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.runtime_session import (
+    aclose_runtime_session_for_test,
+    in_memory_runtime_session,
+)
 
 
 def _event_log(
@@ -53,19 +56,7 @@ def _event_log(
 
 
 async def _drain_runtime_for_close(runtime) -> None:
-    deadline = monotonic() + 30.0
-    await runtime.transcript_projection_checkpoint_service.request_close_cancellation()
-    await runtime.context_input_io_service.drain_pending(deadline_monotonic=deadline)
-    await runtime.event_write_service.drain_pending(deadline_monotonic=deadline)
-    await runtime.subagent_graph_checkpoint_service.drain_pending(
-        deadline_monotonic=deadline
-    )
-    await runtime.transcript_projection_checkpoint_service.drain_pending(
-        deadline_monotonic=deadline
-    )
-    await runtime.prompt_queue_checkpoint_service.drain_pending(
-        deadline_monotonic=deadline
-    )
+    await aclose_runtime_session_for_test(runtime, timeout_seconds=30.0)
 
 
 def _command_request(
@@ -192,8 +183,6 @@ def test_postgres_prompt_queue_commit_checkpoint_and_reopen_are_one_authority(
         return item.queue_item_id, item.row_fingerprint
 
     queue_item_id, row_fingerprint = asyncio.run(first_process())
-    runtime.close()
-
     with psycopg.connect(
         migrated_postgres_database.runtime_dsn,
         autocommit=True,
@@ -239,7 +228,6 @@ def test_postgres_prompt_queue_commit_checkpoint_and_reopen_are_one_authority(
     assert restored.delivery_state == "accepted_pending"
     assert reopened.prompt_queue_projection_store.snapshot().account_revision == 1
     asyncio.run(_drain_runtime_for_close(reopened))
-    reopened.close()
 
 
 def test_postgres_terminal_command_receipt_is_idempotent_and_recovers_pending(

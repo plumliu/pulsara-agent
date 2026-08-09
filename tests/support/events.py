@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from pulsara_agent.event import EventContext, ProjectionRequestedEvent
+from pulsara_agent.event import AgentEvent, EventContext, ProjectionRequestedEvent
+from pulsara_agent.ports.event_write import (
+    CommittedCheckpointHandoff,
+    CommittedEventSettlementReceipt,
+    CommittedPublicationSettlement,
+    CommittedSemanticFoldSettlement,
+    RuntimeThreadEventSettlementReceipt,
+)
 from pulsara_agent.primitives.context import context_fingerprint
 
 
@@ -55,4 +62,41 @@ def typed_non_transcript_event(
     return ProjectionRequestedEvent.model_validate(fields)
 
 
-__all__ = ["typed_non_transcript_event"]
+def settled_test_event(
+    event: AgentEvent,
+    *,
+    sequence: int,
+) -> RuntimeThreadEventSettlementReceipt:
+    """Return the same typed settlement shape required from thread recorders."""
+
+    if sequence < 1:
+        raise ValueError("test settlement sequence must be positive")
+    committed = event.model_copy(update={"sequence": sequence})
+    references = ((committed.id, sequence, f"test:{committed.id}"),)
+    stored_batch_identity = f"test-batch:{committed.id}:{sequence}"
+    payload = {
+        "stored_batch_receipt_identity": stored_batch_identity,
+        "requested_event_references": references,
+        "durability": "full",
+        "semantic_fold": CommittedSemanticFoldSettlement.HEALTHY.value,
+        "checkpoint_handoff": CommittedCheckpointHandoff.NOT_APPLICABLE.value,
+        "publication": CommittedPublicationSettlement.COMPLETED.value,
+    }
+    settlement = CommittedEventSettlementReceipt(
+        stored_batch_receipt_identity=stored_batch_identity,
+        requested_event_references=references,
+        durability="full",
+        semantic_fold=CommittedSemanticFoldSettlement.HEALTHY,
+        checkpoint_handoff=CommittedCheckpointHandoff.NOT_APPLICABLE,
+        publication=CommittedPublicationSettlement.COMPLETED,
+        settlement_fingerprint=context_fingerprint(
+            "committed-event-settlement-receipt:v1", payload
+        ),
+    )
+    return RuntimeThreadEventSettlementReceipt(
+        committed_event=committed,
+        settlement=settlement,
+    )
+
+
+__all__ = ["settled_test_event", "typed_non_transcript_event"]

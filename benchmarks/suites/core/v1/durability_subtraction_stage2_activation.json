@@ -1,0 +1,91 @@
+{
+  "schema_version": "durability-subtraction-stage2-activation.v1",
+  "status": "activated",
+  "authority_activation": "single_reset_only",
+  "captured_head": "5b7ad9f7ffc8565bc572180b2bde0c81ab64473a",
+  "document_sha256": {
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "a86a6e43f592e9f3db40eddb787f9a67412334637cf892c8781c299a845672ff",
+    "STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md": "8a30fb3db34bff7c152f3450ce5b18c7b403e3e657fb6f53d9e2e1d87b812b4a",
+    "STAGE_0_1_IMPLEMENTATION_SPEC.zh.md": "d092089f523f035f9971d4e35b66ed017633853f90b0d947f01173cff4f7ec65",
+    "DURABILITY_SUBTRACTION_CUTOVER_RUNBOOK.zh.md": "7855b124173dfaf53e21e3e651c13bb19a889e5357a0381a41c3f526164a3313"
+  },
+  "schema": {
+    "migration_head": 13,
+    "product_schema": "pulsara_v3",
+    "active_product_relations": 24,
+    "manifest_fingerprint": "sha256:f0d5190bf1bb90b2eb6a09b6f5e7e5275ca71db578d6d348b88b3923ab519b71",
+    "migration_registry_prefix_fingerprint": "sha256:3015ab9d6d2166a08fe784b274c7f0b75c87cb622905ecee69ba3d8c2b1dedcb"
+  },
+  "vocabulary": {
+    "committed": 26,
+    "live": 23,
+    "subject_slots": 13,
+    "append_guards": 2
+  },
+  "protocol": {
+    "major": 3,
+    "minor": 0,
+    "schema_fingerprint": "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
+  },
+  "runtime_limits": {
+    "contract": "stage2_runtime_limits.v1",
+    "named_finite_fields": 62
+  },
+  "structural_budgets": {
+    "contract": "stage2_structural_budgets.v1",
+    "text_turn_canonical_transactions": 2,
+    "text_turn_committed_events": 3,
+    "one_tool_canonical_transactions": 5,
+    "one_tool_committed_events": 7,
+    "one_tool_remote_identity_transactions": 6,
+    "one_tool_remote_identity_committed_events": 8,
+    "text_turn_owner_families_hard": 3,
+    "one_tool_owner_families_hard": 5,
+    "host_close_logical_bands": 3,
+    "host_close_awaits_hard": 12,
+    "host_close_reducer_barriers": 0
+  },
+  "production_entrypoints": {
+    "host": "pulsara_agent.conversation_kernel.host.KernelHostCore",
+    "terminal": "pulsara_agent.terminal_client.v3_launcher.launch_terminal_kernel_client",
+    "conversation_authority": "pulsara_v3",
+    "protocol_major": 3
+  },
+  "production_unreachable": [
+    "legacy universal EventLog execution graph",
+    "durable provider and tool-result stream segments",
+    "Terminal Presentation Foundation",
+    "durable terminal monitor recovery",
+    "subagent execution recovery",
+    "legacy durable projection jobs",
+    "legacy provider raw/draft/adoption carrier graph",
+    "Oxigraph and SPARQL memory surface"
+  ],
+  "verification": {
+    "database_reset": "passed_authorized_complete_reset",
+    "fresh_migration_and_deep_verify": "passed_head_13_deep_verified",
+    "fresh_kernel_dogfood": "passed_real_provider_and_rehydrate",
+    "protocol_v3_python_go": "passed_generator_and_cross_language",
+    "targeted_pytest": "72_passed_in_19.81s",
+    "postgres_pytest": "439_passed_2476_deselected_in_82.27s",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "full_pytest": "2912_passed_2_skipped_1_scc_red_in_766.40s_then_38_affected_followup_passed_in_13.32s",
+    "post_review_targeted_pytest": "56_passed_in_17.13s",
+    "post_review_postgres_and_migration": "9_passed_in_4.07s",
+    "provider_carrier_hard_cut_targeted_pytest": "223_passed_in_10.86s",
+    "final_stage2_targeted_pytest": "87_passed_in_22.22s",
+    "final_stage2_postgres_runner_dogfood": "34_passed_in_4.66s",
+    "post_macro_boundary_review_stage2": "88_passed_in_21.90s",
+    "post_macro_boundary_review_legacy_facades": "78_passed_in_19.16s",
+    "post_macro_boundary_review_terminal_compatibility": "102_passed_in_57.05s",
+    "post_macro_boundary_review_provider_compatibility": "114_passed_in_13.79s",
+    "post_review_full_pytest": "not_rerun_by_user_direction"
+  },
+  "open_review_findings": {
+    "count_p1": 0,
+    "count_p2": 0,
+    "activation_blocked": false,
+    "disposition": "closed_provider_adapters_emit_formal_live_payloads; eager_universal_event_and_legacy_package_facades_removed_from_kernel_and_protocol_v3_import_closure; legacy_raw_draft_adoption_graph_is_production_unreachable"
+  }
+}

@@ -1,0 +1,149 @@
+"""Host-lifetime replacement coverage for the removed durable monitor owner."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+import shlex
+import sys
+from uuid import uuid4
+
+import pytest
+
+from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.runner import KernelToolAuthorizationKind
+from pulsara_agent.conversation_kernel.tool_runtime import (
+    DirectKernelToolPort,
+    _truncate_tool_result_utf8,
+)
+from pulsara_agent.conversation_kernel.tool_policy import (
+    DefaultToolDispatchAuthorizationPolicy,
+)
+from pulsara_agent.runtime.permission import default_permission_policy
+
+
+def _name(prefix: str) -> str:
+    return f"{prefix}:{uuid4().hex}"
+
+
+@pytest.mark.parametrize("maximum", [1, 4, 5, 10, 64])
+def test_tool_result_truncation_is_utf8_safe_and_obeys_final_hard_cap(
+    maximum: int,
+) -> None:
+    result = _truncate_tool_result_utf8("🙂" * 100, maximum_bytes=maximum)
+    assert len(result) <= maximum
+    result.decode("utf-8")
+
+
+async def _start_background_process(
+    port: DirectKernelToolPort,
+) -> tuple[str, str, str]:
+    call_id = _name("call")
+    turn_id = _name("turn")
+    entry_id = _name("entry")
+    arguments = {
+        "command": (
+            f"{shlex.quote(sys.executable)} -c "
+            "'import time; print(\"READY\", flush=True); time.sleep(30)'"
+        ),
+        "yield_time_ms": 0,
+    }
+    authorization = await port.authorize(
+        tool_name="terminal",
+        arguments=arguments,
+        tool_call_id=call_id,
+        turn_id=turn_id,
+        assistant_entry_id=entry_id,
+    )
+    assert authorization.kind is KernelToolAuthorizationKind.ALLOW
+    result = await port.invoke(
+        tool_name="terminal",
+        arguments=arguments,
+        tool_call_id=call_id,
+        attempt_id=_name("attempt"),
+        turn_id=turn_id,
+        assistant_entry_id=entry_id,
+    )
+    payload = json.loads(result.content)
+    assert payload["status"] == "running"
+    assert payload["yielded_to_background"] is True
+    return str(payload["process_id"]), turn_id, entry_id
+
+
+def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        owner = _name("host")
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id=owner,
+            session_id=_name("session"),
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
+                default_permission_policy()
+            ),
+        )
+        process_id, turn_id, entry_id = await _start_background_process(port)
+        poll = await port.invoke(
+            tool_name="terminal_process",
+            arguments={"action": "poll", "process_id": process_id},
+            tool_call_id=_name("call"),
+            attempt_id=_name("attempt"),
+            turn_id=turn_id,
+            assistant_entry_id=entry_id,
+        )
+        assert json.loads(poll.content)["process_id"] == process_id
+        assert port._terminal.live_process_count(  # noqa: SLF001
+            owner_host_session_id=owner
+        ) == 1
+        await port.aclose(timeout_seconds=5.0)
+        assert port._terminal.live_process_count(  # noqa: SLF001
+            owner_host_session_id=owner
+        ) == 0
+
+    asyncio.run(scenario())
+
+
+def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        old_owner = _name("host")
+        new_owner = _name("host")
+        old = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id=old_owner,
+            session_id=_name("session"),
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
+                default_permission_policy()
+            ),
+        )
+        new = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id=new_owner,
+            session_id=_name("session"),
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
+                default_permission_policy()
+            ),
+        )
+        process_id, turn_id, entry_id = await _start_background_process(old)
+        with pytest.raises(KeyError):
+            await new.invoke(
+                tool_name="terminal_process",
+                arguments={"action": "poll", "process_id": process_id},
+                tool_call_id=_name("call"),
+                attempt_id=_name("attempt"),
+                turn_id=turn_id,
+                assistant_entry_id=entry_id,
+            )
+        assert new._terminal.live_process_count(  # noqa: SLF001
+            owner_host_session_id=new_owner
+        ) == 0
+        await old.aclose(timeout_seconds=5.0)
+        await new.aclose(timeout_seconds=5.0)
+
+    asyncio.run(scenario())

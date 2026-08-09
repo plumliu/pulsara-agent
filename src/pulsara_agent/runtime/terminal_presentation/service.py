@@ -508,19 +508,7 @@ class TerminalPresentationFoundationService:
             raise TerminalPresentationCloseBlocked(
                 "presentation physical I/O did not exit before close"
             ) from exc
-        if self._worker_error is not None:
-            raise TerminalPresentationCloseBlocked(
-                "presentation background owner failed during close"
-            ) from self._worker_error
-        with self._checkpoint_lock:
-            if (
-                self._pending_checkpoint_owner is not None
-                or self._pending_confirmed_checkpoint_install is not None
-                or self._pending_checkpoint_delivery is not None
-            ):
-                raise TerminalPresentationCloseBlocked(
-                    "presentation checkpoint or delivery owner remains unresolved"
-                )
+        self._discard_derived_close_state()
         self.io_service.close_if_idle()
         self._finish_close()
 
@@ -538,17 +526,23 @@ class TerminalPresentationFoundationService:
             raise TerminalPresentationCloseBlocked(
                 "cannot close presentation with physical I/O in flight"
             )
-        with self._checkpoint_lock:
-            if (
-                self._pending_checkpoint_owner is not None
-                or self._pending_confirmed_checkpoint_install is not None
-                or self._pending_checkpoint_delivery is not None
-            ):
-                raise TerminalPresentationCloseBlocked(
-                    "cannot close presentation with unresolved checkpoint owner"
-                )
+        self._discard_derived_close_state()
         self.io_service.close_if_idle()
         self._finish_close()
+
+    def _discard_derived_close_state(self) -> None:
+        """Drop presentation-only retry/delivery intent after physical drain."""
+
+        if self.io_service.pending_count():
+            raise TerminalPresentationCloseBlocked(
+                "cannot discard presentation state with physical I/O in flight"
+            )
+        with self._checkpoint_lock:
+            self._pending_checkpoint_owner = None
+            self._pending_confirmed_checkpoint_install = None
+            self._pending_checkpoint_delivery = None
+        with self._observation_lock:
+            self._pending_capacity_terminalizations.clear()
 
     def _finish_close(self) -> None:
         self._closed = True
@@ -686,6 +680,8 @@ class TerminalPresentationFoundationService:
                     self._reconciliation_reason = (
                         f"PRESENTATION_CHECKPOINT_{exc.receipt.disposition.upper()}"
                     )
+                    if self._closing:
+                        return
                     deadline = self._close_deadline_monotonic
                     if self._closing and (deadline is None or monotonic() >= deadline):
                         raise TerminalPresentationCloseBlocked(

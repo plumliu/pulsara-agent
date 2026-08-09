@@ -15,11 +15,15 @@ from pulsara_agent.event import (
     SubagentRunFailedEvent,
     TextBlockSegmentEvent,
 )
-from pulsara_agent.runtime.publisher import RuntimePublishedEvent
+from pulsara_agent.runtime.publisher import (
+    RuntimeEventSubscriberSemantics,
+    RuntimePublishedEvent,
+)
 from pulsara_agent.ports.stored_event import (
     GroupingIndependentOwnedEventReducerAdapter,
 )
 from pulsara_agent.runtime.session import (
+    CommittedReducerSemantics,
     EventReconciliationRequired,
     EventWriteConflict,
 )
@@ -206,6 +210,25 @@ def test_event_write_returns_committed_truth_when_observer_fails(tmp_path) -> No
     assert [item.event.sequence for item in recording.events] == [1]
 
 
+def test_derived_observer_failure_does_not_enter_write_settlement(tmp_path) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+    recording = _RecordingSubscriber()
+    runtime.publisher.subscribe(
+        _FailingSubscriber(),
+        semantics=RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT,
+    )
+    runtime.publisher.subscribe(recording)
+
+    result = asyncio.run(runtime.write_event(_event("derived-failure")))
+
+    assert result.commit_status == "committed"
+    assert result.publication_status == "completed"
+    assert result.publication_errors == ()
+    assert runtime.reconciliation_required is False
+    assert runtime.publication_reconciliation_required is False
+    assert [item.event.sequence for item in recording.events] == [1]
+
+
 def test_event_batch_observer_failure_does_not_skip_later_sequences(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     failing = _FailFirstSubscriber()
@@ -259,6 +282,83 @@ def test_committed_reducer_failure_requires_reconciliation(tmp_path) -> None:
 
     asyncio.run(run())
     assert [event.sequence for event in runtime.event_log.iter()] == [1]
+
+
+def test_derived_reducer_failure_quarantines_only_that_instance(tmp_path) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+    calls = 0
+
+    def fail(_events: tuple[AgentEvent, ...]) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("synthetic derived reducer failure")
+
+    runtime.register_committed_reducer(
+        reducer_id="test:derived",
+        through_sequence=0,
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=fail,
+        ),
+        semantics=CommittedReducerSemantics.DERIVED_BEST_EFFORT,
+        bounded_fallback="rebuild from canonical EventLog on next owner generation",
+    )
+
+    first = asyncio.run(runtime.write_event(_event("first")))
+    second = asyncio.run(runtime.write_event(_event("second")))
+
+    assert first.commit_status == second.commit_status == "committed"
+    assert first.reducer_errors[0].reducer_id == "test:derived"
+    assert second.reducer_errors == ()
+    assert calls == 1
+    assert runtime.reconciliation_required is False
+    assert runtime.pending_committed_reducer_repair_handles() == ()
+    diagnostic = next(
+        item
+        for item in runtime.committed_reducer_operational_diagnostics()["registrations"]
+        if item["reducer_id"] == "test:derived"
+    )
+    assert diagnostic["semantics"] == "derived_best_effort"
+    assert diagnostic["quarantined"] is True
+    assert diagnostic["last_error_code"] == "RUNTIMEERROR"
+
+
+def test_derived_reducer_requires_explicit_bounded_fallback(tmp_path) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+
+    with pytest.raises(ValueError, match="requires a bounded fallback"):
+        runtime.register_committed_reducer(
+            reducer_id="test:unbounded-derived",
+            through_sequence=0,
+            ingress=GroupingIndependentOwnedEventReducerAdapter(
+                apply_owned_events=lambda _events: None,
+            ),
+            semantics=CommittedReducerSemantics.DERIVED_BEST_EFFORT,
+        )
+
+
+def test_initial_derived_catch_up_failure_uses_same_quarantine_path(tmp_path) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+    runtime.event_log.append(_event("before-registration"))
+
+    def fail(_events: tuple[AgentEvent, ...]) -> None:
+        raise RuntimeError("synthetic derived catch-up failure")
+
+    runtime.register_committed_reducer(
+        reducer_id="test:derived-catch-up",
+        through_sequence=0,
+        ingress=GroupingIndependentOwnedEventReducerAdapter(
+            apply_owned_events=fail,
+        ),
+        semantics=CommittedReducerSemantics.DERIVED_BEST_EFFORT,
+        bounded_fallback="discard this instance and rebuild from EventLog",
+    )
+
+    registration = runtime._committed_reducers["test:derived-catch-up"]
+    assert registration.quarantined is True
+    assert registration.reconciliation_required is False
+    assert runtime.reconciliation_required is False
+    result = asyncio.run(runtime.write_event(_event("after-registration")))
+    assert result.commit_status == "committed"
 
 
 def test_initial_reducer_catch_up_failure_remains_registered_for_reconciliation(

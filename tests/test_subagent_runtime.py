@@ -62,7 +62,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
+from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import LLMRuntime
 from tests.support import (

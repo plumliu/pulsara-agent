@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
-from typing import Iterable
+from typing import Iterable, TypeAlias
 
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -25,22 +25,27 @@ class PostgresCatalogCanonicalizer:
         self,
         connection: Connection,
         *,
-        relation_names: Iterable[str] | None = None,
+        relation_names: Iterable["PostgresRelationIdentity"] | None = None,
     ) -> PostgresFastObservedCatalogFact:
-        names = tuple(
+        identities = tuple(
             sorted(
-                relation_names
+                (_normalize_relation_identity(item) for item in relation_names)
                 if relation_names is not None
                 else (
-                    str(item["relation_name"])
+                    (
+                        str(item["schema_name"]),
+                        str(item["relation_name"]),
+                    )
                     for item in POSTGRES_LATEST_SCHEMA_MANIFEST.owned_relations
-                )
+                ),
+                key=lambda item: (item[0], item[1]),
             )
         )
         extensions = self._extensions(connection)
         types = self._types(connection)
         relations = tuple(
-            self._relation_execution_shape(connection, name) for name in names
+            self._relation_execution_shape(connection, schema_name, relation_name)
+            for schema_name, relation_name in identities
         )
         functions = self._function_execution_shapes(connection)
         payload = {
@@ -74,7 +79,7 @@ class PostgresCatalogCanonicalizer:
         self,
         connection: Connection,
         *,
-        relation_names: Iterable[str] | None = None,
+        relation_names: Iterable["PostgresRelationIdentity"] | None = None,
     ) -> PostgresDeepObservedCatalogFact:
         fast = self.read_fast(connection, relation_names=relation_names)
         relations_list: list[dict[str, object]] = []
@@ -83,11 +88,16 @@ class PostgresCatalogCanonicalizer:
             relation = {
                 **shape,
                 "indexes": self._indexes(
-                    connection,
-                    relation_name=relation_name,
+                connection,
+                schema_name=str(shape["schema_name"]),
+                relation_name=relation_name,
                 ),
             }
-            triggers = self._triggers(connection, relation_name=relation_name)
+            triggers = self._triggers(
+                connection,
+                schema_name=str(shape["schema_name"]),
+                relation_name=relation_name,
+            )
             if triggers:
                 relation["triggers"] = triggers
             relations_list.append(relation)
@@ -146,7 +156,10 @@ class PostgresCatalogCanonicalizer:
             return tuple(_canonical_row(row) for row in cursor.fetchall())
 
     def _relation_execution_shape(
-        self, connection: Connection, relation_name: str
+        self,
+        connection: Connection,
+        schema_name: str,
+        relation_name: str,
     ) -> dict[str, object]:
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -154,14 +167,14 @@ class PostgresCatalogCanonicalizer:
                 SELECT c.relkind
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname = %s
+                WHERE n.nspname = %s AND c.relname = %s
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             relation = cursor.fetchone()
             if relation is None:
                 return {
-                    "schema_name": "public",
+                    "schema_name": schema_name,
                     "relation_name": relation_name,
                     "relation_kind": "missing",
                     "columns": (),
@@ -190,13 +203,13 @@ class PostgresCatalogCanonicalizer:
                        ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
                 LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
                 LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
-                WHERE n.nspname = 'public'
+                WHERE n.nspname = %s
                   AND c.relname = %s
                   AND a.attnum > 0
                   AND NOT a.attisdropped
                 ORDER BY a.attnum
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             columns = tuple(_canonical_row(row) for row in cursor.fetchall())
             cursor.execute(
@@ -210,10 +223,10 @@ class PostgresCatalogCanonicalizer:
                 FROM pg_catalog.pg_constraint con
                 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname = %s
+                WHERE n.nspname = %s AND c.relname = %s
                 ORDER BY con.conname
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             constraints = tuple(_canonical_row(row) for row in cursor.fetchall())
             cursor.execute(
@@ -228,14 +241,14 @@ class PostgresCatalogCanonicalizer:
                 JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
-                WHERE n.nspname = 'public' AND c.relname = %s
+                WHERE n.nspname = %s AND c.relname = %s
                 ORDER BY ic.relname
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             indexes = tuple(_canonical_row(row) for row in cursor.fetchall())
         return {
-            "schema_name": "public",
+            "schema_name": schema_name,
             "relation_name": relation_name,
             "relation_kind": str(relation["relkind"]),
             "columns": columns,
@@ -245,7 +258,7 @@ class PostgresCatalogCanonicalizer:
 
     @staticmethod
     def _indexes(
-        connection: Connection, *, relation_name: str
+        connection: Connection, *, schema_name: str, relation_name: str
     ) -> tuple[dict[str, object], ...]:
         with connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -264,10 +277,10 @@ class PostgresCatalogCanonicalizer:
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                 JOIN pg_catalog.pg_am am ON am.oid = ic.relam
-                WHERE n.nspname = 'public' AND c.relname = %s
+                WHERE n.nspname = %s AND c.relname = %s
                 ORDER BY ic.relname
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             return tuple(_canonical_row(row) for row in cursor.fetchall())
 
@@ -275,6 +288,7 @@ class PostgresCatalogCanonicalizer:
     def _triggers(
         connection: Connection,
         *,
+        schema_name: str,
         relation_name: str,
     ) -> tuple[dict[str, object], ...]:
         with connection.cursor(row_factory=dict_row) as cursor:
@@ -290,12 +304,12 @@ class PostgresCatalogCanonicalizer:
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
                 JOIN pg_catalog.pg_namespace pns ON pns.oid = p.pronamespace
-                WHERE n.nspname = 'public'
+                WHERE n.nspname = %s
                   AND c.relname = %s
                   AND NOT t.tgisinternal
                 ORDER BY t.tgname
                 """,
-                (relation_name,),
+                (schema_name, relation_name),
             )
             return tuple(_canonical_row(row) for row in cursor.fetchall())
 
@@ -363,4 +377,21 @@ def _canonical_row(row: object) -> dict[str, object]:
     }
 
 
-__all__ = ["PostgresCatalogCanonicalizer"]
+PostgresRelationIdentity: TypeAlias = str | tuple[str, str]
+
+
+def _normalize_relation_identity(value: PostgresRelationIdentity) -> tuple[str, str]:
+    if isinstance(value, str):
+        if not value:
+            raise ValueError("relation name must be non-empty")
+        return "public", value
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise TypeError("relation identity must be name or (schema, name)")
+    return value
+
+
+__all__ = ["PostgresCatalogCanonicalizer", "PostgresRelationIdentity"]

@@ -76,7 +76,7 @@ class PostgresSchemaVerifier:
         self._canonicalizer = canonicalizer or PostgresCatalogCanonicalizer()
         self._expected = _load_expected_catalog(through_version=registry.latest_version)
         self._expected_relation_names = tuple(
-            str(item["relation_name"])
+            (str(item["schema_name"]), str(item["relation_name"]))
             for item in self._expected["relation_execution_shapes"]
         )
 

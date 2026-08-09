@@ -147,7 +147,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 @pytest.fixture(autouse=True)
 def _bind_marked_postgres_test_database(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("postgres") is not None:
-        request.getfixturevalue("migrated_postgres_database")
+        if Path(str(request.node.fspath)).name.startswith("test_stage2_"):
+            request.getfixturevalue("stage2_migrated_postgres_database")
+        else:
+            request.getfixturevalue("migrated_postgres_database")
 
 
 @pytest.fixture(scope="session")
@@ -167,6 +170,22 @@ def migrated_postgres_database():
             os.environ.pop("PULSARA_POSTGRES_DSN", None)
         else:
             os.environ["PULSARA_POSTGRES_DSN"] = previous
+        drop_postgres_test_database(admin_root_dsn(), database.database_name)
+
+
+@pytest.fixture(scope="session")
+def stage2_migrated_postgres_database():
+    try:
+        database = create_migrated_postgres_test_database(
+            legacy_runtime_access=False
+        )
+    except Exception as exc:
+        if os.environ.get("CI"):
+            pytest.fail(f"Stage 2 PostgreSQL test database unavailable in CI: {exc}")
+        pytest.skip(f"Stage 2 PostgreSQL test database unavailable: {exc}")
+    try:
+        yield database
+    finally:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)
 
 

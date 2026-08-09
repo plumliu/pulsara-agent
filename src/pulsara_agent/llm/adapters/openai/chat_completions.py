@@ -7,14 +7,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 
-from pulsara_agent.event import EventContext
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
     build_async_openai_client,
 )
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
-    RawProviderItemBuilder,
+    ProviderLiveItemBuilder,
     ReportedModelIdentityObserver,
     chat_completion_reported_model,
     sdk_event_to_dict,
@@ -37,7 +36,8 @@ from pulsara_agent.llm.provider import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.llm.raw_provider import RawProviderStreamItem
+from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
+from pulsara_agent.ports.provider_stream import ProviderAdapterStreamItem
 from pulsara_agent.llm.runtime_observation import (
     resolve_runtime_observation_binding,
 )
@@ -73,10 +73,14 @@ class OpenAIChatCompletionsTransport:
         *,
         call: ResolvedModelCall,
         context: LLMContext,
-        event_context: EventContext,
-    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
+        event_context: object | None = None,
+    ) -> AsyncIterator[ProviderAdapterStreamItem]:
+        # Explicit legacy LLMRuntime callers may still supply this keyword
+        # until Stage 3 deletes that bridge.  The Stage 2 provider protocol
+        # neither declares nor observes it.
+        del event_context
         model = call.target.model_profile
-        builder = RawProviderItemBuilder()
+        builder = ProviderLiveItemBuilder()
         thinking_delta_fields = model.provider_profile.thinking.delta_fields
         if self._mock_chunks:
             model_identity = ReportedModelIdentityObserver(
@@ -355,13 +359,13 @@ def _messages_to_chat_messages(
 def translate_chat_completion_chunk(
     raw_chunk: Any,
     *,
-    builder: RawProviderItemBuilder,
+    builder: ProviderLiveItemBuilder,
     accumulator: "ChatToolCallAccumulator",
     thinking_delta_fields: tuple[str, ...] = ("reasoning_content",),
-) -> list[RawProviderStreamItem]:
+) -> list[ProviderStreamPayload]:
     chunk = sdk_event_to_dict(raw_chunk)
     accumulator.update_usage(chunk.get("usage"))
-    events: list[RawProviderStreamItem] = []
+    events: list[ProviderStreamPayload] = []
     choices = chunk.get("choices")
     if not isinstance(choices, list):
         return events
@@ -399,13 +403,13 @@ class _ChatToolCallState:
 
 @dataclass(slots=True)
 class ChatToolCallAccumulator:
-    builder: RawProviderItemBuilder
+    builder: ProviderLiveItemBuilder
     usage_report: TransportUsageReport | None = None
     _states: dict[str, _ChatToolCallState] = field(default_factory=dict)
 
     def apply_tool_call_delta(
         self, raw_tool_call: dict[str, Any]
-    ) -> list[RawProviderStreamItem]:
+    ) -> list[ProviderStreamPayload]:
         key = str(raw_tool_call.get("index", len(self._states)))
         state = self._states.setdefault(key, _ChatToolCallState())
         tool_call_id = raw_tool_call.get("id")
@@ -434,7 +438,7 @@ class ChatToolCallAccumulator:
             if isinstance(arguments, str) and arguments:
                 arguments_delta = arguments
 
-        events: list[RawProviderStreamItem] = []
+        events: list[ProviderStreamPayload] = []
         if not state.started and state.tool_call_id and state.name:
             events.extend(
                 self.builder.tool_call_start(
@@ -469,7 +473,7 @@ class ChatToolCallAccumulator:
         if report.usage_status == "reported":
             self.usage_report = report
 
-    def close_active_tool_calls(self) -> list[RawProviderStreamItem]:
+    def close_active_tool_calls(self) -> list[ProviderStreamPayload]:
         if any(
             not state.started or not state.tool_call_id
             for state in self._states.values()
@@ -478,7 +482,7 @@ class ChatToolCallAccumulator:
                 "tool-call stream ended before a named tool-call start",
                 reason_code="transport_tool_call_start_missing",
             )
-        events: list[RawProviderStreamItem] = []
+        events: list[ProviderStreamPayload] = []
         for state in self._states.values():
             assert state.tool_call_id is not None
             events.extend(self.builder.tool_call_end(tool_call_id=state.tool_call_id))

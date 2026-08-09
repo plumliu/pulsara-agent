@@ -96,6 +96,19 @@ class LocalSkillCapabilityProvider:
             ),
         )
 
+    def resolve_projection_for_available_tools(
+        self,
+        context: CapabilityProjectionResolveContext,
+        *,
+        available_tool_names: frozenset[str],
+    ) -> CapabilityProjectionOutput:
+        """Narrow public seam for runtimes without legacy surface artifacts."""
+
+        return self._resolve_projection_output(
+            context,
+            available_tool_names=available_tool_names,
+        )
+
 
 def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
     return ResolvedSkillCatalogEntry(

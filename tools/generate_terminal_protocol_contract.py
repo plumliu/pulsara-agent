@@ -24,6 +24,17 @@ GO_VALUES = ROOT / "clients/terminal/internal/protocolvalue/vocabulary_gen.go"
 GO_BUILD = ROOT / "clients/terminal/internal/buildinfo/buildinfo.go"
 GO_PROTO = ROOT / "clients/terminal/internal/protocol/terminal_client.pb.go"
 PY_PROTO = ROOT / "src/pulsara_agent/terminal_protocol/generated/terminal_client_pb2.py"
+V3_PROTO = SCHEMA_ROOT / "terminal_kernel_v3.proto"
+V3_GO_PROTO = ROOT / "clients/terminal/internal/protocolv3/terminal_kernel_v3.pb.go"
+V3_PY_PROTO = (
+    ROOT
+    / "src/pulsara_agent/terminal_protocol/generated_v3/terminal_kernel_v3_pb2.py"
+)
+V3_GATEWAY = ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py"
+V3_GO_CLIENT = ROOT / "clients/terminal/internal/kernelclient/client.go"
+V3_CROSS_LANGUAGE_FIXTURE = (
+    ROOT / "tests/fixtures/stage2_protocol_v3_cross_language.json"
+)
 
 
 def main() -> None:
@@ -68,8 +79,12 @@ def _verify_contract() -> None:
     _verify_cross_language_constants(manifest)
     _require_literal(CODEC, expected)
     _require_literal(GO_VALUES, expected)
-    _require_literal(GO_BUILD, expected)
     _verify_generated_protobuf()
+    v3_schema_identity = "sha256:" + sha256(V3_PROTO.read_bytes()).hexdigest()
+    _require_literal(GO_BUILD, v3_schema_identity)
+    _require_literal(V3_GATEWAY, v3_schema_identity)
+    _require_literal(V3_GO_CLIENT, v3_schema_identity)
+    _verify_v3_cross_language_fixture(v3_schema_identity)
     for relative, expected_digest in manifest.get(
         "generated_contract_files_sha256", {}
     ).items():
@@ -134,6 +149,30 @@ def _require_literal(path: Path, value: str) -> None:
     text = path.read_text(encoding="utf-8")
     if re.search(re.escape(value), text) is None:
         raise SystemExit(f"terminal schema identity is stale in {path}")
+
+
+def _verify_v3_cross_language_fixture(schema_identity: str) -> None:
+    fixture = json.loads(V3_CROSS_LANGUAGE_FIXTURE.read_text(encoding="utf-8"))
+    if fixture.get("schema_fingerprint") != schema_identity:
+        raise SystemExit("Protocol v3 cross-language fixture schema is stale")
+    sys.path.insert(0, str(ROOT / "src"))
+    from pulsara_agent.terminal_protocol.generated_v3 import (
+        terminal_kernel_v3_pb2 as v3_wire,
+    )
+
+    snapshot = v3_wire.CanonicalSessionSnapshot()
+    try:
+        snapshot.ParseFromString(bytes.fromhex(fixture["snapshot_protobuf_hex"]))
+    except (KeyError, ValueError) as exc:
+        raise SystemExit("Protocol v3 cross-language fixture is malformed") from exc
+    observed = snapshot.snapshot_fingerprint
+    snapshot.snapshot_fingerprint = ""
+    expected = "sha256:" + sha256(
+        b"terminal-canonical-snapshot:v3\0"
+        + snapshot.SerializeToString(deterministic=True)
+    ).hexdigest()
+    if observed != expected or fixture.get("snapshot_fingerprint") != expected:
+        raise SystemExit("Protocol v3 cross-language snapshot fingerprint drifted")
 
 
 def _integer_constant(path: Path, name: str) -> int:
@@ -272,6 +311,35 @@ def _verify_generated_protobuf() -> None:
             raise SystemExit("generated Go Terminal Protocol binding is stale")
         if generated_python.read_bytes() != PY_PROTO.read_bytes():
             raise SystemExit("generated Python Terminal Protocol binding is stale")
+        subprocess.run(
+            [
+                "protoc",
+                "-I",
+                str(SCHEMA_ROOT),
+                f"--go_out={temporary}",
+                "--go_opt=module=github.com/plumliu/pulsara-agent/clients/terminal",
+                str(V3_PROTO),
+            ],
+            check=True,
+            env=environment,
+        )
+        subprocess.run(
+            [
+                "protoc",
+                "-I",
+                str(SCHEMA_ROOT),
+                f"--python_out={temporary}",
+                str(V3_PROTO),
+            ],
+            check=True,
+            env=environment,
+        )
+        generated_v3_go = temporary / "internal/protocolv3/terminal_kernel_v3.pb.go"
+        generated_v3_python = temporary / "terminal_kernel_v3_pb2.py"
+        if generated_v3_go.read_bytes() != V3_GO_PROTO.read_bytes():
+            raise SystemExit("generated Go Terminal Protocol v3 binding is stale")
+        if generated_v3_python.read_bytes() != V3_PY_PROTO.read_bytes():
+            raise SystemExit("generated Python Terminal Protocol v3 binding is stale")
 
 
 if __name__ == "__main__":

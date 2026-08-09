@@ -1,0 +1,45 @@
+{
+  "schema_version": "durability-subtraction-stage2-handoff.v1",
+  "checkpoint_kind": "STAGE0_1_PLUS_STAGE2_PRE_REVIEW_WIP",
+  "stage0_1_checkpoint_head": null,
+  "captured_head": "5b7ad9f7ffc8565bc572180b2bde0c81ab64473a",
+  "worktree_policy": "The captured HEAD predates an isolated Stage 0/1 checkpoint. Preserve the combined Stage 0/1 plus Stage 2 WIP worktree; do not fabricate a retrospective checkpoint, dual-write, or compatibility authority.",
+  "document_sha256": {
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "a86a6e43f592e9f3db40eddb787f9a67412334637cf892c8781c299a845672ff",
+    "STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md": "8a30fb3db34bff7c152f3450ce5b18c7b403e3e657fb6f53d9e2e1d87b812b4a",
+    "STAGE_0_1_IMPLEMENTATION_SPEC.zh.md": "d092089f523f035f9971d4e35b66ed017633853f90b0d947f01173cff4f7ec65",
+    "DURABILITY_SUBTRACTION_CUTOVER_RUNBOOK.zh.md": "7855b124173dfaf53e21e3e651c13bb19a889e5357a0381a41c3f526164a3313"
+  },
+  "target_oracle": {
+    "fixture": "tests/fixtures/durability_subtraction_stage0_target_oracle.json",
+    "sha256": "0c131bd818e816b2a1edffe41455c783440d5fb50e98beb5394206c5209f60dd",
+    "committed": 26,
+    "live": 23,
+    "subject_slots": 13,
+    "append_guards": 2
+  },
+  "full_pytest_handoff": {
+    "command": "uv run pytest -q",
+    "collected": 2848,
+    "passed": 2843,
+    "failed": 3,
+    "skipped": 2,
+    "warnings": 7,
+    "duration_seconds": 912.05,
+    "exit_code": 1,
+    "red_nodes": [
+      {
+        "test_id": "tests/test_host_core.py::test_host_terminal_monitor_registration_completion_and_autonomous_delivery",
+        "disposition": "legacy terminal checkpoint safety blocker; replaced by S2-B/S2-G Host-scoped terminal contract"
+      },
+      {
+        "test_id": "tests/test_host_core.py::test_host_terminal_monitor_repeated_progress_without_reregistration",
+        "disposition": "legacy terminal checkpoint safety blocker; replaced by S2-B/S2-G Host-scoped terminal contract"
+      },
+      {
+        "test_id": "tests/test_schema_hot_path_architecture.py::test_baseline_sql_is_forward_only_and_extension_is_unique",
+        "disposition": "expected S2-A migration-list drift introduced after handoff capture; updated in the owning slice"
+      }
+    ]
+  }
+}

@@ -507,16 +507,27 @@ def test_s1_production_update_signal_and_foreground_owners_are_exact() -> None:
 def test_s1_layout_viewport_and_scrollback_owners_are_exact() -> None:
     client_root = ROOT / "clients" / "terminal"
     transcript_root = client_root / "internal" / "components" / "transcript"
+    kernel_viewport_owner = client_root / "internal" / "kernelapp" / "model.go"
     viewport_tokens = ("scrollOffset", "followTail", "viewportAnchor", "WrapCache")
     violations: list[str] = []
     for path in (client_root / "internal").rglob("*.go"):
-        if path.name.endswith("_test.go") or path.is_relative_to(transcript_root):
+        if (
+            path.name.endswith("_test.go")
+            or path.is_relative_to(transcript_root)
+            or path == kernel_viewport_owner
+        ):
             continue
         source = path.read_text(encoding="utf-8")
         for token in viewport_tokens:
             if token in source:
                 violations.append(f"{path.relative_to(ROOT).as_posix()}:{token}")
     assert violations == []
+    production_binary = (client_root / "cmd" / "pulsara-tui" / "main.go").read_text(
+        encoding="utf-8"
+    )
+    assert "kernelbootstrap.Run" in production_binary
+    assert "internal/bootstrap" not in production_binary
+    assert "followTail" in kernel_viewport_owner.read_text(encoding="utf-8")
 
     presentation = (client_root / "internal" / "presentation" / "state.go").read_text(
         encoding="utf-8"

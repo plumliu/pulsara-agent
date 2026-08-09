@@ -6,15 +6,10 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated, Any, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from pulsara_agent.event import (
-    AgentEvent,
-    EventContext,
-    TerminalProcessMonitorRegisteredEvent,
-)
 from pulsara_agent.primitives.context import (
     ContextEventReferenceFact,
     FrozenJsonObjectFact,
@@ -42,6 +37,13 @@ from pulsara_agent.ports.tool_execution import (
     ToolInvocationOwnerKind,
     ToolPermissionInvocation,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.event import (
+        AgentEvent,
+        EventContext,
+        TerminalProcessMonitorRegisteredEvent,
+    )
 
 
 @dataclass(frozen=True, slots=True)

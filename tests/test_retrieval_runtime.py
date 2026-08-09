@@ -6,7 +6,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from pulsara_agent.host import HostCore, HostWorkspaceInput
+from pulsara_agent.host import HostWorkspaceInput
+from pulsara_agent.host.core import HostCore
 from tests.support import test_llm_config
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph.durable_facade import DurableGraphFacade

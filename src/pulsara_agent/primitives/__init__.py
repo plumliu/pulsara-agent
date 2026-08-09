@@ -1,169 +1,48 @@
-"""Low-level, event-safe Pulsara contracts."""
+"""Low-level contract facade with lazy compatibility exports.
 
-from pulsara_agent.primitives.authority_materialization import (
-    ActivePhysicalReservationStateFact,
-    AuthorityMaterializationLimits,
-    CheckpointDispatchBarrierFact,
-    FixedBatchBurstContractFact,
-    FixedBatchEventContractFact,
-    LedgerMaterializationAccountStateFact,
-    LedgerMaterializationConsumerHorizonFact,
-    LedgerMaterializationConsumerKind,
-    LedgerMaterializationGenerationFact,
-    LedgerWriteAdmissionClass,
-    NonTranscriptEventContractFact,
-    PhysicalBookkeepingEventBoundFact,
-    PhysicalBurstContractFact,
-    PhysicalChargeContractFact,
-    PhysicalOperationKind,
-    PhysicalOperationReservationFact,
-    PhysicalStoredEnvelopeObservation,
-    StoredEnvelopeIdentityBoundsFact,
-    ToolDeltaBurstContractFact,
-    TranscriptDomainPrefixFact,
-    TranscriptDomainSparseReadProofFact,
-    TranscriptAccelerationEventContractFact,
-    TranscriptEventDomainRegistryContractFact,
-    TranscriptProjectionLiveAssemblyState,
-    TranscriptProjectionStableSemanticStateFact,
-    TranscriptSemanticEventContractFact,
-    TransportSegmentedBurstContractFact,
+Focused primitive modules are safe dependency leaves.  The package facade
+must not eagerly aggregate the legacy authority/projection vocabulary when
+the Stage 2 kernel imports one such leaf.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+_LAZY_MODULES = (
+    "pulsara_agent.primitives.authority_materialization",
+    "pulsara_agent.primitives.context",
+    "pulsara_agent.primitives.context_source",
+    "pulsara_agent.primitives.context_input_commit",
+    "pulsara_agent.primitives.model_call",
+    "pulsara_agent.primitives.permission",
+    "pulsara_agent.primitives.frozen",
+    "pulsara_agent.primitives.run_entry",
+    "pulsara_agent.primitives.run_lifecycle",
+    "pulsara_agent.primitives.tool_observation",
+    "pulsara_agent.primitives.terminal_projection",
+    "pulsara_agent.primitives.tool_result",
 )
-from pulsara_agent.primitives.context import (
-    ContextAuthoritySlicePlan,
-    ContextCandidateSourceSelectionFact,
-    ContextCandidateCollectionPolicyFact,
-    ContextCompilePolicyFact,
-    ContextCompileFailureStage,
-    ContextEventRangeFact,
-    ContextEventReferenceFact,
-    ContextFactSnapshotFact,
-    ContextInputIdentityFact,
-    LongHorizonContextAttributionFact,
-    ContextSectionCandidate,
-    FrozenJsonArrayFact,
-    FrozenJsonObjectFact,
-    PreparedContextCandidateSet,
-    ProjectedToolResultCompileRefFact,
-    ResolvedToolResultRenderPolicyFact,
-    RunPermissionSnapshotFact,
-    ToolResultRenderPolicyBasisFact,
-    TranscriptCompileInput,
-    TranscriptProjectionWindowFact,
-    canonical_utc_timestamp,
-    context_fingerprint,
-    freeze_json,
-    thaw_json,
-)
-from pulsara_agent.primitives.context_source import (
-    ContextSourceCandidateAttributionFact,
-    ContextSourceCandidateSemanticFact,
-    ContextSourceContractFact,
-    ContextSourceId,
-)
-from pulsara_agent.primitives.context_input_commit import (
-    CheckpointProjectionBaseReferenceFact,
-    ContextCompileInputCommitFact,
-    ContextCompileSourceReferenceSetFact,
-    ContextInputAuditExpectationFact,
-    RunSeedProjectionBaseReferenceFact,
-    TranscriptProjectionBaseReferenceFact,
-    build_context_input_audit_expectation,
-)
-from pulsara_agent.primitives.model_call import (
-    CompactionTargetEstimateFact,
-    CompactionObservedAfterMeasurementFact,
-    ContextBudgetReportEvent,
-    ModelCallDiagnosticFact,
-    ModelCallPurpose,
-    ModelContextLimits,
-    ModelContextMode,
-    ModelTokenUsageFact,
-    ResolvedModelCallFact,
-    ResolvedModelContextBudgetFact,
-    ResolvedModelOptionsFact,
-    ResolvedModelTargetFact,
-    TokenEstimatorFact,
-    canonical_json_bytes,
-    sha256_fingerprint,
-)
-from pulsara_agent.primitives.permission import (
-    DEFAULT_PERMISSION_MODE,
-    PermissionMode,
-    PresetPermissionPolicyFact,
-    parse_permission_mode,
-    preset_permission_payload,
-    preset_permission_policy_fact,
-)
-from pulsara_agent.primitives.frozen import (
-    DURABLE_FACT_FINGERPRINT_REGISTRY,
-    DurableFactFingerprintRegistry,
-    DurableFactFingerprintSpec,
-    DurableFingerprintJoinSpec,
-    FrozenFactBase,
-    FrozenRuntimeStateBase,
-    PreparedRuntimeValueBase,
-    StableEventIdentityFact,
-    build_frozen_fact,
-)
-from pulsara_agent.primitives.run_entry import (
-    CapabilityExposureOwnerFact,
-    CapabilityExposureOwnerKind,
-    CurrentUserMessageFact,
-    DurableRunExistence,
-    HostRunBoundaryIdentityFact,
-    HostRunBoundaryKind,
-    RunEntryKind,
-    SubagentRunEntryFact,
-)
-from pulsara_agent.primitives.run_lifecycle import (
-    RunStopReason,
-    RunTerminalizationKind,
-)
-from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
-from pulsara_agent.primitives.terminal_projection import (
-    CanonicalToolResultBlockFact,
-    CanonicalToolResultBlockSemanticFact,
-    CanonicalToolResultContentBlockFact,
-    CanonicalToolResultDataBlockSemanticFact,
-    CanonicalToolResultTextBlockSemanticFact,
-    DataMediaTypeNormalizationContractFact,
-    DataMediaTypeNormalizationRuleFact,
-    ModelCallSemanticSourceFact,
-    ModelCallTerminalProjectionEndReferenceFact,
-    ModelDataBlockSemanticFact,
-    ModelProjectionItemFact,
-    ModelProviderErrorSemanticFact,
-    ModelTerminalProjectionPayloadFact,
-    ModelTerminalProjectionSemanticFact,
-    ModelTextBlockSemanticFact,
-    ModelThinkingBlockSemanticFact,
-    ModelToolCallBlockSemanticFact,
-    TerminalArtifactContentReferenceFact,
-    TerminalContentArtifactCodecContractFact,
-    TerminalContentCanonicalizationContractFact,
-    TerminalContentSemanticFact,
-    TerminalInlineContentFact,
-    TerminalProjectionDocumentContractFact,
-    TerminalProjectionDocumentFact,
-    TerminalProjectionReferenceFact,
-    ToolResultSemanticSourceFact,
-    ToolResultTerminalProjectionEndReferenceFact,
-    ToolTerminalProjectionPayloadFact,
-    ToolTerminalProjectionSemanticFact,
-)
-from pulsara_agent.primitives.tool_result import (
-    CapabilityResultRenderContractFact,
-    CapabilityResultRenderVariantFact,
-    ExternalToolCallRequirementFact,
-    PreparedToolResultRenderInput,
-    ToolResultEssentialCapturePolicyFact,
-    ToolResultExecutionSemanticsFact,
-    ToolResultRenderProfileFact,
-    ToolResultRenderUnit,
-    ToolResultSemanticsBuilderContractFact,
-    ToolResultStateFact,
-)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(name)
+    for module_name in _LAZY_MODULES:
+        module = import_module(module_name)
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            continue
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 __all__ = [
     "ActivePhysicalReservationStateFact",

@@ -17,10 +17,10 @@ from tests.test_host_lifecycle_contract import (
 )
 
 from pulsara_agent.host import (
-    HostCore,
     HostSessionRegistry,
     ResumableSessionSummary,
 )
+from pulsara_agent.host.core import HostCore
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.session import EventPublicationAfterCommitError

@@ -1,0 +1,675 @@
+syntax = "proto3";
+
+package pulsara.terminal.v3;
+
+option go_package = "github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolv3;protocolv3";
+
+message ProtocolIdentity {
+  uint32 major = 1;
+  uint32 minor = 2;
+  string schema_fingerprint = 3;
+}
+
+enum AttachmentRole {
+  ATTACHMENT_ROLE_UNSPECIFIED = 0;
+  ATTACHMENT_ROLE_OBSERVER = 1;
+  ATTACHMENT_ROLE_CONTROLLER = 2;
+}
+
+message TerminalKernelBootstrapCarrier {
+  uint32 carrier_version = 1;
+  string launch_id = 2;
+  bytes launch_capability = 3;
+  string client_instance_id = 4;
+  string host_session_id = 5;
+  string session_id = 6;
+  string unix_socket_path = 7;
+  AttachmentRole requested_role = 8;
+  uint64 parent_pid = 9;
+  string expires_at_utc = 10;
+  bytes carrier_nonce = 11;
+  string carrier_fingerprint = 12;
+}
+
+enum CommittedEventType {
+  COMMITTED_EVENT_TYPE_UNSPECIFIED = 0;
+  USER_MESSAGE_ACCEPTED = 1;
+  ASSISTANT_MESSAGE_ACCEPTED = 2;
+  ASSISTANT_TOOL_REQUEST_ACCEPTED = 3;
+  TOOL_RESULT_ACCEPTED = 4;
+  TURN_COMPLETED = 5;
+  TURN_INTERRUPTED = 6;
+  USER_STEER_ACCEPTED = 7;
+  CAPABILITY_DECISION_ACCEPTED = 8;
+  INTERACTION_DECISION_ACCEPTED = 9;
+  TOOL_ATTEMPT_ACCEPTED = 10;
+  TOOL_REMOTE_IDENTITY_PUBLISHED = 11;
+  PROMPT_QUEUED = 12;
+  PROMPT_CONSUMED = 13;
+  PROMPT_CANCELLED = 14;
+  PROMPT_REJECTED = 15;
+  COMPACTION_ADOPTED = 16;
+  SUBAGENT_TASK_ACCEPTED = 17;
+  SUBAGENT_TASK_STATUS_ACCEPTED = 18;
+  SUBAGENT_MESSAGE_ACCEPTED = 19;
+  SUBAGENT_RESULT_ACCEPTED = 20;
+  JOB_QUEUED = 21;
+  JOB_ATTEMPT_ACCEPTED = 22;
+  JOB_TERMINAL_ACCEPTED = 23;
+  MEMORY_FACT_ACCEPTED = 24;
+  MEMORY_FACT_LIFECYCLE_CHANGED = 25;
+  MEMORY_RELATION_ACCEPTED = 26;
+}
+
+enum LiveEventType {
+  LIVE_EVENT_TYPE_UNSPECIFIED = 0;
+  TEXT_START = 1;
+  TEXT_DELTA = 2;
+  TEXT_END = 3;
+  THINKING_START = 4;
+  THINKING_DELTA = 5;
+  THINKING_END = 6;
+  DATA_START = 7;
+  DATA_DELTA = 8;
+  DATA_END = 9;
+  TOOL_CALL_START = 10;
+  TOOL_CALL_DELTA = 11;
+  TOOL_CALL_END = 12;
+  TOOL_RESULT_START = 13;
+  TOOL_RESULT_DELTA = 14;
+  TOOL_RESULT_END = 15;
+  INTERACTION_OPENED = 16;
+  INTERACTION_REPLACED = 17;
+  INTERACTION_CLOSED = 18;
+  TERMINAL_PROCESS_COMPLETED = 19;
+  TERMINAL_MONITOR_OPENED = 20;
+  TERMINAL_MONITOR_OBSERVATION = 21;
+  TERMINAL_MONITOR_CLOSED = 22;
+  SUBAGENT_PROGRESS = 23;
+}
+
+enum ConversationScopeKind {
+  CONVERSATION_SCOPE_KIND_UNSPECIFIED = 0;
+  ROOT = 1;
+  SUBAGENT_TASK = 2;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  USER_MESSAGE = 1;
+  USER_STEER = 2;
+  ASSISTANT_MESSAGE = 3;
+  ASSISTANT_TOOL_REQUEST = 4;
+  TOOL_RESULT = 5;
+}
+
+enum ContentKind {
+  CONTENT_KIND_UNSPECIFIED = 0;
+  INLINE = 1;
+  CANONICAL_BLOB = 2;
+}
+
+message CanonicalContentReference {
+  ContentKind kind = 1;
+  bytes inline_content = 2;
+  reserved 3;
+  reserved "blob_id";
+  string digest = 4;
+  uint64 size = 5;
+  string media_type = 6;
+  string codec = 7;
+}
+
+message CanonicalAssistantBlock {
+  string block_id = 1;
+  uint32 ordinal = 2;
+  string block_kind = 3;
+  string tool_call_id = 4;
+  string tool_name = 5;
+  bytes tool_arguments_preview = 6;
+  CanonicalContentReference content = 7;
+  bool tool_arguments_truncated = 8;
+  string tool_arguments_digest = 9;
+  uint64 tool_arguments_size = 10;
+}
+
+message CanonicalEntry {
+  string entry_id = 1;
+  string turn_id = 2;
+  uint64 entry_sequence = 3;
+  EntryKind entry_kind = 4;
+  ConversationScopeKind scope_kind = 5;
+  string scope_subagent_task_id = 6;
+  string context_binding_revision_id = 7;
+  uint64 provider_input_through_sequence = 8;
+  CanonicalContentReference content = 9;
+  repeated CanonicalAssistantBlock blocks = 10;
+  string accepted_at_utc = 11;
+}
+
+message ActiveTurnControl {
+  string turn_id = 1;
+  ConversationScopeKind scope_kind = 2;
+  string scope_subagent_task_id = 3;
+  string status = 4;
+  string accepted_at_utc = 5;
+}
+
+message PromptQueueControl {
+  string queue_item_id = 1;
+  uint64 queue_sequence = 2;
+  string status = 3;
+  string delivery_mode = 4;
+  string target_turn_id = 5;
+  CanonicalContentReference content = 6;
+}
+
+message ToolAttemptControl {
+  string attempt_id = 1;
+  string assistant_entry_id = 2;
+  string tool_call_id = 3;
+  string result_state = 4;
+  string result_entry_id = 5;
+}
+
+message SubagentTaskControl {
+  string task_id = 1;
+  string parent_turn_id = 2;
+  string status = 3;
+  string objective = 4;
+}
+
+message JobControl {
+  string job_id = 1;
+  string handler_type = 2;
+  string status = 3;
+  uint32 maximum_attempts = 4;
+  uint32 attempt_count = 5;
+}
+
+message MemoryFreshnessControl {
+  string channel = 1;
+  uint64 desired_generation = 2;
+  uint64 applied_generation = 3;
+  string handler_contract = 4;
+}
+
+message CanonicalControl {
+  string session_lifecycle = 1;
+  repeated ActiveTurnControl active_turns = 2;
+  repeated PromptQueueControl prompt_queue = 3;
+  uint64 prompt_queue_total_count = 4;
+  repeated ToolAttemptControl tool_attempts = 5;
+  repeated SubagentTaskControl subagent_tasks = 6;
+  repeated JobControl jobs = 7;
+  repeated MemoryFreshnessControl memory_freshness = 8;
+}
+
+message HistoryCursor {
+  string session_id = 1;
+  uint64 cut_sequence = 2;
+  uint64 entry_sequence = 3;
+}
+
+message CanonicalSessionSnapshot {
+  string session_id = 1;
+  string workspace_id = 2;
+  uint64 writer_generation = 3;
+  uint64 entry_sequence_cut = 4;
+  uint64 event_sequence_cut = 5;
+  repeated CanonicalEntry entries = 6;
+  HistoryCursor older_history_cursor = 7;
+  CanonicalControl control = 8;
+  string snapshot_fingerprint = 9;
+}
+
+message HelloRequest {
+  string request_id = 1;
+  ProtocolIdentity protocol = 2;
+  string launch_id = 3;
+  bytes launch_capability = 4;
+  string client_instance_id = 5;
+  string host_session_id = 6;
+  string session_id = 7;
+  AttachmentRole requested_role = 8;
+}
+
+message HelloAccepted {
+  string request_id = 1;
+  ProtocolIdentity protocol = 2;
+  string attachment_id = 3;
+  uint64 attachment_generation = 4;
+  AttachmentRole granted_role = 5;
+  uint32 heartbeat_interval_ms = 6;
+  uint32 maximum_frame_bytes = 7;
+  string result_fingerprint = 8;
+  uint64 live_owner_epoch = 9;
+  uint64 live_revision = 10;
+  LiveSnapshotProjection live_snapshot = 11;
+}
+
+message SnapshotRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  uint32 maximum_entries = 4;
+  uint32 maximum_control_items = 5;
+}
+
+message SnapshotResponse {
+  string request_id = 1;
+  CanonicalSessionSnapshot snapshot = 2;
+}
+
+message HistoryPageRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  HistoryCursor cursor = 4;
+  uint32 maximum_entries = 5;
+  uint32 maximum_serialized_bytes = 6;
+}
+
+message HistoryPageResponse {
+  string request_id = 1;
+  repeated CanonicalEntry entries = 2;
+  HistoryCursor older_history_cursor = 3;
+  bool has_more = 4;
+}
+
+enum ObservationProjectionKind {
+  OBSERVATION_PROJECTION_KIND_UNSPECIFIED = 0;
+  EVENT_ONLY = 1;
+  IMMUTABLE_ENTRY = 2;
+  CURRENT_CONTROL = 3;
+}
+
+message CommittedObservationProjection {
+  uint64 event_sequence = 1;
+  string event_id = 2;
+  CommittedEventType event_type = 3;
+  ObservationProjectionKind projection_kind = 4;
+  string subject_slot = 5;
+  string subject_id = 6;
+  CanonicalEntry entry = 7;
+  CanonicalControl current_control = 8;
+}
+
+enum LiveChannelKind {
+  LIVE_CHANNEL_KIND_UNSPECIFIED = 0;
+  LIVE_CHANNEL_MODEL_OUTPUT = 1;
+  LIVE_CHANNEL_TOOL_RESULT = 2;
+  LIVE_CHANNEL_TERMINAL_EXTENSION = 3;
+  LIVE_CHANNEL_SUBAGENT_EXTENSION = 4;
+}
+
+enum LiveBlockKind {
+  LIVE_BLOCK_KIND_UNSPECIFIED = 0;
+  LIVE_BLOCK_TEXT = 1;
+  LIVE_BLOCK_THINKING = 2;
+  LIVE_BLOCK_DATA = 3;
+  LIVE_BLOCK_TOOL_CALL = 4;
+  LIVE_BLOCK_TOOL_RESULT = 5;
+  LIVE_BLOCK_OPERATIONAL = 6;
+}
+
+message LiveTextStartPayload { string block_identity = 1; }
+message LiveTextDeltaPayload { string block_identity = 1; string delta = 2; }
+message LiveTextEndPayload {
+  string block_identity = 1; string final_text = 2;
+  uint64 utf8_bytes = 3; string digest = 4;
+}
+message LiveThinkingStartPayload { string block_identity = 1; }
+message LiveThinkingDeltaPayload { string block_identity = 1; string delta = 2; }
+message LiveThinkingEndPayload {
+  string block_identity = 1; string final_text = 2;
+  uint64 utf8_bytes = 3; string digest = 4;
+}
+message LiveDataStartPayload { string block_identity = 1; string media_type = 2; }
+message LiveDataDeltaPayload { string block_identity = 1; string data = 2; }
+message LiveDataEndPayload {
+  string block_identity = 1; string media_type = 2; string final_data = 3;
+  uint64 utf8_bytes = 4; string digest = 5;
+}
+message LiveToolCallStartPayload {
+  string block_identity = 1; string tool_call_id = 2; string tool_name = 3;
+}
+message LiveToolCallDeltaPayload {
+  string block_identity = 1; string tool_call_id = 2; string delta = 3;
+}
+message LiveToolCallEndPayload {
+  string block_identity = 1; string tool_call_id = 2; string tool_name = 3;
+  string arguments_json = 4; uint64 utf8_bytes = 5; string digest = 6;
+}
+message LiveToolResultStartPayload {
+  string block_identity = 1; string tool_call_id = 2; string attempt_id = 3;
+}
+message LiveToolResultDeltaPayload { string block_identity = 1; string text = 2; }
+message LiveToolResultEndPayload {
+  string block_identity = 1; string result_state = 2; string final_text = 3;
+  uint64 utf8_bytes = 4; string digest = 5;
+}
+message LiveInteractionOpenedPayload {
+  string interaction_id = 1; string interaction_kind = 2;
+  string public_prompt = 3; repeated string public_options = 4;
+  string expires_at_utc = 5;
+}
+message LiveInteractionReplacedPayload {
+  string replaced_interaction_id = 1; string interaction_id = 2;
+  string interaction_kind = 3; string public_prompt = 4;
+  repeated string public_options = 5; string expires_at_utc = 6;
+}
+message LiveInteractionClosedPayload { string interaction_id = 1; string reason = 2; }
+message LiveTerminalProcessCompletedPayload {
+  string process_id = 1; string status = 2; optional sint32 exit_code = 3;
+  uint64 output_utf8_bytes = 4; string output_digest = 5;
+}
+message LiveTerminalMonitorOpenedPayload { string monitor_id = 1; string process_id = 2; }
+message LiveTerminalMonitorObservationPayload {
+  string monitor_id = 1; string process_id = 2; string observation_kind = 3;
+  string public_preview = 4; uint64 complete_utf8_bytes = 5;
+  string complete_digest = 6;
+}
+message LiveTerminalMonitorClosedPayload {
+  string monitor_id = 1; string process_id = 2; string reason = 3;
+}
+message LiveSubagentProgressPayload {
+  string task_id = 1; string status = 2; string public_summary = 3;
+  uint64 summary_utf8_bytes = 4; string summary_digest = 5;
+}
+
+message LiveEventPayload {
+  oneof payload {
+    LiveTextStartPayload text_start = 1;
+    LiveTextDeltaPayload text_delta = 2;
+    LiveTextEndPayload text_end = 3;
+    LiveThinkingStartPayload thinking_start = 4;
+    LiveThinkingDeltaPayload thinking_delta = 5;
+    LiveThinkingEndPayload thinking_end = 6;
+    LiveDataStartPayload data_start = 7;
+    LiveDataDeltaPayload data_delta = 8;
+    LiveDataEndPayload data_end = 9;
+    LiveToolCallStartPayload tool_call_start = 10;
+    LiveToolCallDeltaPayload tool_call_delta = 11;
+    LiveToolCallEndPayload tool_call_end = 12;
+    LiveToolResultStartPayload tool_result_start = 13;
+    LiveToolResultDeltaPayload tool_result_delta = 14;
+    LiveToolResultEndPayload tool_result_end = 15;
+    LiveInteractionOpenedPayload interaction_opened = 16;
+    LiveInteractionReplacedPayload interaction_replaced = 17;
+    LiveInteractionClosedPayload interaction_closed = 18;
+    LiveTerminalProcessCompletedPayload terminal_process_completed = 19;
+    LiveTerminalMonitorOpenedPayload terminal_monitor_opened = 20;
+    LiveTerminalMonitorObservationPayload terminal_monitor_observation = 21;
+    LiveTerminalMonitorClosedPayload terminal_monitor_closed = 22;
+    LiveSubagentProgressPayload subagent_progress = 23;
+  }
+}
+
+message LiveEventProjection {
+  uint64 owner_epoch = 1;
+  uint64 live_revision = 2;
+  LiveEventType event_type = 3;
+  string session_id = 4;
+  string turn_id = 5;
+  string draft_identity = 6;
+  LiveEventPayload payload = 7;
+  ConversationScopeKind scope_kind = 8;
+  string scope_subagent_task_id = 9;
+  LiveChannelKind channel_kind = 10;
+  string channel_tool_call_id = 11;
+  string channel_attempt_id = 12;
+  string generation_id = 13;
+  string proposed_entry_id = 14;
+  string block_id = 15;
+  uint32 block_ordinal = 16;
+  LiveBlockKind block_kind = 17;
+}
+
+enum LiveSettlementKind {
+  LIVE_SETTLEMENT_KIND_UNSPECIFIED = 0;
+  LIVE_GENERATION_COMMITTED = 1;
+  LIVE_GENERATION_ABORTED = 2;
+}
+
+message LiveGenerationSettlement {
+  uint64 owner_epoch = 1;
+  uint64 live_revision = 2;
+  LiveSettlementKind kind = 3;
+  string session_id = 4;
+  string turn_id = 5;
+  string draft_identity = 6;
+  string committed_entry_id = 7;
+  string reason_code = 8;
+  ConversationScopeKind scope_kind = 9;
+  string scope_subagent_task_id = 10;
+  LiveChannelKind channel_kind = 11;
+  string channel_tool_call_id = 12;
+  string channel_attempt_id = 13;
+  string generation_id = 14;
+  string proposed_entry_id = 15;
+}
+
+message LiveSnapshotProjection {
+  uint64 owner_epoch = 1;
+  uint64 retained_from_revision = 2;
+  uint64 through_revision = 3;
+  repeated LiveEventProjection events = 4;
+  repeated LiveGenerationSettlement settlements = 5;
+  bool truncated_before = 6;
+}
+
+message LiveInteractionView {
+  string interaction_id = 1;
+  string interaction_kind = 2;
+  string public_prompt = 3;
+  repeated string public_options = 4;
+  string expires_at_utc = 5;
+}
+
+message SessionLiveControlSnapshot {
+  string session_id = 1;
+  uint64 owner_epoch = 2;
+  uint64 live_revision = 3;
+  LiveInteractionView current_interaction = 4;
+}
+
+enum LiveControlEventKind {
+  LIVE_CONTROL_EVENT_KIND_UNSPECIFIED = 0;
+  LIVE_INTERACTION_OPENED = 1;
+  LIVE_INTERACTION_REPLACED = 2;
+  LIVE_INTERACTION_CLOSED = 3;
+}
+
+message LiveControlEventProjection {
+  uint64 owner_epoch = 1;
+  uint64 live_revision = 2;
+  LiveControlEventKind kind = 3;
+  LiveInteractionView interaction = 4;
+  string closed_interaction_id = 5;
+}
+
+enum ObservationGapKind {
+  OBSERVATION_GAP_KIND_UNSPECIFIED = 0;
+  COMMITTED_GAP = 1;
+  LIVE_GAP = 2;
+  LIVE_CONTROL_GAP = 3;
+}
+
+message ObservationGap {
+  ObservationGapKind kind = 1;
+  uint64 latest_sequence = 2;
+  string reason = 3;
+}
+
+message ObserveRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  uint64 after_event_sequence = 4;
+  uint64 live_owner_epoch = 5;
+  uint64 after_live_revision = 6;
+  uint32 maximum_events = 7;
+  uint32 maximum_bytes = 8;
+  uint32 wait_ms = 9;
+  uint64 live_control_owner_epoch = 10;
+  uint64 after_live_control_revision = 11;
+}
+
+message ObservationResponse {
+  string request_id = 1;
+  uint64 through_event_sequence = 2;
+  repeated CommittedObservationProjection committed = 3;
+  uint64 live_owner_epoch = 4;
+  uint64 through_live_revision = 5;
+  repeated LiveEventProjection live = 6;
+  ObservationGap gap = 7;
+  repeated LiveGenerationSettlement settlements = 8;
+  uint64 live_control_owner_epoch = 9;
+  uint64 through_live_control_revision = 10;
+  repeated LiveControlEventProjection live_control = 11;
+}
+
+message LiveControlSnapshotRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+}
+
+message LiveControlSnapshotResponse {
+  string request_id = 1;
+  SessionLiveControlSnapshot snapshot = 2;
+}
+
+enum CommandKind {
+  COMMAND_KIND_UNSPECIFIED = 0;
+  SUBMIT_PROMPT = 1;
+  STOP_ACTIVE_TURN = 2;
+  DETACH = 3;
+  CLOSE_SESSION = 4;
+  STEER_ACTIVE_TURN = 5;
+}
+
+message CommandRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string command_id = 4;
+  CommandKind command_kind = 5;
+  string client_submission_id = 6;
+  string text = 7;
+  string target_turn_id = 8;
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  SUCCEEDED = 1;
+  REJECTED = 2;
+  PENDING = 3;
+}
+
+message CommandOutcome {
+  string request_id = 1;
+  string command_id = 2;
+  CommandStatus status = 3;
+  string target_id = 4;
+  string public_code = 5;
+  string public_message = 6;
+}
+
+message QueryCommandRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string command_id = 4;
+}
+
+message QueryCommandResponse {
+  string request_id = 1;
+  bool found = 2;
+  CommandOutcome outcome = 3;
+}
+
+enum InteractionResolutionDecision {
+  INTERACTION_RESOLUTION_DECISION_UNSPECIFIED = 0;
+  INTERACTION_ALLOW = 1;
+  INTERACTION_DENY = 2;
+}
+
+message ResolveInteractionRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string command_id = 4;
+  uint64 expected_writer_generation = 5;
+  uint64 expected_owner_epoch = 6;
+  uint64 expected_live_revision = 7;
+  string interaction_id = 8;
+  InteractionResolutionDecision decision = 9;
+}
+
+message ReadContentRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string entry_id = 4;
+  string block_id = 5;
+  uint64 offset_bytes = 6;
+  uint32 limit_bytes = 7;
+}
+
+message CanonicalContentChunk {
+  string request_id = 1;
+  string digest = 2;
+  uint64 complete_size = 3;
+  uint64 offset_bytes = 4;
+  bytes content = 5;
+  bool complete = 6;
+}
+
+message HeartbeatRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+}
+
+message HeartbeatResponse {
+  string request_id = 1;
+  bool active = 2;
+}
+
+message ClientFrame {
+  oneof request {
+    HelloRequest hello = 1;
+    SnapshotRequest snapshot = 2;
+    HistoryPageRequest history_page = 3;
+    ObserveRequest observe = 4;
+    CommandRequest command = 5;
+    QueryCommandRequest query_command = 6;
+    ReadContentRequest read_content = 7;
+    HeartbeatRequest heartbeat = 8;
+    LiveControlSnapshotRequest live_control_snapshot = 9;
+    ResolveInteractionRequest resolve_interaction = 10;
+  }
+}
+
+message ProtocolError {
+  string request_id = 1;
+  string stable_code = 2;
+  string public_message = 3;
+}
+
+message ServerFrame {
+  oneof response {
+    HelloAccepted hello = 1;
+    SnapshotResponse snapshot = 2;
+    HistoryPageResponse history_page = 3;
+    ObservationResponse observation = 4;
+    CommandOutcome command_outcome = 5;
+    QueryCommandResponse query_command = 6;
+    CanonicalContentChunk content = 7;
+    HeartbeatResponse heartbeat = 8;
+    ProtocolError error = 9;
+    LiveControlSnapshotResponse live_control_snapshot = 10;
+  }
+}

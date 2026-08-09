@@ -49,13 +49,14 @@ def _register_owner(
     *,
     subagent_run_id: str,
     reservation=None,
+    attach_child_session: bool = True,
 ):
     reservation = reservation or registry.reserve(parent_run_id=CTX.run_id, count=1)
     horizon = read_ledger_horizon(session.event_log)
     return registry.register_prepared(
         subagent_run_id=subagent_run_id,
         child_runtime_session_id=session.runtime_session_id,
-        child_session=session,
+        child_session=session if attach_child_session else None,
         reservation=reservation,
         parent_runtime_session_id="runtime:parent",
         parent_run_id=CTX.run_id,
@@ -104,6 +105,7 @@ def test_partial_reservation_keeps_attached_capacity_until_graph_settlement(
         session,
         subagent_run_id="subagent_run:partial-reservation",
         reservation=reservation,
+        attach_child_session=False,
     )
 
     registry.release_reservation(reservation)
@@ -282,8 +284,11 @@ def test_cancel_waits_for_activation_finally_before_session_close(tmp_path) -> N
         runtime_session_id = "runtime:child:drain-order"
         event_log = InMemoryEventLog()
 
-        def close(self) -> None:
+        async def teardown_non_host_runtime_session(self, **_kwargs) -> None:
             order.append("session_close")
+
+        def close(self) -> None:
+            pass
 
     async def child() -> None:
         started.set()
@@ -306,6 +311,13 @@ def test_cancel_waits_for_activation_finally_before_session_close(tmp_path) -> N
 
         await operations.cancel(owner.subagent_run_id, timeout_seconds=1)
         await asyncio.sleep(0)
+
+        teardown = admission.install_or_get_child_session_teardown_task(
+            owner.subagent_run_id,
+            deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        )
+        assert teardown is not None
+        await teardown
 
         assert task.cancelled()
         assert order == ["activation_finally", "session_close"]
@@ -355,6 +367,12 @@ def test_sync_cancel_runs_on_owner_loop_and_releases_after_exit(tmp_path) -> Non
 
         await asyncio.wait_for(finished.wait(), timeout=1)
         await asyncio.sleep(0)
+        teardown = admission.install_or_get_child_session_teardown_task(
+            owner.subagent_run_id,
+            deadline_monotonic=asyncio.get_running_loop().time() + 5,
+        )
+        assert teardown is not None
+        await teardown
         assert task.cancelled()
         assert finally_thread_ids == [owner_thread_id]
         assert admission.owners() == ()
@@ -373,8 +391,11 @@ def test_cancel_timeout_retains_admission_until_physical_exit(tmp_path) -> None:
         runtime_session_id = "runtime:child:slow-cleanup"
         event_log = InMemoryEventLog()
 
-        def close(self) -> None:
+        async def teardown_non_host_runtime_session(self, **_kwargs) -> None:
             closed.append(True)
+
+        def close(self) -> None:
+            pass
 
     async def child() -> None:
         try:
@@ -404,6 +425,12 @@ def test_cancel_timeout_retains_admission_until_physical_exit(tmp_path) -> None:
         allow_cleanup.set()
         await task
         await asyncio.sleep(0)
+        teardown = admission.install_or_get_child_session_teardown_task(
+            owner.subagent_run_id,
+            deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        )
+        assert teardown is not None
+        await teardown
         assert admission.owners() == ()
         assert closed == [True]
 

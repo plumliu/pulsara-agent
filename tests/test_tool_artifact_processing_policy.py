@@ -18,6 +18,7 @@ from pulsara_agent.runtime.tool_composition import (
 from pulsara_agent.runtime.tool_executor import ToolExecutor
 from pulsara_agent.tools.registry import ToolRegistry
 from tests.support.capability import descriptor_attribution_for_test
+from tests.support.events import settled_test_event
 
 
 CTX = EventContext(
@@ -178,8 +179,9 @@ def test_artifact_processing_failure_closes_the_physical_tool_result() -> None:
     events = []
 
     def record_event(event):
-        events.append(event)
-        return event
+        receipt = settled_test_event(event, sequence=len(events) + 1)
+        events.append(receipt.committed_event)
+        return receipt
 
     executor = ToolExecutor(
         registry=registry,

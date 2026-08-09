@@ -134,7 +134,7 @@ from pulsara_agent.primitives.host_ingress import (
     RuntimeRequestRunIngressFact,
 )
 from pulsara_agent.primitives.terminal_observation import TerminalAutonomousDeliveryFact
-from pulsara_agent.host.identity import ResolvedWorkspace
+from pulsara_agent.workspace_identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages_bounded
 from pulsara_agent.message import SystemMsg
 from pulsara_agent.ports.model_lifecycle import (
@@ -5005,6 +5005,13 @@ class HostSession:
             return
         self.begin_close()
         close_deadline = time.monotonic() + drain_timeout_seconds
+
+        def remaining_close_timeout() -> float:
+            remaining = close_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("HostSession close deadline expired")
+            return remaining
+
         runtime_session = self.wiring.runtime_wiring.runtime_session
         extraction_registration = self._compaction_memory_extraction_registration
         extraction_driver = self._compaction_memory_extraction_driver
@@ -5022,7 +5029,7 @@ class HostSession:
         # reconciliation gate.
         await asyncio.to_thread(
             runtime_session.terminal_monitor_coordinator.stop_admission_and_drain_workers,
-            timeout_seconds=drain_timeout_seconds,
+            timeout_seconds=remaining_close_timeout(),
         )
         await asyncio.to_thread(
             runtime_session.terminal_sessions.kill_owned,
@@ -5031,14 +5038,14 @@ class HostSession:
         await asyncio.to_thread(
             runtime_session.terminal_sessions.drain_pending_completions,
             self.host_session_id,
-            timeout_seconds=drain_timeout_seconds,
+            timeout_seconds=remaining_close_timeout(),
         )
         await runtime_session.drain_open_committed_reducer_barrier(
             deadline_monotonic=close_deadline
         )
         await asyncio.to_thread(
             runtime_session.terminal_monitor_coordinator.terminate_all_for_session_close,
-            timeout_seconds=drain_timeout_seconds,
+            timeout_seconds=remaining_close_timeout(),
         )
         await runtime_session.drain_open_committed_reducer_barrier(
             deadline_monotonic=close_deadline
@@ -5048,7 +5055,7 @@ class HostSession:
             deadline_monotonic=close_deadline
         )
         await self.drain_active_run(
-            reason=reason, timeout_seconds=drain_timeout_seconds
+            reason=reason, timeout_seconds=remaining_close_timeout()
         )
         await self._terminal_application_services.stop_and_drain_commands(
             deadline_monotonic=close_deadline
@@ -5088,10 +5095,10 @@ class HostSession:
         governance_engine = self.wiring.runtime_wiring.memory_governance_engine
         if governance_engine is not None:
             await governance_engine.stop_admission_and_drain(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+                deadline_monotonic=close_deadline
             )
         await self.wiring.runtime_wiring.memory_governance_executor.flush_pending_event_outbox_async(
-            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            deadline_monotonic=close_deadline
         )
         compaction_service = self.wiring.runtime_wiring.compaction_service
         if compaction_service is not None:
@@ -5103,10 +5110,10 @@ class HostSession:
         )
         if candidate_projection_port is not None:
             await candidate_projection_port.stop_admission_and_drain(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+                deadline_monotonic=close_deadline
             )
             await candidate_projection_port.flush_pending(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+                deadline_monotonic=close_deadline
             )
         # These close paths can themselves append preparation-abandonment and
         # generation-terminal events.  They are therefore part of the producer
@@ -5120,11 +5127,11 @@ class HostSession:
         window_compaction_service = runtime_session.window_compaction_service
         if window_compaction_service is not None:
             await window_compaction_service.drain_pending(
-                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+                deadline_monotonic=close_deadline
             )
         if compaction_service is not None:
             await compaction_service.drain_pending_terminalizations(
-                timeout_seconds=drain_timeout_seconds
+                timeout_seconds=remaining_close_timeout()
             )
         subagent_runtime = self.wiring.subagent_runtime
         if subagent_runtime is not None:
@@ -5132,7 +5139,7 @@ class HostSession:
                 reason_code="subagent_host_session_close",
                 reason_message="HostSession is closing; active child runtimes are cancelled.",
                 cancelled_by="host_shutdown",
-                timeout_seconds=drain_timeout_seconds,
+                timeout_seconds=remaining_close_timeout(),
             )
         mcp_tool_execution_port = runtime_session.mcp_tool_execution_port
         if mcp_tool_execution_port is not None:
@@ -5140,7 +5147,7 @@ class HostSession:
                 deadline_monotonic=close_deadline,
             )
         if self.mcp_supervisor is not None:
-            await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
+            await self.mcp_supervisor.aclose(timeout_seconds=remaining_close_timeout())
 
         # All EventLog producers are now quiescent.  Only at this fixed point
         # may close retire the physical writer and the semantic repair owners.

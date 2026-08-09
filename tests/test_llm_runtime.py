@@ -46,7 +46,7 @@ from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
     OPENAI_RESPONSES_API,
 )
-from pulsara_agent.llm.adapters.openai.events import RawProviderItemBuilder
+from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
@@ -89,13 +89,22 @@ from pulsara_agent.llm.registry import (
     LLMTransportRegistry,
 )
 from pulsara_agent.llm.raw_provider import (
-    RawProviderBlockEnd,
     RawProviderBlockStart,
     RawProviderFailure,
     RawProviderTextDelta,
-    RawProviderThinkingDelta,
-    RawProviderToolCallDelta,
 )
+from pulsara_agent.ports.live_agent_event import (
+    TextDeltaPayload,
+    TextEndPayload,
+    TextStartPayload,
+    ThinkingDeltaPayload,
+    ThinkingEndPayload,
+    ThinkingStartPayload,
+    ToolCallDeltaPayload,
+    ToolCallEndPayload,
+    ToolCallStartPayload,
+)
+from pulsara_agent.ports.provider_stream import ProviderStreamFailure
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.runtime import LLMRuntime
 from pulsara_agent.llm.commit import (
@@ -3047,24 +3056,22 @@ def test_openai_responses_events_translate_to_agent_events() -> None:
         builder=builder,
     )
 
-    assert isinstance(text_events[0], RawProviderBlockStart)
-    assert isinstance(text_events[1], RawProviderTextDelta)
+    assert isinstance(text_events[0], TextStartPayload)
+    assert isinstance(text_events[1], TextDeltaPayload)
     assert len(text_done_events) == 1
-    assert isinstance(text_done_events[0], RawProviderBlockEnd)
-    assert text_done_events[0].block_kind == "text"
-    assert isinstance(thinking_events[0], RawProviderBlockStart)
-    assert isinstance(thinking_events[1], RawProviderThinkingDelta)
+    assert isinstance(text_done_events[0], TextEndPayload)
+    assert isinstance(thinking_events[0], ThinkingStartPayload)
+    assert isinstance(thinking_events[1], ThinkingDeltaPayload)
     assert len(thinking_done_events) == 1
-    assert isinstance(thinking_done_events[0], RawProviderBlockEnd)
-    assert thinking_done_events[0].block_kind == "thinking"
-    assert isinstance(start_events[0], RawProviderBlockStart)
+    assert isinstance(thinking_done_events[0], ThinkingEndPayload)
+    assert isinstance(start_events[0], ToolCallStartPayload)
     assert len(args_events) == 1
-    assert isinstance(args_events[0], RawProviderToolCallDelta)
+    assert isinstance(args_events[0], ToolCallDeltaPayload)
     assert args_events[0].tool_call_id == "fc_1"
     assert args_events[0].delta == '{"q": "json-ld"}'
     assert len(done_events) == 1
-    assert isinstance(done_events[0], RawProviderBlockEnd)
-    assert done_events[0].block_id == "fc_1"
+    assert isinstance(done_events[0], ToolCallEndPayload)
+    assert done_events[0].block_identity == "fc_1"
 
 
 def test_openai_responses_rejects_arguments_before_named_tool_start() -> None:
@@ -3111,10 +3118,10 @@ def test_openai_responses_done_only_content_is_preserved_losslessly() -> None:
     )
 
     assert len(events) == 3
-    assert isinstance(events[0], RawProviderBlockStart)
-    assert isinstance(events[1], RawProviderTextDelta)
+    assert isinstance(events[0], TextStartPayload)
+    assert isinstance(events[1], TextDeltaPayload)
     assert events[1].delta == "complete"
-    assert isinstance(events[2], RawProviderBlockEnd)
+    assert isinstance(events[2], TextEndPayload)
 
 
 def test_openai_responses_done_payload_mismatch_fails_closed() -> None:
@@ -3238,14 +3245,14 @@ def test_openai_responses_done_tool_name_drift_fails_closed() -> None:
         )
 
 
-def test_openai_raw_builder_closes_parallel_tools_in_start_order() -> None:
+def test_openai_live_builder_closes_parallel_tools_in_start_order() -> None:
     builder = transport_builder_for_test()
     builder.tool_call_start(tool_call_id="call_b", tool_call_name="second")
     builder.tool_call_start(tool_call_id="call_a", tool_call_name="first")
 
     events = builder.close_active_blocks()
 
-    assert [event.block_id for event in events] == ["call_b", "call_a"]
+    assert [event.block_identity for event in events] == ["call_b", "call_a"]
 
 
 def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
@@ -3289,15 +3296,14 @@ def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
 
     assert not any(isinstance(event, ModelCallStartEvent) for event in events)
     assert any(
-        isinstance(event, RawProviderTextDelta) and event.delta == "hi"
+        isinstance(event, TextDeltaPayload) and event.delta == "hi" for event in events
+    )
+    assert any(
+        isinstance(event, ToolCallStartPayload) and event.tool_name == "lookup"
         for event in events
     )
     assert any(
-        isinstance(event, RawProviderBlockStart) and event.tool_call_name == "lookup"
-        for event in events
-    )
-    assert any(
-        isinstance(event, RawProviderToolCallDelta) and event.delta == "{}"
+        isinstance(event, ToolCallDeltaPayload) and event.delta == "{}"
         for event in events
     )
     assert not any(isinstance(event, ModelCallEndEvent) for event in events)
@@ -3323,15 +3329,15 @@ def test_non_streaming_response_synthesizes_same_event_shape() -> None:
         builder=builder,
     )
 
-    assert isinstance(events[0], RawProviderBlockStart)
-    assert isinstance(events[1], RawProviderThinkingDelta)
-    assert isinstance(events[2], RawProviderBlockStart)
-    assert isinstance(events[3], RawProviderTextDelta)
-    assert isinstance(events[4], RawProviderBlockStart)
-    assert isinstance(events[5], RawProviderToolCallDelta)
-    assert isinstance(events[6], RawProviderBlockEnd)
-    assert any(isinstance(event, RawProviderBlockEnd) for event in events)
-    assert any(isinstance(event, RawProviderBlockEnd) for event in events)
+    assert isinstance(events[0], ThinkingStartPayload)
+    assert isinstance(events[1], ThinkingDeltaPayload)
+    assert isinstance(events[2], TextStartPayload)
+    assert isinstance(events[3], TextDeltaPayload)
+    assert isinstance(events[4], ToolCallStartPayload)
+    assert isinstance(events[5], ToolCallDeltaPayload)
+    assert isinstance(events[6], ToolCallEndPayload)
+    assert any(isinstance(event, ThinkingEndPayload) for event in events)
+    assert any(isinstance(event, TextEndPayload) for event in events)
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
     assert events[-1].usage.input_tokens == 3
@@ -3515,14 +3521,12 @@ def test_openai_responses_tool_calls_prefer_call_id_over_item_id() -> None:
         builder=builder,
     )
 
-    start = next(event for event in events if isinstance(event, RawProviderBlockStart))
-    delta = next(
-        event for event in events if isinstance(event, RawProviderToolCallDelta)
-    )
-    end = next(event for event in events if isinstance(event, RawProviderBlockEnd))
-    assert start.block_id == "call_responses_1"
+    start = next(event for event in events if isinstance(event, ToolCallStartPayload))
+    delta = next(event for event in events if isinstance(event, ToolCallDeltaPayload))
+    end = next(event for event in events if isinstance(event, ToolCallEndPayload))
+    assert start.block_identity == "call_responses_1"
     assert delta.tool_call_id == "call_responses_1"
-    assert end.block_id == "call_responses_1"
+    assert end.block_identity == "call_responses_1"
 
 
 def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
@@ -3568,12 +3572,12 @@ def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
         )
     )
 
-    assert isinstance(events[0], RawProviderBlockStart)
-    assert isinstance(events[1], RawProviderToolCallDelta)
-    assert isinstance(events[2], RawProviderBlockEnd)
-    assert events[0].block_id == "call_responses_1"
+    assert isinstance(events[0], ToolCallStartPayload)
+    assert isinstance(events[1], ToolCallDeltaPayload)
+    assert isinstance(events[2], ToolCallEndPayload)
+    assert events[0].block_identity == "call_responses_1"
     assert events[1].tool_call_id == "call_responses_1"
-    assert events[2].block_id == "call_responses_1"
+    assert events[2].block_identity == "call_responses_1"
 
 
 def test_openai_responses_done_reuses_frozen_item_to_call_id_mapping() -> None:
@@ -3608,12 +3612,12 @@ def test_openai_responses_done_reuses_frozen_item_to_call_id_mapping() -> None:
         )
     )
 
-    assert isinstance(events[0], RawProviderBlockStart)
-    assert isinstance(events[1], RawProviderToolCallDelta)
-    assert isinstance(events[2], RawProviderBlockEnd)
-    assert events[0].block_id == "call_responses_1"
+    assert isinstance(events[0], ToolCallStartPayload)
+    assert isinstance(events[1], ToolCallDeltaPayload)
+    assert isinstance(events[2], ToolCallEndPayload)
+    assert events[0].block_identity == "call_responses_1"
     assert events[1].tool_call_id == "call_responses_1"
-    assert events[2].block_id == "call_responses_1"
+    assert events[2].block_identity == "call_responses_1"
 
 
 def test_openai_responses_error_event_emits_run_error_without_model_end() -> None:
@@ -3625,7 +3629,7 @@ def test_openai_responses_error_event_emits_run_error_without_model_end() -> Non
     )
 
     assert len(events) == 1
-    assert isinstance(events[0], RawProviderFailure)
+    assert isinstance(events[0], ProviderStreamFailure)
     assert events[0].message == "provider exploded"
     assert events[0].code_hint == "provider_transport_error"
 
@@ -3666,7 +3670,7 @@ def test_openai_responses_transport_uses_sdk_stream() -> None:
 
     assert fake_client.responses.calls[0]["model"] == "flash"
     assert fake_client.responses.calls[0]["stream"] is True
-    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[0], TextStartPayload)
     assert events[1].delta == "pong"
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
@@ -3698,7 +3702,7 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
     events = asyncio.run(collect())
 
     assert len(events) == 1
-    assert isinstance(events[0], RawProviderFailure)
+    assert isinstance(events[0], ProviderStreamFailure)
     assert events[0].message == "boom"
     assert events[0].code_hint == "provider_transport_error"
 
@@ -3751,7 +3755,7 @@ def test_openai_responses_transport_retries_pre_output_failure() -> None:
     assert fake_client.close_count == 0
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
     assert any(
-        isinstance(event, RawProviderTextDelta) and event.delta == "pong"
+        isinstance(event, TextDeltaPayload) and event.delta == "pong"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -3898,11 +3902,11 @@ def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
     events = asyncio.run(collect())
 
     assert len(fake_client.responses.calls) == 1
-    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    error = next(event for event in events if isinstance(event, ProviderStreamFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
     assert error.retry_summary.skipped_reason == "semantic_output_started"
-    assert not any(isinstance(event, RawProviderBlockEnd) for event in events)
+    assert not any(isinstance(event, TextEndPayload) for event in events)
 
 
 def test_openai_responses_transport_retry_exhausted_has_durable_summary() -> None:
@@ -3939,7 +3943,7 @@ def test_openai_responses_transport_retry_exhausted_has_durable_summary() -> Non
 
     events = asyncio.run(collect())
 
-    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    error = next(event for event in events if isinstance(event, ProviderStreamFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
     assert error.retry_summary.exhausted is True
@@ -4081,7 +4085,7 @@ def test_openai_chat_completions_transport_error_emits_raw_failure() -> None:
         )
 
     events = asyncio.run(collect())
-    assert isinstance(events[0], RawProviderFailure)
+    assert isinstance(events[0], ProviderStreamFailure)
     assert events[0].message == "Connection error."
     assert events[0].code_hint == "provider_transport_error"
 
@@ -4422,21 +4426,21 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
 
     assert not any(isinstance(event, ModelCallStartEvent) for event in events)
     assert any(
-        isinstance(event, RawProviderTextDelta) and event.delta == "hi"
-        for event in events
+        isinstance(event, TextDeltaPayload) and event.delta == "hi" for event in events
     )
     assert any(
-        isinstance(event, RawProviderBlockStart) and event.block_id == "call_chat_1"
+        isinstance(event, ToolCallStartPayload)
+        and event.block_identity == "call_chat_1"
         for event in events
     )
     assert [
-        event.delta for event in events if isinstance(event, RawProviderToolCallDelta)
+        event.delta for event in events if isinstance(event, ToolCallDeltaPayload)
     ] == [
         '{"q"',
         ':"pulsara"}',
     ]
     assert any(
-        isinstance(event, RawProviderBlockEnd) and event.block_id == "call_chat_1"
+        isinstance(event, ToolCallEndPayload) and event.block_identity == "call_chat_1"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -4456,11 +4460,11 @@ def test_openai_chat_completions_translates_reasoning_content_delta() -> None:
         accumulator=accumulator,
     )
 
-    assert isinstance(events[0], RawProviderBlockStart)
-    assert isinstance(events[1], RawProviderThinkingDelta)
+    assert isinstance(events[0], ThinkingStartPayload)
+    assert isinstance(events[1], ThinkingDeltaPayload)
     assert events[1].delta == "think"
-    assert isinstance(events[2], RawProviderBlockStart)
-    assert isinstance(events[3], RawProviderTextDelta)
+    assert isinstance(events[2], TextStartPayload)
+    assert isinstance(events[3], TextDeltaPayload)
     assert events[3].delta == "answer"
 
 
@@ -4501,7 +4505,7 @@ def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
 
     assert fake_client.chat.completions.calls[0]["model"] == "flash"
     assert fake_client.chat.completions.calls[0]["stream"] is True
-    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[0], TextStartPayload)
     assert events[1].delta == "pong"
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
@@ -4559,7 +4563,7 @@ def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
     assert fake_client.close_count == 0
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
     assert any(
-        isinstance(event, RawProviderTextDelta) and event.delta == "pong"
+        isinstance(event, TextDeltaPayload) and event.delta == "pong"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -4682,11 +4686,11 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
 
     assert len(fake_client.chat.completions.calls) == 1
     assert any(
-        isinstance(event, RawProviderToolCallDelta) and event.delta == '{"q"'
+        isinstance(event, ToolCallDeltaPayload) and event.delta == '{"q"'
         for event in events
     )
-    assert not any(isinstance(event, RawProviderBlockEnd) for event in events)
-    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    assert not any(isinstance(event, ToolCallEndPayload) for event in events)
+    error = next(event for event in events if isinstance(event, ProviderStreamFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
     assert error.retry_summary.skipped_reason == "semantic_output_started"
@@ -4727,7 +4731,7 @@ def test_openai_chat_completions_retry_exhausted_has_durable_summary() -> None:
 
     events = asyncio.run(collect())
 
-    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    error = next(event for event in events if isinstance(event, ProviderStreamFailure))
     assert error.code_hint == "provider_transport_error"
     assert error.retry_summary is not None
     assert error.retry_summary.exhausted is True
@@ -4743,7 +4747,9 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
             "choices": [
                 {
                     "delta": {
-                        "tool_calls": [{"index": 0, "function": {"arguments": '{"q"'}}]
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"q":"x"}'}}
+                        ]
                     }
                 }
             ]
@@ -4773,12 +4779,12 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
     )
 
     assert first_events == []
-    assert isinstance(second_events[0], RawProviderBlockStart)
-    assert second_events[0].block_id == "call_late"
-    assert isinstance(second_events[1], RawProviderToolCallDelta)
+    assert isinstance(second_events[0], ToolCallStartPayload)
+    assert second_events[0].block_identity == "call_late"
+    assert isinstance(second_events[1], ToolCallDeltaPayload)
     assert second_events[1].tool_call_id == "call_late"
-    assert second_events[1].delta == '{"q"'
-    assert isinstance(second_events[2], RawProviderBlockEnd)
+    assert second_events[1].delta == '{"q":"x"}'
+    assert isinstance(second_events[2], ToolCallEndPayload)
 
 
 def test_openai_chat_completions_waits_for_name_after_id_and_arguments() -> None:
@@ -4820,11 +4826,11 @@ def test_openai_chat_completions_waits_for_name_after_id_and_arguments() -> None
     )
 
     assert first_events == []
-    assert isinstance(second_events[0], RawProviderBlockStart)
-    assert second_events[0].block_id == "call_late_name"
-    assert isinstance(second_events[1], RawProviderToolCallDelta)
+    assert isinstance(second_events[0], ToolCallStartPayload)
+    assert second_events[0].block_identity == "call_late_name"
+    assert isinstance(second_events[1], ToolCallDeltaPayload)
     assert second_events[1].delta == "{}"
-    assert isinstance(second_events[2], RawProviderBlockEnd)
+    assert isinstance(second_events[2], ToolCallEndPayload)
 
 
 def test_openai_chat_completions_fails_closed_without_named_tool_start() -> None:
@@ -4984,7 +4990,7 @@ def transport_builder_for_test(config: LLMConfig | None = None):
         pro_model="pro",
         flash_model="flash",
     )
-    return RawProviderItemBuilder()
+    return ProviderLiveItemBuilder()
 
 
 class FakeAsyncStream:

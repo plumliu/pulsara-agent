@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pulsara_agent.event import EventContext
 from pulsara_agent.message import ToolResultArtifactRef
 from pulsara_agent.message import ToolResultPreviewMetadata
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+
+if TYPE_CHECKING:
+    from pulsara_agent.event import EventContext
 
 
 class ArtifactContentConflict(RuntimeError):

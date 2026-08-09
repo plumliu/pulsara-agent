@@ -36,6 +36,7 @@ from pulsara_agent.runtime.provider_input.vector import load_provider_input_vect
 from pulsara_agent.runtime.session import RuntimeSession
 from tests.support.artifacts import FakeToolResultArtifactIndex
 from tests.support import run_agent_task, test_llm_config, test_model_limits
+from tests.support.runtime_session import aclose_runtime_session_for_test
 from tests.support.runtime_owner import build_test_agent_runtime
 
 
@@ -345,7 +346,7 @@ async def run_provider_input_prefix_benchmark(
         prefix_invariant_holds=prefix_ok,
         benchmark_wall_seconds=wall_seconds,
     )
-    runtime_session.close()
+    await aclose_runtime_session_for_test(runtime_session, timeout_seconds=30.0)
     if not prefix_ok or duplicate_renders != 0:
         raise RuntimeError(
             "append-only provider-prefix benchmark invariant failed: "

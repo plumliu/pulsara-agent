@@ -194,7 +194,6 @@ class PreparedProviderInputStartBundle:
     resident: ProviderInputResidentGeneration
     artifacts: tuple[PreparedProviderInputArtifact, ...]
     prepared_plan: PreparedProviderInputPlanFact | None = None
-    prepared_context_input_audit_source_basis: object | None = None
 
     @property
     def resulting_core_state(self) -> CommittedProviderInputGenerationCoreStateFact:

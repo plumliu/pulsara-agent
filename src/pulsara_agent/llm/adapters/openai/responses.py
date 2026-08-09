@@ -7,14 +7,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 
-from pulsara_agent.event import EventContext
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_RESPONSES_API,
     build_async_openai_client,
 )
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
-    RawProviderItemBuilder,
+    ProviderLiveItemBuilder,
     ReportedModelIdentityObserver,
     arguments_to_json_string,
     event_includes_run_error,
@@ -35,10 +34,7 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.llm.raw_provider import (
-    RawProviderStreamItem,
-    is_raw_provider_stream_item,
-)
+from pulsara_agent.ports.provider_stream import ProviderAdapterStreamItem
 from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
 from pulsara_agent.llm.user_carrier import validate_provider_user_carrier_messages
 from pulsara_agent.llm.retry import (
@@ -72,10 +68,14 @@ class OpenAIResponsesTransport:
         *,
         call: ResolvedModelCall,
         context: LLMContext,
-        event_context: EventContext,
-    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
+        event_context: object | None = None,
+    ) -> AsyncIterator[ProviderAdapterStreamItem]:
+        # Explicit legacy LLMRuntime callers may still supply this keyword
+        # until Stage 3 deletes that bridge.  The Stage 2 provider protocol
+        # neither declares nor observes it.
+        del event_context
         model = call.target.model_profile
-        builder = RawProviderItemBuilder()
+        builder = ProviderLiveItemBuilder()
         if self._mock_events:
             model_identity = ReportedModelIdentityObserver(
                 requested_model_id=model.id,
@@ -85,8 +85,7 @@ class OpenAIResponsesTransport:
             for raw_event in self._mock_events:
                 model_identity.observe(responses_reported_model(raw_event))
                 items = translate_responses_event(raw_event, builder=builder)
-                events = [item for item in items if is_raw_provider_stream_item(item)]
-                run_error_emitted = event_includes_run_error(events)
+                run_error_emitted = event_includes_run_error(items)
                 for item in items:
                     if isinstance(item, TransportUsageReport):
                         if usage_report is not None:
@@ -142,10 +141,7 @@ class OpenAIResponsesTransport:
                     async for raw_event in stream:
                         model_identity.observe(responses_reported_model(raw_event))
                         items = translate_responses_event(raw_event, builder=builder)
-                        events = [
-                            item for item in items if is_raw_provider_stream_item(item)
-                        ]
-                        run_error_emitted = event_includes_run_error(events)
+                        run_error_emitted = event_includes_run_error(items)
                         for item in items:
                             if isinstance(item, TransportUsageReport):
                                 if attempt_usage_report is not None:
@@ -320,9 +316,9 @@ def build_responses_payload(
 def response_to_agent_events(
     *,
     response: dict[str, Any],
-    builder: RawProviderItemBuilder,
-) -> list[RawProviderStreamItem | TransportUsageReport]:
-    events: list[RawProviderStreamItem | TransportUsageReport] = []
+    builder: ProviderLiveItemBuilder,
+) -> list[ProviderAdapterStreamItem]:
+    events: list[ProviderAdapterStreamItem] = []
     thinking = _extract_reasoning_summary(response)
     if thinking:
         events.extend(builder.thinking_delta(thinking))
@@ -345,8 +341,8 @@ def response_to_agent_events(
 def translate_responses_event(
     raw_event: Any,
     *,
-    builder: RawProviderItemBuilder,
-) -> list[RawProviderStreamItem | TransportUsageReport]:
+    builder: ProviderLiveItemBuilder,
+) -> list[ProviderAdapterStreamItem]:
     event = sdk_event_to_dict(raw_event)
     event_type = event.get("type")
     if event_type == "response.output_text.delta":

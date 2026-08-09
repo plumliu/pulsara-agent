@@ -1,147 +1,69 @@
-"""JSON-LD memory substrate for Pulsara."""
+"""Legacy memory facade with lazy compatibility exports.
 
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.candidates.pool import (
-    CandidateOrigin,
-    CandidatePool,
-    CandidatePoolProposal,
-    ContradictAndSubmitDecision,
-    CorrectAndSubmitDecision,
-    GovernanceDecision,
-    GovernanceWriteOutcome,
-    InMemoryCandidatePool,
-    MemoryGovernanceDecisionRecord,
-    MergeAndSubmitDecision,
-    NoWriteOutcome,
-    PooledMemoryCandidate,
-    PostgresCandidatePool,
-    SkipDecision,
-    SubmitAsIsDecision,
-    SupersedeAndSubmitDecision,
-    WriteFailedOutcome,
-    WriteSucceededOutcome,
-    governance_batch_context,
-    new_governance_batch_id,
+Stage 2 memory production code imports the PostgreSQL-only kernel modules
+directly.  Importing a focused ``pulsara_agent.memory.*`` module must not
+eagerly load the old governance/EventLog/Oxigraph graph.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+_LAZY_MODULES = (
+    "pulsara_agent.memory.artifacts.archive",
+    "pulsara_agent.memory.candidates.pool",
+    "pulsara_agent.memory.governance.dedupe",
+    "pulsara_agent.memory.recall.explain",
+    "pulsara_agent.memory.governance.executor",
+    "pulsara_agent.memory.governance.engine",
+    "pulsara_agent.memory.governance.relatedness",
+    "pulsara_agent.memory.canonical.ledger",
+    "pulsara_agent.memory.canonical.lifecycle",
+    "pulsara_agent.memory.artifacts.postgres_archive",
+    "pulsara_agent.memory.recall.projection",
+    "pulsara_agent.memory.recall.projection_ledger",
+    "pulsara_agent.memory.foundation.protocols",
+    "pulsara_agent.replay.provenance",
+    "pulsara_agent.memory.canonical.query",
+    "pulsara_agent.memory.recall.service",
+    "pulsara_agent.memory.foundation.records",
+    "pulsara_agent.ports.artifact",
+    "pulsara_agent.memory.recall.rerank",
+    "pulsara_agent.memory.scope",
+    "pulsara_agent.memory.working_context",
+    "pulsara_agent.memory.reflection.engine",
+    "pulsara_agent.memory.foundation.run_timeline_query",
+    "pulsara_agent.memory.recall.trace",
+    "pulsara_agent.memory.recall.hybrid",
+    "pulsara_agent.memory.recall.graph",
+    "pulsara_agent.memory.recall.sparse",
+    "pulsara_agent.memory.recall.dense",
+    "pulsara_agent.memory.recall.semantic_rerank",
+    "pulsara_agent.memory.canonical.vector_index_sync",
+    "pulsara_agent.memory.canonical.vector_query",
+    "pulsara_agent.memory.canonical.unit_of_work",
+    "pulsara_agent.memory.canonical.write_service",
 )
-from pulsara_agent.memory.governance.dedupe import already_exists, candidate_fingerprint
-from pulsara_agent.memory.recall.explain import (
-    ClaimKind,
-    Explanation,
-    ExplanationClaim,
-    explain_memory,
-    explanation_to_payload,
-    validate_explanation,
-)
-from pulsara_agent.memory.governance.executor import (
-    MemoryGovernanceApplyResult,
-    MemoryGovernanceExecutor,
-)
-from pulsara_agent.memory.governance.engine import (
-    MemoryGovernanceEngine,
-    MemoryGovernanceOptions,
-    MemoryGovernanceOutput,
-    MemoryGovernanceRunResult,
-)
-from pulsara_agent.memory.governance.relatedness import (
-    CandidateRelatedness,
-    GovernanceRelatednessService,
-    MemoryGovernanceRelatednessOptions,
-    RelatedCanonicalMemory,
-    RelatednessAvailability,
-    RelatednessBatchResult,
-    RelatednessExecutionContext,
-)
-from pulsara_agent.memory.canonical.ledger import CanonicalMemoryLedger
-from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
-from pulsara_agent.memory.recall.projection import ProjectionBuilder
-from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
-from pulsara_agent.memory.foundation.protocols import (
-    ArtifactStore,
-    RuntimeEventReadStore,
-)
-from pulsara_agent.replay.provenance import (
-    RuntimeEventRef,
-    RuntimeEventSpan,
-    runtime_event_span_from_events,
-)
-from pulsara_agent.memory.canonical.query import (
-    CanonicalNodeView,
-    MemoryQuery,
-    MemoryRelationEdge,
-    PostgresMemoryQuery,
-)
-from pulsara_agent.memory.recall.service import (
-    LexicalMemoryRecallService,
-    MemoryRecallService,
-    RecallItem,
-    RecallQuery,
-    RecallResult,
-    RecallStatus,
-    RecallTrigger,
-)
-from pulsara_agent.memory.foundation.records import (
-    ArtifactPutConfirmation,
-    ArtifactWriteResult,
-)
-from pulsara_agent.ports.artifact import ArtifactContentConflict
-from pulsara_agent.memory.recall.rerank import direct_relation_rerank
-from pulsara_agent.memory.scope import (
-    CTX_USER,
-    MemoryDomainContext,
-    canonical_project_key,
-    format_scope_list,
-    is_valid_flat_id,
-    is_valid_scope,
-    parse_scope,
-    scopes_for_domain,
-    workspace_scope_key,
-    workspace_scope,
-)
-from pulsara_agent.memory.working_context import (
-    PostgresWorkingContextStore,
-    WorkingContextSummary,
-    WorkingContextUpdate,
-    propose_working_context_update,
-    working_context_projection,
-)
-from pulsara_agent.memory.reflection.engine import (
-    MemoryReflectionEngine,
-    MemoryReflectionHint,
-    MemoryReflectionOptions,
-)
-from pulsara_agent.memory.foundation.run_timeline_query import (
-    RunTimelineExportLimitExceeded,
-    RunTimelinePage,
-    RunTimelinePageCursor,
-    RunTimelineSummary,
-    RunTimelineToolTrace,
-    load_run_timeline,
-    load_run_timeline_page,
-    summarize_persisted_run_timeline,
-    summarize_run_timeline,
-)
-from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore, RecallTraceStore
-from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
-from pulsara_agent.memory.recall.graph import (
-    GraphCandidateService,
-    RecallPath,
-    RecallPathStep,
-)
-from pulsara_agent.memory.recall.sparse import SparseCandidateService
-from pulsara_agent.memory.recall.dense import DenseCandidateService
-from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
-from pulsara_agent.memory.canonical.vector_index_sync import (
-    MemoryVectorIndexSync,
-    VectorSyncResult,
-    VectorSyncStatus,
-)
-from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
-from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
-from pulsara_agent.memory.canonical.write_service import (
-    MemoryWriteOutcome,
-    MemoryWriteService,
-)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(name)
+    for module_name in _LAZY_MODULES:
+        module = import_module(module_name)
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            continue
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 __all__ = [
     "ArtifactStore",

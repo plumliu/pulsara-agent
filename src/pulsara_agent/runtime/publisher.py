@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from pulsara_agent.event import AgentEvent
@@ -19,6 +21,17 @@ class RuntimePublishedEvent:
 
 class RuntimeEventSubscriber(Protocol):
     async def on_published_event(self, published: RuntimePublishedEvent) -> None: ...
+
+
+class RuntimeEventSubscriberSemantics(StrEnum):
+    SEMANTIC_REQUIRED = "semantic_required"
+    DERIVED_BEST_EFFORT = "derived_best_effort"
+
+
+@dataclass(frozen=True, slots=True)
+class _SubscriberRegistration:
+    subscriber: RuntimeEventSubscriber
+    semantics: RuntimeEventSubscriberSemantics
 
 
 @dataclass(slots=True)
@@ -42,7 +55,7 @@ class RuntimeEventPublisher:
         if next_sequence_to_publish < 1:
             raise ValueError("next_sequence_to_publish must be >= 1")
         self.runtime_session_id = runtime_session_id
-        self._subscribers: list[RuntimeEventSubscriber] = []
+        self._subscribers: list[_SubscriberRegistration] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_id: int | None = None
         self._mailbox: asyncio.Queue[_PublishItem] | None = None
@@ -51,7 +64,7 @@ class RuntimeEventPublisher:
         self._pending_by_sequence: dict[int, _PublishItem] = {}
         self._enqueue_lock = threading.RLock()
         self._enqueued_through_sequence = next_sequence_to_publish - 1
-        self.errors: list[Exception] = []
+        self.errors: deque[Exception] = deque(maxlen=128)
 
     @property
     def enqueued_through_sequence(self) -> int:
@@ -115,13 +128,32 @@ class RuntimeEventPublisher:
                 delivery_futures=tuple(futures),
             )
 
-    def subscribe(self, subscriber: RuntimeEventSubscriber) -> None:
-        if subscriber not in self._subscribers:
-            self._subscribers.append(subscriber)
+    def subscribe(
+        self,
+        subscriber: RuntimeEventSubscriber,
+        *,
+        semantics: RuntimeEventSubscriberSemantics = (
+            RuntimeEventSubscriberSemantics.SEMANTIC_REQUIRED
+        ),
+    ) -> None:
+        existing = next(
+            (item for item in self._subscribers if item.subscriber is subscriber),
+            None,
+        )
+        if existing is not None:
+            if existing.semantics is not semantics:
+                raise ValueError(
+                    "subscriber semantics cannot change after registration"
+                )
+            return
+        self._subscribers.append(
+            _SubscriberRegistration(subscriber=subscriber, semantics=semantics)
+        )
 
     def unsubscribe(self, subscriber: RuntimeEventSubscriber) -> None:
-        if subscriber in self._subscribers:
-            self._subscribers.remove(subscriber)
+        self._subscribers = [
+            item for item in self._subscribers if item.subscriber is not subscriber
+        ]
 
     async def publish(self, published: RuntimePublishedEvent) -> None:
         loop = asyncio.get_running_loop()
@@ -215,12 +247,17 @@ class RuntimeEventPublisher:
             item = self._pending_by_sequence.pop(self._next_sequence_to_publish, None)
             if item is None:
                 break
-            for subscriber in list(self._subscribers):
+            for registration in list(self._subscribers):
                 try:
-                    await subscriber.on_published_event(item.published)
+                    await registration.subscriber.on_published_event(item.published)
                 except Exception as exc:
                     self.errors.append(exc)
-                    if item.error is None:
+                    if (
+                        registration.semantics
+                        is RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT
+                    ):
+                        self.unsubscribe(registration.subscriber)
+                    elif item.error is None:
                         item.error = exc
             if (
                 item.delivered is not None

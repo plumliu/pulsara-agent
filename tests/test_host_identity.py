@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pulsara_agent.host.identity import (
+from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     normalize_workspace_kind,
     resolve_workspace,

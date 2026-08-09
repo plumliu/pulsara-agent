@@ -384,6 +384,44 @@ def test_presentation_close_blocks_until_executor_operation_physically_exits(
     asyncio.run(run())
 
 
+def test_presentation_close_discards_non_full_checkpoint_after_physical_exit(
+    tmp_path, monkeypatch
+) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+    service = runtime.terminal_presentation_foundation_service
+    checkpoint_owner = runtime.presentation_history_checkpoint_owner
+    physical_calls = 0
+
+    def conflict(attempt, *, deadline_monotonic=None):
+        nonlocal physical_calls
+        physical_calls += 1
+        return _checkpoint_receipt(
+            disposition="conflict",
+            candidate_fingerprint=attempt.commit_candidate_fingerprint,
+            installed_checkpoint=None,
+            installed_root_identity=None,
+            confirmation_kind="conflict",
+        )
+
+    monkeypatch.setattr(checkpoint_owner, "commit_prepared_attempt", conflict)
+    monkeypatch.setattr(checkpoint_owner, "confirm_prepared_attempt", conflict)
+
+    async def run() -> None:
+        service.start_background_if_possible()
+        await runtime.write_event(_segment("derived-conflict"))
+        deadline = monotonic() + 1.0
+        while service.reconciliation_reason is None and monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        assert service.reconciliation_reason == "PRESENTATION_CHECKPOINT_CONFLICT"
+        await service.stop_admission_and_drain(deadline_monotonic=monotonic() + 1.0)
+        assert service._closed
+        assert service._pending_checkpoint_owner is None
+        assert service._pending_checkpoint_delivery is None
+
+    asyncio.run(run())
+    assert physical_calls >= 1
+
+
 def test_history_page_blocking_store_read_does_not_block_event_loop(
     tmp_path, monkeypatch
 ) -> None:

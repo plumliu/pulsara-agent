@@ -5,14 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from pulsara_agent.event import AgentEvent, EventContext
-from pulsara_agent.ports.event_write import RuntimeThreadEventSettlementReceipt
 from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.terminal_observation import (
     TerminalProcessObservationSemanticFact,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.event import AgentEvent, EventContext
+    from pulsara_agent.ports.event_write import RuntimeThreadEventSettlementReceipt
 
 
 class TerminalBackendType(StrEnum):

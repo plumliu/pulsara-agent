@@ -69,7 +69,9 @@ def test_runtime_acl_owner_is_the_typed_grant_executor_only() -> None:
             findings.append(relative)
     assert findings == ["storage/migrations/grants.py"]
     grants = (SOURCE_ROOT / findings[0]).read_text(encoding="utf-8")
-    assert "REVOKE" not in grants
+    assert "GRANT {}" in grants
+    assert "REVOKE {}" in grants
+    assert "PostgresRuntimePrivilegeRevocationFact" in grants
     assert "sql.Identifier(runtime_role)" in grants
 
 
@@ -137,7 +139,8 @@ def test_baseline_sql_is_forward_only_and_extension_is_unique() -> None:
         "0010_mcp_continuation_secret_store.sql",
         "0011_terminal_presentation_queue.sql",
         "0012_terminal_active_queue_projection.sql",
-    ]
+        "0013_conversation_kernel_hard_cut.sql",
+        ]
     create_extension_owners = []
     for path in resources:
         sql_text = path.read_text(encoding="utf-8")

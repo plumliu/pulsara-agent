@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.host.identity import ResolvedWorkspace
+from pulsara_agent.workspace_identity import ResolvedWorkspace
 from pulsara_agent.host.session_manifest import (
     ResumableSessionSummary,
     SessionManifest,

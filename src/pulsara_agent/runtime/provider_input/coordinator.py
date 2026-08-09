@@ -5,7 +5,7 @@ from __future__ import annotations
 from pulsara_agent.event_log.historical_decoder import decode_raw_stored_event_envelope
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from threading import RLock
 from time import monotonic
 
@@ -397,34 +397,6 @@ class ProviderInputGenerationCoordinator:
                     bundle.resident,
                 )
             attempt.activated = True
-
-    def bind_optional_context_audit_source(
-        self,
-        bundle: PreparedProviderInputStartBundle,
-        *,
-        source_basis: object,
-    ) -> PreparedProviderInputStartBundle:
-        """Attach process-local audit detail without changing durable authority.
-
-        Finalization installs the preparation attempt before the optional audit
-        source can be assembled.  This owner-scoped rebind keeps the exact
-        bundle identity used by later activation while leaving every durable
-        candidate and companion event unchanged.
-        """
-
-        owner = bundle.prepared_candidate.preparation_ownership
-        with self._attempt_lock:
-            attempt = self._attempts.get(owner.preparation_id)
-            if attempt is None or attempt.bundle != bundle or attempt.activated:
-                raise ProviderInputPreparationStale(
-                    "optional context audit source cannot rebind this preparation"
-                )
-            rebound = replace(
-                bundle,
-                prepared_context_input_audit_source_basis=source_basis,
-            )
-            attempt.bundle = rebound
-            return rebound
 
     @property
     def owned_preparation_count(self) -> int:

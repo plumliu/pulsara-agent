@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
+from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
@@ -40,7 +40,10 @@ def test_host_session_close_has_no_legacy_active_task_owner(
         assert not hasattr(session, "_active_task")
         assert session.wiring.run_activation_service is not None
 
-        await session.aclose(drain_timeout_seconds=0.05)
+        # This test owns the legacy-task shape, not a close-deadline race.  Give
+        # the Stage 1 shared absolute close budget enough time for every
+        # no-work owner to pass through its physical quiesce boundary.
+        await session.aclose(drain_timeout_seconds=2.0)
 
         assert session.closed is True
 

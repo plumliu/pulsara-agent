@@ -7,7 +7,10 @@ from typing import Any, TypeVar
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.runtime_session import (
+    close_runtime_session_for_test,
+    in_memory_runtime_session,
+)
 from tests.support.events import typed_non_transcript_event
 
 from tests.support.raw_provider import (
@@ -1352,7 +1355,7 @@ def test_graph_checkpoint_service_commits_horizon_in_same_account_batch(
             for event in event_log.iter()
         )
     finally:
-        runtime.close()
+        close_runtime_session_for_test(runtime)
 
 
 def test_materialization_account_precommit_failure_remains_none(
@@ -2345,7 +2348,7 @@ def test_checkpoint_intent_full_without_terminal_recovers_interrupted_before_reo
         )
         is None
     )
-    runtime.close()
+    close_runtime_session_for_test(runtime)
 
 
 def test_restart_recovers_active_checkpoint_barrier_before_producer_admission(
@@ -2405,7 +2408,7 @@ def test_restart_recovers_active_checkpoint_barrier_before_producer_admission(
         runtime.materialization_account_store.snapshot().active_checkpoint_barrier
         is None
     )
-    runtime.close()
+    close_runtime_session_for_test(runtime)
 
 
 def test_host_close_cancels_and_drains_checkpoint_barrier_owner(
@@ -2504,7 +2507,7 @@ def test_host_close_cancels_and_drains_checkpoint_barrier_owner(
         assert service.pending_count == 0
 
     asyncio.run(scenario())
-    runtime.close()
+    close_runtime_session_for_test(runtime)
 
 
 def test_checkpoint_worker_cancel_preserves_retryable_candidate(
@@ -2597,7 +2600,7 @@ def test_checkpoint_worker_cancel_preserves_retryable_candidate(
         assert service.pending_count == 0
 
     asyncio.run(scenario())
-    runtime.close()
+    close_runtime_session_for_test(runtime)
 
 
 def test_checkpoint_publication_failure_does_not_revoke_committed_checkpoint(
@@ -2681,7 +2684,7 @@ def test_checkpoint_publication_failure_does_not_revoke_committed_checkpoint(
         assert service.pending_count == 0
 
     asyncio.run(scenario())
-    runtime.close()
+    close_runtime_session_for_test(runtime)
 
 
 def test_projection_evidence_restores_requested_high_water_when_live_store_is_ahead(
@@ -2906,7 +2909,7 @@ def test_full_source_doctor_rebuilds_checkpoint(tmp_path) -> None:
     assert asyncio.run(
         reopened.transcript_projection_checkpoint_service.projection_delta_minimum_sequence()
     ) == (committed_checkpoint.checkpoint.candidate_ledger_through_sequence + 1)
-    reopened.close()
+    close_runtime_session_for_test(reopened)
 
     from pulsara_agent.inspector.service import (
         _authority_materialization_projection,

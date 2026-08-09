@@ -1,0 +1,71 @@
+{
+  "schema_version": "durability-subtraction-stage0-target-oracle.v1",
+  "append_guards": [
+    "HostWriterGuard",
+    "JobAttemptClaimGuard"
+  ],
+  "committed_core": [
+    {"type": "UserMessageAccepted", "subject_slot": "subject_entry_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "AssistantMessageAccepted", "subject_slot": "subject_entry_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "AssistantToolRequestAccepted", "subject_slot": "subject_entry_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "ToolResultAccepted", "subject_slot": "subject_entry_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "TurnCompleted", "subject_slot": "subject_turn_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "TurnInterrupted", "subject_slot": "subject_turn_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "UserSteerAccepted", "subject_slot": "subject_entry_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "CapabilityDecisionAccepted", "subject_slot": "subject_interaction_decision_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "InteractionDecisionAccepted", "subject_slot": "subject_interaction_decision_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "ToolAttemptAccepted", "subject_slot": "subject_tool_attempt_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "ToolRemoteIdentityPublished", "subject_slot": "subject_tool_attempt_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "PromptQueued", "subject_slot": "subject_queue_item_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "PromptConsumed", "subject_slot": "subject_queue_item_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "PromptCancelled", "subject_slot": "subject_queue_item_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "PromptRejected", "subject_slot": "subject_queue_item_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "CompactionAdopted", "subject_slot": "subject_context_binding_revision_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "SubagentTaskAccepted", "subject_slot": "subject_subagent_task_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "SubagentTaskStatusAccepted", "subject_slot": "subject_subagent_task_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "SubagentMessageAccepted", "subject_slot": "subject_subagent_message_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "SubagentResultAccepted", "subject_slot": "subject_subagent_result_id", "append_guards": ["HostWriterGuard"]},
+    {"type": "JobQueued", "subject_slot": "subject_job_id", "append_guards": ["HostWriterGuard", "JobAttemptClaimGuard"]},
+    {"type": "JobAttemptAccepted", "subject_slot": "subject_job_attempt_id", "append_guards": ["JobAttemptClaimGuard"]},
+    {"type": "JobTerminalAccepted", "subject_slot": "subject_job_id", "append_guards": ["JobAttemptClaimGuard"]},
+    {"type": "MemoryFactAccepted", "subject_slot": "subject_memory_fact_id", "append_guards": ["JobAttemptClaimGuard"]},
+    {"type": "MemoryFactLifecycleChanged", "subject_slot": "subject_memory_fact_id", "append_guards": ["JobAttemptClaimGuard"]},
+    {"type": "MemoryRelationAccepted", "subject_slot": "subject_memory_relation_id", "append_guards": ["JobAttemptClaimGuard"]}
+  ],
+  "live_core": [
+    "TextStart", "TextDelta", "TextEnd",
+    "ThinkingStart", "ThinkingDelta", "ThinkingEnd",
+    "DataStart", "DataDelta", "DataEnd",
+    "ToolCallStart", "ToolCallDelta", "ToolCallEnd",
+    "ToolResultStart", "ToolResultDelta", "ToolResultEnd",
+    "InteractionOpened", "InteractionReplaced", "InteractionClosed",
+    "TerminalProcessCompleted", "TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed",
+    "SubagentProgress"
+  ],
+  "subject_slots": [
+    "subject_turn_id",
+    "subject_entry_id",
+    "subject_tool_attempt_id",
+    "subject_job_id",
+    "subject_job_attempt_id",
+    "subject_queue_item_id",
+    "subject_interaction_decision_id",
+    "subject_context_binding_revision_id",
+    "subject_subagent_task_id",
+    "subject_subagent_message_id",
+    "subject_subagent_result_id",
+    "subject_memory_fact_id",
+    "subject_memory_relation_id"
+  ],
+  "forbidden_formal_targets": [
+    "CustomEvent",
+    "ToolOutcomeUnknown",
+    "RawProviderBlockStart",
+    "RawProviderBlockEnd",
+    "RawProviderTextDelta",
+    "RawProviderThinkingDelta",
+    "RawProviderDataDelta",
+    "RawProviderToolCallDelta",
+    "RawProviderError"
+  ]
+}

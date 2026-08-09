@@ -26,6 +26,7 @@ from pulsara_agent.storage.migrations.grants import (
     PostgresRelationGrantTargetFact,
     PostgresRuntimeGrantExecutor,
     PostgresRuntimeGrantRequirementFact,
+    PostgresRuntimePrivilegeRevocationFact,
     PostgresSchemaGrantTargetFact,
     PostgresTypeGrantTargetFact,
     build_postgres_runtime_grant_policy,
@@ -77,6 +78,28 @@ _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE = (
 )
 _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE = (
     "0012_runtime_write_protected_relations_v1.json"
+)
+_CONVERSATION_KERNEL_SCHEMA_SUBCUT_VERSION = 13
+_CONVERSATION_KERNEL_PROTECTED_RELATION_RESOURCE = (
+    "0013_runtime_write_protected_relations_v1.json"
+)
+_RESET_PRESERVED_INFRASTRUCTURE_RELATIONS = frozenset(
+    {
+        "pulsara_schema_migrations",
+        "runtime_write_guard_secrets",
+        "runtime_write_admission_epochs",
+        "runtime_write_protected_relations",
+        "durable_projection_kind_activations",
+        "canonical_mutation_v2_migration_binding_plans",
+        "canonical_mutation_v2_migration_binding_receipts",
+    }
+)
+_LEGACY_PRODUCT_RELATIONS_FOR_STAGE2_RESET = tuple(
+    str(item["relation_name"])
+    for item in build_postgres_schema_manifest(12).owned_relations
+    if str(item["schema_name"]) == "public"
+    and str(item["relation_name"])
+    not in _RESET_PRESERVED_INFRASTRUCTURE_RELATIONS
 )
 
 
@@ -317,6 +340,13 @@ class PostgresMigrationRunner:
                         definition=definition,
                         deadline_monotonic=deadline_monotonic,
                     )
+                elif definition.version == _CONVERSATION_KERNEL_SCHEMA_SUBCUT_VERSION:
+                    self._require_empty_world_for_conversation_kernel(admin)
+                    self._enter_conversation_kernel_maintenance(
+                        admin,
+                        definition=definition,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                 admin = self._apply_one(
                     admin,
                     runtime_identity=runtime_identity,
@@ -363,7 +393,10 @@ class PostgresMigrationRunner:
                 observed_catalog = PostgresCatalogCanonicalizer().read_deep(
                     admin,
                     relation_names=tuple(
-                        str(item["relation_name"])
+                        (
+                            str(item["schema_name"]),
+                            str(item["relation_name"]),
+                        )
                         for item in expected_catalog["relation_execution_shapes"]
                     ),
                 )
@@ -613,6 +646,69 @@ class PostgresMigrationRunner:
                 target_migration_version=definition.version,
             )
 
+    def _enter_conversation_kernel_maintenance(
+        self,
+        connection: Connection,
+        *,
+        definition: PostgresMigrationDefinition,
+        deadline_monotonic: float,
+    ) -> None:
+        from pulsara_agent.projection_jobs.contracts import RuntimeWriteAdmissionMode
+        from pulsara_agent.storage.runtime_write_admission import (
+            enter_runtime_write_maintenance,
+        )
+
+        epoch = read_runtime_write_epoch(connection, privileged=True)
+        if (
+            epoch.mode is RuntimeWriteAdmissionMode.MAINTENANCE
+            and epoch.target_migration_version == definition.version
+        ):
+            return
+        if epoch.mode is not RuntimeWriteAdmissionMode.NORMAL:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.MIGRATION_FAILED,
+                "migration 0013 cannot replace a different maintenance operation",
+            )
+        operation_id = "conversation-kernel-maintenance:" + postgres_schema_fingerprint(
+            "conversation-kernel-schema-subcut-operation:v1",
+            {
+                "database_target_fingerprint": (
+                    self._admin_factory.endpoint.endpoint_fingerprint
+                ),
+                "normal_epoch_fingerprint": epoch.epoch_fingerprint,
+                "target_migration_contract_fingerprint": (
+                    definition.migration_contract_fingerprint
+                ),
+            },
+        )
+        with connection.transaction():
+            _apply_local_deadline(connection, deadline_monotonic)
+            enter_runtime_write_maintenance(
+                connection,
+                current_epoch=epoch,
+                maintenance_operation_id=operation_id,
+                target_migration_version=definition.version,
+            )
+
+    @staticmethod
+    def _require_empty_world_for_conversation_kernel(connection: Connection) -> None:
+        nonempty: list[str] = []
+        with connection.cursor(row_factory=tuple_row) as cursor:
+            for relation in _LEGACY_PRODUCT_RELATIONS_FOR_STAGE2_RESET:
+                row = cursor.execute(
+                    sql.SQL("SELECT EXISTS (SELECT 1 FROM {}.{} LIMIT 1)").format(
+                        sql.Identifier("public"), sql.Identifier(relation)
+                    )
+                ).fetchone()
+                if row is not None and bool(row[0]):
+                    nonempty.append(relation)
+        if nonempty:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.MIGRATION_FAILED,
+                "migration 0013 is reset-only; legacy product relations are not empty: "
+                + ", ".join(nonempty[:8]),
+            )
+
     def _require_pulsara_empty(self, connection: Connection) -> None:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -788,6 +884,13 @@ class PostgresMigrationRunner:
                             resource_name = (
                                 _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE
                             )
+                        elif (
+                            definition.version
+                            == _CONVERSATION_KERNEL_SCHEMA_SUBCUT_VERSION
+                        ):
+                            resource_name = (
+                                _CONVERSATION_KERNEL_PROTECTED_RELATION_RESOURCE
+                            )
                         else:
                             raise PostgresSchemaError(
                                 PostgresSchemaFailureCode.MIGRATION_FAILED,
@@ -806,6 +909,12 @@ class PostgresMigrationRunner:
                             protected_relation_resource_name=resource_name,
                         )
                     policy = build_postgres_runtime_grant_policy(definition.version)
+                    for revocation in policy.revocations:
+                        self._grant_executor.apply_revocation(
+                            connection,
+                            runtime_role=runtime_role,
+                            revocation=revocation,
+                        )
                     for requirement in policy.requirements:
                         self._grant_executor.apply_requirement(
                             connection,
@@ -934,22 +1043,26 @@ class PostgresMigrationRunner:
     @staticmethod
     def _validate_postcondition(connection: Connection, through_version: int) -> None:
         manifest = build_postgres_schema_manifest(through_version)
-        relation_names = tuple(
-            str(item["relation_name"]) for item in manifest.owned_relations
+        relation_identities = tuple(
+            (str(item["schema_name"]), str(item["relation_name"]))
+            for item in manifest.owned_relations
         )
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT c.relname
+                SELECT n.nspname, c.relname
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname = ANY(%s)
-                ORDER BY c.relname
+                WHERE (n.nspname, c.relname) IN (
+                    SELECT item->>0, item->>1
+                    FROM jsonb_array_elements(%s::jsonb) AS item
+                )
+                ORDER BY n.nspname, c.relname
                 """,
-                (list(relation_names),),
+                (Jsonb(relation_identities),),
             )
-            observed = tuple(row[0] for row in cursor.fetchall())
-            if observed != tuple(sorted(relation_names)):
+            observed = tuple(tuple(row) for row in cursor.fetchall())
+            if observed != tuple(sorted(relation_identities)):
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.CATALOG_DRIFT,
                     f"migration {through_version} relation postcondition failed",
@@ -999,7 +1112,11 @@ class PostgresMigrationRunner:
                                     else (
                                         _TERMINAL_PRESENTATION_PROTECTED_RELATION_RESOURCE
                                         if through_version == 11
-                                        else _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE
+                                        else (
+                                            _TERMINAL_ACTIVE_QUEUE_PROTECTED_RELATION_RESOURCE
+                                            if through_version == 12
+                                            else _CONVERSATION_KERNEL_PROTECTED_RELATION_RESOURCE
+                                        )
                                     )
                                 )
                             )
@@ -1095,7 +1212,16 @@ class PostgresMigrationRunner:
                 for requirement in policy.requirements
                 if not requirement_satisfied(connection, runtime_role, requirement)
             )
-            if not missing and not epoch_role_rebind_required:
+            outstanding_revocations = tuple(
+                revocation
+                for revocation in policy.revocations
+                if revocation_required(connection, runtime_role, revocation)
+            )
+            if (
+                not missing
+                and not outstanding_revocations
+                and not epoch_role_rebind_required
+            ):
                 return connection, ()
             body_completed = False
             try:
@@ -1108,7 +1234,15 @@ class PostgresMigrationRunner:
                             "migration ledger disappeared during privilege reconciliation",
                         )
                     self._validate_applied_history(rows, require_latest=True)
-                    _preflight_grant_authority(connection, missing)
+                    _preflight_grant_authority(
+                        connection, (*missing, *outstanding_revocations)
+                    )
+                    for revocation in outstanding_revocations:
+                        self._grant_executor.apply_revocation(
+                            connection,
+                            runtime_role=runtime_role,
+                            revocation=revocation,
+                        )
                     for requirement in missing:
                         self._grant_executor.apply_requirement(
                             connection,
@@ -1132,9 +1266,25 @@ class PostgresMigrationRunner:
                             PostgresSchemaFailureCode.PRIVILEGE_RECONCILIATION_FAILED,
                             "runtime privilege reconciliation did not reach its complete post-state",
                         )
+                    unresolved_revocations = tuple(
+                        revocation.revocation_fingerprint
+                        for revocation in policy.revocations
+                        if revocation_required(connection, runtime_role, revocation)
+                    )
+                    if unresolved_revocations:
+                        raise PostgresSchemaError(
+                            PostgresSchemaFailureCode.PRIVILEGE_RECONCILIATION_FAILED,
+                            "runtime legacy privilege revocation did not reach its complete post-state",
+                        )
                     body_completed = True
                 return connection, tuple(
-                    item.requirement_fingerprint for item in missing
+                    (
+                        *(item.requirement_fingerprint for item in missing),
+                        *(
+                            item.revocation_fingerprint
+                            for item in outstanding_revocations
+                        ),
+                    )
                 )
             except PostgresSchemaError:
                 raise
@@ -1149,13 +1299,20 @@ class PostgresMigrationRunner:
                     runtime_identity=runtime_identity,
                     runtime_role=runtime_role,
                     pre_state_missing=missing,
+                    pre_state_revocations=outstanding_revocations,
                     pre_epoch_role_rebind_required=(epoch_role_rebind_required),
                     deadline_monotonic=deadline_monotonic,
                 )
                 if confirmation is PostgresCommitConfirmation.FULL:
                     assert confirmed_connection is not None
                     return confirmed_connection, tuple(
-                        item.requirement_fingerprint for item in missing
+                        (
+                            *(item.requirement_fingerprint for item in missing),
+                            *(
+                                item.revocation_fingerprint
+                                for item in outstanding_revocations
+                            ),
+                        )
                     )
                 if confirmation is PostgresCommitConfirmation.NONE:
                     assert confirmed_connection is not None
@@ -1180,6 +1337,9 @@ class PostgresMigrationRunner:
         runtime_identity: PostgresDatabaseIdentity,
         runtime_role: str,
         pre_state_missing: tuple[PostgresRuntimeGrantRequirementFact, ...],
+        pre_state_revocations: tuple[
+            PostgresRuntimePrivilegeRevocationFact, ...
+        ],
         pre_epoch_role_rebind_required: bool,
         deadline_monotonic: float,
     ) -> tuple[PostgresCommitConfirmation, Connection | None]:
@@ -1206,6 +1366,11 @@ class PostgresMigrationRunner:
                 for requirement in policy.requirements
                 if not requirement_satisfied(connection, runtime_role, requirement)
             )
+            observed_revocations = tuple(
+                revocation
+                for revocation in policy.revocations
+                if revocation_required(connection, runtime_role, revocation)
+            )
             observed_epoch_rebind_required = _runtime_epoch_role_rebind_required(
                 connection,
                 runtime_role=runtime_role,
@@ -1225,11 +1390,21 @@ class PostgresMigrationRunner:
                 connection.close()
             return PostgresCommitConfirmation.UNRESOLVED, None
 
-        if not observed_missing and not observed_epoch_rebind_required:
+        if (
+            not observed_missing
+            and not observed_revocations
+            and not observed_epoch_rebind_required
+        ):
             return PostgresCommitConfirmation.FULL, connection
         if (
             tuple(item.requirement_fingerprint for item in observed_missing)
             == tuple(item.requirement_fingerprint for item in pre_state_missing)
+            and tuple(
+                item.revocation_fingerprint for item in observed_revocations
+            )
+            == tuple(
+                item.revocation_fingerprint for item in pre_state_revocations
+            )
             and observed_epoch_rebind_required == pre_epoch_role_rebind_required
         ):
             return PostgresCommitConfirmation.NONE, connection
@@ -1321,6 +1496,66 @@ def requirement_satisfied(
             if cursor.fetchone()[0] is not True:
                 return False
     return True
+
+
+def revocation_required(
+    connection: Connection,
+    runtime_role: str,
+    revocation: PostgresRuntimePrivilegeRevocationFact,
+) -> bool:
+    target = revocation.target
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = %s",
+            (runtime_role,),
+        )
+        role = cursor.fetchone()
+        if role is None:
+            raise RuntimeError("runtime role is absent")
+        # A superuser necessarily has effective access regardless of ACL.  It
+        # remains legal for admin-only verification tooling, while the Stage 2
+        # production Host independently rejects that activation boundary.
+        if bool(role[0]):
+            return False
+        for privilege in revocation.ordered_revoked_privileges:
+            if isinstance(target, PostgresSchemaGrantTargetFact):
+                cursor.execute(
+                    "SELECT pg_catalog.has_schema_privilege(%s, %s, %s)",
+                    (runtime_role, target.schema_name, privilege),
+                )
+            elif isinstance(target, PostgresRelationGrantTargetFact):
+                cursor.execute(
+                    "SELECT pg_catalog.has_table_privilege(%s, %s, %s)",
+                    (
+                        runtime_role,
+                        f"{target.schema_name}.{target.relation_name}",
+                        privilege,
+                    ),
+                )
+            elif isinstance(target, PostgresFunctionGrantTargetFact):
+                arguments = ",".join(target.ordered_argument_types)
+                cursor.execute(
+                    "SELECT pg_catalog.has_function_privilege(%s, %s, %s)",
+                    (
+                        runtime_role,
+                        f"{target.schema_name}.{target.function_name}({arguments})",
+                        privilege,
+                    ),
+                )
+            elif isinstance(target, PostgresTypeGrantTargetFact):
+                cursor.execute(
+                    "SELECT pg_catalog.has_type_privilege(%s, %s, %s)",
+                    (
+                        runtime_role,
+                        f"{target.schema_name}.{target.type_name}",
+                        privilege,
+                    ),
+                )
+            else:  # pragma: no cover - closed union
+                raise TypeError("unknown privilege revocation target")
+            if cursor.fetchone()[0] is True:
+                return True
+    return False
 
 
 def _runtime_epoch_role_rebind_required(
@@ -1509,7 +1744,11 @@ def _catalog_matches_manifest(
 
 def _preflight_grant_authority(
     connection: Connection,
-    requirements: tuple[PostgresRuntimeGrantRequirementFact, ...],
+    requirements: tuple[
+        PostgresRuntimeGrantRequirementFact
+        | PostgresRuntimePrivilegeRevocationFact,
+        ...,
+    ],
 ) -> None:
     with connection.cursor() as cursor:
         cursor.execute(

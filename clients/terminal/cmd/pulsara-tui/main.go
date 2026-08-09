@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/plumliu/pulsara-agent/clients/terminal/internal/bootstrap"
+	"github.com/plumliu/pulsara-agent/clients/terminal/internal/kernelbootstrap"
 )
 
 func main() {
-	os.Exit(bootstrap.Run(os.Args[1:]))
+	os.Exit(kernelbootstrap.Run(os.Args[1:]))
 }

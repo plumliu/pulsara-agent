@@ -11,7 +11,7 @@ from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
-from pulsara_agent.host.identity import (
+from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     ResolvedWorkspace,
     resolve_workspace,
@@ -43,6 +43,7 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
+from pulsara_agent.runtime.publisher import RuntimeEventSubscriberSemantics
 from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
     PendingInteraction,
@@ -503,7 +504,8 @@ class HostCore:
                 self.rollout_budget_feasibility
             )
             wiring.runtime_wiring.runtime_session.publisher.subscribe(
-                projection_service
+                projection_service,
+                semantics=RuntimeEventSubscriberSemantics.DERIVED_BEST_EFFORT,
             )
             session = HostSession(
                 host_session_id=host_session_id,

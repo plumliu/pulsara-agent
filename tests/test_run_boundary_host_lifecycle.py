@@ -777,7 +777,7 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
     async def scenario() -> None:
         core = _core(monkeypatch, ScriptedTransport([{"text": "done"}]))
         session = await _open(core, tmp_path, host_session_id="host:run-end-retry")
-        original_emit_many = RuntimeSession.emit_many
+        original_write_events = RuntimeSession.write_events
         failures = 0
 
         async def fail_run_end(self, events, **kwargs):
@@ -785,9 +785,9 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
             if any(isinstance(event, RunEndEvent) for event in events):
                 failures += 1
                 raise EventCommitError("synthetic RunEnd store outage")
-            return await original_emit_many(self, events, **kwargs)
+            return await original_write_events(self, events, **kwargs)
 
-        monkeypatch.setattr(RuntimeSession, "emit_many", fail_run_end)
+        monkeypatch.setattr(RuntimeSession, "write_events", fail_run_end)
         pending = await session.run_turn("hello")
         assert isinstance(pending, RunTerminalizationPending)
         deadline = asyncio.get_running_loop().time() + 2.0
@@ -808,7 +808,7 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
             service.wait_run_completion(pending.owner_identity.run_id)
         )
         await asyncio.sleep(0)
-        monkeypatch.setattr(RuntimeSession, "emit_many", original_emit_many)
+        monkeypatch.setattr(RuntimeSession, "write_events", original_write_events)
         terminal = await asyncio.wait_for(completion, timeout=10)
         assert terminal.output.status == "finished"
         assert any(isinstance(event, RunEndEvent) for event in session.replay_events())

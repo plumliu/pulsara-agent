@@ -32,6 +32,7 @@ from pulsara_agent.llm.user_carrier_lifecycle import (
     context_source_lifecycle_entry,
     context_source_transition_kind,
 )
+from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.subagent.facts import SubagentGraphState
@@ -138,12 +139,6 @@ class InMemoryContextLifecycleCache:
         with self._lock:
             self._values.clear()
             self._total_chars = 0
-
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Pulsara, an agentic coding runtime. Work carefully inside the current "
-    "workspace, use tools when needed, and provide concise final answers."
-)
 
 
 def render_plan_revision_instruction(user_feedback: str) -> str:

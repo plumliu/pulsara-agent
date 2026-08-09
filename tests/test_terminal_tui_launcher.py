@@ -17,7 +17,7 @@ from pulsara_agent.terminal_client.binary import (
 )
 from pulsara_agent.terminal_client.launcher import launch_terminal_client
 import pulsara_agent.terminal_client.launcher as launcher_module
-from pulsara_agent.terminal_protocol.codec import (
+from pulsara_agent.terminal_protocol.v3_gateway import (
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
     PROTOCOL_SCHEMA_FINGERPRINT,

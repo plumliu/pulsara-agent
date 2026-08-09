@@ -96,6 +96,61 @@ _TERMINAL_PRESENTATION_QUEUE_RELATIONS = (
     "terminal_command_receipts",
 )
 
+CONVERSATION_KERNEL_RELATIONS = (
+    "sessions",
+    "session_commands",
+    "turns",
+    "turn_context_binding_revisions",
+    "context_snapshots",
+    "transcript_entries",
+    "assistant_message_blocks",
+    "tool_execution_attempts",
+    "tool_results",
+    "prompt_queue_items",
+    "interaction_decisions",
+    "subagent_tasks",
+    "subagent_task_children",
+    "durable_jobs",
+    "durable_job_attempts",
+    "memory_candidates",
+    "memory_governance_decisions",
+    "memory_facts",
+    "memory_relations",
+    "memory_search_index",
+    "memory_vector_index",
+    "memory_index_state",
+    "blobs",
+    "agent_events",
+)
+CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
+    "sessions": ("SELECT", "INSERT", "UPDATE"),
+    "session_commands": ("SELECT", "INSERT"),
+    "turns": ("SELECT", "INSERT", "UPDATE"),
+    "turn_context_binding_revisions": ("SELECT", "INSERT"),
+    "context_snapshots": ("SELECT", "INSERT"),
+    "transcript_entries": ("SELECT", "INSERT"),
+    "assistant_message_blocks": ("SELECT", "INSERT"),
+    "tool_execution_attempts": ("SELECT", "INSERT", "UPDATE"),
+    "tool_results": ("SELECT", "INSERT"),
+    "prompt_queue_items": ("SELECT", "INSERT", "UPDATE"),
+    "interaction_decisions": ("SELECT", "INSERT"),
+    "subagent_tasks": ("SELECT", "INSERT", "UPDATE"),
+    "subagent_task_children": ("SELECT", "INSERT"),
+    "durable_jobs": ("SELECT", "INSERT", "UPDATE"),
+    "durable_job_attempts": ("SELECT", "INSERT", "UPDATE"),
+    "memory_candidates": ("SELECT", "INSERT", "UPDATE"),
+    "memory_governance_decisions": ("SELECT", "INSERT"),
+    "memory_facts": ("SELECT", "INSERT", "UPDATE"),
+    "memory_relations": ("SELECT", "INSERT"),
+    "memory_search_index": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    "memory_vector_index": ("SELECT", "INSERT", "DELETE"),
+    "memory_index_state": ("SELECT", "INSERT", "UPDATE"),
+    "blobs": ("SELECT", "INSERT", "DELETE"),
+    "agent_events": ("SELECT", "INSERT"),
+}
+if tuple(CONVERSATION_KERNEL_RUNTIME_PRIVILEGES) != CONVERSATION_KERNEL_RELATIONS:
+    raise RuntimeError("Stage 2 relation privilege catalog is not exhaustive")
+
 _RELATIONS_INTRODUCED_BY_VERSION = (
     ("pulsara_schema_migrations",),
     (),
@@ -109,6 +164,7 @@ _RELATIONS_INTRODUCED_BY_VERSION = (
     _COMPACTION_MEMORY_EXTRACTION_RELATIONS,
     _MCP_CONTINUATION_RELATIONS,
     _TERMINAL_PRESENTATION_QUEUE_RELATIONS,
+    (),
     (),
 )
 _ALL_RELATIONS = tuple(
@@ -144,6 +200,7 @@ def _freeze(value: object) -> object:
 def _relation(
     name: str,
     *,
+    schema_name: str = "public",
     writable: bool,
     through_version: int,
     runtime_privileges: tuple[str, ...] | None = None,
@@ -153,9 +210,12 @@ def _relation(
         relation
         for relation in expected["relations"]
         if relation["relation_name"] == name
+        and relation["schema_name"] == schema_name
     )
     if len(matches) != 1:
-        raise RuntimeError(f"packaged catalog is missing exact relation {name}")
+        raise RuntimeError(
+            f"packaged catalog is missing exact relation {schema_name}.{name}"
+        )
     result = {
         **_freeze(matches[0]),
         "runtime_writable": writable,
@@ -273,7 +333,7 @@ _V5_RUNTIME_EXECUTABLE_FUNCTIONS = {
 
 
 def _manifest_payload(through_version: int) -> dict[str, object]:
-    if through_version < 0 or through_version > 12:
+    if through_version < 0 or through_version > 13:
         raise ValueError("unsupported manifest version")
     relations: list[dict[str, object]] = [
         _relation(
@@ -346,6 +406,33 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
             )
             for name in _TERMINAL_PRESENTATION_QUEUE_RELATIONS
         )
+    if through_version >= 13:
+        relations.extend(
+            _relation(
+                name,
+                schema_name="pulsara_v3",
+                writable=any(
+                    privilege in {"INSERT", "UPDATE", "DELETE"}
+                    for privilege in CONVERSATION_KERNEL_RUNTIME_PRIVILEGES[name]
+                ),
+                through_version=through_version,
+                runtime_privileges=CONVERSATION_KERNEL_RUNTIME_PRIVILEGES[name],
+            )
+            for name in CONVERSATION_KERNEL_RELATIONS
+        )
+        # Stage 2 activates a new runtime authority.  Legacy public relations
+        # remain physical catalog shells for the later deletion stages, but
+        # are no longer part of the runtime role's product surface.
+        for relation in relations:
+            if str(relation["schema_name"]) != "public":
+                continue
+            relation["runtime_writable"] = False
+            relation["runtime_privileges"] = (
+                ("SELECT",)
+                if str(relation["relation_name"])
+                == "pulsara_schema_migrations"
+                else ()
+            )
     extensions: tuple[dict[str, object], ...] = ()
     if through_version >= 1:
         extensions += (
@@ -393,17 +480,21 @@ def _manifest_payload(through_version: int) -> dict[str, object]:
                 for item in expected["functions"]
             )
     historical_relation_names = tuple(
-        name
+        ("public", name)
         for introduced_relations in _RELATIONS_INTRODUCED_BY_VERSION[
             : through_version + 1
         ]
         for name in introduced_relations
     )
+    if through_version >= 13:
+        historical_relation_names += tuple(
+            ("pulsara_v3", name) for name in CONVERSATION_KERNEL_RELATIONS
+        )
     reserved_names = tuple(
         PostgresObjectIdentityFact.build(
-            object_kind="relation", schema_name="public", object_name=name
+            object_kind="relation", schema_name=schema_name, object_name=name
         )
-        for name in historical_relation_names
+        for schema_name, name in historical_relation_names
     )
     if through_version >= 3:
         reserved_names += tuple(
@@ -443,7 +534,7 @@ def build_postgres_schema_manifest(
 
 
 POSTGRES_SCHEMA_MANIFESTS = tuple(
-    build_postgres_schema_manifest(version) for version in range(13)
+    build_postgres_schema_manifest(version) for version in range(14)
 )
 POSTGRES_LATEST_SCHEMA_MANIFEST = POSTGRES_SCHEMA_MANIFESTS[-1]
 PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)
@@ -452,6 +543,8 @@ PULSARA_RESERVED_RELATION_NAMES = frozenset(_ALL_RELATIONS)
 __all__ = [
     "POSTGRES_LATEST_SCHEMA_MANIFEST",
     "POSTGRES_SCHEMA_MANIFESTS",
+    "CONVERSATION_KERNEL_RELATIONS",
+    "CONVERSATION_KERNEL_RUNTIME_PRIVILEGES",
     "MEMORY_SUBSTRATE_TABLES",
     "PULSARA_RESERVED_RELATION_NAMES",
     "RUNTIME_TRUTH_TABLES",

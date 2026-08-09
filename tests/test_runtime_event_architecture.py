@@ -264,23 +264,37 @@ def test_memory_candidate_producers_cannot_bypass_projection_ownership() -> None
 
 
 def test_model_stream_delta_events_are_physically_deleted() -> None:
-    forbidden = (
+    forbidden_classes = (
         "TextBlockDeltaEvent",
         "ThinkingBlockDeltaEvent",
         "DataBlockDeltaEvent",
         "ToolCallDeltaEvent",
-        "EventType.TEXT_BLOCK_DELTA",
-        "EventType.THINKING_BLOCK_DELTA",
-        "EventType.DATA_BLOCK_DELTA",
-        "EventType.TOOL_CALL_DELTA",
     )
+    forbidden_event_members = {
+        "TEXT_BLOCK_DELTA",
+        "THINKING_BLOCK_DELTA",
+        "DATA_BLOCK_DELTA",
+        "TOOL_CALL_DELTA",
+    }
     violations: list[str] = []
     source_root = REPO_ROOT / "src" / "pulsara_agent"
     for path in sorted(source_root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        for symbol in forbidden:
+        for symbol in forbidden_classes:
             if symbol in source:
                 violations.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "EventType"
+                and node.attr in forbidden_event_members
+            ):
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:"
+                    f"EventType.{node.attr}"
+                )
     assert violations == []
 
 
@@ -454,37 +468,26 @@ def test_context_input_audit_plane_cannot_latch_or_fail_live_runtime() -> None:
 def test_context_input_audit_pages_do_not_duplicate_canonical_context_authority() -> (
     None
 ):
-    source = (SOURCE_ROOT / "runtime" / "agent.py").read_text(encoding="utf-8")
-    extractor = source.split("def _context_input_audit_capture_components(", 1)[
-        1
-    ].split("def _empty_context_budget_report(", 1)[0]
-    for forbidden in (
-        "ordered.projection",
-        "provider_projection.projection_fact,",
-        "prepared_transcript_projection.authority,",
-    ):
-        assert forbidden not in extractor
-    page_owned_detail = extractor.split("detail_values = (", 1)[1].split(
-        "references =", 1
-    )[0]
-    for forbidden in (
-        "active_window,",
-        "projection_state,",
-        "prepared_rollups,",
-        "rollout_state,",
-        "normalized_transcript.transcript",
-        "authority_slice",
-    ):
-        assert forbidden not in page_owned_detail
-    for eager_copy in ("freeze_json(", ".model_dump(", ".to_event_value("):
-        assert eager_copy not in page_owned_detail
-    capture_install = source.split(
-        "audit_capture = PreparedContextInputAuditSourceCapture(", 1
-    )[1].split("compiled_context = final_compiled_context", 1)[0]
-    assert "components=_context_input_audit_capture_components(" in capture_install
-    assert "capture_components=" not in source
-    assert "partial(" not in capture_install
-    assert "_known_context_input_audit_detail_bytes" not in source
+    agent_source = (SOURCE_ROOT / "runtime" / "agent.py").read_text(encoding="utf-8")
+    llm_source = (SOURCE_ROOT / "llm" / "runtime.py").read_text(encoding="utf-8")
+    coordinator_source = (
+        SOURCE_ROOT / "runtime" / "provider_input" / "coordinator.py"
+    ).read_text(encoding="utf-8")
+    planner_source = (
+        SOURCE_ROOT / "runtime" / "provider_input" / "planner.py"
+    ).read_text(encoding="utf-8")
+    lifecycle_source = (SOURCE_ROOT / "ports" / "model_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "PreparedContextInputAuditSourceCapture" not in agent_source
+    assert "_context_input_audit_capture_components" not in agent_source
+    assert "bind_optional_context_audit_source" not in coordinator_source
+    assert "prepared_context_input_audit_source_basis" not in planner_source
+    assert "prepared_context_input_audit_source_basis" not in lifecycle_source
+    assert "context-input-audit-materialize" not in llm_source
+    assert "offer_best_effort_nowait" not in llm_source
+
     materializer = (
         SOURCE_ROOT / "runtime" / "context_input" / "audit_materializer.py"
     ).read_text(encoding="utf-8")

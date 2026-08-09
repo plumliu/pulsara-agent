@@ -1,0 +1,439 @@
+"""Host-scoped, same-session Stage 2 subagent execution.
+
+The manager owns only live asyncio tasks.  Accepted task coordination and the
+task-scoped conversation are canonical PostgreSQL facts; no execution attempt,
+lease, checkpoint, or resume carrier is durable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from time import monotonic
+from typing import Callable, Mapping
+from uuid import uuid4
+
+from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.live import (
+    LiveAgentEventBus,
+    LiveBlockKind,
+    LiveChannelKind,
+)
+from pulsara_agent.ports.live_agent_event import (
+    SubagentProgressPayload,
+    live_digest,
+)
+from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
+from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.conversation_kernel.runner import (
+    ConversationKernelRunner,
+    KernelRunResult,
+    KernelToolResult,
+)
+
+
+SUBAGENT_TOOL_NAMES = frozenset(
+    {"spawn_agent", "list_agents", "wait_agent", "stop_agent"}
+)
+MAXIMUM_LIVE_SUBAGENTS = STAGE2_LIMITS.nonterminal_subagent_hard_items
+
+
+@dataclass(slots=True)
+class _LiveTask:
+    task_id: str
+    parent_turn_id: str
+    objective: str
+    task: asyncio.Task[KernelRunResult]
+    status: str = "ACTIVE"
+    result: KernelRunResult | None = None
+    failure_code: str | None = None
+    cancellation_reason: str | None = None
+
+
+class KernelSubagentManager:
+    def __init__(
+        self,
+        *,
+        repository: ConversationKernelRepository,
+        guard: HostWriterGuard,
+        host_owner_id: str,
+        io_owner: KernelSessionIO,
+        live_bus: LiveAgentEventBus,
+    ) -> None:
+        self._repository = repository
+        self._guard = guard
+        self._host_owner_id = host_owner_id
+        self._io = io_owner
+        self._live_bus = live_bus
+        self._runner_factory: Callable[[], ConversationKernelRunner] | None = None
+        self._tasks: dict[str, _LiveTask] = {}
+        self._spawning: set[str] = set()
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    @property
+    def tool_names(self) -> frozenset[str]:
+        return SUBAGENT_TOOL_NAMES
+
+    def bind_runner_factory(
+        self, factory: Callable[[], ConversationKernelRunner]
+    ) -> None:
+        if self._runner_factory is not None:
+            raise RuntimeError("subagent runner factory is already bound")
+        self._runner_factory = factory
+
+    async def invoke(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        parent_turn_id: str,
+    ) -> KernelToolResult:
+        if tool_name == "spawn_agent":
+            return await self._spawn(arguments, parent_turn_id=parent_turn_id)
+        if tool_name == "list_agents":
+            return await self._list(arguments)
+        if tool_name == "wait_agent":
+            return await self._wait(arguments)
+        if tool_name == "stop_agent":
+            return await self._stop(arguments)
+        raise KeyError(tool_name)
+
+    async def _spawn(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        parent_turn_id: str,
+    ) -> KernelToolResult:
+        objective = str(arguments.get("task") or "").strip()
+        if (
+            not objective
+            or len(objective.encode("utf-8"))
+            > STAGE2_LIMITS.subagent_objective_hard_bytes
+        ):
+            return _result("APPLICATION_ERROR", {"error": "task is required"})
+        async with self._lock:
+            if self._closed or self._runner_factory is None:
+                return _result(
+                    "TOOL_UNAVAILABLE", {"error": "subagent owner is closed"}
+                )
+            active = sum(not item.task.done() for item in self._tasks.values()) + len(
+                self._spawning
+            )
+            if active >= MAXIMUM_LIVE_SUBAGENTS:
+                return _result(
+                    "APPLICATION_ERROR",
+                    {
+                        "error": "subagent capacity is exhausted",
+                        "capacity": MAXIMUM_LIVE_SUBAGENTS,
+                    },
+                )
+            task_id = f"subagent-task:{uuid4().hex}"
+            self._spawning.add(task_id)
+        try:
+            await self._io.run(
+                self._repository.accept_subagent_task,
+                self._guard,
+                task_id=task_id,
+                parent_turn_id=parent_turn_id,
+                objective=objective,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=self._host_owner_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            changed = await self._io.run(
+                self._repository.set_subagent_task_status,
+                self._guard,
+                task_id=task_id,
+                status="ACTIVE",
+                reason=None,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=self._host_owner_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            if not changed:
+                raise RuntimeError("subagent activation CAS failed")
+            self._offer_progress(task_id, parent_turn_id, "ACTIVE", "Subagent started")
+        except BaseException:
+            async with self._lock:
+                self._spawning.discard(task_id)
+            raise
+        closing_after_accept = False
+        async with self._lock:
+            self._spawning.discard(task_id)
+            if self._closed:
+                closing_after_accept = True
+            else:
+                task = asyncio.create_task(
+                    self._run_child(task_id, objective),
+                    name=f"kernel-subagent:{task_id}",
+                )
+                live = _LiveTask(task_id, parent_turn_id, objective, task)
+                self._tasks[task_id] = live
+        if closing_after_accept:
+            await self._terminalize_best_effort(
+                task_id, "INTERRUPTED", "HOST_CLOSING"
+            )
+            self._offer_progress(
+                task_id, parent_turn_id, "INTERRUPTED", "Subagent interrupted"
+            )
+            return _result(
+                "TOOL_UNAVAILABLE", {"error": "subagent owner is closed"}
+            )
+        return _result(
+            "SUCCESS",
+            {
+                "status": "started",
+                "subagent_run_id": task_id,
+                "conversation_scope": {"kind": "SUBAGENT_TASK", "task_id": task_id},
+            },
+            remote_identity=task_id,
+        )
+
+    async def _run_child(self, task_id: str, objective: str) -> KernelRunResult:
+        runner_factory = self._runner_factory
+        assert runner_factory is not None
+        try:
+            result = await runner_factory().run_subagent_turn(
+                task_id=task_id,
+                objective=objective,
+            )
+            await self._io.run(
+                self._repository.accept_subagent_child,
+                self._guard,
+                child_id=f"subagent-result:{uuid4().hex}",
+                task_id=task_id,
+                child_kind="RESULT",
+                child_ordinal=0,
+                entry_id=result.final_entry_id,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=task_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            await self._io.run(
+                self._repository.set_subagent_task_status,
+                self._guard,
+                task_id=task_id,
+                status="COMPLETED",
+                reason=None,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=self._host_owner_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            async with self._lock:
+                live = self._tasks.get(task_id)
+                if live is not None:
+                    live.status = "COMPLETED"
+                    live.result = result
+                    parent_turn_id = live.parent_turn_id
+                else:
+                    parent_turn_id = task_id
+            self._offer_progress(
+                task_id,
+                parent_turn_id,
+                "COMPLETED",
+                result.final_text,
+            )
+            return result
+        except asyncio.CancelledError:
+            async with self._lock:
+                live = self._tasks.get(task_id)
+                reason = (
+                    live.cancellation_reason if live is not None else None
+                ) or "HOST_CLOSING"
+            explicit_stop = reason == "USER_CANCELLED"
+            status = "CANCELLED" if explicit_stop else "INTERRUPTED"
+            await self._terminalize_best_effort(task_id, status, reason)
+            async with self._lock:
+                live = self._tasks.get(task_id)
+                if live is not None:
+                    live.status = status
+                    live.failure_code = reason
+                    parent_turn_id = live.parent_turn_id
+                else:
+                    parent_turn_id = task_id
+            self._offer_progress(task_id, parent_turn_id, status, reason)
+            raise
+        except BaseException as exc:
+            code = f"CHILD_{type(exc).__name__.upper()}"
+            await self._terminalize_best_effort(task_id, "FAILED", code)
+            async with self._lock:
+                live = self._tasks.get(task_id)
+                if live is not None:
+                    live.status = "FAILED"
+                    live.failure_code = code
+                    parent_turn_id = live.parent_turn_id
+                else:
+                    parent_turn_id = task_id
+            self._offer_progress(task_id, parent_turn_id, "FAILED", code)
+            raise
+
+    async def _terminalize_best_effort(
+        self, task_id: str, status: str, reason: str
+    ) -> None:
+        try:
+            await self._io.run(
+                self._repository.set_subagent_task_status,
+                self._guard,
+                task_id=task_id,
+                status=status,
+                reason=reason,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=self._host_owner_id,
+                deadline_monotonic=monotonic() + 5.0,
+            )
+        except BaseException:
+            # A writer takeover owns the canonical INTERRUPTED transition.
+            pass
+
+    async def _list(self, arguments: Mapping[str, object]) -> KernelToolResult:
+        maximum = int(arguments.get("max_items", 50))
+        maximum = max(1, min(maximum, 50))
+        async with self._lock:
+            rows = [
+                {
+                    "subagent_run_id": item.task_id,
+                    "status": item.status,
+                    "objective": item.objective,
+                }
+                for item in list(self._tasks.values())[-maximum:]
+            ]
+        return _result("SUCCESS", {"agents": rows})
+
+    async def _wait(self, arguments: Mapping[str, object]) -> KernelToolResult:
+        task_id = str(arguments.get("subagent_run_id") or "")
+        timeout = float(arguments.get("timeout_seconds", 30.0))
+        if timeout <= 0 or timeout > 300:
+            return _result("APPLICATION_ERROR", {"error": "timeout is out of bounds"})
+        async with self._lock:
+            live = self._tasks.get(task_id)
+        if live is None:
+            return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
+        try:
+            await asyncio.wait_for(asyncio.shield(live.task), timeout=timeout)
+        except TimeoutError:
+            return _result("SUCCESS", {"status": "running", "subagent_run_id": task_id})
+        except BaseException:
+            pass
+        if live.result is not None:
+            return _result(
+                "SUCCESS",
+                {
+                    "status": "completed",
+                    "subagent_run_id": task_id,
+                    "result": live.result.final_text,
+                    "result_entry_id": live.result.final_entry_id,
+                },
+            )
+        return _result(
+            "APPLICATION_ERROR",
+            {
+                "status": live.status.lower(),
+                "subagent_run_id": task_id,
+                "error_code": live.failure_code,
+            },
+        )
+
+    async def _stop(self, arguments: Mapping[str, object]) -> KernelToolResult:
+        task_id = str(arguments.get("subagent_run_id") or "")
+        async with self._lock:
+            live = self._tasks.get(task_id)
+        if live is None:
+            return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
+        if not live.task.done():
+            async with self._lock:
+                current = self._tasks.get(task_id)
+                if current is not None:
+                    current.cancellation_reason = "USER_CANCELLED"
+            live.task.cancel()
+            await asyncio.gather(live.task, return_exceptions=True)
+        return _result(
+            "SUCCESS", {"status": live.status.lower(), "subagent_run_id": task_id}
+        )
+
+    async def aclose(self, *, timeout_seconds: float) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            tasks = tuple(
+                item.task for item in self._tasks.values() if not item.task.done()
+            )
+            for item in self._tasks.values():
+                if not item.task.done():
+                    item.cancellation_reason = "HOST_CLOSING"
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        # asyncio can cancel a newly-created Task before its coroutine body
+        # executes, in which case _run_child() never observes CancelledError.
+        # The Host owner still has to install the frozen close disposition for
+        # every accepted ACTIVE task.
+        async with self._lock:
+            unterminalized = tuple(
+                item for item in self._tasks.values() if item.status == "ACTIVE"
+            )
+        for item in unterminalized:
+            await self._terminalize_best_effort(
+                item.task_id, "INTERRUPTED", "HOST_CLOSING"
+            )
+            async with self._lock:
+                current = self._tasks.get(item.task_id)
+                if current is not None and current.status == "ACTIVE":
+                    current.status = "INTERRUPTED"
+                    current.failure_code = "HOST_CLOSING"
+            self._offer_progress(
+                item.task_id,
+                item.parent_turn_id,
+                "INTERRUPTED",
+                "HOST_CLOSING",
+            )
+
+    def _offer_progress(
+        self, task_id: str, parent_turn_id: str, status: str, summary: str
+    ) -> None:
+        public = summary[:4096]
+        self._live_bus.offer_nowait(
+            event_type=LiveEventType.SUBAGENT_PROGRESS,
+            session_id=self._guard.session_id,
+            turn_id=parent_turn_id,
+            draft_identity=task_id,
+            payload=SubagentProgressPayload(
+                task_id,
+                status,
+                public,
+                len(public.encode("utf-8")),
+                live_digest(public),
+            ),
+            scope_kind="SUBAGENT_TASK",
+            scope_subagent_task_id=task_id,
+            channel_kind=LiveChannelKind.SUBAGENT_EXTENSION,
+            generation_id=f"subagent:{task_id}",
+            block_id=task_id,
+            block_ordinal=0,
+            block_kind=LiveBlockKind.OPERATIONAL,
+        )
+
+
+def _result(
+    state: str,
+    value: Mapping[str, object],
+    *,
+    remote_identity: str | None = None,
+) -> KernelToolResult:
+    return KernelToolResult(
+        state=state,
+        content=json.dumps(dict(value), ensure_ascii=False, sort_keys=True).encode(),
+        remote_identity=remote_identity,
+    )
+
+
+__all__ = ["KernelSubagentManager", "MAXIMUM_LIVE_SUBAGENTS", "SUBAGENT_TOOL_NAMES"]

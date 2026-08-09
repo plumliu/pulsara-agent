@@ -12,9 +12,9 @@ import (
 var (
 	Version                          = "0.0.0-dev"
 	Commit                           = "unknown"
-	ProtocolMajor             uint32 = 2
+	ProtocolMajor             uint32 = 3
 	ProtocolMinor             uint32 = 0
-	SchemaFingerprint                = "sha256:61c53a72b867a1f10794959e0b27244833ca5488a965550b1881f252a22004e6"
+	SchemaFingerprint                = "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
 	DependencyLockFingerprint        = "development"
 )
 
