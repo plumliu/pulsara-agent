@@ -1,59 +1,55 @@
 {
-  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "schema_version": "pulsara.kernel-dogfood-scenario.v2",
   "scenario_id": "subagent-delegation",
-  "description": "Require one child task to discover and traverse an eight-file linked trail, persist and verify a structured audit, return an explicit result, and let the parent write the verified checksum.",
+  "description": "Delegate one bounded child task, wait for its canonical result, and consume the result in the parent tool loop.",
   "model_role": "flash",
-  "reasoning_effort": null,
-  "timeout_seconds": 720,
-  "memory_reflection": false,
-  "system_prompt": "You are running Pulsara's frozen subagent dogfood. Obey delegation constraints literally. The parent may use only create_agent_tasks, wait_agent_tasks, and write_file; it must not inspect the workspace, delegated source files, or child_trace.json itself. Delegate the complete child procedure exactly, wait for an explicit child result, and only then write the parent result. Never inspect .env or credentials.",
+  "timeout_seconds": 900,
+  "system_prompt": "You are running Pulsara's Host-scoped subagent dogfood. The parent may use only spawn_agent, wait_agent, and write_file. It must not inspect delegated source files. Wait for an explicit child result before writing the parent result. Never inspect credentials.",
   "fixture": {
     "fixture_kind": "directory_copy",
     "workdir": "workdir"
   },
   "workflow": {
     "workflow_kind": "subagent_delegation",
-    "prompt": "The data directory contains an unordered eight-file linked trail whose first file contains START_NODE. Call create_agent_tasks exactly once to create exactly one child task. Delegate these requirements verbatim: the child must use search_files exactly once to locate START_NODE; call read_file separately for every trail file while following each NEXT reference until END; never use terminal, terminal_process, shell commands, or bulk-read shortcuts; collect the ordered workspace-relative data/... paths and integer VALUE fields; compute both the plain sum and the one-based weighted checksum sum(index * value); write child_trace.json with exactly the keys chain, values, sum, weighted_checksum, and terminal_marker; read child_trace.json back once to verify it; then call report_agent_result with the sum and weighted checksum. As the parent, do not inspect data or child_trace.json and do not calculate from source files. Wait for the explicit child result, then write only SUM:WEIGHTED_CHECKSUM to result.txt."
+    "prompt": "Call spawn_agent exactly once to create exactly one child. Give the child these requirements verbatim: use search_files exactly once to locate START_NODE; call read_file separately for every trail file while following NEXT until END; never use terminal or terminal_process; collect the ordered workspace-relative paths and integer VALUE fields; compute the plain sum and one-based weighted checksum sum(index * value); write child_trace.json with exactly the keys chain, values, sum, weighted_checksum, and terminal_marker; read child_trace.json back once; and make its final response exactly SUM:WEIGHTED_CHECKSUM. As the parent, do not inspect data or child_trace.json. Call wait_agent exactly once with timeout_seconds 300, then write only the returned SUM:WEIGHTED_CHECKSUM to result.txt using write_file exactly once."
   },
   "verifier": {
     "path": "verify.py",
     "timeout_seconds": 20
   },
   "evidence_gate": {
-    "min_root_runs": 1,
-    "max_root_runs": 1,
-    "min_all_runs": 1,
-    "max_all_runs": 1,
-    "min_model_calls": 2,
-    "max_model_calls": 16,
-    "min_tool_calls": 3,
-    "max_tool_calls": 24,
-    "event_count_minimums": [
-      {"event_type": "SUBAGENT_RESULT_CONSUMED", "minimum": 1},
-      {"event_type": "SUBAGENT_RUN_COMPLETED", "minimum": 1},
-      {"event_type": "SUBAGENT_RUN_STARTED", "minimum": 1},
-      {"event_type": "SUBAGENT_TASK_COMPLETED", "minimum": 1},
-      {"event_type": "SUBAGENT_TASK_CREATED", "minimum": 1}
+    "min_root_turns": 1,
+    "max_root_turns": 1,
+    "min_all_turns": 2,
+    "max_all_turns": 2,
+    "min_model_calls": 4,
+    "max_model_calls": 32,
+    "min_tool_calls": 12,
+    "max_tool_calls": 32,
+    "committed_event_minimums": [
+      {"event_type": "AssistantMessageAccepted", "minimum": 2},
+      {"event_type": "SubagentResultAccepted", "minimum": 1},
+      {"event_type": "SubagentTaskAccepted", "minimum": 1},
+      {"event_type": "ToolResultAccepted", "minimum": 12},
+      {"event_type": "TurnCompleted", "minimum": 2}
     ],
-    "forbidden_event_types": [
-      "MODEL_CALL_REJECTED",
-      "PROVIDER_MODEL_STREAM_ERROR",
-      "RUN_ERROR",
-      "SUBAGENT_RUN_FAILED",
-      "SUBAGENT_TASK_FAILED"
-    ],
-    "root_run_tool_gate": {
-      "run_selector": "first",
+    "forbidden_event_types": ["TurnInterrupted"],
+    "root_turn_tool_gate": {
+      "turn_selector": "first",
       "required_exact_counts": [
-        {"tool_name": "create_agent_tasks", "exact_count": 1}
+        {"tool_name": "spawn_agent", "exact_count": 1},
+        {"tool_name": "wait_agent", "exact_count": 1},
+        {"tool_name": "write_file", "exact_count": 1}
       ],
-      "forbidden_tool_names": ["read_file", "search_files", "terminal", "terminal_process"]
+      "forbidden_tool_names": [
+        "read_file",
+        "search_files",
+        "terminal",
+        "terminal_process"
+      ]
     },
-    "subagent_child_tools": {
-      "expected_completed_children": 1,
-      "minimum_tool_calls_per_child": 10
-    },
-    "require_positive_cached_input_tokens": false,
-    "max_provider_input_rollovers": 2
+    "minimum_completed_subagent_tasks": 1,
+    "minimum_child_tool_calls": 10,
+    "expected_writer_generation_delta": 0
   }
 }

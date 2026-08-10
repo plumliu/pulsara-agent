@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
 from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
 from pulsara_agent.conversation_kernel.host import (
     KernelCompositionUnavailable,
@@ -24,6 +25,16 @@ class _CapabilityProvider:
             catalog_prompt="<skills>review</skills>",
             active_skill_prompt="<active-skill>review body</active-skill>",
         )
+
+
+def test_every_model_callable_builtin_has_provider_object_schema() -> None:
+    invalid = {
+        descriptor.name: descriptor.input_schema.get("type")
+        for descriptor in builtin_tool_descriptors()
+        if descriptor.is_model_callable
+        and descriptor.input_schema.get("type") != "object"
+    }
+    assert invalid == {}
 
 
 def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(

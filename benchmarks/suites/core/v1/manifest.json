@@ -1,40 +1,40 @@
 {
-  "schema_version": "pulsara.core-dogfood-suite.v1",
-  "suite_id": "pulsara-core-dogfood-v1",
+  "schema_version": "pulsara.kernel-dogfood-suite.v2",
+  "suite_id": "pulsara-kernel-dogfood-v2",
   "execution_policy": "serial-real-provider",
   "external_network_access": "required",
   "workspace_isolation": "fresh-copy-hidden-verifier",
-  "durable_evidence_source": "postgres-inspector",
+  "evidence_source": "canonical-query+operational-hooks",
   "scenarios": [
     {
       "scenario_id": "cache-continuity",
       "path": "scenarios/cache-continuity",
-      "scenario_contract_fingerprint": "b007beee296d6a633ae5b4fa9dd7d18e9222971294ab814056c3ae364bf27a8c"
+      "scenario_contract_fingerprint": "f0edddf140e67326a1debb6d20191b368e7b1f9b3377c682db2483820f7130a0"
     },
     {
-      "scenario_id": "durable-resume",
+      "scenario_id": "canonical-resume",
       "path": "scenarios/durable-resume",
-      "scenario_contract_fingerprint": "c2da4d115fb9cb16fac87231201d962e0e512ef6e4b8314822eb53d1c2222ff1"
+      "scenario_contract_fingerprint": "4f5ec8fe04712ba830b4c145b2920ea23710d32d143fe095d70146f673dc0f0b"
     },
     {
-      "scenario_id": "manual-compaction-trail",
+      "scenario_id": "long-context-continuity",
       "path": "scenarios/manual-compaction-trail",
-      "scenario_contract_fingerprint": "090fefcd8b1be4050cad9afcdddcf240ea84a7f58651ac76549959f8866bbebf"
+      "scenario_contract_fingerprint": "d194a1edf12b1ba68b7df969ba20668f9e96d745e4be4d580c9f381629b8c9aa"
     },
     {
-      "scenario_id": "plan-workflow",
+      "scenario_id": "prompt-queue-fifo",
       "path": "scenarios/plan-workflow",
-      "scenario_contract_fingerprint": "bfe0f87173c83c0270b9d75931b083843b361548a6be6acdda3bac4185c25713"
+      "scenario_contract_fingerprint": "7589d335d0742979a8d273f334b58f00d43920c9f9a239f1251def8b4589cf5f"
     },
     {
       "scenario_id": "subagent-delegation",
       "path": "scenarios/subagent-delegation",
-      "scenario_contract_fingerprint": "914670eda5aac3c977063840fdd7e9a99c18ae01d2ebe383edb3e0e7b39f209b"
+      "scenario_contract_fingerprint": "3908913750595ef65afbd5e8e23f906aef928d039d0c16419f3521c42ed37526"
     },
     {
       "scenario_id": "workspace-patch",
       "path": "scenarios/workspace-patch",
-      "scenario_contract_fingerprint": "3c0cf2649a27911012595881b92bc9e69456dd484bbf5b1f0e287c239d1917a2"
+      "scenario_contract_fingerprint": "92a6a5cfa827dd246c808025c588d45aa0904109a3cccfb7e3b661563c1e55db"
     }
   ]
 }

@@ -1,12 +1,10 @@
 {
-  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "schema_version": "pulsara.kernel-dogfood-scenario.v2",
   "scenario_id": "cache-continuity",
-  "description": "Exercise three append-only Host turns and require a provider-reported prompt-cache hit without rereading the source.",
+  "description": "Exercise three canonical turns, exact prefix continuity, and provider-reported process-local cache usage.",
   "model_role": "flash",
-  "reasoning_effort": null,
   "timeout_seconds": 600,
-  "memory_reflection": false,
-  "system_prompt": "You are running Pulsara's frozen provider-prefix continuity dogfood. Use workspace tools exactly as requested. Preserve facts learned in prior turns and do not reread files when the user forbids it. Never inspect .env or credentials. Keep responses concise after completing each file operation.",
+  "system_prompt": "You are running Pulsara's Kernel cache-continuity dogfood. Use workspace tools exactly as requested. Preserve facts learned in prior turns and do not reread files when forbidden. Never inspect credentials or environment variables. Keep responses concise.",
   "fixture": {
     "fixture_kind": "directory_copy",
     "workdir": "workdir"
@@ -25,32 +23,28 @@
     "timeout_seconds": 20
   },
   "evidence_gate": {
-    "min_root_runs": 3,
-    "max_root_runs": 3,
-    "min_all_runs": 3,
-    "max_all_runs": 3,
+    "min_root_turns": 3,
+    "max_root_turns": 3,
+    "min_all_turns": 3,
+    "max_all_turns": 3,
     "min_model_calls": 3,
     "max_model_calls": 10,
     "min_tool_calls": 4,
     "max_tool_calls": 16,
-    "event_count_minimums": [
-      {"event_type": "MODEL_CALL_END", "minimum": 3},
-      {"event_type": "PROVIDER_INPUT_APPEND_COMMITTED", "minimum": 3},
-      {"event_type": "RUN_END", "minimum": 3}
+    "committed_event_minimums": [
+      {"event_type": "AssistantMessageAccepted", "minimum": 3},
+      {"event_type": "ToolResultAccepted", "minimum": 4},
+      {"event_type": "TurnCompleted", "minimum": 3}
     ],
-    "forbidden_event_types": [
-      "MODEL_CALL_REJECTED",
-      "PROVIDER_MODEL_STREAM_ERROR",
-      "RUN_ERROR"
-    ],
-    "root_run_tool_gate": {
-      "run_selector": "last",
+    "forbidden_event_types": ["TurnInterrupted"],
+    "root_turn_tool_gate": {
+      "turn_selector": "last",
       "required_exact_counts": [
         {"tool_name": "write_file", "exact_count": 1}
       ],
       "forbidden_tool_names": ["read_file", "search_files", "terminal"]
     },
     "require_positive_cached_input_tokens": true,
-    "max_provider_input_rollovers": 1
+    "expected_writer_generation_delta": 0
   }
 }

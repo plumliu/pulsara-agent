@@ -1,10 +1,9 @@
-"""Semantic and durable-evidence graders for the core dogfood suite."""
+"""Canonical and operational graders for Kernel-native dogfood runs."""
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 import subprocess
 import sys
@@ -13,27 +12,23 @@ from typing import Any
 
 from benchmarks.suites.contracts import (
     AssertionResultFact,
+    CanonicalTurnEvidenceFact,
     CoreDogfoodScenarioContract,
     HiddenVerifierResultFact,
-    ProviderCacheCallObservationFact,
-    RootRunEvidenceFact,
+    ProviderUsageObservationFact,
 )
+from pulsara_agent.conversation_kernel.query import CanonicalInspectorView
 
 
 @dataclass(frozen=True, slots=True)
-class GradedEvidence:
+class GradedKernelEvidence:
     assertions: tuple[AssertionResultFact, ...]
-    root_runs: tuple[RootRunEvidenceFact, ...]
-    all_run_count: int
-    event_count: int
-    event_counts: tuple[tuple[str, int], ...]
+    canonical_turns: tuple[CanonicalTurnEvidenceFact, ...]
+    committed_event_counts: tuple[tuple[str, int], ...]
     model_call_count: int
     tool_call_count: int
-    total_tokens: int
+    total_tokens: int | None
     cached_input_tokens: int | None
-    provider_cache_calls: tuple[ProviderCacheCallObservationFact, ...]
-    provider_input_generation_count: int
-    provider_input_rollover_count: int
 
     @property
     def passed(self) -> bool:
@@ -76,14 +71,14 @@ def run_hidden_verifier(
         )
 
 
-def grade_durable_evidence(
+def grade_kernel_evidence(
     *,
     scenario: CoreDogfoodScenarioContract,
-    session_report: dict[str, Any],
-    root_run_reports: tuple[dict[str, Any], ...],
-    final_texts: tuple[str, ...],
+    view: CanonicalInspectorView,
+    provider_usage: tuple[ProviderUsageObservationFact, ...],
+    writer_generations: tuple[int, ...],
     verifier: HiddenVerifierResultFact,
-) -> GradedEvidence:
+) -> GradedKernelEvidence:
     assertions: list[AssertionResultFact] = []
 
     def check(assertion_id: str, passed: bool, detail: str) -> None:
@@ -95,435 +90,212 @@ def grade_durable_evidence(
             )
         )
 
-    counts = {
-        str(key): int(value)
-        for key, value in dict(session_report.get("event_counts") or {}).items()
-    }
-    runs = tuple(session_report.get("runs") or ())
-    root_run_count = len(root_run_reports)
-    all_run_count = len(runs)
-    model_call_count = counts.get("MODEL_CALL_START", 0)
-    tool_call_count = counts.get("TOOL_CALL_START", 0)
-
     gate = scenario.evidence_gate
+    turns = tuple(view.turns)
+    root_turns = tuple(
+        item for item in turns if str(item["conversation_scope_kind"]) == "ROOT"
+    )
+    tools_by_turn, child_tool_count = _tool_inventory(view)
+    canonical_turns = tuple(
+        CanonicalTurnEvidenceFact(
+            turn_id=str(item["id"]),
+            scope_kind=str(item["conversation_scope_kind"]),
+            status=str(item["status"]),
+            tool_names=tuple(tools_by_turn.get(str(item["id"]), ())),
+        )
+        for item in turns
+    )
+    event_counts = Counter(str(item["event_type"]) for item in view.selective_events)
+    tool_call_count = len(view.tool_attempts)
+    assistant_entry_count = sum(
+        str(item["entry_kind"])
+        in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
+        for item in view.conversation.entries
+    )
+    model_call_count = len(provider_usage)
+
     check(
-        "root_run_count_in_bounds",
-        gate.min_root_runs <= root_run_count <= gate.max_root_runs,
-        f"root_run_count={root_run_count}, expected={gate.min_root_runs}..{gate.max_root_runs}",
+        "root_turn_count_in_bounds",
+        gate.min_root_turns <= len(root_turns) <= gate.max_root_turns,
+        f"root_turns={len(root_turns)}, expected={gate.min_root_turns}..{gate.max_root_turns}",
     )
     check(
-        "all_run_count_in_bounds",
-        gate.min_all_runs <= all_run_count <= gate.max_all_runs,
-        f"all_run_count={all_run_count}, expected={gate.min_all_runs}..{gate.max_all_runs}",
+        "all_turn_count_in_bounds",
+        gate.min_all_turns <= len(turns) <= gate.max_all_turns,
+        f"all_turns={len(turns)}, expected={gate.min_all_turns}..{gate.max_all_turns}",
+    )
+    check(
+        "all_turns_completed",
+        bool(turns) and all(str(item["status"]) == "COMPLETED" for item in turns),
+        f"statuses={tuple(str(item['status']) for item in turns)}",
     )
     check(
         "model_call_count_in_bounds",
         gate.min_model_calls <= model_call_count <= gate.max_model_calls,
-        f"model_call_count={model_call_count}, expected={gate.min_model_calls}..{gate.max_model_calls}",
+        f"model_calls={model_call_count}, expected={gate.min_model_calls}..{gate.max_model_calls}",
+    )
+    check(
+        "usage_exactly_joins_accepted_assistant_entries",
+        model_call_count == assistant_entry_count,
+        f"usage={model_call_count}, assistant_entries={assistant_entry_count}",
     )
     check(
         "tool_call_count_in_bounds",
         gate.min_tool_calls <= tool_call_count <= gate.max_tool_calls,
-        f"tool_call_count={tool_call_count}, expected={gate.min_tool_calls}..{gate.max_tool_calls}",
-    )
-
-    run_statuses = tuple(str(item.get("status")) for item in runs)
-    check(
-        "all_durable_runs_finished",
-        bool(run_statuses) and all(status == "finished" for status in run_statuses),
-        f"run_statuses={run_statuses}",
-    )
-    root_statuses = tuple(
-        str((report.get("run") or {}).get("status")) for report in root_run_reports
+        f"tool_calls={tool_call_count}, expected={gate.min_tool_calls}..{gate.max_tool_calls}",
     )
     check(
-        "all_root_runs_finished",
-        bool(root_statuses) and all(status == "finished" for status in root_statuses),
-        f"root_statuses={root_statuses}",
-    )
-
-    error_diagnostics = tuple(
-        item
-        for item in session_report.get("diagnostics") or ()
-        if str(item.get("severity", "")).lower() == "error"
+        "tool_attempts_have_terminal_results",
+        all(item.get("result_state") is not None for item in view.tool_attempts),
+        "result_states=" + repr(tuple(item.get("result_state") for item in view.tool_attempts)),
     )
     check(
-        "inspector_has_no_error_diagnostics",
-        not error_diagnostics,
-        "error_diagnostic_codes="
-        + repr(
-            tuple(str(item.get("code", "unknown")) for item in error_diagnostics[:20])
-        ),
-    )
-
-    for assertion_id, start_type, terminal_type in (
-        ("run_lifecycle_balanced", "RUN_START", "RUN_END"),
-        ("model_lifecycle_balanced", "MODEL_CALL_START", "MODEL_CALL_END"),
-        ("tool_lifecycle_balanced", "TOOL_CALL_START", "TOOL_RESULT_END"),
-        (
-            "physical_reservations_balanced",
-            "PHYSICAL_OPERATION_RESERVATION_CREATED",
-            "PHYSICAL_OPERATION_RESERVATION_SETTLED",
-        ),
-        (
-            "checkpoint_barriers_balanced",
-            "CHECKPOINT_DISPATCH_BARRIER_INSTALLED",
-            "CHECKPOINT_DISPATCH_BARRIER_RELEASED",
-        ),
-        (
-            "provider_generations_balanced",
-            "PROVIDER_INPUT_GENERATION_STARTED",
-            "PROVIDER_INPUT_GENERATION_CLOSED",
-        ),
-    ):
-        start_count = counts.get(start_type, 0)
-        terminal_count = counts.get(terminal_type, 0)
-        check(
-            assertion_id,
-            start_count == terminal_count,
-            f"{start_type}={start_count}, {terminal_type}={terminal_count}",
-        )
-
-    for requirement in gate.event_count_minimums:
-        actual = counts.get(requirement.event_type, 0)
-        check(
-            f"event_minimum:{requirement.event_type}",
-            actual >= requirement.minimum,
-            f"actual={actual}, minimum={requirement.minimum}",
-        )
-    for event_type in gate.forbidden_event_types:
-        actual = counts.get(event_type, 0)
-        check(
-            f"event_forbidden:{event_type}",
-            actual == 0,
-            f"actual={actual}",
-        )
-
-    total_tokens, cached_input_tokens = _usage_totals(session_report)
-    usage_rows = tuple(session_report.get("model_usage_by_run") or ())
-    reported_usage_calls = sum(
-        int(item.get("reported_call_count") or 0) for item in usage_rows
-    )
-    missing_usage_calls = sum(
-        int(item.get("missing_usage_call_count") or 0) for item in usage_rows
-    )
-    check(
-        "provider_usage_is_complete",
-        reported_usage_calls == model_call_count and missing_usage_calls == 0,
-        f"reported={reported_usage_calls}, missing={missing_usage_calls}, "
-        f"model_calls={model_call_count}",
-    )
-    if gate.require_positive_cached_input_tokens:
-        continuation_cache_hit = _has_positive_continuation_cache_hit(session_report)
-        check(
-            "provider_reported_positive_continuation_cache_hit",
-            cached_input_tokens is not None
-            and cached_input_tokens > 0
-            and continuation_cache_hit,
-            f"cached_input_tokens={cached_input_tokens}, "
-            f"continuation_cache_hit={continuation_cache_hit}",
-        )
-
-    generations = tuple(session_report.get("provider_input_generations") or ())
-    provider_cache_calls = _provider_cache_observations(session_report)
-    check(
-        "model_calls_join_provider_generations",
-        len(provider_cache_calls) == model_call_count,
-        f"generation_calls={len(provider_cache_calls)}, model_calls={model_call_count}",
-    )
-    rollover_count = sum(1 for item in generations if item.get("rollover") is not None)
-    check(
-        "provider_input_rollover_bound",
-        rollover_count <= gate.max_provider_input_rollovers,
-        f"rollovers={rollover_count}, maximum={gate.max_provider_input_rollovers}",
-    )
-
-    if gate.root_run_tool_gate is not None:
-        selected = _select_run_reports(
-            root_run_reports, gate.root_run_tool_gate.run_selector
-        )
-        selected_tools = tuple(
-            tool for report in selected for tool in _tool_names(report)
-        )
-        tool_counts = Counter(selected_tools)
-        for requirement in gate.root_run_tool_gate.required_exact_counts:
-            actual = tool_counts[requirement.tool_name]
-            check(
-                f"tool_exact:{requirement.tool_name}",
-                actual == requirement.exact_count,
-                f"actual={actual}, expected={requirement.exact_count}, tools={selected_tools}",
-            )
-        for tool_name in gate.root_run_tool_gate.forbidden_tool_names:
-            actual = tool_counts[tool_name]
-            check(
-                f"tool_forbidden:{tool_name}",
-                actual == 0,
-                f"actual={actual}, tools={selected_tools}",
-            )
-
-    child_tool_gate = gate.subagent_child_tools
-    if child_tool_gate is not None:
-        child_completions = tuple(
-            event
-            for event in session_report.get("events") or ()
-            if event.get("type") == "SUBAGENT_RUN_COMPLETED"
-        )
-        child_tool_counts = tuple(
-            int(event.get("tool_call_count") or 0) for event in child_completions
-        )
-        check(
-            "subagent_completed_child_count",
-            len(child_completions) == child_tool_gate.expected_completed_children,
-            f"completed_children={len(child_completions)}, "
-            f"expected={child_tool_gate.expected_completed_children}",
-        )
-        check(
-            "subagent_child_tool_call_minimum",
-            len(child_tool_counts) == child_tool_gate.expected_completed_children
-            and all(
-                count >= child_tool_gate.minimum_tool_calls_per_child
-                for count in child_tool_counts
-            ),
-            f"child_tool_counts={child_tool_counts}, "
-            f"minimum={child_tool_gate.minimum_tool_calls_per_child}",
-        )
-
-    extraction_gate = gate.compaction_memory_extraction
-    if extraction_gate is not None:
-        extraction_rows = tuple(
-            session_report.get("compaction_memory_extraction_durable_status") or ()
-        )
-        check(
-            "compaction_memory_extraction_present",
-            len(extraction_rows) == 1,
-            f"extraction_count={len(extraction_rows)}",
-        )
-        extraction = extraction_rows[0] if len(extraction_rows) == 1 else {}
-        status = str(extraction.get("status") or "missing")
-        check(
-            "compaction_memory_extraction_terminal",
-            status in extraction_gate.allowed_terminal_statuses,
-            f"status={status}, allowed={extraction_gate.allowed_terminal_statuses}",
-        )
-        candidates = tuple(extraction.get("candidates") or ())
-        check(
-            "compaction_memory_candidate_produced",
-            len(candidates) >= extraction_gate.minimum_candidate_count,
-            f"candidate_count={len(candidates)}, "
-            f"minimum={extraction_gate.minimum_candidate_count}",
-        )
-        lifecycle = tuple(extraction.get("model_lifecycle") or ())
-        complete_lifecycle = tuple(
-            item
-            for item in lifecycle
-            if item.get("start") is not None and item.get("end") is not None
-        )
-        check(
-            "compaction_memory_model_lifecycle_complete",
-            bool(complete_lifecycle),
-            f"lifecycle_count={len(lifecycle)}, complete={len(complete_lifecycle)}",
-        )
-        model_call = complete_lifecycle[-1] if complete_lifecycle else {}
-        model_start = model_call.get("start") or {}
-        model_end = model_call.get("end") or {}
-        request = extraction.get("request") or {}
-        result = extraction.get("result") or {}
-        ordered_sequences = (
-            extraction.get("completed_sequence"),
-            request.get("sequence"),
-            model_start.get("sequence"),
-            model_end.get("sequence"),
-            result.get("sequence"),
-        )
-        sequence_chain_is_valid = all(
-            isinstance(item, int) for item in ordered_sequences
-        ) and tuple(ordered_sequences) == tuple(sorted(set(ordered_sequences)))
-        check(
-            "compaction_summary_precedes_extraction_terminal",
-            sequence_chain_is_valid,
-            f"ordered_sequences={ordered_sequences}",
-        )
-        input_projection = model_call.get("input") or {}
-        nodes = tuple(input_projection.get("nodes") or ())
-        human_only = (
-            input_projection.get("status") == "full"
-            and input_projection.get("all_sources_direct_human") is True
-            and bool(nodes)
-            and all(
-                item.get("projection_kind") == "full"
-                and item.get("source_event_type") == "RUN_START"
-                and item.get("source_ingress_kind") == "human"
-                for item in nodes
-            )
-        )
-        check(
-            "compaction_memory_input_is_canonical_human_only",
-            human_only,
-            f"input_status={input_projection.get('status')}, nodes={len(nodes)}, "
-            f"all_sources_direct_human={input_projection.get('all_sources_direct_human')}",
-        )
-        final_run_events = (
-            tuple(root_run_reports[-1].get("events") or ()) if root_run_reports else ()
-        )
-        continuation_start = next(
-            (
-                item.get("sequence")
-                for item in final_run_events
-                if item.get("type") == "RUN_START"
-            ),
-            None,
-        )
-        model_end_sequence = model_end.get("sequence")
-        check(
-            "main_continuation_started_before_extraction_terminal",
-            isinstance(continuation_start, int)
-            and isinstance(model_end_sequence, int)
-            and continuation_start < model_end_sequence,
-            f"continuation_start={continuation_start}, "
-            f"extraction_model_end={model_end_sequence}",
-        )
-        job = extraction.get("job") or {}
-        result_candidate = extraction.get("result_candidate") or {}
-        outbox = tuple(extraction.get("outbox") or ())
-        job_id = job.get("job_id")
-        result_event_id = result.get("event_id")
-        exact_join = (
-            bool(job_id)
-            and result_candidate.get("job_id") == job_id
-            and result_candidate.get("completed_event_id") == result_event_id
-            and bool(outbox)
-            and all(item.get("producer_event_id") == result_event_id for item in outbox)
-            and all(item.get("status") == "applied" for item in outbox)
-        )
-        check(
-            "compaction_memory_candidate_job_outbox_exact_join",
-            exact_join,
-            f"job_id={job_id}, result_event_id={result_event_id}, "
-            f"outbox_count={len(outbox)}",
-        )
-
-    check(
-        "hidden_workspace_verifier",
+        "hidden_verifier_passed",
         verifier.passed,
         f"exit_code={verifier.exit_code}, stderr={verifier.stderr}",
     )
 
-    root_evidence = tuple(
-        RootRunEvidenceFact(
-            run_id=str((report.get("run") or {}).get("id", "missing")),
-            status=str((report.get("run") or {}).get("status", "missing")),
-            tool_names=_tool_names(report),
-            final_text_sha256=sha256(text.encode("utf-8")).hexdigest(),
-            final_text_characters=len(text),
+    for minimum in gate.committed_event_minimums:
+        observed = event_counts[minimum.event_type]
+        check(
+            f"committed_event_{minimum.event_type}",
+            observed >= minimum.minimum,
+            f"observed={observed}, minimum={minimum.minimum}",
         )
-        for report, text in zip(root_run_reports, final_texts, strict=True)
+    forbidden = sorted(set(gate.forbidden_event_types) & set(event_counts))
+    check(
+        "forbidden_committed_events_absent",
+        not forbidden,
+        f"present={tuple(forbidden)}",
     )
-    return GradedEvidence(
+
+    if gate.root_turn_tool_gate is not None:
+        selected = _selected_root_turns(root_turns, gate.root_turn_tool_gate.turn_selector)
+        selected_tools = tuple(
+            tool
+            for turn in selected
+            for tool in tools_by_turn.get(str(turn["id"]), ())
+        )
+        selected_counts = Counter(selected_tools)
+        for requirement in gate.root_turn_tool_gate.required_exact_counts:
+            check(
+                f"root_tool_exact_{requirement.tool_name}",
+                selected_counts[requirement.tool_name] == requirement.exact_count,
+                f"observed={selected_counts[requirement.tool_name]}, expected={requirement.exact_count}",
+            )
+        forbidden_tools = sorted(
+            set(selected_tools) & set(gate.root_turn_tool_gate.forbidden_tool_names)
+        )
+        check(
+            "root_forbidden_tools_absent",
+            not forbidden_tools,
+            f"present={tuple(forbidden_tools)}",
+        )
+
+    completed_subagents = sum(
+        str(item["status"]) == "COMPLETED" for item in view.subagent_tasks
+    )
+    if gate.minimum_completed_subagent_tasks:
+        check(
+            "completed_subagent_count",
+            completed_subagents >= gate.minimum_completed_subagent_tasks,
+            f"completed={completed_subagents}, minimum={gate.minimum_completed_subagent_tasks}",
+        )
+    if gate.minimum_child_tool_calls:
+        check(
+            "child_tool_call_minimum",
+            child_tool_count >= gate.minimum_child_tool_calls,
+            f"child_tools={child_tool_count}, minimum={gate.minimum_child_tool_calls}",
+        )
+
+    if gate.expected_prompt_queue_statuses:
+        statuses = tuple(str(item["status"]) for item in view.prompt_queue)
+        sequences = tuple(int(item["queue_sequence"]) for item in view.prompt_queue)
+        check(
+            "prompt_queue_terminal_statuses",
+            statuses == gate.expected_prompt_queue_statuses,
+            f"statuses={statuses}, expected={gate.expected_prompt_queue_statuses}",
+        )
+        check(
+            "prompt_queue_sequence_is_strict_fifo",
+            sequences == tuple(sorted(sequences)) and len(sequences) == len(set(sequences)),
+            f"queue_sequences={sequences}",
+        )
+
+    generation_delta = (
+        writer_generations[-1] - writer_generations[0]
+        if writer_generations
+        else -1
+    )
+    check(
+        "writer_generation_delta",
+        generation_delta == gate.expected_writer_generation_delta,
+        f"delta={generation_delta}, expected={gate.expected_writer_generation_delta}",
+    )
+
+    reported = tuple(item for item in provider_usage if item.usage_status == "reported")
+    total_tokens = (
+        sum(int(item.total_tokens or 0) for item in reported)
+        if len(reported) == len(provider_usage)
+        else None
+    )
+    cached_input_tokens = (
+        sum(int(item.cached_input_tokens or 0) for item in reported)
+        if len(reported) == len(provider_usage)
+        else None
+    )
+    if gate.require_positive_cached_input_tokens:
+        check(
+            "provider_reported_positive_cache_hit",
+            cached_input_tokens is not None and cached_input_tokens > 0,
+            f"cached_input_tokens={cached_input_tokens}",
+        )
+
+    return GradedKernelEvidence(
         assertions=tuple(assertions),
-        root_runs=root_evidence,
-        all_run_count=all_run_count,
-        event_count=int(session_report.get("event_count") or sum(counts.values())),
-        event_counts=tuple(sorted(counts.items())),
+        canonical_turns=canonical_turns,
+        committed_event_counts=tuple(sorted(event_counts.items())),
         model_call_count=model_call_count,
         tool_call_count=tool_call_count,
         total_tokens=total_tokens,
         cached_input_tokens=cached_input_tokens,
-        provider_cache_calls=provider_cache_calls,
-        provider_input_generation_count=len(generations),
-        provider_input_rollover_count=rollover_count,
     )
 
 
-def _usage_totals(report: dict[str, Any]) -> tuple[int, int | None]:
-    usages = tuple(report.get("model_usage_by_run") or ())
-    total = sum(int(item.get("total_tokens") or 0) for item in usages)
-    cached_values = tuple(item.get("cached_input_tokens") for item in usages)
-    cached = (
-        None
-        if any(value is None for value in cached_values)
-        else sum(int(value) for value in cached_values)
-    )
-    return total, cached
+def _tool_inventory(
+    view: CanonicalInspectorView,
+) -> tuple[dict[str, list[str]], int]:
+    by_turn: dict[str, list[str]] = {}
+    child_count = 0
+    for entry in view.conversation.entries:
+        turn_id = str(entry["turn_id"])
+        for block in entry["blocks"]:
+            if str(block.get("kind")) != "TOOL_CALL":
+                continue
+            by_turn.setdefault(turn_id, []).append(str(block.get("tool_name")))
+            if str(entry["conversation_scope_kind"]) == "SUBAGENT_TASK":
+                child_count += 1
+    return by_turn, child_count
 
 
-def _has_positive_continuation_cache_hit(report: dict[str, Any]) -> bool:
-    for generation in report.get("provider_input_generations") or ():
-        calls = tuple(generation.get("model_calls") or ())
-        if any(int(call.get("cached_input_tokens") or 0) > 0 for call in calls[1:]):
-            return True
-    return False
-
-
-def _provider_cache_observations(
-    report: dict[str, Any],
-) -> tuple[ProviderCacheCallObservationFact, ...]:
-    observations: list[ProviderCacheCallObservationFact] = []
-    for generation in report.get("provider_input_generations") or ():
-        generation_id = str(generation.get("generation_id") or "unknown")
-        for call in generation.get("model_calls") or ():
-            observations.append(
-                ProviderCacheCallObservationFact(
-                    call_ordinal=len(observations),
-                    generation_id=generation_id,
-                    generation_revision=(
-                        int(call["generation_revision"])
-                        if call.get("generation_revision") is not None
-                        else None
-                    ),
-                    resolved_model_call_id=(
-                        str(call["resolved_model_call_id"])
-                        if call.get("resolved_model_call_id") is not None
-                        else None
-                    ),
-                    cached_input_tokens=(
-                        int(call["cached_input_tokens"])
-                        if call.get("cached_input_tokens") is not None
-                        else None
-                    ),
-                    cache_ratio=(
-                        float(call["cache_ratio"])
-                        if call.get("cache_ratio") is not None
-                        else None
-                    ),
-                )
-            )
-    return tuple(observations)
-
-
-def _tool_names(report: dict[str, Any]) -> tuple[str, ...]:
-    names: list[str] = []
-    timeline = report.get("timeline") or {}
-    for item in timeline.get("items") or ():
-        if item.get("kind") != "tool_call":
-            continue
-        metadata = item.get("metadata") or {}
-        tool_name = metadata.get("tool_name")
-        if isinstance(tool_name, str) and tool_name:
-            names.append(tool_name)
-    return tuple(names)
-
-
-def _select_run_reports(
-    reports: tuple[dict[str, Any], ...], selector: str
-) -> tuple[dict[str, Any], ...]:
-    if not reports:
-        return ()
+def _selected_root_turns(
+    turns: tuple[dict[str, Any], ...] | tuple[Any, ...], selector: str
+) -> tuple[Any, ...]:
     if selector == "first":
-        return reports[:1]
+        return turns[:1]
     if selector == "last":
-        return reports[-1:]
-    return reports
+        return turns[-1:]
+    return turns
+
+
+def _bounded(value: str, *, limit: int = 4_000) -> str:
+    return value if len(value) <= limit else value[: limit - 16] + "\n...[truncated]"
 
 
 def _as_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
-    return (
-        value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
-    )
+    return value.decode(errors="replace") if isinstance(value, bytes) else value
 
 
-def _bounded(value: str, *, limit: int = 4_000) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 32] + "\n...[bounded output omitted]..."
+__all__ = ["GradedKernelEvidence", "grade_kernel_evidence", "run_hidden_verifier"]

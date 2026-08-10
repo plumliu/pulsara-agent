@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import AsyncIterator, Sequence
+from typing import AsyncIterator, Callable, Sequence
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.reader import (
@@ -24,6 +24,7 @@ from pulsara_agent.llm.normalized_transport import (
     NormalizedLLMTransport,
     NormalizedLLMTransportRegistry,
 )
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
 from pulsara_agent.llm.validation import validate_model_context_for_call
@@ -46,6 +47,10 @@ class DirectKernelModelPort:
         system_prompt: str | None = None,
         role: ModelRole = ModelRole.PRO,
         options: LLMOptions | None = None,
+        usage_observer: Callable[
+            [KernelModelRequest, TransportUsageReport], None
+        ]
+        | None = None,
     ) -> None:
         registry = NormalizedLLMTransportRegistry()
         registry.register(
@@ -72,6 +77,7 @@ class DirectKernelModelPort:
         self._system_prompt = system_prompt
         self._role = role
         self._options = options
+        self._usage_observer = usage_observer
 
     async def stream(
         self, request: KernelModelRequest
@@ -126,6 +132,14 @@ class DirectKernelModelPort:
                     if item.outcome != "COMPLETED":
                         assert item.error is not None
                         raise RuntimeError(f"provider failed: {item.error.code.value}")
+                    if self._usage_observer is not None:
+                        try:
+                            self._usage_observer(request, item.usage)
+                        except Exception:
+                            # Usage is operational-only.  A recorder or hook
+                            # failure cannot invalidate provider completion or
+                            # the later canonical assistant commit.
+                            pass
                     break
                 yield item
         finally:

@@ -40,6 +40,7 @@ class ExtensionDeliveryKind(StrEnum):
 
 
 class OperationalHookType(StrEnum):
+    PROVIDER_USAGE_OBSERVED = "ProviderUsageObserved"
     FOREGROUND_TURN_FAILED = "ForegroundTurnFailed"
     PROVIDER_CONTINUITY_FAILED = "ProviderContinuityFailed"
     BLOB_ORPHAN_GC_FAILED = "BlobOrphanGcFailed"

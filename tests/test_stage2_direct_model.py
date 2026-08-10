@@ -172,6 +172,7 @@ def test_stage2_direct_model_rejects_resolved_input_before_physical_send(
 
 
 def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> None:
+    usage_reports: list[TransportUsageReport] = []
     port = DirectKernelModelPort(
         config=test_llm_config(
             api_key="test",
@@ -180,6 +181,7 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
             flash_model="test-flash",
             api="openai_chat_completions",
         ),
+        usage_observer=lambda _request, report: usage_reports.append(report),
     )
     binding = port._registry.get("openai_chat_completions")
     binding._adapter._mock_chunks = [
@@ -187,9 +189,11 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
         {
             "choices": [],
             "usage": {
-                "prompt_tokens": 1,
+                "prompt_tokens": 4,
+                "prompt_cache_hit_tokens": 3,
+                "prompt_cache_miss_tokens": 1,
                 "completion_tokens": 1,
-                "total_tokens": 2,
+                "total_tokens": 5,
             },
         },
     ]
@@ -211,3 +215,8 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
         TextEndPayload,
     ]
     assert not any("Draft" in type(value).__name__ for value in values)
+    assert len(usage_reports) == 1
+    assert usage_reports[0].usage is not None
+    assert usage_reports[0].usage.input_tokens == 4
+    assert usage_reports[0].usage.cached_input_tokens == 3
+    assert usage_reports[0].usage.output_tokens == 1

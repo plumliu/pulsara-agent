@@ -166,6 +166,12 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     resolved = resolve(root)
     if not isinstance(resolved, dict):
         raise AssertionError("terminal process schema must remain an object")
+    # A discriminated Pydantic union is emitted as a top-level ``oneOf`` with
+    # object-shaped branches, but some OpenAI-compatible providers require the
+    # function schema itself to declare its object type.  This does not widen
+    # the closed action union; every accepted value must still match exactly
+    # one of the strict branch schemas below it.
+    resolved.setdefault("type", "object")
     return resolved
 
 

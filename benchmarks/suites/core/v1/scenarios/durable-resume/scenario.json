@@ -1,45 +1,40 @@
 {
-  "schema_version": "pulsara.core-dogfood-scenario.v1",
-  "scenario_id": "durable-resume",
-  "description": "Detach a durable Host session, reopen it in a new HostCore, and use prior context without rereading its source.",
+  "schema_version": "pulsara.kernel-dogfood-scenario.v2",
+  "scenario_id": "canonical-resume",
+  "description": "Detach one Host, acquire a new writer generation, and continue solely from canonical conversation rows.",
   "model_role": "flash",
-  "reasoning_effort": null,
   "timeout_seconds": 600,
-  "memory_reflection": false,
-  "system_prompt": "You are running Pulsara's frozen durable-resume dogfood. Use the workspace tools exactly as requested. This scenario tests durable transcript continuity, not long-term memory: never call memory tools. Facts from the prior durable conversation must survive process replacement. Never inspect .env or credentials, and never reread a file when the user explicitly forbids it.",
+  "system_prompt": "You are running Pulsara's canonical-resume dogfood. Use workspace tools exactly as requested. This tests canonical transcript continuity, not execution replay or long-term memory. Never call memory tools or inspect credentials.",
   "fixture": {
     "fixture_kind": "directory_copy",
     "workdir": "workdir"
   },
   "workflow": {
-    "workflow_kind": "durable_resume",
+    "workflow_kind": "canonical_resume",
     "first_prompt": "Read resume_source.txt exactly once, retain its RESUME_TOKEN only in this conversation without calling any memory tool, and write before_resume.txt whose entire contents are that token followed by |before. Do not change the source file.",
-    "resumed_prompt": "This is a new HostCore after durable reopen. Do not read, search, or call any memory tool. Using only the restored prior conversation, write after_resume.txt whose entire contents are the retained RESUME_TOKEN followed by |after. Use write_file exactly once."
+    "resumed_prompt": "This is a new Host after canonical reopen. Do not read, search, or call any memory tool. Using only the restored prior conversation, write after_resume.txt whose entire contents are the retained RESUME_TOKEN followed by |after. Use write_file exactly once."
   },
   "verifier": {
     "path": "verify.py",
     "timeout_seconds": 20
   },
   "evidence_gate": {
-    "min_root_runs": 2,
-    "max_root_runs": 2,
-    "min_all_runs": 2,
-    "max_all_runs": 2,
+    "min_root_turns": 2,
+    "max_root_turns": 2,
+    "min_all_turns": 2,
+    "max_all_turns": 2,
     "min_model_calls": 2,
     "max_model_calls": 8,
     "min_tool_calls": 3,
     "max_tool_calls": 8,
-    "event_count_minimums": [
-      {"event_type": "MODEL_CALL_END", "minimum": 2},
-      {"event_type": "RUN_END", "minimum": 2}
+    "committed_event_minimums": [
+      {"event_type": "AssistantMessageAccepted", "minimum": 2},
+      {"event_type": "ToolResultAccepted", "minimum": 3},
+      {"event_type": "TurnCompleted", "minimum": 2}
     ],
-    "forbidden_event_types": [
-      "MODEL_CALL_REJECTED",
-      "PROVIDER_MODEL_STREAM_ERROR",
-      "RUN_ERROR"
-    ],
-    "root_run_tool_gate": {
-      "run_selector": "all",
+    "forbidden_event_types": ["TurnInterrupted"],
+    "root_turn_tool_gate": {
+      "turn_selector": "all",
       "required_exact_counts": [
         {"tool_name": "read_file", "exact_count": 1},
         {"tool_name": "write_file", "exact_count": 2}
@@ -52,7 +47,6 @@
         "terminal"
       ]
     },
-    "require_positive_cached_input_tokens": false,
-    "max_provider_input_rollovers": 2
+    "expected_writer_generation_delta": 1
   }
 }

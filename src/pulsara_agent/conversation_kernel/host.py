@@ -38,6 +38,8 @@ from pulsara_agent.conversation_kernel.extensions import (
     ExtensionRegistrationLease,
     ExtensionRegistrationRequest,
     KernelExtensionHost,
+    OperationalHookOffer,
+    OperationalHookType,
     PostCommitHookOffer,
 )
 from pulsara_agent.conversation_kernel.jobs import KernelDurableJobExecutor
@@ -53,6 +55,7 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
+    KernelModelRequest,
     KernelRunResult,
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
@@ -67,6 +70,7 @@ from pulsara_agent.workspace_identity import (
     resolve_workspace,
 )
 from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.tool_permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
@@ -212,6 +216,7 @@ class KernelHostSession:
             tools=self._tools.tool_specs,
             system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             role=model_role,
+            usage_observer=self._observe_provider_usage,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -1010,6 +1015,38 @@ class KernelHostSession:
             capability_composer=self._capabilities,
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
+        )
+
+    def _observe_provider_usage(
+        self,
+        request: KernelModelRequest,
+        report: TransportUsageReport,
+    ) -> None:
+        usage = report.usage
+        self.extensions.offer_operational_nowait(
+            OperationalHookOffer(
+                event_type=OperationalHookType.PROVIDER_USAGE_OBSERVED,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                public_payload={
+                    "turn_id": request.turn_id,
+                    "model_call_index": request.model_call_index,
+                    "usage_status": report.usage_status,
+                    "input_tokens": None if usage is None else usage.input_tokens,
+                    "cached_input_tokens": (
+                        None if usage is None else usage.cached_input_tokens
+                    ),
+                    "output_tokens": None if usage is None else usage.output_tokens,
+                    "reasoning_output_tokens": (
+                        None if usage is None else usage.reasoning_output_tokens
+                    ),
+                    "total_tokens": None if usage is None else usage.total_tokens,
+                    "reported_model_id": report.reported_model_id,
+                    "diagnostic_codes": tuple(
+                        item.code for item in report.provider_diagnostics
+                    ),
+                },
+            )
         )
 
     def _require_open(self) -> None:

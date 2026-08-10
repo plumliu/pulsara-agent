@@ -1,57 +1,44 @@
-# Pulsara Core Dogfood Suites
+# Pulsara Kernel real-LLM dogfood
 
-The durable projection hard-cut also has a deterministic structural benchmark:
+`benchmarks/suites` contains the small, frozen set of expensive provider-facing
+trajectories used to exercise the active conversation Kernel. It is separate
+from `evals/`: deterministic model-quality datasets belong there, while this
+suite proves that a real provider can traverse Pulsara's current public product
+boundaries.
 
-```bash
-uv run python -m benchmarks.suites.durable_projection_pipeline
-uv run python -m benchmarks.suites.durable_projection_pipeline --postgres --env-file .env
-```
+The logical suite is `pulsara-kernel-dogfood-v2`. Its files remain physically
+under `core/v1/` because that directory also holds immutable Stage 0–5
+activation evidence; the manifest and every emitted result carry the v2
+identity explicitly.
 
-The first command is offline. The second additionally saturates the projection
-PostgreSQL lane and verifies that the separate EventLog lane remains available.
+## Frozen scenarios
 
-`benchmarks/suites` contains the small, frozen set of expensive real-provider
-trajectories used as release evidence. It is intentionally separate from
-`evals/`: deterministic model-quality datasets belong in `evals`, while these
-scenarios exercise Pulsara as a running product with PostgreSQL, Oxigraph,
-provider calls, workspace tools, close drain, and durable replay.
-
-The design borrows three useful properties from DeepSeek-Reasonix's E2E bench:
-
-1. every task runs in a fresh copied or deterministically generated workspace;
-2. the model cannot see the post-run verifier;
-3. the runner emits attributed JSON evidence instead of treating final prose as
-   proof.
-
-## Core v1
-
-| Scenario | Product boundary frozen |
+| Scenario | Current product boundary |
 |---|---|
-| `workspace-patch` | ordinary Host tool loop and behavioral patch verification |
-| `cache-continuity` | three strict-suffix turns and provider-reported cache use |
-| `durable-resume` | detach, process replacement, exact durable reopen |
-| `manual-compaction-trail` | long linked evidence, manual compaction, no-reread recall |
-| `subagent-delegation` | one child task, explicit result delivery, parent isolation |
-| `plan-workflow` | typed question, exit, approval, implementation continuation |
+| `cache-continuity` | three canonical turns plus provider-reported process-local cache usage |
+| `canonical-resume` | detach, new Host writer generation, and reopen from canonical rows |
+| `long-context-continuity` | lossless canonical transcript continuity without compaction or memory |
+| `prompt-queue-fifo` | durable ingress FIFO and two canonical completed turns |
+| `subagent-delegation` | Host-scoped child task, canonical child result, and parent acceptance |
+| `workspace-patch` | ordinary Kernel tool loop and hidden behavioral verification |
 
-Scenario JSON, seed files, generated-fixture recipes, and hidden verifier bytes
-are content-addressed. `manifest.json` freezes each resulting fingerprint.
-Changing a task therefore requires an explicit manifest update and creates a
-new piece of release evidence.
+Each task receives a fresh workspace. The model cannot see the post-run
+verifier. Scenario contracts and fixture/verifier bytes are content-addressed
+by `manifest.json`, so changing a task creates an explicit evidence change.
 
-Five trajectories use the lower-cost `flash` role; `workspace-patch` uses
-`pro`, so the frozen suite exercises both production model-resolution lanes.
+Five trajectories use the `flash` role; `workspace-patch` uses `pro`. Execution
+is serial so scenarios do not compete for provider or database capacity.
 
 ## Commands
 
-Offline validation does not load an API key or call a provider:
+Offline validation neither loads an API key nor calls a provider:
 
 ```bash
 uv run python -m benchmarks.suites.run_core_dogfood validate
 uv run python -m benchmarks.suites.run_core_dogfood list
 ```
 
-Real execution is serial and requires two explicit acknowledgements:
+The full real-provider run requires two explicit acknowledgements:
 
 ```bash
 PULSARA_RUN_CORE_DOGFOOD=1 \
@@ -70,24 +57,24 @@ uv run python -m benchmarks.suites.run_core_dogfood run \
   --confirm-network
 ```
 
-By default results are written beneath `/tmp`. Every completed scenario is
-appended to `results.jsonl` immediately, followed by per-scenario JSON and a
-suite `summary.json`/`summary.md`. Failed workspaces are retained; passed ones
-are removed unless `--keep-workspaces` is supplied.
+Results go beneath `/tmp` unless `--results-dir` is supplied. Every completed
+scenario is appended immediately to `results.jsonl`, with one JSON result per
+scenario and final `summary.json`/`summary.md`. Failed workspaces are retained;
+passed workspaces are removed unless `--keep-workspaces` is set.
 
 ## Evidence boundary
 
-The runner uses only public execution boundaries (`HostCore`, `HostSession`,
-typed plan resolutions, and `InspectorService`). It does not synthesize Agent
-events, mutate reducers, or read `session.wiring`.
+The runner uses `KernelHostCore`/`KernelHostSession`, the bounded canonical
+query port, and a first-party operational hook for provider usage. It does not
+write evidence rows, synthesize committed events, inspect private session
+wiring, or replay execution.
 
-The generic grader requires balanced run/model/tool/reservation/checkpoint/
-generation lifecycles, finished durable runs, no Inspector error diagnostics,
-scenario event minima, bounded calls/tokens, and a passing hidden verifier.
-Scenario-specific gates additionally constrain tool use, compaction,
-subagent delivery, plan interactions, and prompt-cache telemetry.
+Provider usage—including cached input tokens—is an operational observation:
+it is process-local, bounded, failure-isolated, and absent from the selective
+durable journal. Canonical rows prove accepted conversation/tool/subagent/queue
+state; selective events prove accepted occurrences. The hidden verifier proves
+workspace behavior.
 
-These dogfoods are provider-facing evidence, not deterministic correctness
-proof. Normal offline tests remain the PR-level safety gate. Legacy real-provider
-pytest cases have been removed: release-critical trajectories belong in a frozen
-suite here, while narrow regressions belong in deterministic offline tests.
+This suite is release evidence, not a deterministic correctness proof. Normal
+offline tests remain the PR-level gate. It intentionally has no projection,
+universal EventLog, segment-recovery, manual-compaction, or Oxigraph path.

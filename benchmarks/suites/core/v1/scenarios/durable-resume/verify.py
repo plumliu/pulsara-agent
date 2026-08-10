@@ -7,7 +7,7 @@ def main(root: Path) -> None:
         root / "before_resume.txt"
     ).read_text().strip() == "ORCHID-RESUME-4421|before"
     assert (root / "after_resume.txt").read_text().strip() == "ORCHID-RESUME-4421|after"
-    print("durable-resume verifier passed")
+    print("canonical-resume verifier passed")
 
 
 if __name__ == "__main__":
